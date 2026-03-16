@@ -144,7 +144,7 @@ impl TestSessionBuilder {
             TestProviderKind::Tsgo => crate::TypeProviderKind::Tsgo,
         };
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&provider);
         let (service, socket) = tower_lsp_server::LspService::new(move |client| {

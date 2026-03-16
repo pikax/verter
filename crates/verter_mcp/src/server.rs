@@ -3339,7 +3339,17 @@ mod tests {
     use verter_host::{HostConfig, UpsertRequest};
 
     fn make_host() -> Arc<VerterHost> {
-        Arc::new(VerterHost::new(HostConfig::default()))
+        Arc::new(VerterHost::new_standalone(HostConfig::default()))
+    }
+
+    fn make_host_with_workspace(roots: Vec<String>) -> Arc<VerterHost> {
+        let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
+            verter_vfs::FilesystemOptions {
+                roots,
+                eager_preload: false,
+            },
+        ));
+        Arc::new(VerterHost::new(HostConfig::default(), workspace))
     }
 
     fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
@@ -3820,6 +3830,45 @@ const x = ref(1)
         assert!(
             steps.is_empty(),
             "clean component should have no migration steps"
+        );
+    }
+
+    // ── VFS workspace integration ──
+
+    #[test]
+    fn host_with_filesystem_workspace_upsert_and_compile() {
+        let host = make_host_with_workspace(vec!["/test-project".to_string()]);
+        let src = r#"<script setup lang="ts">
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#;
+        upsert_vue(&host, "/test-project/Comp.vue", src);
+        compile_analysis(&host, "/test-project/Comp.vue");
+
+        let analysis = host.get_analysis("/test-project/Comp.vue");
+        assert!(
+            analysis.is_some(),
+            "should produce analysis with FilesystemWorkspace-backed host"
+        );
+
+        // Verify the host has a workspace reference (non-standalone uses Arc<dyn WorkspaceAccess>)
+        let ws = host.workspace();
+        // owner_for_file returns None because no project graph was set
+        assert!(
+            ws.owner_for_file("/test-project/Comp.vue").is_none(),
+            "default FilesystemWorkspace has empty project graph"
+        );
+    }
+
+    #[test]
+    fn host_with_filesystem_workspace_owner_for_file() {
+        let host = make_host_with_workspace(vec!["/my-project".to_string()]);
+        let ws = host.workspace();
+
+        // Before setting a project graph, owner_for_file returns None
+        assert!(
+            ws.owner_for_file("/my-project/src/App.vue").is_none(),
+            "default workspace has no project graph, so no owner"
         );
     }
 }

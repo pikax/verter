@@ -117,9 +117,28 @@ impl VerterHost {
             }
         }
 
+        // Phase 2.5: Workspace resolution (VFS-backed).
+        // Consults the workspace's resolution chain (exact resolutions → project
+        // resolver) which supports tsconfig paths, workspace aliases, and Vite
+        // aliases. Only returns a match if the resolved file is loaded in the host.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(result) = self.workspace.resolve_import(
+                owner_canonical,
+                import_source,
+                verter_vfs::ResolveRequestKind::EsmImport,
+            ) {
+                if files.contains_key(&result.source_id) {
+                    return Some(result.source_id);
+                }
+            }
+        }
+
         // Phase 3: Project resolver (tsconfig paths, workspace aliases).
-        // Uses the configured NativeProjectResolver to resolve aliased specifiers.
-        // Only probes files that are already loaded in the host.
+        // Legacy fallback: uses the host's internal NativeProjectResolver.
+        // In the new architecture, Phase 2.5 (workspace) handles this.
+        // Kept for backward compatibility with WASM and callers that use
+        // configure_projects() without a workspace.
         if let Some(resolver) = &*read_lock(&self.project_resolver) {
             let reader = HostFileMapReader { files };
             let request = ResolveRequest {

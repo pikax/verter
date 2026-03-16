@@ -204,7 +204,9 @@ impl WasmVerterHost {
             parse_wasm_input::<FfiHostConfig>(config)?
         };
         Ok(Self {
-            inner: host::VerterHost::new(ffi_config_to_host(ffi_config).map_err(ffi_err)?),
+            inner: host::VerterHost::new_standalone(
+                ffi_config_to_host(ffi_config).map_err(ffi_err)?,
+            ),
         })
     }
 

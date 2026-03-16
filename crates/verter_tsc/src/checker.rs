@@ -260,7 +260,7 @@ pub fn run(
     // ── Phase 0: Generate public API stubs ─────────────────────────
     // Create a shared VerterHost, upsert all .vue files, and generate .vue.ts
     // stubs containing real component types for cross-component type resolution.
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     for vue_path in &config.vue_files {
         let source = match fs::read_to_string(vue_path) {
             Ok(s) => s,
@@ -2543,7 +2543,7 @@ defineProps<{ msg: string }>()
         )
         .unwrap();
 
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let canonical_id = child_vue.to_string_lossy().replace('\\', "/");
         let source = fs::read_to_string(&child_vue).unwrap();
         host.upsert(UpsertRequest {
@@ -2676,7 +2676,7 @@ defineProps<{ msg: string }>()
         )
         .unwrap();
 
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
         let source = fs::read_to_string(&vue_path).unwrap();
         host.upsert(UpsertRequest {

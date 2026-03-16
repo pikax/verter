@@ -1063,7 +1063,9 @@ impl NapiVerterHost {
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
         let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
         Ok(Self {
-            inner: host::VerterHost::new(ffi_config_to_host(ffi_config).map_err(ffi_err)?),
+            inner: host::VerterHost::new_standalone(
+                ffi_config_to_host(ffi_config).map_err(ffi_err)?,
+            ),
         })
     }
 
@@ -2154,7 +2156,7 @@ mod tests {
     #[test]
     fn host_update_to_napi_exposes_export_signatures() {
         // Use the host to produce real export signatures from a barrel file
-        let h = host::VerterHost::new(host::HostConfig::default());
+        let h = host::VerterHost::new_standalone(host::HostConfig::default());
         let host_result = h
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/barrel.ts".to_string()),
@@ -2189,7 +2191,7 @@ mod tests {
 
     #[test]
     fn host_update_to_napi_export_signatures_local_exports() {
-        let h = host::VerterHost::new(host::HostConfig::default());
+        let h = host::VerterHost::new_standalone(host::HostConfig::default());
         let host_result = h
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/utils.ts".to_string()),

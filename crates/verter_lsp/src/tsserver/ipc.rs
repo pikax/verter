@@ -2828,7 +2828,7 @@ const outerLabel = 'outer'
 </template>
 "#;
 
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let child_id = "/src/TypedSlotComp.vue";
         let parent_id = "/src/TemplateSlotCases.vue";
 
@@ -3007,7 +3007,7 @@ const outerLabel = 'outer'
 </template>
 "#;
 
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let child_id = "/src/TypedSlotComp.vue";
         let parent_id = "/src/TemplateSlotCases.vue";
 
@@ -3152,7 +3152,7 @@ const outerLabel = 'outer'
 </template>
 "#;
 
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let child_id = "/src/TypedSlotComp.vue";
         let parent_id = "/src/TemplateSlotCases.vue";
 
@@ -3296,7 +3296,7 @@ const outerLabel = 'outer'
 
         let source =
             include_str!("../../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let app_id = "/src/App.vue";
 
         let _ = host.upsert(UpsertRequest {

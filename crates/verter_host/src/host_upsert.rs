@@ -260,6 +260,47 @@ impl VerterHost {
             &new_export_signatures,
         );
 
+        // Sync parsed edges to the VFS workspace so the workspace's dependency
+        // graph stays in sync with what the host just parsed.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut parsed_edges = Vec::new();
+
+            // External src blocks (e.g. <script src="./setup.ts">)
+            for req in &result_data.external_requests {
+                parsed_edges.push(verter_vfs::ParsedEdge::ExternalSrc {
+                    specifier: req.specifier.clone(),
+                    resolved_path: Some(req.resolved_canonical_id.clone()),
+                });
+            }
+
+            // Script imports
+            for imp in &result_data.imports {
+                if imp.source.starts_with('.') || imp.source.starts_with("../") {
+                    parsed_edges.push(verter_vfs::ParsedEdge::Relative {
+                        specifier: imp.source.clone(),
+                        kind: if imp.is_type_only {
+                            verter_vfs::ResolveRequestKind::TypeImport
+                        } else {
+                            verter_vfs::ResolveRequestKind::EsmImport
+                        },
+                    });
+                } else {
+                    parsed_edges.push(verter_vfs::ParsedEdge::Bare {
+                        specifier: imp.source.clone(),
+                        kind: if imp.is_type_only {
+                            verter_vfs::ResolveRequestKind::TypeImport
+                        } else {
+                            verter_vfs::ResolveRequestKind::EsmImport
+                        },
+                    });
+                }
+            }
+
+            self.workspace
+                .record_parsed_edges(&canonical_id, &parsed_edges);
+        }
+
         build_upsert_result(
             canonical_id,
             result_data,

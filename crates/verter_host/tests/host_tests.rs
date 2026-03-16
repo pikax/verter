@@ -30,7 +30,7 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) -> HostUpdateResult {
 
 #[test]
 fn resolve_query_param_tolerance_and_order() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let a = host
         .resolve("Comp.vue?vue&type=style&index=0&id=abc&scoped=true&lang.css")
@@ -46,7 +46,7 @@ fn resolve_query_param_tolerance_and_order() {
 
 #[test]
 fn resolve_explicit_script_template_custom() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     assert_eq!(
         host.resolve("Comp.vue?vue&type=script").unwrap().node_kind,
@@ -68,7 +68,7 @@ fn resolve_explicit_script_template_custom() {
 
 #[test]
 fn resolve_succeeds_without_source_get_virtual_file_missing_source() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let resolved = host.resolve("/x/Comp.vue?vue&type=template").unwrap();
     assert!(!resolved.exists_in_host);
@@ -92,7 +92,7 @@ fn resolve_succeeds_without_source_get_virtual_file_missing_source() {
 
 #[test]
 fn non_slice_edit_no_invalidation() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = "<script setup>const n = 1</script>\n<template><div>{{n}}</div></template>\n<style>.a{color:red}</style>";
     let src2 = "<script setup>const n = 1</script>\n\n\n<template><div>{{n}}</div></template>\n\n<style>.a{color:red}</style>";
@@ -108,7 +108,7 @@ fn non_slice_edit_no_invalidation() {
 
 #[test]
 fn style_only_edit_returns_only_style_virtual_id() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let src2 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:blue}</style>";
@@ -126,7 +126,7 @@ fn style_only_edit_returns_only_style_virtual_id() {
 
 #[test]
 fn template_edit_returns_main_and_template_ids() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let src2 = "<script setup>const n = 1</script><template><section>{{n}}</section></template><style>.a{color:red}</style>";
@@ -142,7 +142,7 @@ fn template_edit_returns_main_and_template_ids() {
 
 #[test]
 fn script_edit_returns_all_virtual_ids() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let src2 = "<script setup>const n = 2</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
@@ -166,7 +166,7 @@ fn script_edit_returns_all_virtual_ids() {
 
 #[test]
 fn compile_profile_changes_produce_different_cached_outputs() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -192,7 +192,7 @@ fn compile_profile_changes_produce_different_cached_outputs() {
 
 #[test]
 fn style_override_updates_style_without_reupsert() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -231,7 +231,7 @@ fn style_override_updates_style_without_reupsert() {
 
 #[test]
 fn update_result_contains_both_bundler_and_lsp_ids() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let src2 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:blue}</style>";
@@ -249,7 +249,7 @@ fn update_result_contains_both_bundler_and_lsp_ids() {
 
 #[test]
 fn src_policy_missing_external_source_produces_deterministic_error() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         dev_mode: false,
         compile_error_policy: CompileErrorPolicy::StrictError,
         ..HostConfig::default()
@@ -281,7 +281,7 @@ fn src_policy_missing_external_source_produces_deterministic_error() {
 
 #[test]
 fn external_upsert_invalidates_dependent_owner() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let _ = upsert_vue(
         &host,
@@ -332,7 +332,7 @@ fn external_upsert_invalidates_dependent_owner() {
 
 #[test]
 fn remove_cleans_up_file_and_aliases() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
 
     let _ = host
@@ -361,13 +361,13 @@ fn remove_cleans_up_file_and_aliases() {
 
 #[test]
 fn remove_nonexistent_returns_none() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     assert!(host.remove("nonexistent.vue").is_none());
 }
 
 #[test]
 fn list_virtual_files_returns_correct_nodes() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{}</style><style>.b{}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -382,13 +382,13 @@ fn list_virtual_files_returns_correct_nodes() {
 
 #[test]
 fn list_virtual_files_nonexistent_returns_empty() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     assert!(host.list_virtual_files("nonexistent.vue").is_empty());
 }
 
 #[test]
 fn alias_resolution_maps_to_same_canonical() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
 
     let _ = host
@@ -415,7 +415,7 @@ fn alias_resolution_maps_to_same_canonical() {
 
 #[test]
 fn profile_cap_evicts_oldest_profiles() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         max_profiles_per_file: 2,
         ..HostConfig::default()
     });
@@ -475,7 +475,7 @@ fn profile_cap_evicts_oldest_profiles() {
 
 #[test]
 fn resolve_via_lsp_id_format() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -487,7 +487,7 @@ fn resolve_via_lsp_id_format() {
 
 #[test]
 fn dev_serve_last_known_good_fallback() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         dev_mode: true,
         compile_error_policy: CompileErrorPolicy::DevServeLastKnownGood,
         ..HostConfig::default()
@@ -523,7 +523,7 @@ fn dev_serve_last_known_good_fallback() {
 
 #[test]
 fn cache_hit_returns_same_code() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -550,7 +550,7 @@ fn cache_hit_returns_same_code() {
 
 #[test]
 fn get_virtual_file_by_canonical_id_and_node_kind() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -577,7 +577,7 @@ fn get_virtual_file_by_canonical_id_and_node_kind() {
 
 #[test]
 fn get_virtual_file_no_raw_id_no_canonical_returns_invalid_query() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let err = host
         .get_virtual_file(VirtualQuery {
@@ -593,7 +593,7 @@ fn get_virtual_file_no_raw_id_no_canonical_returns_invalid_query() {
 
 #[test]
 fn apply_style_overrides_nonexistent_returns_missing_source() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let err = host
         .apply_style_overrides(StyleOverrideRequest {
@@ -608,7 +608,7 @@ fn apply_style_overrides_nonexistent_returns_missing_source() {
 
 #[test]
 fn apply_style_overrides_idempotent_reapply_returns_not_changed() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -640,7 +640,7 @@ fn apply_style_overrides_idempotent_reapply_returns_not_changed() {
 /// @ai-generated - When style override hash is unchanged, changed_virtual_nodes must be empty
 #[test]
 fn apply_style_overrides_idempotent_has_empty_changed_nodes() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -679,7 +679,7 @@ fn apply_style_overrides_idempotent_has_empty_changed_nodes() {
 
 #[test]
 fn custom_block_detection_and_retrieval() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><i18n>{\"en\": {\"hello\": \"world\"}}</i18n>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -699,7 +699,7 @@ fn custom_block_detection_and_retrieval() {
 
 #[test]
 fn script_only_sfc_no_template_node() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -711,7 +711,7 @@ fn script_only_sfc_no_template_node() {
 
 #[test]
 fn template_only_sfc_no_script_node() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<template><div>hello</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -723,7 +723,7 @@ fn template_only_sfc_no_script_node() {
 
 #[test]
 fn alias_update_on_reupsert_removes_old() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
 
     let _ = host
@@ -754,7 +754,7 @@ fn alias_update_on_reupsert_removes_old() {
 
 #[test]
 fn non_sfc_upsert_produces_only_main() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let _ = host
         .upsert(UpsertRequest {
@@ -772,7 +772,7 @@ fn non_sfc_upsert_produces_only_main() {
 
 #[test]
 fn remove_by_alias_works() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
 
     let _ = host
@@ -803,7 +803,7 @@ fn remove_by_alias_works() {
 /// changes, the host reports it so dependents can be recompiled.
 #[test]
 fn non_sfc_reupsert_with_different_content_reports_changed() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let first = host
         .upsert(UpsertRequest {
@@ -840,7 +840,7 @@ fn non_sfc_reupsert_with_different_content_reports_changed() {
 /// @ai-generated - Non-SFC reupsert with identical content reports changed=false
 #[test]
 fn non_sfc_reupsert_with_same_content_reports_not_changed() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let _ = host
         .upsert(UpsertRequest {
@@ -867,7 +867,7 @@ fn non_sfc_reupsert_with_same_content_reports_not_changed() {
 /// @ai-generated - Non-SFC reupsert still invalidates dependents via invalidate_dependents
 #[test]
 fn non_sfc_reupsert_still_invalidates_dependents() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     // Comp.vue depends on tpl.html via src
     let _ = upsert_vue(
@@ -922,7 +922,7 @@ fn non_sfc_reupsert_still_invalidates_dependents() {
 /// @ai-generated - Style removal: 3 styles → 1 style reports removed nodes
 #[test]
 fn style_removal_produces_removed_nodes() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = "<script setup>const n = 1</script><template><div/></template><style>.a{}</style><style>.b{}</style><style>.c{}</style>";
     let src2 = "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
@@ -941,7 +941,7 @@ fn style_removal_produces_removed_nodes() {
 /// @ai-generated - Multiple style changes at once: only changed indices reported
 #[test]
 fn multiple_style_changes_at_once() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = "<script setup>const n = 1</script><template><div/></template><style>.a{color:red}</style><style>.b{color:blue}</style><style>.c{color:green}</style>";
     let src2 = "<script setup>const n = 1</script><template><div/></template><style>.a{color:red}</style><style>.b{color:yellow}</style><style>.c{color:purple}</style>";
@@ -964,7 +964,7 @@ fn multiple_style_changes_at_once() {
 /// @ai-generated - get_virtual_file first compile via canonical_id (no prior raw_id)
 #[test]
 fn get_virtual_file_first_compile_via_canonical() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -985,7 +985,7 @@ fn get_virtual_file_first_compile_via_canonical() {
 /// for Main/Template nodes because invalidate_nodes clears them from last_good_outputs.
 #[test]
 fn template_change_then_error_no_fallback() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         dev_mode: true,
         compile_error_policy: CompileErrorPolicy::DevServeLastKnownGood,
         ..HostConfig::default()
@@ -1026,7 +1026,7 @@ fn template_change_then_error_no_fallback() {
 /// Main="js", Script="ts", Template="tsx", Style(plain)="css", Style(scss)="scss"
 #[test]
 fn virtual_file_lang_field_correct_per_node_kind() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style><style lang=\"scss\">.b{color:blue}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1086,7 +1086,7 @@ fn virtual_file_lang_field_correct_per_node_kind() {
 /// Main virtual file lang field should be "ts" for <script setup lang="ts">
 #[test]
 fn virtual_file_main_lang_ts_for_typescript_sfc() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 const { title = 'Test' } = defineProps<{ title?: string }>()
 defineEmits<{ close: [value: string] }>()
@@ -1121,7 +1121,7 @@ defineEmits<{ close: [value: string] }>()
 /// custom_index, block_type are set correctly
 #[test]
 fn virtual_file_meta_fields_populated_correctly() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style scoped>.a{}</style><i18n>{\"en\":{\"hi\":\"hello\"}}</i18n>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1168,7 +1168,7 @@ fn virtual_file_meta_fields_populated_correctly() {
 /// @ai-generated - Main module code should contain style imports for each style block
 #[test]
 fn main_module_contains_style_imports() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{}</style><style lang=\"scss\">.b{}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1196,7 +1196,7 @@ fn main_module_contains_style_imports() {
 /// @ai-generated - Main module contains Vite HMR in dev, absent in prod
 #[test]
 fn main_module_vite_hmr_in_dev_mode() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1234,7 +1234,7 @@ fn main_module_vite_hmr_in_dev_mode() {
 /// @ai-generated - LSP-format raw_id input produces LSP-format output ID
 #[test]
 fn get_virtual_file_via_lsp_id_returns_lsp_format_id() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1271,7 +1271,7 @@ fn get_virtual_file_via_lsp_id_returns_lsp_format_id() {
 /// @ai-generated - source_map is Some when CompileProfile::source_map = true
 #[test]
 fn source_map_present_when_requested() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1296,7 +1296,7 @@ fn source_map_present_when_requested() {
 /// (critical unplugin+Vite interaction)
 #[test]
 fn style_override_persists_through_reupsert() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src1);
 
@@ -1334,7 +1334,7 @@ fn style_override_persists_through_reupsert() {
 /// @ai-generated - Requesting Template on script-only SFC returns MissingVirtualNode
 #[test]
 fn get_virtual_file_missing_node_returns_error() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1360,7 +1360,7 @@ fn get_virtual_file_missing_node_returns_error() {
 /// @ai-generated - __file present in dev mode, absent in prod mode
 #[test]
 fn main_module_dev_file_annotation() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1394,7 +1394,7 @@ fn main_module_dev_file_annotation() {
 /// @ai-generated - Dev+prod compile caches coexist without evicting each other
 #[test]
 fn multiple_profile_cache_coexistence() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         max_profiles_per_file: 8,
         ..HostConfig::default()
     });
@@ -1454,7 +1454,7 @@ fn multiple_profile_cache_coexistence() {
 /// @ai-generated - Remove then re-upsert treats file as fresh insert
 #[test]
 fn remove_then_reupsert_lifecycle() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1482,7 +1482,7 @@ fn remove_then_reupsert_lifecycle() {
 /// @ai-generated - Explicit canonical_id different from input_id stores correctly
 #[test]
 fn upsert_with_explicit_canonical_id() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
 
     let _ = host
@@ -1508,7 +1508,7 @@ fn upsert_with_explicit_canonical_id() {
 /// @ai-generated - Two <i18n> blocks produce distinct Custom nodes
 #[test]
 fn multiple_custom_blocks_same_type() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><i18n>{\"en\":{\"a\":\"hello\"}}</i18n><i18n>{\"fr\":{\"a\":\"bonjour\"}}</i18n>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1542,7 +1542,7 @@ fn multiple_custom_blocks_same_type() {
 /// @ai-generated - <script setup></script> (empty) compiles without panic
 #[test]
 fn empty_script_setup_block() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup></script>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -1564,7 +1564,7 @@ fn empty_script_setup_block() {
 /// @ai-generated - Removing a dependency file invalidates owners' compile slots
 #[test]
 fn remove_invalidates_dependent_compile_slots() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     // Comp.vue depends on tpl.html via src
     let _ = upsert_vue(
@@ -1617,7 +1617,7 @@ fn remove_invalidates_dependent_compile_slots() {
 /// @ai-generated - get_diagnostics returns last-known diagnostics without triggering compilation
 #[test]
 fn get_diagnostics_without_compilation() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         dev_mode: false,
         compile_error_policy: CompileErrorPolicy::StrictError,
         ..HostConfig::default()
@@ -1652,7 +1652,7 @@ fn get_diagnostics_without_compilation() {
 /// @ai-generated - Dep file type export changes → SFC using that type invalidated
 #[test]
 fn smart_invalidation_type_dep_changed_invalidates_sfc() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     // Upsert SFC that imports MyType from a relative path and uses it in defineProps
     let _ = upsert_vue(
@@ -1712,7 +1712,7 @@ fn smart_invalidation_type_dep_changed_invalidates_sfc() {
 /// @ai-generated - upsert returns import_specifiers from script analysis
 #[test]
 fn upsert_returns_import_specifiers() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let result = upsert_vue(
         &host,
@@ -1749,7 +1749,7 @@ fn upsert_returns_import_specifiers() {
 /// is the right trade-off.
 #[test]
 fn recompile_after_type_change_works_correctly() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let _ = upsert_vue(
         &host,
@@ -1806,7 +1806,7 @@ fn recompile_after_type_change_works_correctly() {
 /// must match the scope_id used in CSS selectors.
 #[test]
 fn scoped_style_scope_id_consistency_between_script_and_css() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
 <style scoped>.app { color: red; }</style>"#;
@@ -1895,14 +1895,14 @@ fn scoped_style_scope_id_consistency_between_script_and_css() {
 /// @ai-generated - get_analysis returns None for unknown file
 #[test]
 fn test_get_analysis_returns_none_for_unknown_file() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     assert!(host.get_analysis("nonexistent.vue").is_none());
 }
 
 /// @ai-generated - get_analysis returns imports
 #[test]
 fn test_get_analysis_returns_imports() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
@@ -1938,7 +1938,7 @@ const count = ref(0)
 /// @ai-generated - get_analysis returns bindings
 #[test]
 fn test_get_analysis_returns_bindings() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
@@ -1972,7 +1972,7 @@ const count = ref(0)
 /// @ai-generated - get_analysis returns macros
 #[test]
 fn test_get_analysis_returns_macros() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 defineProps<{ msg: string }>()
 </script>
@@ -2001,7 +2001,7 @@ defineProps<{ msg: string }>()
 /// @ai-generated - get_analysis returns script flags
 #[test]
 fn test_get_analysis_returns_script_flags() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 import { ref } from 'vue'
 defineProps<{ msg: string }>()
@@ -2029,7 +2029,7 @@ const count = ref(0)
 /// @ai-generated - get_analysis returns style analysis
 #[test]
 fn test_get_analysis_returns_style_analysis() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 const msg = 'hello'
 </script>
@@ -2057,7 +2057,7 @@ const msg = 'hello'
 /// Bindings referenced by CSS v-bind() should have used_in_style = true.
 #[test]
 fn test_vbind_marks_used_in_style() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 import { ref } from 'vue'
 const color = ref('red')
@@ -2103,7 +2103,7 @@ const size = ref(12)
 /// @ai-generated - upsert returns parse_duration_ms > 0
 #[test]
 fn test_upsert_returns_parse_duration() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup lang="ts">
 const msg = 'hello'
 </script>
@@ -2132,7 +2132,7 @@ const msg = 'hello'
 /// @ai-generated - get_diagnostics: nonexistent file → None
 #[test]
 fn get_diagnostics_nonexistent_returns_none() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     assert!(host
         .get_diagnostics("nonexistent.vue", &profile_dev())
         .is_none());
@@ -2141,7 +2141,7 @@ fn get_diagnostics_nonexistent_returns_none() {
 /// @ai-generated - get_diagnostics: file exists but no compilation for profile → None
 #[test]
 fn get_diagnostics_no_profile_match_returns_none() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let _ = upsert_vue(
         &host,
         "Comp.vue",
@@ -2158,7 +2158,7 @@ fn get_diagnostics_no_profile_match_returns_none() {
 /// @ai-generated - Main module custom block imports use type={blockType} format
 #[test]
 fn main_module_custom_block_import_uses_block_type_in_url() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
 <route>{"path": "/sport"}</route>"#;
@@ -2195,7 +2195,7 @@ fn main_module_custom_block_import_uses_block_type_in_url() {
 /// @ai-generated - Custom block retrieval via new type={blockType} URL format
 #[test]
 fn custom_block_retrieval_via_new_url_format() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
 <i18n>{"en":{"hello":"world"}}</i18n>"#;
@@ -2225,7 +2225,7 @@ fn custom_block_retrieval_via_new_url_format() {
 /// @ai-generated - Custom block content edit produces changed_virtual_ids with new format
 #[test]
 fn custom_block_edit_returns_changed_virtual_id_with_new_format() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let src1 = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
@@ -2266,7 +2266,7 @@ fn custom_block_edit_returns_changed_virtual_id_with_new_format() {
 /// @ai-generated - Multiple custom blocks of different types use correct type= in URLs
 #[test]
 fn multiple_custom_blocks_different_types_url_format() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
 <i18n>{"en":{"hello":"world"}}</i18n>
@@ -2306,7 +2306,7 @@ fn multiple_custom_blocks_different_types_url_format() {
 /// @ai-generated - AnalysisLevel::None still provides analysis via get_analysis()
 #[test]
 fn analysis_level_none_get_analysis_computes_on_demand() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         analysis_level: AnalysisLevel::None,
         ..HostConfig::default()
     });
@@ -2327,7 +2327,7 @@ fn analysis_level_none_get_analysis_computes_on_demand() {
 /// @ai-generated - AnalysisLevel::Essential get_analysis provides styles on demand
 #[test]
 fn analysis_level_essential_get_analysis_provides_styles() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         analysis_level: AnalysisLevel::Essential,
         ..HostConfig::default()
     });
@@ -2348,7 +2348,7 @@ fn analysis_level_essential_get_analysis_provides_styles() {
 /// @ai-generated - AnalysisLevel::Full (default) populates all analysis during upsert
 #[test]
 fn analysis_level_full_populates_all_in_upsert() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>\nimport { ref } from 'vue'\nconst n = ref(1)\n</script>\n<template><div>{{n}}</div></template>\n<style scoped>.a { color: red }</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -2366,7 +2366,7 @@ fn analysis_level_full_populates_all_in_upsert() {
 /// @ai-generated - Cross-file type resolution: external props are resolved in compiled output
 #[test]
 fn cross_file_type_resolution_resolves_external_props() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     // Upsert the dependency file with an exported interface
     let _ = host
@@ -2416,7 +2416,7 @@ fn cross_file_type_resolution_resolves_external_props() {
 /// @ai-generated - Cross-file type resolution: missing dependency is a compile blocker
 #[test]
 fn cross_file_type_resolution_missing_dep_reports_compile_error() {
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         dev_mode: false,
         compile_error_policy: CompileErrorPolicy::StrictError,
         ..HostConfig::default()
@@ -2459,7 +2459,7 @@ fn cross_file_type_resolution_missing_dep_reports_compile_error() {
 /// @ai-generated - main module lang should be "js" when force_js: true, even for lang="ts" script
 #[test]
 fn main_module_lang_is_js_when_force_js() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
         "/src/Comp.vue",
@@ -2492,7 +2492,7 @@ const x = 1
 /// @ai-generated - main module lang should use script_lang when force_js: false
 #[test]
 fn main_module_lang_uses_script_lang_when_not_force_js() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
         "/src/Comp.vue",
@@ -2525,7 +2525,7 @@ const x = 1
 /// @ai-generated - main module lang defaults to "js" when no script lang and force_js: false
 #[test]
 fn main_module_lang_defaults_to_js_when_no_script_lang() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
         "/src/Comp.vue",
@@ -2558,7 +2558,7 @@ const x = 1
 /// @ai-generated - export type must be stripped from main module when force_js: true
 #[test]
 fn main_module_strips_export_type_when_force_js() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
         "/src/Comp.vue",
@@ -2621,7 +2621,7 @@ const isOpen = computed(() => props.visible)
 /// code should contain the scope_id assignment.
 #[test]
 fn template_only_scoped_style_exposes_script_node_with_scope_id() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<template><div class=\"app\">hello</div></template>\n<style scoped>\n.app { color: red; }\n</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
@@ -2690,7 +2690,7 @@ fn template_only_scoped_style_exposes_script_node_with_scope_id() {
 #[test]
 fn template_analysis_populated_after_compile() {
     // Default config has Full analysis (LSP scope) which includes template flags
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let sfc = r#"<script setup lang="ts">
 import Child from './Child.vue'
@@ -2731,7 +2731,7 @@ const msg = "hello"
 /// @ai-generated - Template analysis detects binding occurrences
 #[test]
 fn template_analysis_detects_binding_occurrences() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let sfc = r#"<script setup lang="ts">
 const msg = "hello"
@@ -2778,7 +2778,7 @@ fn template_analysis_none_when_scope_excludes_template() {
     use verter_analysis::AnalysisScope;
 
     // BUILD scope does NOT include template flags
-    let host = VerterHost::new(HostConfig {
+    let host = VerterHost::new_standalone(HostConfig {
         analysis_scope: Some(AnalysisScope::BUILD),
         ..HostConfig::default()
     });
@@ -2809,7 +2809,7 @@ const msg = "hello"
 /// @ai-generated - Template analysis detects template refs
 #[test]
 fn template_analysis_detects_template_refs() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let sfc = r#"<script setup lang="ts">
 import { ref } from 'vue'
@@ -2843,7 +2843,7 @@ const el = ref<HTMLDivElement | null>(null)
 /// @ai-generated - Template analysis detects event handlers
 #[test]
 fn template_analysis_detects_event_handlers() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let sfc = r#"<script setup lang="ts">
 function handleClick() {}
@@ -2874,7 +2874,7 @@ function handleClick() {}
 /// @ai-generated - Template analysis detects slot definitions
 #[test]
 fn template_analysis_detects_slot_definitions() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let sfc = r#"<script setup lang="ts">
 </script>
@@ -2913,7 +2913,7 @@ fn template_analysis_detects_slot_definitions() {
 /// @ai-generated - Template analysis is updated on recompile after source change
 #[test]
 fn template_analysis_updated_on_recompile() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     // Initial version with one component
     let sfc_v1 = r#"<script setup lang="ts">
@@ -2972,7 +2972,7 @@ import Other from './Other.vue'
 /// @ai-generated - get_analysis returns template: None before any compilation
 #[test]
 fn template_analysis_none_before_compile() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     let sfc = r#"<script setup lang="ts">
 const msg = "hello"
@@ -2996,7 +2996,7 @@ const msg = "hello"
 /// @ai-generated — list_virtual_nodes returns correct nodes for a full SFC.
 #[test]
 fn list_virtual_nodes_full_sfc() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let sfc = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
 <style scoped>.a{color:red}</style>"#;
@@ -3034,7 +3034,7 @@ fn list_virtual_nodes_full_sfc() {
 /// @ai-generated — list_virtual_nodes returns empty for unknown file.
 #[test]
 fn list_virtual_nodes_unknown_file() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let nodes = host.list_virtual_nodes("Unknown.vue");
     assert!(nodes.is_empty(), "Should return empty for unknown file");
 }
@@ -3042,7 +3042,7 @@ fn list_virtual_nodes_unknown_file() {
 /// @ai-generated — list_virtual_nodes handles template-only SFC with scoped style.
 #[test]
 fn list_virtual_nodes_template_only_with_scoped_style() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let sfc = r#"<template><div>hello</div></template>
 <style scoped>.a{color:red}</style>"#;
     upsert_vue(&host, "Comp.vue", sfc);
@@ -3064,7 +3064,7 @@ fn list_virtual_nodes_template_only_with_scoped_style() {
 /// @ai-generated — list_virtual_nodes with multiple styles.
 #[test]
 fn list_virtual_nodes_multiple_styles() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let sfc = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
 <style>.a{color:red}</style>
@@ -3088,7 +3088,7 @@ fn list_virtual_nodes_multiple_styles() {
 /// @ai-generated - v-bind() expressions in style blocks populate generated_var_name in analysis
 #[test]
 fn v_bind_css_analysis_has_generated_var_name() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
         "/test/VBindComp.vue",
@@ -3132,7 +3132,7 @@ const color = ref('red')
 /// @ai-generated - css_var_flow scans across multiple files
 #[test]
 fn css_var_flow_across_files() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
 
     // File A defines --theme-color in style
     host.upsert(UpsertRequest {

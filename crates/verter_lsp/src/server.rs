@@ -585,6 +585,11 @@ pub struct VerterLanguageServer {
     /// Shared hydration cache: prevents re-hydrating compile blockers when
     /// the file's semantic hash hasn't changed since the last hydration.
     hydration_cache: Arc<crate::compile_blockers::HydrationCache>,
+    /// VFS filesystem workspace, built during background_init() after workspace
+    /// roots and project configuration are known. `None` until initialization
+    /// completes. Provides disk-backed file reads, project ownership, and import
+    /// resolution through the [`WorkspaceAccess`] trait.
+    vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
 }
 
 impl VerterLanguageServer {
@@ -662,6 +667,7 @@ impl VerterLanguageServer {
             type_provider_none_reason: config.type_provider_none_reason,
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
             hydration_cache: Arc::new(crate::compile_blockers::HydrationCache::new()),
+            vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -3284,6 +3290,7 @@ impl VerterLanguageServer {
                     self.mru_canonical_ids.lock().clone(),
                 ))
             },
+            vfs_workspace: Arc::clone(&self.vfs_workspace),
         };
 
         let ctx = context.to_owned();
@@ -5158,6 +5165,8 @@ struct BackgroundInitArgs {
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
     /// Snapshot of MRU list at init time for drain ordering.
     mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// VFS workspace handle — populated during background_init with a FilesystemWorkspace.
+    vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
 }
 
 /// Run all blocking initialization work in the background.
@@ -5192,6 +5201,7 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         cached_verter_diags,
         position_encoding,
         mru_canonical_ids,
+        vfs_workspace,
     } = args;
 
     let host = documents.host_arc();
@@ -5316,6 +5326,30 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             .map(|p| p.to_ide_project_config())
             .collect(),
     );
+
+    // Build VFS filesystem workspace with the same project configuration.
+    // The workspace provides disk-backed file reads, project ownership, and
+    // import resolution through the WorkspaceAccess trait.
+    {
+        let vfs_vite_opts = verter_vfs::ViteConfigOptions {
+            enabled: vite_opts.enabled,
+            trusted_files: vite_opts.trusted_files.clone(),
+            node_path: vite_opts.node_path.clone(),
+        };
+        let vfs_build = verter_vfs::ProjectGraph::from_workspace_roots(&roots, &vfs_vite_opts);
+        let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
+            verter_vfs::FilesystemOptions {
+                roots: roots.clone(),
+                eager_preload: false,
+            },
+        ));
+        workspace.set_project_graph(vfs_build.graph);
+        *vfs_workspace.write() = Some(workspace);
+        tracing::info!(
+            "VFS filesystem workspace initialized with {} roots",
+            roots.len()
+        );
+    }
 
     *project_registry.write() = Some(registry);
 
@@ -6535,6 +6569,16 @@ impl VerterLanguageServer {
     /// Install a project registry (test harness access).
     pub(crate) fn install_project_registry(&self, registry: crate::config::ProjectRegistry) {
         *self.project_registry.write() = Some(registry);
+    }
+
+    /// Access the VFS workspace (test harness access).
+    pub(crate) fn test_vfs_workspace(&self) -> Option<Arc<verter_vfs::FilesystemWorkspace>> {
+        self.vfs_workspace.read().clone()
+    }
+
+    /// Install a VFS workspace (test harness access).
+    pub(crate) fn install_vfs_workspace(&self, workspace: Arc<verter_vfs::FilesystemWorkspace>) {
+        *self.vfs_workspace.write() = Some(workspace);
     }
 }
 
@@ -10258,7 +10302,7 @@ mod tests {
     fn make_hover_test_service(
         type_provider: Arc<dyn TypeProvider>,
     ) -> tower_lsp_server::LspService<VerterLanguageServer> {
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -10642,7 +10686,7 @@ mod tests {
 
         let provider = Arc::new(MockTypeProvider::new());
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, socket) = tower_lsp_server::LspService::new(move |client| {
@@ -11042,7 +11086,7 @@ mod tests {
             ),
         ]);
         // Host must have the backing .vue source for the collision guard to pass
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         host.upsert(verter_host::UpsertRequest {
             canonical_id: Some("/workspace/src/App.vue".to_string()),
             input_id: "/workspace/src/App.vue".to_string(),
@@ -11077,7 +11121,7 @@ mod tests {
                 Some("/workspace/tsconfig.app.json".to_string()),
             ),
         ]);
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // "/workspace/src/weird.vue.tsx" has no backing "/workspace/src/weird.vue"
         // registered in any project, so the resolver should not strip the suffix
@@ -11099,7 +11143,7 @@ mod tests {
             ),
         ]);
         // Host must have the backing .vue source for the collision guard to pass
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         host.upsert(verter_host::UpsertRequest {
             canonical_id: Some("/workspace/src/App.vue".to_string()),
             input_id: "/workspace/src/App.vue".to_string(),
@@ -11129,7 +11173,7 @@ mod tests {
                 Some("/workspace/tsconfig.app.json".to_string()),
             ),
         ]);
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         // Do NOT upsert /workspace/src/Real.vue into host
 
         assert_eq!(
@@ -11290,7 +11334,7 @@ mod tests {
 
         let provider = Arc::new(SlowConfigurePathsProvider::default());
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, socket) = tower_lsp_server::LspService::new(move |client| {
@@ -12702,7 +12746,7 @@ mod tests {
 
     #[tokio::test]
     async fn goto_type_definition_returns_none_without_provider() {
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let (service, socket) = tower_lsp_server::LspService::new(move |client| {
             VerterLanguageServer::new(
                 client,
@@ -14385,7 +14429,7 @@ function handleCustom(payload: string) {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file() {
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = DocumentRegistry::new(Arc::clone(&host));
         let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
         let _ = documents.did_open(&TextDocumentItem {
@@ -14489,7 +14533,7 @@ function handleCustom(payload: string) {
         let popup_id = format!("{workspace_id}/src/Popup.vue");
         let uri = crate::uri::path_to_file_uri(&popup_id).expect("file uri");
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = DocumentRegistry::new(Arc::clone(&host));
         let _ = documents.did_open(&TextDocumentItem {
             uri: uri.clone(),
@@ -14596,7 +14640,7 @@ defineProps<{ msg: string }>()
 
         let provider = Arc::new(MockTypeProvider::new());
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -14712,7 +14756,7 @@ defineProps<{ msg: string }>()
     async fn sync_imported_vue_api_lightweight_opens_snapshot_ide_path_for_tsgo() {
         let provider = Arc::new(MockTypeProvider::new());
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -14770,7 +14814,7 @@ defineProps<{ msg: string }>()
     async fn ensure_current_file_synced_queues_provisional_ide_path_for_snapshot_reconciliation() {
         let provider = Arc::new(MockTypeProvider::new());
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -15073,7 +15117,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             }
         };
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -15206,7 +15250,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             }
         };
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -15311,7 +15355,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             }
         };
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -15386,7 +15430,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
         let uri = crate::uri::path_to_file_uri(&app_path).expect("fixture uri should be valid");
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
         let _ = documents.did_open(&TextDocumentItem {
             uri: uri.clone(),
@@ -15483,7 +15527,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             }
         };
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -15578,7 +15622,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             }
         };
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
         let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -15783,7 +15827,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         let app_id = format!("{workspace_id}/src/App.vue");
         let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = DocumentRegistry::new(Arc::clone(&host));
         let _ = documents.did_open(&TextDocumentItem {
             uri: uri.clone(),
@@ -15936,7 +15980,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         let app_id = format!("{workspace_id}/src/App.vue");
         let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = DocumentRegistry::new(Arc::clone(&host));
         let _ = documents.did_open(&TextDocumentItem {
             uri: uri.clone(),
@@ -16316,7 +16360,9 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn compute_verter_diagnostics_ignores_plain_typescript_files() {
-        let host = Arc::new(VerterHost::new(verter_host::HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(
+            verter_host::HostConfig::default(),
+        ));
         let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
         let uri: Uri = "file:///workspace/src/__verter_mayberef_repro__.ts"
@@ -16373,7 +16419,7 @@ defineProps<{ msg: string }>()
     fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
         use verter_host::{CompileErrorPolicy, FileKind, UpsertRequest};
 
-        let host = Arc::new(VerterHost::new(verter_host::HostConfig {
+        let host = Arc::new(VerterHost::new_standalone(verter_host::HostConfig {
             dev_mode: false,
             compile_error_policy: CompileErrorPolicy::StrictError,
             ..verter_host::HostConfig::default()
@@ -16494,7 +16540,7 @@ import Child from '@/components/Child.vue'
 <template><Child msg="hello" /></template>"#
         );
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = DocumentRegistry::new(Arc::clone(&host));
         let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
         let _ = documents.did_open(&TextDocumentItem {
@@ -16643,7 +16689,7 @@ defineProps<{ msg: string }>()
             .to_string();
         let app_id = format!("{workspace_id}/src/App.vue");
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = DocumentRegistry::new(Arc::clone(&host));
         let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
         let _ = documents.did_open(&TextDocumentItem {
@@ -16753,7 +16799,7 @@ defineProps<{ show: boolean }>()
             .to_string();
         let app_id = format!("{workspace_id}/src/App.vue");
 
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let documents = DocumentRegistry::new(Arc::clone(&host));
         let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
         let _ = documents.did_open(&TextDocumentItem {
@@ -16839,5 +16885,99 @@ import { Overlay } from './components'
         );
 
         let _ = std::fs::remove_dir_all(&temp_base);
+    }
+
+    // ── VFS workspace integration ──
+
+    #[test]
+    fn vfs_workspace_rwlock_initially_none() {
+        let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
+            Arc::new(parking_lot::RwLock::new(None));
+
+        // Before background_init, the workspace is None
+        assert!(
+            vfs.read().is_none(),
+            "VFS workspace should be None before initialization"
+        );
+    }
+
+    #[test]
+    fn vfs_workspace_rwlock_install_and_access() {
+        let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
+            Arc::new(parking_lot::RwLock::new(None));
+
+        // Simulate what background_init does: build workspace and store it
+        let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
+            verter_vfs::FilesystemOptions {
+                roots: vec!["/test-project".to_string()],
+                eager_preload: false,
+            },
+        ));
+        *vfs.write() = Some(Arc::clone(&workspace));
+
+        // Verify it's accessible
+        let ws = vfs.read().clone();
+        assert!(ws.is_some(), "VFS workspace should be Some after install");
+
+        // Verify workspace options match
+        assert_eq!(
+            ws.unwrap().options().roots,
+            vec!["/test-project".to_string()],
+            "workspace roots should match what was installed"
+        );
+    }
+
+    #[test]
+    fn vfs_workspace_with_project_graph() {
+        let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
+            verter_vfs::FilesystemOptions {
+                roots: vec!["/my-project".to_string()],
+                eager_preload: false,
+            },
+        ));
+
+        // Before setting a project graph, owner_for_file returns None
+        use verter_vfs::WorkspaceAccess;
+        assert!(
+            workspace
+                .owner_for_file("/my-project/src/App.vue")
+                .is_none(),
+            "empty project graph should have no owner"
+        );
+
+        // Set a simple project graph
+        let graph = verter_vfs::ProjectGraph::from_configs(vec![verter_vfs::VfsProjectConfig {
+            root: "/my-project".to_string(),
+            rank: verter_vfs::ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![".vue".to_string()],
+            workspace_root: "/my-project".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: Default::default(),
+            references: vec![],
+            membership: verter_vfs::ProjectMembership::MatchAll,
+        }]);
+        workspace.set_project_graph(graph);
+
+        // Now owner_for_file should return the project
+        let owner = workspace.owner_for_file("/my-project/src/App.vue");
+        assert!(
+            owner.is_some(),
+            "file under project root should have an owner after graph set"
+        );
+        assert_eq!(
+            owner.unwrap().project_root,
+            "/my-project",
+            "owner should be the correct project root"
+        );
+
+        // Negative: file outside project root should have no owner
+        assert!(
+            workspace
+                .owner_for_file("/other-project/src/App.vue")
+                .is_none(),
+            "file outside project root should have no owner"
+        );
     }
 }

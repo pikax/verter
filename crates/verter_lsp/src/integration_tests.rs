@@ -23,7 +23,7 @@ use crate::features::rename::{prepare_rename, rename_at_position};
 
 /// Helper: create a DocumentRegistry and open a Vue SFC.
 fn open_vue_file(source: &str) -> (DocumentRegistry, Uri) {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
     let uri: Uri = "file:///test/App.vue".parse().unwrap();
     let item = TextDocumentItem {
@@ -39,7 +39,7 @@ fn open_vue_file(source: &str) -> (DocumentRegistry, Uri) {
 /// Helper: create a DocumentRegistry with embedded ambient types and open a Vue SFC.
 /// Simulates the case where `@verter/types` is not installed in the workspace.
 fn open_vue_file_with_ambient(source: &str) -> (DocumentRegistry, Uri) {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
     registry.set_embed_ambient_types(true);
     let uri: Uri = "file:///test/App.vue".parse().unwrap();
@@ -1201,7 +1201,7 @@ const emit = defineEmits<{
 fn open_multi_file(
     files: &[(&str, &str, &str)], // (uri, language_id, source)
 ) -> (DocumentRegistry, Vec<Uri>) {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
     let mut uris = Vec::new();
     for (uri_str, lang, source) in files {
@@ -2620,7 +2620,7 @@ const msg = 'hello'
 </template>
 "#;
 
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
     let uri: Uri = "file:///test/MT.vue".parse().unwrap();
 
@@ -2714,7 +2714,7 @@ const msg = 'hello'
 fn multithread_parallel_did_open_multiple_files() {
     use std::sync::Arc;
 
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
 
     let files: Vec<(String, String)> = (0..8)
@@ -2794,7 +2794,7 @@ const count = 0
 </template>
 "#;
 
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
     let uri: Uri = "file:///test/Interleaved.vue".parse().unwrap();
 
@@ -2887,7 +2887,7 @@ const count = {i}
 fn multithread_concurrent_did_change_different_files() {
     use std::sync::Arc;
 
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
 
     // Open 4 files
@@ -2970,7 +2970,7 @@ fn stress_test_no_deadlock_under_heavy_concurrent_load() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
 
     // Pre-open a set of files
@@ -3435,7 +3435,7 @@ const count = 42
 ///   "overlay not found for closed file: file:///...runtime-dom.d.ts.tsx"
 #[test]
 fn get_ide_returns_none_for_typescript_file() {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a TypeScript file (non-Vue)
@@ -3457,7 +3457,7 @@ fn get_ide_returns_none_for_typescript_file() {
 
 #[test]
 fn get_ide_returns_none_for_declaration_file() {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a .d.ts file (e.g., runtime-dom.d.ts opened by VS Code during go-to-definition)
@@ -3511,7 +3511,7 @@ const msg = 'hello'
 /// The did_close guard (get_ide().is_some()) must prevent close_tsx.
 #[test]
 fn close_non_vue_file_does_not_affect_vue_ide_state() {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a Vue file
@@ -4088,7 +4088,7 @@ fn concurrent_did_change_with_real_compilation() {
         .unwrap();
 
     rt.block_on(async {
-        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let registry = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
         let source = r#"<script setup lang="ts">
@@ -4239,7 +4239,7 @@ fn runtime_liveness_under_blocking_host_operations() {
         .build()
         .unwrap();
 
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
     let source = r#"<script setup lang="ts">
@@ -4340,7 +4340,7 @@ fn block_in_place_prevents_runtime_starvation() {
         .build()
         .unwrap();
 
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
     let source = r#"<script setup lang="ts">
@@ -5007,7 +5007,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
 /// so that completions/hover/definition still work on the .vue file.
 #[test]
 fn dep_did_open_preserves_vue_ide_context() {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // 1. Open a Vue file that imports from a .ts dependency
@@ -5077,7 +5077,7 @@ const msg = greet('world')
 /// should remain available throughout.
 #[test]
 fn dep_peek_open_close_preserves_ide() {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // 1. Open a Vue file
@@ -5145,7 +5145,7 @@ import { count } from './state'
 /// the correct TSX offset for tsserver/TSGO to provide member completions.
 #[test]
 fn v_for_member_access_position_mapping() {
-    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     let vue_source = r#"<script setup lang="ts">

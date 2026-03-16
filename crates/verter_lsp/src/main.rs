@@ -41,7 +41,7 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let host = Arc::new(VerterHost::new(HostConfig {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: verter_host::AnalysisLevel::Full,
         ..HostConfig::default()
     }));

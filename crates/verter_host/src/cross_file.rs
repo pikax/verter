@@ -392,7 +392,7 @@ mod tests {
     use std::sync::Arc;
 
     fn make_host() -> VerterHost {
-        VerterHost::new(HostConfig::default())
+        VerterHost::new_standalone(HostConfig::default())
     }
 
     fn upsert_vue(host: &VerterHost, id: &str, src: &str) {

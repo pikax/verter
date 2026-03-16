@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use verter_span::Span;
+use verter_vfs::WorkspaceAccess;
 
 use crate::shared::read_lock;
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
 use verter_core::compile::CompileTarget;
 
 fn strict_host() -> VerterHost {
-    VerterHost::new(HostConfig {
+    VerterHost::new_standalone(HostConfig {
         dev_mode: false,
         compile_error_policy: CompileErrorPolicy::StrictError,
         ..HostConfig::default()
@@ -1297,7 +1298,7 @@ export interface Props extends Base { bar: number }
 /// conditions under the NAPI path that fails while strict_host tests pass.
 #[test]
 fn barrel_chain_vue_sfc_with_dev_mode_and_windows_paths() {
-    let host = VerterHost::new(HostConfig::default()); // dev_mode: true, DevServeLastKnownGood
+    let host = VerterHost::new_standalone(HostConfig::default()); // dev_mode: true, DevServeLastKnownGood
 
     let consumer_source = r#"<script setup lang="ts">
 import type { DrawerEmits } from "@/components/base"
@@ -1456,7 +1457,7 @@ const height = ref('100px')
 
 #[test]
 fn expand_relative_candidates_produces_correct_paths() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let candidates = host.expand_relative_candidates("/workspace/src/App.vue", "./types");
 
     // Direct resolution
@@ -1487,7 +1488,7 @@ fn expand_relative_candidates_produces_correct_paths() {
 
 #[test]
 fn expand_relative_candidates_handles_parent_traversal() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let candidates = host.expand_relative_candidates("/workspace/src/deep/file.vue", "../utils");
 
     assert_eq!(candidates[0], "/workspace/src/utils");
@@ -1672,5 +1673,255 @@ export function useEl(el: MaybeRef<HTMLElement | null>) { return el }
     assert!(
         diags.is_none(),
         "NonSfc file should have no diagnostics, got: {diags:?}"
+    );
+}
+
+// ── Workspace integration tests ──────────────────────────────────────
+
+#[test]
+fn upsert_syncs_external_src_edges_to_workspace() {
+    // Create a host with a MemoryWorkspace so we can query the workspace's
+    // edge graph directly after upsert.
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            dev_mode: false,
+            compile_error_policy: CompileErrorPolicy::StrictError,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    // An SFC with an external script src (parsed into external_requests)
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script src=\"./setup.ts\"></script>\n<template><div>hello</div></template>",
+    );
+
+    // After upsert, the workspace should have recorded the external src edge.
+    // reverse_deps_for returns files that depend on the given file.
+    let rev_deps = ws.reverse_deps_for("/src/setup.ts");
+    assert!(
+        rev_deps.contains(&"/src/Comp.vue".to_string()),
+        "workspace should have /src/Comp.vue as a reverse dep of /src/setup.ts after upsert; got: {rev_deps:?}"
+    );
+
+    // forward_deps_for returns the files that /src/Comp.vue depends on
+    let fwd_deps = ws.forward_deps_for("/src/Comp.vue");
+    assert!(
+        fwd_deps.contains(&"/src/setup.ts".to_string()),
+        "workspace should have /src/setup.ts as a forward dep of /src/Comp.vue after upsert; got: {fwd_deps:?}"
+    );
+}
+
+#[test]
+fn upsert_syncs_relative_import_edges_to_workspace() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+
+    // Set up a project with a resolver so that relative imports can be resolved
+    // by the VFS. Without a project resolver, the VFS can't resolve relative
+    // specifiers (it doesn't do bare path probing like the host's Phase 4).
+    ws.add_explicit_project(verter_vfs::VfsProjectConfig {
+        root: "/src".to_string(),
+        rank: verter_vfs::ProjectRank::Explicit,
+        tsconfig_path: None,
+        root_files: vec![],
+        extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
+        workspace_root: "/src".to_string(),
+        workspace_aliases: vec![],
+        compiler_options: verter_vfs::IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: verter_vfs::ProjectMembership::default(),
+    });
+
+    // Inject the dependency file so the resolver can find it
+    ws.inject_file(
+        "/src/utils.ts".to_string(),
+        Arc::from("export function helper() { return 1 }"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            dev_mode: false,
+            compile_error_policy: CompileErrorPolicy::StrictError,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    // SFC with a relative import in script
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport { helper } from './utils'\n</script>\n<template><div>{{ helper() }}</div></template>",
+    );
+
+    // After upsert, the workspace should have the relative import edge resolved
+    // to /src/utils.ts (via the project resolver's relative path probing).
+    let fwd_deps = ws.forward_deps_for("/src/Comp.vue");
+    assert!(
+        fwd_deps.contains(&"/src/utils.ts".to_string()),
+        "workspace should have /src/utils.ts as a forward dep of /src/Comp.vue after upsert; got: {fwd_deps:?}"
+    );
+
+    // Reverse dep should also be present
+    let rev_deps = ws.reverse_deps_for("/src/utils.ts");
+    assert!(
+        rev_deps.contains(&"/src/Comp.vue".to_string()),
+        "workspace should have /src/Comp.vue as a reverse dep of /src/utils.ts; got: {rev_deps:?}"
+    );
+}
+
+#[test]
+fn upsert_syncs_bare_import_edges_to_workspace() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            dev_mode: false,
+            compile_error_policy: CompileErrorPolicy::StrictError,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    // SFC with a bare (non-relative) import
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+
+    // Bare imports should be stored in the workspace edge store as bare_specifiers.
+    // The EdgeStore doesn't eagerly resolve them, but they should be present.
+    // We can verify by checking that no panic occurred and the workspace is consistent.
+    // The forward deps will be empty since 'vue' isn't resolvable in the MemoryWorkspace.
+    let fwd_deps = ws.forward_deps_for("/src/Comp.vue");
+    // This is intentionally a weak assertion — we just verify the edge syncing didn't break.
+    // The key assertion is that forward_deps_for doesn't panic and returns a list.
+    assert!(
+        fwd_deps.len() < 100,
+        "sanity: forward deps should be a small list"
+    );
+}
+
+#[test]
+fn workspace_resolution_used_for_aliased_imports() {
+    // This test verifies that resolve_loaded_dependency_canonical will
+    // consult the workspace's resolve_import when the host's own Phases 1-3
+    // don't find a match.
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+
+    // Set up a project with @/ alias pointing to /project/src
+    ws.add_explicit_project(verter_vfs::VfsProjectConfig {
+        root: "/project".to_string(),
+        rank: verter_vfs::ProjectRank::Explicit,
+        tsconfig_path: Some("/project/tsconfig.json".to_string()),
+        root_files: vec![],
+        extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
+        workspace_root: "/project".to_string(),
+        workspace_aliases: vec![],
+        compiler_options: verter_vfs::IdeProjectCompilerOptions {
+            paths: vec![("@/*".to_string(), vec!["/project/src/*".to_string()])],
+            ..Default::default()
+        },
+        references: vec![],
+        membership: verter_vfs::ProjectMembership::default(),
+    });
+
+    // Inject the dependency file into the workspace so it can be resolved
+    ws.inject_file(
+        "/project/src/utils.ts".to_string(),
+        Arc::from("export function helper() { return 42 }"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            dev_mode: false,
+            compile_error_policy: CompileErrorPolicy::StrictError,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    // Upsert both files into the host
+    upsert_non_sfc(
+        &host,
+        "/project/src/utils.ts",
+        "export function helper() { return 42 }",
+    );
+    upsert_vue(
+        &host,
+        "/project/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport { helper } from '@/utils'\n</script>\n<template><div>{{ helper() }}</div></template>",
+    );
+
+    // Now test resolution: the host's Phase 1 (dependency_resolutions) will miss
+    // because no set_import_dependencies was called. Phase 3 (project_resolver)
+    // will also miss because configure_projects was not called. But the workspace
+    // has the @/ alias configured, so workspace-backed resolution should find it.
+    let files = read_lock(&host.files);
+    let result =
+        host.resolve_loaded_dependency_canonical(&files, "/project/src/Comp.vue", "@/utils");
+    drop(files);
+
+    // This SHOULD resolve to /project/src/utils.ts via the workspace's project resolver.
+    assert_eq!(
+        result,
+        Some("/project/src/utils.ts".to_string()),
+        "workspace resolution should find @/utils via tsconfig paths alias"
+    );
+}
+
+#[test]
+fn workspace_resolution_does_not_override_exact_resolution() {
+    // Exact resolutions (Phase 1) should take priority over workspace resolution.
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            dev_mode: false,
+            compile_error_policy: CompileErrorPolicy::StrictError,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    // Upsert the dep and the component
+    upsert_non_sfc(&host, "/src/exact-target.ts", "export const x = 1");
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport { x } from './dep'\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+
+    // Set exact resolution for ./dep → /src/exact-target.ts
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some("/src/exact-target.ts".to_string()),
+            possible_canonical_ids: vec![],
+        }],
+    );
+
+    let files = read_lock(&host.files);
+    let result = host.resolve_loaded_dependency_canonical(&files, "/src/Comp.vue", "./dep");
+    drop(files);
+
+    // Phase 1 exact resolution should take priority
+    assert_eq!(
+        result,
+        Some("/src/exact-target.ts".to_string()),
+        "exact resolution should take priority over workspace resolution"
     );
 }

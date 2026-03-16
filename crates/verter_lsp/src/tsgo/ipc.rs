@@ -3257,7 +3257,7 @@ const count: number = 42;
 </template>"#;
 
         // Generate TSX using verter_host — upsert then trigger compilation via get_virtual_file
-        let host = verter_host::VerterHost::new(verter_host::HostConfig::default());
+        let host = verter_host::VerterHost::new_standalone(verter_host::HostConfig::default());
         let _ = host.upsert(verter_host::UpsertRequest {
             canonical_id: Some("App.vue".to_string()),
             input_id: "App.vue".to_string(),
@@ -3553,7 +3553,7 @@ const count: number = 42;
             return None;
         }
 
-        let host = verter_host::VerterHost::new(verter_host::HostConfig::default());
+        let host = verter_host::VerterHost::new_standalone(verter_host::HostConfig::default());
         let file_id = format!("{}.vue", file_stem);
         let _ = host.upsert(verter_host::UpsertRequest {
             canonical_id: Some(file_id.clone()),
@@ -3617,7 +3617,7 @@ const count: number = 42;
 
     /// Helper: compile Vue SFC to TSX, return (code, source_map_json).
     fn compile_vue_to_tsx_with_map(vue_source: &str, file_stem: &str) -> (String, Option<String>) {
-        let host = verter_host::VerterHost::new(verter_host::HostConfig::default());
+        let host = verter_host::VerterHost::new_standalone(verter_host::HostConfig::default());
         let file_id = format!("{}.vue", file_stem);
         let _ = host.upsert(verter_host::UpsertRequest {
             canonical_id: Some(file_id.clone()),

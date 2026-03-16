@@ -1138,11 +1138,11 @@ const msg = ref('hello')
 </style>"#;
 
     fn make_host() -> VerterHost {
-        VerterHost::new(HostConfig::default())
+        VerterHost::new_standalone(HostConfig::default())
     }
 
     fn make_lazy_host() -> VerterHost {
-        VerterHost::new(HostConfig {
+        VerterHost::new_standalone(HostConfig {
             analysis_level: AnalysisLevel::None,
             ..HostConfig::default()
         })

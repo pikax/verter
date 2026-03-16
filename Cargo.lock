@@ -3422,7 +3422,6 @@ version = "0.0.1-beta.1"
 dependencies = [
  "bitflags",
  "criterion",
- "glob",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",
@@ -3432,6 +3431,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "verter_span",
+ "verter_vfs",
 ]
 
 [[package]]
@@ -3522,6 +3522,7 @@ dependencies = [
  "verter_analysis",
  "verter_core",
  "verter_span",
+ "verter_vfs",
  "web-time",
  "xxhash-rust",
 ]
@@ -3556,6 +3557,7 @@ dependencies = [
  "verter_host",
  "verter_mcp",
  "verter_span",
+ "verter_vfs",
 ]
 
 [[package]]
@@ -3576,6 +3578,7 @@ dependencies = [
  "verter_diagnostics",
  "verter_host",
  "verter_span",
+ "verter_vfs",
  "walkdir",
 ]
 
@@ -3622,6 +3625,23 @@ dependencies = [
  "verter_core",
  "verter_host",
  "walkdir",
+]
+
+[[package]]
+name = "verter_vfs"
+version = "0.0.1-beta.1"
+dependencies = [
+ "glob",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
+ "parking_lot",
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

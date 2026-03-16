@@ -1423,7 +1423,7 @@ mod tests {
                 is_type_only: false,
                 bindings: vec!["ref".to_string(), "computed".to_string()],
             }],
-            module_references: host::VerterHost::new(host::HostConfig::default())
+            module_references: host::VerterHost::new_standalone(host::HostConfig::default())
                 .upsert(host::UpsertRequest {
                     canonical_id: Some("/src/dynamic.ts".to_string()),
                     input_id: "/src/dynamic.ts".to_string(),
@@ -1502,7 +1502,7 @@ mod tests {
     #[test]
     fn host_update_to_ffi_export_signatures() {
         // Use the host to produce real export signatures from a barrel file
-        let h = host::VerterHost::new(host::HostConfig::default());
+        let h = host::VerterHost::new_standalone(host::HostConfig::default());
         let result = h
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/barrel.ts".to_string()),
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[test]
     fn host_update_to_ffi_export_signatures_local_exports() {
-        let h = host::VerterHost::new(host::HostConfig::default());
+        let h = host::VerterHost::new_standalone(host::HostConfig::default());
         let result = h
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/utils.ts".to_string()),

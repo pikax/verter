@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn open_uris_returns_open_documents() {
-        let host = Arc::new(verter_host::VerterHost::new(
+        let host = Arc::new(verter_host::VerterHost::new_standalone(
             verter_host::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
@@ -809,7 +809,7 @@ mod tests {
     /// position mapper when the host already has cached TSX output.
     #[test]
     fn position_mapper_lazily_rebuilt_on_fast_path() {
-        let host = Arc::new(verter_host::VerterHost::new(
+        let host = Arc::new(verter_host::VerterHost::new_standalone(
             verter_host::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
@@ -852,7 +852,7 @@ mod tests {
     /// get_ide() fast path should not overwrite an existing position mapper.
     #[test]
     fn position_mapper_not_overwritten_when_present() {
-        let host = Arc::new(verter_host::VerterHost::new(
+        let host = Arc::new(verter_host::VerterHost::new_standalone(
             verter_host::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);

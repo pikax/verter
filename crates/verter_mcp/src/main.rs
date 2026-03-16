@@ -21,6 +21,7 @@ use verter_mcp::config::{Cli, McpServerConfig, Transport};
 use verter_mcp::scanner;
 use verter_mcp::tools;
 use verter_mcp::VerterMcpServer;
+use verter_vfs::{FilesystemOptions, FilesystemWorkspace};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,12 +34,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Create host with full analysis scope for maximum data
-    let host = Arc::new(VerterHost::new(HostConfig {
-        analysis_scope: Some(verter_analysis::AnalysisScope::LSP),
-        dev_mode: true,
-        ..Default::default()
+    // Create filesystem workspace from project root (if provided)
+    let roots: Vec<String> = cli
+        .project_root
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    let workspace = Arc::new(FilesystemWorkspace::new(FilesystemOptions {
+        roots,
+        eager_preload: false,
     }));
+
+    // Create host backed by the filesystem workspace
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            analysis_scope: Some(verter_analysis::AnalysisScope::LSP),
+            dev_mode: true,
+            ..Default::default()
+        },
+        workspace,
+    ));
 
     // Create linter with configured preset
     let lint_config = tools::diagnostics::make_lint_config(&cli.lint_preset);

@@ -503,7 +503,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missing() {
-        let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new(
+        let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
             HostConfig::default(),
         ))));
         let provider = Arc::new(MockTypeProvider::new());

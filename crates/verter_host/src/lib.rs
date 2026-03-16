@@ -74,6 +74,9 @@ use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
 use verter_analysis::project_resolver::NativeProjectResolver;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+
 /// Central file store and compile cache for Vue SFC compilation.
 ///
 /// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
@@ -85,9 +88,12 @@ use verter_analysis::project_resolver::NativeProjectResolver;
 /// 3. [`get_virtual_file`](Self::get_virtual_file) — compile on demand (or cache hit) and return code
 ///
 /// Internal state is protected by `RwLock` for thread-safe concurrent access.
-#[derive(Debug)]
 pub struct VerterHost {
     pub(crate) config: HostConfig,
+    /// VFS workspace providing file reads, import resolution, and edge recording.
+    /// Only available on native targets (not WASM).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) workspace: Arc<dyn verter_vfs::WorkspaceAccess>,
     pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
@@ -101,8 +107,38 @@ pub struct VerterHost {
     pub(crate) metrics: HostMetrics,
 }
 
+// Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
+impl std::fmt::Debug for VerterHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerterHost")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 impl VerterHost {
-    /// Create a new host with the given configuration.
+    /// Create a new host backed by the given workspace.
+    ///
+    /// The workspace provides file reads, import resolution, and edge recording
+    /// through the [`WorkspaceAccess`](verter_vfs::WorkspaceAccess) trait.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(config: HostConfig, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) -> Self {
+        Self {
+            config,
+            workspace,
+            files: default_shared(FxHashMap::default()),
+            alias_to_canonical: default_shared(FxHashMap::default()),
+            reverse_dependencies: default_shared(FxHashMap::default()),
+            tick: std::sync::atomic::AtomicU64::new(1),
+            last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
+            project_resolver: default_shared(None),
+            #[cfg(feature = "host_metrics")]
+            metrics: HostMetrics::default(),
+        }
+    }
+
+    /// Create a new host (WASM variant, no workspace).
+    #[cfg(target_arch = "wasm32")]
     pub fn new(config: HostConfig) -> Self {
         Self {
             config,
@@ -115,6 +151,50 @@ impl VerterHost {
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
         }
+    }
+
+    /// Create a standalone host with an internal memory workspace.
+    ///
+    /// For backward compatibility with tests and simple use cases that don't
+    /// need an external workspace. Creates a [`MemoryWorkspace`](verter_vfs::MemoryWorkspace)
+    /// internally.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_standalone(config: HostConfig) -> Self {
+        let workspace = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        Self::new(config, workspace)
+    }
+
+    /// Create a standalone host (WASM variant).
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_standalone(config: HostConfig) -> Self {
+        Self::new(config)
+    }
+
+    /// Get a reference to the workspace.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn workspace(&self) -> &Arc<dyn verter_vfs::WorkspaceAccess> {
+        &self.workspace
+    }
+
+    /// Resolve an import through the workspace (VFS).
+    ///
+    /// Uses the workspace's resolution chain: exact resolutions (authoritative)
+    /// then project resolver then no fallthrough.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn resolve_import_via_workspace(
+        &self,
+        parent_canonical_id: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        self.workspace
+            .resolve_import(
+                parent_canonical_id,
+                import_source,
+                verter_vfs::ResolveRequestKind::EsmImport,
+            )
+            .map(|r| r.source_id)
     }
 
     /// Release all cached data (files, aliases, dependency graph).
@@ -315,7 +395,7 @@ mod tests {
 
     #[test]
     fn get_source_returns_source_for_canonical_and_alias() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let source = "<template><div>hello</div></template>";
 
         host.upsert(UpsertRequest {
@@ -334,7 +414,7 @@ mod tests {
 
     #[test]
     fn host_internal_diagnostic_spans_remain_byte_offsets() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let source = "<template>\n  😀<div>\n</template>\n";
 
         let result = upsert_vue(&host, "Comp.vue", source);
@@ -397,7 +477,7 @@ mod tests {
     /// @ai-generated - AnalysisLevel::Essential runs script analysis but not style
     #[test]
     fn analysis_level_essential_runs_script_not_style() {
-        let host = VerterHost::new(HostConfig {
+        let host = VerterHost::new_standalone(HostConfig {
             analysis_level: AnalysisLevel::Essential,
             ..HostConfig::default()
         });
@@ -419,7 +499,7 @@ mod tests {
     /// @ai-generated - AnalysisLevel::None skips all analysis during upsert
     #[test]
     fn analysis_level_none_skips_all_analysis_in_upsert() {
-        let host = VerterHost::new(HostConfig {
+        let host = VerterHost::new_standalone(HostConfig {
             analysis_level: AnalysisLevel::None,
             ..HostConfig::default()
         });
@@ -814,7 +894,7 @@ mod tests {
     /// @ai-generated - Custom resolve_extensions config is respected
     #[test]
     fn custom_resolve_extensions_config() {
-        let host = VerterHost::new(HostConfig {
+        let host = VerterHost::new_standalone(HostConfig {
             resolve_extensions: vec![".ts".to_string(), ".js".to_string()],
             ..HostConfig::default()
         });
@@ -866,7 +946,7 @@ mod tests {
     /// @ai-generated - File kind change from VueSfc to NonSfc produces correct node list
     #[test]
     fn file_kind_change_vue_to_nonsfc() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // First upsert as VueSfc
         let _ = upsert_vue(
@@ -896,7 +976,7 @@ mod tests {
     /// @ai-generated - generation field increments on each upsert
     #[test]
     fn generation_counter_increments_on_upsert() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
         let _ = upsert_vue(&host, "Comp.vue", src1);
 
@@ -1140,7 +1220,7 @@ mod tests {
 
     #[test]
     fn profile_cap_evicts_oldest_profiles() {
-        let host = VerterHost::new(HostConfig {
+        let host = VerterHost::new_standalone(HostConfig {
             max_profiles_per_file: 2,
             ..HostConfig::default()
         });
@@ -1201,7 +1281,7 @@ mod tests {
     /// @ai-generated - Relative imports auto-register in dependency graph
     #[test]
     fn relative_imports_auto_register_deps() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1222,7 +1302,7 @@ mod tests {
     /// @ai-generated - set_import_dependencies adds to reverse dep graph
     #[test]
     fn set_import_dependencies_adds_to_reverse_deps() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1252,7 +1332,7 @@ mod tests {
     /// @ai-generated - set_import_dependencies: subsequent dep upsert triggers invalidation
     #[test]
     fn set_import_dependencies_subsequent_upsert_invalidates() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1313,7 +1393,7 @@ mod tests {
 
     #[test]
     fn invalidate_dependents_of_works_when_dependency_was_never_loaded() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1352,7 +1432,7 @@ mod tests {
     /// @ai-generated - Dep file with no export signatures → full invalidation (Tier 1 fallback)
     #[test]
     fn smart_invalidation_no_signatures_full_invalidation() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // Manually set up a dependency relationship without export signatures
         let _ = upsert_vue(
@@ -1403,7 +1483,7 @@ mod tests {
     /// @ai-generated - Dep file unchanged export → SFC NOT invalidated
     #[test]
     fn smart_invalidation_unchanged_export_no_invalidation() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // Upsert SFC that imports MyType
         let _ = upsert_vue(
@@ -1499,7 +1579,7 @@ mod tests {
     /// (Tier 2 WOULD invalidate since export text hash changes, but Tier 3 saves it)
     #[test]
     fn tier3_comment_added_no_invalidation() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1548,7 +1628,7 @@ mod tests {
     /// @ai-generated - Tier 3: property added to dep type → invalidation
     #[test]
     fn tier3_property_added_invalidates() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1598,7 +1678,7 @@ mod tests {
     /// @ai-generated - Tier 3: property type changed → invalidation
     #[test]
     fn tier3_property_type_changed_invalidates() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1647,7 +1727,7 @@ mod tests {
     /// @ai-generated - Tier 3: resolved_type_hashes are stored for future comparisons
     #[test]
     fn tier3_stores_resolved_type_hashes() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1698,7 +1778,7 @@ mod tests {
     /// @ai-generated - Tier 3: unrelated type changed in same file → NO invalidation
     #[test]
     fn tier3_unrelated_type_change_no_invalidation() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let _ = upsert_vue(
             &host,
@@ -1752,7 +1832,7 @@ mod tests {
     /// @ai-generated - Tier 3: whitespace-only change to dep type → NO invalidation
     #[test]
     fn tier3_whitespace_only_change_no_invalidation() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // SFC imports MyType and uses it in defineProps
         let _ = upsert_vue(
@@ -1805,7 +1885,7 @@ mod tests {
     /// @ai-generated - update_alias_map: removes old aliases, adds new ones
     #[test]
     fn update_alias_map_removes_old_adds_new() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let old_aliases: BTreeSet<String> = ["old-alias".to_string()].into();
         let new_aliases: BTreeSet<String> =
@@ -1831,7 +1911,7 @@ mod tests {
     /// @ai-generated - update_reverse_deps: keeps shared deps when another owner exists
     #[test]
     fn update_reverse_deps_keeps_shared_dep() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // shared-dep.ts is owned by both Comp.vue and Other.vue
         {
@@ -1856,7 +1936,7 @@ mod tests {
     /// @ai-generated - update_reverse_deps: removes stale deps, adds new ones
     #[test]
     fn update_reverse_deps_removes_stale_adds_new() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         let old_deps: BTreeSet<String> = ["old-dep.ts".to_string()].into();
         let new_deps: BTreeSet<String> = ["new-dep.ts".to_string()].into();
@@ -1950,7 +2030,7 @@ mod tests {
     /// - DOES remap the preprocessed block's analysis spans to original SFC positions
     #[test]
     fn style_override_remaps_preprocessed_block_preserves_css_block() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // SFC with two style blocks: plain CSS (index 0) and "sass" (index 1)
         let sfc = concat!(
@@ -2092,7 +2172,7 @@ mod tests {
     /// @ai-generated - apply_block_overrides: template override produces compile-ready source
     #[test]
     fn apply_block_overrides_template() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
         let _ = upsert_vue(&host, "test.vue", sfc);
 
@@ -2141,7 +2221,7 @@ mod tests {
     /// @ai-generated - apply_block_overrides: no change if same override applied twice
     #[test]
     fn apply_block_overrides_no_change_if_same_hash() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
         let _ = upsert_vue(&host, "test.vue", sfc);
 
@@ -2180,7 +2260,7 @@ mod tests {
     /// @ai-generated - apply_block_overrides: style overrides delegated to existing mechanism
     #[test]
     fn apply_block_overrides_style_delegated() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template><div>hello</div></template>\n<script setup>const x = 1</script>\n<style lang=\"scss\">.a { .b { color: red } }</style>";
         let _ = upsert_vue(&host, "test.vue", sfc);
 
@@ -2225,7 +2305,7 @@ mod tests {
     /// as SASS indented syntax, causing build failures.
     #[test]
     fn style_override_changes_virtual_id_lang_to_css() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template><div>hello</div></template>\n<style lang=\"sass\">.a\n  color: red\n</style>";
         let upsert = upsert_vue(&host, "test.vue", sfc);
         // Before override, the URL should have the original lang
@@ -2276,7 +2356,7 @@ mod tests {
     /// @ai-generated - upsert returns preprocessor_requests for pug template
     #[test]
     fn upsert_returns_preprocessor_requests() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
         let result = upsert_vue(&host, "test.vue", sfc);
         assert!(
@@ -2375,7 +2455,7 @@ mod tests {
 
     #[test]
     fn close_clears_all_caches() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // Upsert a file to populate caches
         upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
@@ -2409,7 +2489,7 @@ mod tests {
 
     #[test]
     fn close_allows_reuse() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
         host.close();
 
@@ -2465,7 +2545,7 @@ mod tests {
 
     #[test]
     fn configure_projects_exact_alias() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // Configure project with exact path mapping
         host.configure_projects(vec![make_project_config(
@@ -2498,7 +2578,7 @@ mod tests {
 
     #[test]
     fn configure_projects_wildcard_alias() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         host.configure_projects(vec![make_project_config(
             "/project",
@@ -2527,7 +2607,7 @@ mod tests {
 
     #[test]
     fn configure_projects_multi_project() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         host.configure_projects(vec![
             make_project_config("/workspace/app", vec![("@app/*", vec!["./src/*"])]),
@@ -2572,7 +2652,7 @@ mod tests {
 
     #[test]
     fn set_import_dependencies_overrides_project_resolver() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         host.configure_projects(vec![make_project_config(
             "/project",
@@ -2610,7 +2690,7 @@ mod tests {
 
     #[test]
     fn configure_projects_empty_clears() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         host.configure_projects(vec![make_project_config(
             "/project",
@@ -2649,7 +2729,7 @@ mod tests {
 
     #[test]
     fn configure_projects_fallthrough_unloaded() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         host.configure_projects(vec![make_project_config(
             "/project",
@@ -2673,7 +2753,7 @@ mod tests {
 
     #[test]
     fn cross_file_optimization_with_project_resolver() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         host.configure_projects(vec![make_project_config(
             "/project",
@@ -2718,5 +2798,112 @@ mod tests {
             result.const_prop_overrides
         );
         assert!(child_consts.unwrap().contains("msg"), "msg should be const");
+    }
+
+    // ── Workspace integration tests (Phase 4) ──
+
+    #[test]
+    fn new_with_workspace_stores_workspace_ref() {
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+        // Positive: workspace reference is accessible
+        let ws_ref = host.workspace();
+        assert!(!ws_ref.file_exists("nonexistent.vue"));
+
+        // Inject a file via workspace and verify it's visible
+        ws.inject_file("test.vue".to_string(), Arc::from("<template></template>"));
+        assert!(ws_ref.file_exists("test.vue"));
+    }
+
+    #[test]
+    fn new_standalone_creates_host_with_memory_workspace() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        // Positive: host is functional
+        let ws = host.workspace();
+        assert!(!ws.file_exists("anything.vue"));
+
+        // Positive: host can still upsert and compile normally
+        upsert_vue(&host, "App.vue", "<template><div>hi</div></template>");
+        let source = host.get_source("App.vue");
+        assert!(source.is_some(), "upsert should work on standalone host");
+    }
+
+    #[test]
+    fn workspace_accessor_returns_same_arc() {
+        let ws: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+        // Positive: workspace() returns the same Arc we passed in
+        let ws_ref = host.workspace();
+        // Compare trait object pointer identity via data pointer
+        let ptr1 = Arc::as_ptr(&ws) as *const () as usize;
+        let ptr2 = Arc::as_ptr(ws_ref) as *const () as usize;
+        assert_eq!(ptr1, ptr2, "workspace() should return the same Arc");
+    }
+
+    #[test]
+    fn resolve_import_via_workspace_uses_exact_resolutions() {
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+
+        // Set up exact resolutions on the workspace
+        ws.set_exact_resolutions(
+            "/src/App.vue",
+            vec![verter_vfs::ExactResolution {
+                specifier: "./Child.vue".to_string(),
+                resolved_canonical_id: Some("/src/Child.vue".to_string()),
+                possible_canonical_ids: vec!["/src/Child.vue".to_string()],
+            }],
+        );
+
+        let host = VerterHost::new(HostConfig::default(), ws);
+
+        // Positive: exact resolution works
+        let resolved = host.resolve_import_via_workspace("/src/App.vue", "./Child.vue");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/src/Child.vue"),
+            "should resolve through workspace exact resolutions"
+        );
+
+        // Negative: non-existent specifier returns None
+        let not_found = host.resolve_import_via_workspace("/src/App.vue", "./Missing.vue");
+        assert!(
+            not_found.is_none(),
+            "should return None for unresolved imports"
+        );
+    }
+
+    #[test]
+    fn resolve_import_via_workspace_returns_none_for_no_resolution() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        // Negative: standalone workspace has no resolutions
+        let result = host.resolve_import_via_workspace("/src/App.vue", "./anything");
+        assert!(
+            result.is_none(),
+            "standalone workspace should not resolve arbitrary imports"
+        );
+    }
+
+    #[test]
+    fn host_debug_impl_works_with_workspace() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let debug_str = format!("{:?}", host);
+        assert!(
+            debug_str.contains("VerterHost"),
+            "Debug should produce VerterHost output"
+        );
+        assert!(
+            !debug_str.contains("workspace"),
+            "Debug should not expose workspace internals"
+        );
     }
 }

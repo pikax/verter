@@ -87,7 +87,7 @@ input { margin-bottom: 0.5rem; }
 "#;
 
 fn make_host() -> VerterHost {
-    VerterHost::new(HostConfig::default())
+    VerterHost::new_standalone(HostConfig::default())
 }
 
 fn upsert(host: &VerterHost, id: &str, source: &str) {

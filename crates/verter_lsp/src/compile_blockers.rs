@@ -494,7 +494,7 @@ mod tests {
     }
 
     fn strict_host() -> VerterHost {
-        VerterHost::new(HostConfig {
+        VerterHost::new_standalone(HostConfig {
             dev_mode: false,
             compile_error_policy: CompileErrorPolicy::StrictError,
             ..HostConfig::default()
@@ -645,7 +645,7 @@ mod tests {
         std::fs::write(&file_path, "export const x = 1;").unwrap();
 
         let canonical_id = normalize_fs_path(&file_path.to_string_lossy());
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         // Not in host yet
         assert!(
@@ -676,7 +676,7 @@ mod tests {
         std::fs::write(&file_path, "<template><div>hi</div></template>").unwrap();
 
         let canonical_id = normalize_fs_path(&file_path.to_string_lossy());
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         assert!(ensure_source_loaded_into_host(&host, &canonical_id));
 
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn ensure_source_loaded_into_host_returns_false_for_missing_file() {
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
         assert!(
             !ensure_source_loaded_into_host(&host, "/nonexistent/file.ts"),
             "ingress should return false for missing files"
@@ -800,7 +800,7 @@ mod tests {
         std::fs::write(&file_path, "export type T = string;").unwrap();
 
         let canonical_id = normalize_fs_path(&file_path.to_string_lossy());
-        let host = VerterHost::new(HostConfig::default());
+        let host = VerterHost::new_standalone(HostConfig::default());
 
         assert!(host.get_source(&canonical_id).is_none());
 

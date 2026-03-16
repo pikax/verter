@@ -1064,7 +1064,7 @@ mod tests {
 
     #[tokio::test]
     async fn scanner_assigns_each_vue_to_exactly_one_owner_project() {
-        let host = VerterHost::new(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
         let canonical_id = "/workspace/pkg-a/src/App.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[tokio::test]
     async fn scanner_routes_unmatched_files_to_workspace_project_only() {
-        let host = VerterHost::new(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
         let canonical_id = "/workspace/scripts/Tool.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1187,7 +1187,7 @@ mod tests {
 
     #[tokio::test]
     async fn scanner_syncs_vue_ide_artifact_for_tsgo() {
-        let host = VerterHost::new(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
         let canonical_id = "/workspace/src/App.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1285,7 +1285,7 @@ defineProps<{ msg: string }>()
 
         let canonical_id = root.join("src").join("App.vue");
         let canonical_id = canonical_id.to_string_lossy().replace('\\', "/");
-        let host = VerterHost::new(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
