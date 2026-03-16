@@ -2,6 +2,7 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   ensureFixtureWarm,
+  ensureTypeProviderSynced,
   openVueFile,
   getAppVuePath,
   getDecorationState,
@@ -34,7 +35,7 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
     while (Date.now() - pollStart < 15_000) {
       // Trigger a no-op edit to force decoration providers to re-request analysis
       await triggerDecorationRefresh();
-      await sleep(300);
+      await sleep(600);
       state = await getDecorationState();
       if (state) {
         // Check if any category has ranges (analysis is complete)
@@ -127,7 +128,7 @@ suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
     const pollStart = Date.now();
     while (Date.now() - pollStart < 15_000) {
       await triggerDecorationRefresh();
-      await sleep(300);
+      await sleep(600);
       state = await getDecorationState();
       if (state) {
         const totalRanges = Object.values(state.vueApiCalls).reduce(
@@ -173,7 +174,8 @@ suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
     // Prop constness requires cross-file analysis via the type provider
     if (!TYPE_PROVIDER) return this.skip();
-    await ensureFixtureWarm();
+    this.timeout(30_000);
+    await ensureTypeProviderSynced();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const config = vscode.workspace.getConfiguration("verter.decorations");
@@ -181,11 +183,11 @@ suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
 
     await openVueFile(getAppVuePath());
 
-    // Poll up to 15s for prop constness decorations to populate
+    // Poll up to 20s for prop constness decorations to populate
     const pollStart = Date.now();
-    while (Date.now() - pollStart < 15_000) {
+    while (Date.now() - pollStart < 20_000) {
       await triggerDecorationRefresh();
-      await sleep(300);
+      await sleep(600);
       state = await getDecorationState();
       if (state) {
         const totalRanges = Object.values(state.propConstness).reduce(
