@@ -1,6 +1,6 @@
 {
   "name": "@verter/native-darwin-arm64",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Native Node.js bindings for Verter Vue compiler",
   "license": "MIT",
   "repository": {

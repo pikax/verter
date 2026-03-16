@@ -1,6 +1,6 @@
 {
   "name": "@verter/wasm",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "WASM bindings for Verter Vue compiler",
   "keywords": ["vue", "compiler", "wasm", "webassembly"],
   "license": "MIT",

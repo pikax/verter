@@ -1,7 +1,7 @@
 {
   "name": "@verter/oxc-bindings",
   "displayName": "Verter OXC bindings",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Resolves and downloads OXC bindings",
   "keywords": ["vue", "oxc", "parser", "bindings"],
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "@verter/tsc-linux-x64-gnu",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "verter-tsc binary for Linux x64 (glibc)",
   "license": "MIT",
   "repository": {

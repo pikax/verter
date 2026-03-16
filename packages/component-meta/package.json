@@ -1,6 +1,6 @@
 {
   "name": "@verter/component-meta",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Extract Vue component metadata (props, events, slots, models, expose) with a generic Type IR",
   "keywords": ["vue", "component", "metadata", "props", "storybook", "histoire", "zod", "json-schema"],
   "license": "MIT",

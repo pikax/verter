@@ -1,6 +1,6 @@
 {
   "name": "@verter/playground",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Online playground for Verter Vue compiler",
   "license": "MIT",
   "author": "pikax",

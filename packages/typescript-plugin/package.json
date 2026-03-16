@@ -1,6 +1,6 @@
 {
   "name": "@verter/typescript-plugin",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Vue TypeScript Plugin powered by Verter",
   "keywords": ["vue", "typescript", "plugin", "language-service"],
   "homepage": "https://verterjs.dev/",

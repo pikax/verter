@@ -3404,7 +3404,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "verter_actions"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "oxc_allocator",
  "oxc_parser",
@@ -3418,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "verter_analysis"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "bitflags",
  "criterion",
@@ -3436,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "verter_bench"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "criterion",
  "hotpath",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "verter_core"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "allocator-api2 0.4.0",
  "base64",
@@ -3485,7 +3485,7 @@ dependencies = [
 
 [[package]]
 name = "verter_diagnostics"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "rustc-hash 2.1.1",
  "serde",
@@ -3496,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "verter_ffi"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "serde",
  "verter_actions",
@@ -3507,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "verter_host"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "criterion",
  "oxc_allocator",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "verter_lsp"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "axum",
  "dashmap 6.1.0",
@@ -3560,7 +3560,7 @@ dependencies = [
 
 [[package]]
 name = "verter_mcp"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "axum",
  "clap",
@@ -3581,7 +3581,7 @@ dependencies = [
 
 [[package]]
 name = "verter_napi"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -3600,7 +3600,7 @@ dependencies = [
 
 [[package]]
 name = "verter_span"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "oxc_span",
  "serde",
@@ -3609,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "verter_tsc"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "base64",
  "clap",
@@ -3626,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "verter_wasm"
-version = "0.0.1-alpha.3"
+version = "0.0.1-beta.1"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",

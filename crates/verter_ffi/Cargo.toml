@@ -10,8 +10,8 @@ description = "FFI types for Verter — shared serializable structs for NAPI/WAS
 publish = false
 
 [dependencies]
-verter_host = { path = "../verter_host", version = "0.0.1-alpha.3" }
-verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-alpha.3" }
-verter_actions = { path = "../verter_actions", version = "0.0.1-alpha.3" }
+verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
+verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
+verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
 serde = { workspace = true }

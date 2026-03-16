@@ -1,6 +1,6 @@
 {
   "name": "@verter/native",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Native Node.js bindings for Verter Vue compiler",
   "keywords": ["vue", "compiler", "native", "napi", "bindings"],
   "license": "MIT",

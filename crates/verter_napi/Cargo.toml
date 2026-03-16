@@ -16,12 +16,12 @@ default = []
 host_metrics = ["verter_host/host_metrics"]
 
 [dependencies]
-verter_core = { path = "../verter_core", version = "0.0.1-alpha.3" }
-verter_host = { path = "../verter_host", version = "0.0.1-alpha.3" }
-verter_ffi = { path = "../verter_ffi", version = "0.0.1-alpha.3" }
-verter_actions = { path = "../verter_actions", version = "0.0.1-alpha.3" }
-verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-alpha.3" }
-verter_analysis = { path = "../verter_analysis", version = "0.0.1-alpha.3" }
+verter_core = { path = "../verter_core", version = "0.0.1-beta.1" }
+verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
+verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
+verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
+verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
+verter_analysis = { path = "../verter_analysis", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
 napi = { version = "2", default-features = false, features = ["napi8", "serde-json"] }
 napi-derive = "2"

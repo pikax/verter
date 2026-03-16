@@ -1,6 +1,6 @@
 {
   "name": "verter",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "private": true,
   "description": "Vue compiler and Language Server Protocol implementation",
   "keywords": [

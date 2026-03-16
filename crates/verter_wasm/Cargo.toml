@@ -15,11 +15,11 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-verter_host = { path = "../verter_host", version = "0.0.1-alpha.3" }
-verter_ffi = { path = "../verter_ffi", version = "0.0.1-alpha.3" }
-verter_analysis = { path = "../verter_analysis", version = "0.0.1-alpha.3" }
-verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-alpha.3" }
-verter_actions = { path = "../verter_actions", version = "0.0.1-alpha.3" }
+verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
+verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
+verter_analysis = { path = "../verter_analysis", version = "0.0.1-beta.1" }
+verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
+verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
 wasm-bindgen = "0.2"
 serde = { workspace = true }

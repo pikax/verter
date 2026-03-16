@@ -1,6 +1,6 @@
 {
   "name": "@verter/tsc-darwin-x64",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "verter-tsc binary for macOS x64",
   "license": "MIT",
   "repository": {

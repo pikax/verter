@@ -1,6 +1,6 @@
 {
   "name": "example",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Example Vue project using Verter compiler",
   "license": "MIT",
   "author": "pikax",
