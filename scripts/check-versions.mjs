@@ -161,8 +161,49 @@ const order = topoSort(packages.filter((p) => p.needsPublish));
 const cargoToml = readFileSync(join(ROOT, "Cargo.toml"), "utf8");
 const cargoVersionMatch = cargoToml.match(/version\s*=\s*"([^"]+)"/);
 const cargoVersion = cargoVersionMatch ? cargoVersionMatch[1] : null;
-const cratePublished = getCrateVersion("verter_core");
-const crateNeedsPublish = cargoVersion ? semverGt(cargoVersion, cratePublished) : false;
+
+/** Crates published to crates.io, in dependency order */
+const PUBLISHED_CRATES = ["verter_span", "verter_core"];
+
+const rustCrates = [];
+for (const crate of PUBLISHED_CRATES) {
+  const published = getCrateVersion(crate);
+  rustCrates.push({
+    crate,
+    localVersion: cargoVersion,
+    publishedVersion: published,
+    needsPublish: cargoVersion ? semverGt(cargoVersion, published) : false,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// VS Code extension validation
+// ---------------------------------------------------------------------------
+
+const vscodeWarnings = [];
+const vscodePkgPath = join(PACKAGES_DIR, "vue-vscode", "package.json");
+if (existsSync(vscodePkgPath)) {
+  const vscodePkg = readJson(vscodePkgPath);
+  const typesVscodeRaw = vscodePkg.devDependencies?.["@types/vscode"];
+  const enginesVscodeRaw = vscodePkg.engines?.vscode;
+  if (typesVscodeRaw && enginesVscodeRaw) {
+    const extractMinVersion = (range) => range.replace(/^[\^~>=<\s]+/, "").split(" ")[0];
+    const typesMin = extractMinVersion(typesVscodeRaw);
+    const enginesMin = extractMinVersion(enginesVscodeRaw);
+    const parseVer = (v) => v.split(".").map(Number);
+    const tv = parseVer(typesMin);
+    const ev = parseVer(enginesMin);
+    const typesExceedsEngines =
+      tv[0] > ev[0] ||
+      (tv[0] === ev[0] && tv[1] > ev[1]) ||
+      (tv[0] === ev[0] && tv[1] === ev[1] && (tv[2] || 0) > (ev[2] || 0));
+    if (typesExceedsEngines) {
+      vscodeWarnings.push(
+        `@types/vscode ${typesVscodeRaw} exceeds engines.vscode ${enginesVscodeRaw} — vsce will reject this`,
+      );
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Output
@@ -183,12 +224,8 @@ const result = {
   order,
   isPrerelease,
   channel,
-  rust: {
-    crate: "verter_core",
-    localVersion: cargoVersion,
-    publishedVersion: cratePublished,
-    needsPublish: crateNeedsPublish,
-  },
+  rust: rustCrates,
+  vscodeWarnings,
 };
 
 if (jsonMode) {
@@ -206,6 +243,15 @@ if (jsonMode) {
   console.log(`  Pre-release: ${isPrerelease} (channel: ${channel || "stable"})`);
 
   console.log("\n=== Rust crates ===");
-  const rStatus = crateNeedsPublish ? "PUBLISH" : "skip";
-  console.log(`  [${rStatus}] verter_core: ${cratePublished || "(none)"} -> ${cargoVersion}`);
+  for (const r of rustCrates) {
+    const rStatus = r.needsPublish ? "PUBLISH" : "skip";
+    console.log(`  [${rStatus}] ${r.crate}: ${r.publishedVersion || "(none)"} -> ${r.localVersion}`);
+  }
+
+  if (vscodeWarnings.length > 0) {
+    console.log("\n=== VS Code Extension Warnings ===");
+    for (const w of vscodeWarnings) {
+      console.log(`  WARNING: ${w}`);
+    }
+  }
 }

@@ -45,6 +45,40 @@ jobs:
             echo "dist-tag=latest" >> $GITHUB_OUTPUT
           fi
 
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Pre-publish validation
+        run: |
+          echo "=== Version & dependency checks ==="
+          node scripts/check-versions.mjs
+
+          # Fail on VS Code extension warnings (e.g. @types/vscode > engines.vscode)
+          node scripts/check-versions.mjs --json | node -e "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8'));
+            if (data.vscodeWarnings && data.vscodeWarnings.length > 0) {
+              data.vscodeWarnings.forEach(w => console.error('::error::' + w));
+              process.exit(1);
+            }
+            console.log('VS Code extension checks passed');
+          "
+
+          echo ""
+          echo "=== Cargo publish dry-run ==="
+          # Dry-run verter_span (no local deps, can always be validated)
+          cargo publish -p verter_span --dry-run --allow-dirty 2>&1 || {
+            echo "::error::cargo publish dry-run failed for verter_span"
+            exit 1
+          }
+          # Note: verter_core dry-run is skipped here because verter_span may not
+          # yet exist on crates.io. The publish-crates job handles sequencing.
+          echo "All pre-publish checks passed"
+
   # ---------------------------------------------------------------------------
   # Build native binaries (matrix — for npm platform packages)
   # ---------------------------------------------------------------------------
@@ -281,9 +315,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish verter_span
+        run: |
+          PUBLISHED=$(cargo search verter_span --limit 1 2>/dev/null | grep -oP 'verter_span = "\K[^"]+' || echo "")
+          LOCAL=$(grep -oP 'version = "\K[^"]+' Cargo.toml | head -1)
+
+          if [ "$PUBLISHED" = "$LOCAL" ]; then
+            echo "verter_span $LOCAL already published, skipping"
+          else
+            echo "Publishing verter_span $LOCAL (currently: ${PUBLISHED:-none})"
+            cargo publish -p verter_span --allow-dirty
+            echo "Waiting for crates.io index propagation..."
+            sleep 30
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
       - name: Publish verter_core
         run: |
-          # Check if this version is already published
           PUBLISHED=$(cargo search verter_core --limit 1 2>/dev/null | grep -oP 'verter_core = "\K[^"]+' || echo "")
           LOCAL=$(grep -oP 'version = "\K[^"]+' Cargo.toml | head -1)
 
@@ -384,12 +434,50 @@ jobs:
             PUBLISH_ARGS="$PUBLISH_ARGS --tag $DIST_TAG"
           fi
 
+          TOTAL=0
+          PUBLISHED=0
+          SKIPPED=0
+          FAILED=0
+          HAD_FAILURE=false
+
+          # Publish a single package with proper error handling.
+          # Only E403 "already published" is tolerated — all other errors are fatal.
+          publish_pkg() {
+            local pkg_name="$1"
+            TOTAL=$((TOTAL + 1))
+
+            echo ""
+            echo "--- Publishing $pkg_name ---"
+
+            local output exit_code
+            output=$(pnpm publish $PUBLISH_ARGS 2>&1) && exit_code=0 || exit_code=$?
+
+            if [ $exit_code -eq 0 ]; then
+              echo "  OK: $pkg_name published"
+              PUBLISHED=$((PUBLISHED + 1))
+              return 0
+            fi
+
+            # E403 / EPUBLISHCONFLICT = version already exists (safe to skip)
+            if echo "$output" | grep -qiE "(E403|cannot publish over|previously published|EPUBLISHCONFLICT)"; then
+              echo "  SKIP: $pkg_name already published"
+              SKIPPED=$((SKIPPED + 1))
+              return 0
+            fi
+
+            # Any other error is fatal
+            echo "  FAIL: $pkg_name (exit code $exit_code)"
+            echo "$output"
+            FAILED=$((FAILED + 1))
+            return 1
+          }
+
           # Publish native platform packages first
           for platform_dir in packages/native/npm/*/; do
             if [ -f "$platform_dir/package.json" ]; then
-              echo "Publishing $(basename $platform_dir)..."
+              pkg_name=$(node -p "require('./$platform_dir/package.json').name")
               cd "$platform_dir"
-              pnpm publish $PUBLISH_ARGS || echo "Already published or failed: $(basename $platform_dir)"
+              publish_pkg "$pkg_name" || HAD_FAILURE=true
               cd "$GITHUB_WORKSPACE"
             fi
           done
@@ -397,9 +485,9 @@ jobs:
           # Publish tsc platform packages
           for platform_dir in packages/verter-tsc/npm/*/; do
             if [ -f "$platform_dir/package.json" ]; then
-              echo "Publishing $(basename $platform_dir)..."
+              pkg_name=$(node -p "require('./$platform_dir/package.json').name")
               cd "$platform_dir"
-              pnpm publish $PUBLISH_ARGS || echo "Already published or failed: $(basename $platform_dir)"
+              publish_pkg "$pkg_name" || HAD_FAILURE=true
               cd "$GITHUB_WORKSPACE"
             fi
           done
@@ -411,11 +499,66 @@ jobs:
           ")
 
           for pkg_dir in $ORDER; do
-            echo "Publishing $pkg_dir..."
+            pkg_name=$(node -p "require('./packages/$pkg_dir/package.json').name")
             cd "packages/$pkg_dir"
-            pnpm publish $PUBLISH_ARGS || echo "Already published or failed: $pkg_dir"
+            publish_pkg "$pkg_name" || HAD_FAILURE=true
             cd "$GITHUB_WORKSPACE"
           done
+
+          # Summary
+          echo ""
+          echo "=========================================="
+          echo "  Publish Summary"
+          echo "=========================================="
+          echo "  Total:     $TOTAL"
+          echo "  Published: $PUBLISHED"
+          echo "  Skipped:   $SKIPPED (already published)"
+          echo "  Failed:    $FAILED"
+          echo "=========================================="
+
+          if [ "$HAD_FAILURE" = "true" ]; then
+            echo "::error::$FAILED package(s) failed to publish"
+            exit 1
+          fi
+
+          if [ "$PUBLISHED" -eq 0 ] && [ "$SKIPPED" -eq 0 ]; then
+            echo "::error::No packages were published or already existed"
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify critical packages on registry
+        run: |
+          LOCAL_VERSION=$(node -p "require('./packages/core/package.json').version")
+          echo "Verifying published packages (version: $LOCAL_VERSION)..."
+          echo "Waiting 15s for registry propagation..."
+          sleep 15
+
+          CRITICAL_PACKAGES=(
+            "@verter/core"
+            "@verter/native"
+            "@verter/types"
+            "@verter/unplugin"
+          )
+
+          MISSING=0
+          for pkg in "${CRITICAL_PACKAGES[@]}"; do
+            FOUND=$(npm view "$pkg@$LOCAL_VERSION" version 2>/dev/null || echo "")
+            if [ "$FOUND" = "$LOCAL_VERSION" ]; then
+              echo "  OK: $pkg@$LOCAL_VERSION"
+            else
+              echo "  MISSING: $pkg@$LOCAL_VERSION (got: ${FOUND:-nothing})"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+
+          if [ $MISSING -gt 0 ]; then
+            echo "::error::$MISSING critical package(s) not found on registry after publishing"
+            exit 1
+          fi
+
+          echo "All critical packages verified on registry"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
