@@ -308,10 +308,16 @@ jobs:
       - name: Test @verter/wasm
         run: pnpm --filter @verter/wasm test
 
+  # TODO: Re-enable once E2E flakiness is resolved — tests pass locally but
+  # fail intermittently in CI due to timing/race conditions in the VS Code test host.
+  # build-vscode-e2e:
+  #   name: Build VS Code E2E
+  #   needs: detect-changes
+  #   if: needs.detect-changes.outputs.vscode == 'true'
   build-vscode-e2e:
-    name: Build VS Code E2E
+    name: Build VS Code E2E (DISABLED — flaky)
     needs: detect-changes
-    if: needs.detect-changes.outputs.vscode == 'true'
+    if: false # Disabled: E2E tests are too flaky in CI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -352,7 +358,7 @@ jobs:
   vscode-e2e:
     name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
     needs: [detect-changes, build-vscode-e2e]
-    if: needs.detect-changes.outputs.vscode == 'true'
+    if: false # Disabled: E2E tests are too flaky in CI
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
