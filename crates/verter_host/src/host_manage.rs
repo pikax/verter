@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use verter_analysis::project_resolver::NativeProjectResolver;
+
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
 use crate::shared::{read_lock, write_lock};
@@ -227,6 +229,7 @@ impl VerterHost {
     ) {
         let files = read_lock(&self.files);
         let alias_map = read_lock(&self.alias_to_canonical);
+        let resolver = read_lock(&self.project_resolver);
         let Some(entry) = files.get(parent_canonical_id) else {
             return;
         };
@@ -235,6 +238,7 @@ impl VerterHost {
                 import.resolved_canonical_id = crate::cross_file::resolve_import_to_canonical(
                     &files,
                     &alias_map,
+                    resolver.as_ref(),
                     entry,
                     &import.source,
                 );
@@ -652,9 +656,17 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let files = read_lock(&self.files);
         let alias_map = read_lock(&self.alias_to_canonical);
+        let resolver = read_lock(&self.project_resolver);
         let mut visited = rustc_hash::FxHashSet::default();
 
-        self.follow_reexport_chain(&files, &alias_map, &canonical, binding_name, &mut visited)
+        self.follow_reexport_chain(
+            &files,
+            &alias_map,
+            resolver.as_ref(),
+            &canonical,
+            binding_name,
+            &mut visited,
+        )
     }
 
     /// Internal recursive helper for following re-export chains.
@@ -663,6 +675,7 @@ impl VerterHost {
         &self,
         files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
         alias_map: &rustc_hash::FxHashMap<String, String>,
+        project_resolver: Option<&NativeProjectResolver>,
         canonical_id: &str,
         binding_name: &str,
         visited: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -737,12 +750,17 @@ impl VerterHost {
                 (&sig.reexport_source, &sig.reexport_local)
             {
                 // Resolve the source module to a canonical ID
-                if let Some(target_canonical) =
-                    crate::cross_file::resolve_import_to_canonical(files, alias_map, entry, source)
-                {
+                if let Some(target_canonical) = crate::cross_file::resolve_import_to_canonical(
+                    files,
+                    alias_map,
+                    project_resolver,
+                    entry,
+                    source,
+                ) {
                     return self.follow_reexport_chain(
                         files,
                         alias_map,
+                        project_resolver,
                         &target_canonical,
                         local_name,
                         visited,
@@ -769,8 +787,15 @@ impl VerterHost {
     pub fn resolve_import(&self, parent_canonical_id: &str, import_source: &str) -> Option<String> {
         let files = read_lock(&self.files);
         let alias_map = read_lock(&self.alias_to_canonical);
+        let resolver = read_lock(&self.project_resolver);
         let entry = files.get(parent_canonical_id)?;
-        crate::cross_file::resolve_import_to_canonical(&files, &alias_map, entry, import_source)
+        crate::cross_file::resolve_import_to_canonical(
+            &files,
+            &alias_map,
+            resolver.as_ref(),
+            entry,
+            import_source,
+        )
     }
 
     /// Returns all exports of a file, following re-export chains to their ultimate source.
@@ -784,8 +809,15 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let files = read_lock(&self.files);
         let alias_map = read_lock(&self.alias_to_canonical);
+        let resolver = read_lock(&self.project_resolver);
         let mut visiting = rustc_hash::FxHashSet::default();
-        self.collect_resolved_exports(&files, &alias_map, &canonical, &mut visiting)
+        self.collect_resolved_exports(
+            &files,
+            &alias_map,
+            resolver.as_ref(),
+            &canonical,
+            &mut visiting,
+        )
     }
 
     /// Recursively collect resolved exports from a file, following re-export chains.
@@ -793,6 +825,7 @@ impl VerterHost {
         &self,
         files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
         alias_map: &rustc_hash::FxHashMap<String, String>,
+        project_resolver: Option<&NativeProjectResolver>,
         canonical_id: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Vec<ResolvedExport> {
@@ -826,10 +859,19 @@ impl VerterHost {
                 // Wildcard re-export: export * from './module'
                 if let Some(ref source) = sig.reexport_source {
                     if let Some(target) = crate::cross_file::resolve_import_to_canonical(
-                        files, alias_map, entry, source,
+                        files,
+                        alias_map,
+                        project_resolver,
+                        entry,
+                        source,
                     ) {
-                        let nested =
-                            self.collect_resolved_exports(files, alias_map, &target, visiting);
+                        let nested = self.collect_resolved_exports(
+                            files,
+                            alias_map,
+                            project_resolver,
+                            &target,
+                            visiting,
+                        );
                         for mut export in nested {
                             // Trace the source through to the ultimate origin
                             if export.source_canonical_id.is_none() {
@@ -846,11 +888,21 @@ impl VerterHost {
                 (&sig.reexport_source, &sig.reexport_local)
             {
                 // Named re-export: follow chain to find ultimate source
-                if let Some(target) =
-                    crate::cross_file::resolve_import_to_canonical(files, alias_map, entry, source)
-                {
-                    let resolved =
-                        self.resolve_single_export(files, alias_map, &target, local_name, visiting);
+                if let Some(target) = crate::cross_file::resolve_import_to_canonical(
+                    files,
+                    alias_map,
+                    project_resolver,
+                    entry,
+                    source,
+                ) {
+                    let resolved = self.resolve_single_export(
+                        files,
+                        alias_map,
+                        project_resolver,
+                        &target,
+                        local_name,
+                        visiting,
+                    );
                     let (src_id, src_name) = match resolved {
                         Some((cid, n)) => (Some(cid), n),
                         None => (Some(target.clone()), local_name.clone()),
@@ -891,6 +943,7 @@ impl VerterHost {
         &self,
         files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
         alias_map: &rustc_hash::FxHashMap<String, String>,
+        project_resolver: Option<&NativeProjectResolver>,
         canonical_id: &str,
         name: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
@@ -911,13 +964,25 @@ impl VerterHost {
                 return Some((canonical_id.to_string(), name.to_string()));
             }
             visiting.insert(canonical_id.to_string());
-            let target =
-                crate::cross_file::resolve_import_to_canonical(files, alias_map, entry, source);
+            let target = crate::cross_file::resolve_import_to_canonical(
+                files,
+                alias_map,
+                project_resolver,
+                entry,
+                source,
+            );
             visiting.remove(canonical_id);
 
             if let Some(target_id) = target {
-                self.resolve_single_export(files, alias_map, &target_id, local, visiting)
-                    .or(Some((target_id, local.clone())))
+                self.resolve_single_export(
+                    files,
+                    alias_map,
+                    project_resolver,
+                    &target_id,
+                    local,
+                    visiting,
+                )
+                .or(Some((target_id, local.clone())))
             } else {
                 Some((canonical_id.to_string(), name.to_string()))
             }

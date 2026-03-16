@@ -36,6 +36,19 @@ export interface HostCompileProfile {
   target?: "bundler" | "ide" | "analysis";
 }
 
+export interface HostIdeProjectConfig {
+  root: string;
+  workspaceRoot: string;
+  tsconfigPath?: string;
+  providerRoot?: string;
+  workspaceAliases?: { find: string; replacement: string }[];
+  compilerOptions?: {
+    baseUrl?: string;
+    paths?: { pattern: string; targets: string[] }[];
+  };
+  references?: string[];
+}
+
 export interface HostIdeResponse {
   code: string;
   sourceMap?: string;

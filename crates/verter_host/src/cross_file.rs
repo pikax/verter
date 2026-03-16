@@ -8,8 +8,12 @@
 //! a const value AND no parent uses `v-bind` spread on the component.
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_analysis::project_resolver::{
+    NativeProjectResolver, ResolvePhase, ResolveRequest, ResolveRequestKind,
+};
 use verter_analysis::template::PropValueConstness;
 
+use crate::host_resolve::HostFileMapReader;
 use crate::shared::read_lock;
 use crate::VerterHost;
 
@@ -98,10 +102,12 @@ impl VerterHost {
                         // Uses multiple strategies:
                         // 1. Direct/normalized match in file map
                         // 2. Alias map (for tsconfig paths, vite aliases like @/, #/)
-                        // 3. Parent's resolved dependencies (matching raw import → canonical)
+                        // 3. Project resolver (tsconfig paths, workspace aliases)
+                        // 4. Parent's resolved dependencies (matching raw import → canonical)
                         resolve_import_to_canonical(
                             &files,
                             &read_lock(&self.alias_to_canonical),
+                            read_lock(&self.project_resolver).as_ref(),
                             entry,
                             source,
                         )
@@ -236,7 +242,8 @@ impl VerterHost {
 /// 1. Direct match in file map
 /// 2. Normalized (strip `./`) match
 /// 3. Relative resolution against the parent file's canonical ID
-/// 4. Host alias map (for tsconfig paths, vite aliases like `@/`, `#/`, `~/`)
+/// 4. Host alias map (for tsconfig paths, vite aliases like `@/`, `#/`, `~/`),
+///    then project resolver (tsconfig paths, workspace aliases, project references)
 /// 5. Parent's resolved dependencies (match raw import source suffix against
 ///    canonical dependency paths — handles `@/components/Child.vue` when the
 ///    parent's dependency set already contains `/project/src/components/Child.vue`)
@@ -245,6 +252,7 @@ impl VerterHost {
 pub(crate) fn resolve_import_to_canonical(
     files: &rustc_hash::FxHashMap<String, crate::types::FileEntry>,
     alias_map: &rustc_hash::FxHashMap<String, String>,
+    project_resolver: Option<&NativeProjectResolver>,
     parent_entry: &crate::types::FileEntry,
     import_source: &str,
 ) -> Option<String> {
@@ -289,6 +297,22 @@ pub(crate) fn resolve_import_to_canonical(
         if let Some(canonical) = alias_map.get(candidate) {
             if files.contains_key(canonical) {
                 return Some(canonical.clone());
+            }
+        }
+    }
+
+    // Project resolver (tsconfig paths, workspace aliases, project references)
+    if let Some(resolver) = project_resolver {
+        let reader = HostFileMapReader { files };
+        let request = ResolveRequest {
+            importer_id: parent_entry.canonical_id.clone(),
+            specifier: import_source.to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::CodegenBlocker,
+        };
+        if let Some(result) = resolver.resolve_with_reader(&reader, &request) {
+            if files.contains_key(&result.source_id) {
+                return Some(result.source_id);
             }
         }
     }

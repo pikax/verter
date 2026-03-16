@@ -72,6 +72,7 @@ use id::canonicalize_id;
 pub use id::resolve_external;
 use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
+use verter_analysis::project_resolver::NativeProjectResolver;
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
@@ -95,6 +96,7 @@ pub struct VerterHost {
     /// Used to detect changes on re-computation (Phase 7 invalidation).
     pub(crate) last_const_prop_overrides:
         Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
+    pub(crate) project_resolver: Shared<Option<NativeProjectResolver>>,
     #[cfg(feature = "host_metrics")]
     pub(crate) metrics: HostMetrics,
 }
@@ -109,6 +111,7 @@ impl VerterHost {
             reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
+            project_resolver: default_shared(None),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
         }
@@ -125,6 +128,27 @@ impl VerterHost {
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
+        *write_lock(&self.project_resolver) = None;
+    }
+
+    /// Configure project-scoped path alias resolution.
+    ///
+    /// Accepts a list of [`IdeProjectConfig`] describing tsconfig paths,
+    /// workspace aliases, and project references. The host uses these to
+    /// resolve aliased import specifiers (e.g. `@/components/Foo.vue`,
+    /// `#imports`) without relying on external caller-provided resolutions.
+    ///
+    /// Pass an empty slice to clear the resolver.
+    pub fn configure_projects(
+        &self,
+        projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
+    ) {
+        let resolver = if projects.is_empty() {
+            None
+        } else {
+            Some(NativeProjectResolver::new(projects))
+        };
+        *write_lock(&self.project_resolver) = resolver;
     }
 
     #[cfg(feature = "host_metrics")]
@@ -242,6 +266,7 @@ impl VerterHost {
         deps::smart_invalidate_dependents(
             &self.files,
             &self.reverse_dependencies,
+            &self.project_resolver,
             &self.config,
             dependency_id,
             old_export_signatures,
@@ -2402,5 +2427,296 @@ mod tests {
             !read_lock(&host.files).contains_key("test.vue"),
             "previously closed files should not reappear"
         );
+    }
+
+    // ── Project resolver tests ───────────────────────────────────────
+
+    fn make_project_config(
+        root: &str,
+        paths: Vec<(&str, Vec<&str>)>,
+    ) -> verter_analysis::project_resolver::IdeProjectConfig {
+        let mut config = verter_analysis::project_resolver::IdeProjectConfig::new(
+            root.to_string(),
+            root.to_string(),
+            None,
+        );
+        config.compiler_options.paths = paths
+            .into_iter()
+            .map(|(pat, targets)| {
+                (
+                    pat.to_string(),
+                    targets.iter().map(|t| t.to_string()).collect(),
+                )
+            })
+            .collect();
+        config
+    }
+
+    fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_projects_exact_alias() {
+        let host = VerterHost::new(HostConfig::default());
+
+        // Configure project with exact path mapping
+        host.configure_projects(vec![make_project_config(
+            "/project",
+            vec![("#imports", vec!["./types/imports.d.ts"])],
+        )]);
+
+        // Upsert target file
+        upsert_non_sfc(
+            &host,
+            "/project/types/imports.d.ts",
+            "export type Foo = string;",
+        );
+
+        // Upsert parent file that imports via the alias
+        upsert_vue(
+            &host,
+            "/project/src/App.vue",
+            "<script setup>\nimport type { Foo } from '#imports'\n</script>\n<template><div/></template>",
+        );
+
+        // Resolve the aliased import
+        let resolved = host.resolve_import("/project/src/App.vue", "#imports");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/project/types/imports.d.ts"),
+            "exact alias #imports should resolve via project resolver"
+        );
+    }
+
+    #[test]
+    fn configure_projects_wildcard_alias() {
+        let host = VerterHost::new(HostConfig::default());
+
+        host.configure_projects(vec![make_project_config(
+            "/project",
+            vec![("@/*", vec!["./src/*"])],
+        )]);
+
+        upsert_vue(
+            &host,
+            "/project/src/components/Child.vue",
+            "<script setup>\ndefineProps({ msg: String })\n</script>\n<template><div>{{ msg }}</div></template>",
+        );
+
+        upsert_vue(
+            &host,
+            "/project/src/App.vue",
+            "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><Child msg=\"hi\" /></template>",
+        );
+
+        let resolved = host.resolve_import("/project/src/App.vue", "@/components/Child.vue");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/project/src/components/Child.vue"),
+            "wildcard alias @/* should resolve via project resolver"
+        );
+    }
+
+    #[test]
+    fn configure_projects_multi_project() {
+        let host = VerterHost::new(HostConfig::default());
+
+        host.configure_projects(vec![
+            make_project_config("/workspace/app", vec![("@app/*", vec!["./src/*"])]),
+            make_project_config("/workspace/lib", vec![("@lib/*", vec!["./src/*"])]),
+        ]);
+
+        upsert_non_sfc(
+            &host,
+            "/workspace/app/src/utils.ts",
+            "export const foo = 1;",
+        );
+        upsert_non_sfc(
+            &host,
+            "/workspace/lib/src/utils.ts",
+            "export const bar = 2;",
+        );
+        upsert_vue(
+            &host,
+            "/workspace/app/src/App.vue",
+            "<script setup>\nimport { foo } from '@app/utils'\n</script>\n<template><div/></template>",
+        );
+        upsert_vue(
+            &host,
+            "/workspace/lib/src/Lib.vue",
+            "<script setup>\nimport { bar } from '@lib/utils'\n</script>\n<template><div/></template>",
+        );
+
+        let app_resolved = host.resolve_import("/workspace/app/src/App.vue", "@app/utils");
+        assert_eq!(
+            app_resolved.as_deref(),
+            Some("/workspace/app/src/utils.ts"),
+            "@app/* should resolve to app project"
+        );
+
+        let lib_resolved = host.resolve_import("/workspace/lib/src/Lib.vue", "@lib/utils");
+        assert_eq!(
+            lib_resolved.as_deref(),
+            Some("/workspace/lib/src/utils.ts"),
+            "@lib/* should resolve to lib project"
+        );
+    }
+
+    #[test]
+    fn set_import_dependencies_overrides_project_resolver() {
+        let host = VerterHost::new(HostConfig::default());
+
+        host.configure_projects(vec![make_project_config(
+            "/project",
+            vec![("@/*", vec!["./src/*"])],
+        )]);
+
+        // Two possible targets
+        upsert_non_sfc(&host, "/project/src/utils.ts", "export const a = 1;");
+        upsert_non_sfc(&host, "/project/custom/utils.ts", "export const b = 2;");
+
+        upsert_vue(
+            &host,
+            "/project/src/App.vue",
+            "<script setup>\nimport { b } from '@/utils'\n</script>\n<template><div/></template>",
+        );
+
+        // Project resolver would map @/utils → /project/src/utils.ts
+        // But structured deps should override to custom/utils.ts
+        host.set_import_dependencies(
+            "/project/src/App.vue",
+            vec![DependencyResolution {
+                specifier: "@/utils".to_string(),
+                resolved_canonical_id: Some("/project/custom/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let resolved = host.resolve_import("/project/src/App.vue", "@/utils");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/project/custom/utils.ts"),
+            "structured deps should override project resolver"
+        );
+    }
+
+    #[test]
+    fn configure_projects_empty_clears() {
+        let host = VerterHost::new(HostConfig::default());
+
+        host.configure_projects(vec![make_project_config(
+            "/project",
+            vec![("#imports", vec!["./types/imports.d.ts"])],
+        )]);
+
+        upsert_non_sfc(
+            &host,
+            "/project/types/imports.d.ts",
+            "export type Foo = string;",
+        );
+        upsert_vue(
+            &host,
+            "/project/src/App.vue",
+            "<script setup>\nimport type { Foo } from '#imports'\n</script>\n<template><div/></template>",
+        );
+
+        // Should resolve before clearing
+        assert!(
+            host.resolve_import("/project/src/App.vue", "#imports")
+                .is_some(),
+            "should resolve before clearing"
+        );
+
+        // Clear resolver
+        host.configure_projects(vec![]);
+
+        // Should no longer resolve via project resolver
+        let resolved = host.resolve_import("/project/src/App.vue", "#imports");
+        assert!(
+            resolved.is_none(),
+            "should not resolve after clearing projects, got: {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn configure_projects_fallthrough_unloaded() {
+        let host = VerterHost::new(HostConfig::default());
+
+        host.configure_projects(vec![make_project_config(
+            "/project",
+            vec![("@/*", vec!["./src/*"])],
+        )]);
+
+        // DON'T upsert the target file — it's not loaded
+        upsert_vue(
+            &host,
+            "/project/src/App.vue",
+            "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><div/></template>",
+        );
+
+        // Should gracefully return None (no panic)
+        let resolved = host.resolve_import("/project/src/App.vue", "@/components/Child.vue");
+        assert!(
+            resolved.is_none(),
+            "should fall through when resolved file not in host"
+        );
+    }
+
+    #[test]
+    fn cross_file_optimization_with_project_resolver() {
+        let host = VerterHost::new(HostConfig::default());
+
+        host.configure_projects(vec![make_project_config(
+            "/project",
+            vec![("@/*", vec!["./src/*"])],
+        )]);
+
+        upsert_vue(
+            &host,
+            "/project/src/components/Child.vue",
+            "<script setup>\ndefineProps({ msg: String })\n</script>\n<template><div>{{ msg }}</div></template>",
+        );
+
+        upsert_vue(
+            &host,
+            "/project/src/App.vue",
+            "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><Child msg=\"hello\" /></template>",
+        );
+
+        // Compile both to generate template analysis
+        host.get_virtual_file(VirtualQuery {
+            raw_id: Some("/project/src/components/Child.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: CompileProfile::default(),
+        })
+        .unwrap();
+        host.get_virtual_file(VirtualQuery {
+            raw_id: Some("/project/src/App.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: CompileProfile::default(),
+        })
+        .unwrap();
+
+        let result = host.compute_cross_file_optimizations();
+        let child_consts = result
+            .const_prop_overrides
+            .get("/project/src/components/Child.vue");
+        assert!(
+            child_consts.is_some(),
+            "cross-file optimization should resolve aliased import via project resolver. Overrides: {:?}",
+            result.const_prop_overrides
+        );
+        assert!(child_consts.unwrap().contains("msg"), "msg should be const");
     }
 }

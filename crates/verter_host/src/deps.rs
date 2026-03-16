@@ -7,6 +7,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use verter_analysis::project_resolver::{
+    NativeProjectResolver, ProjectResolverReader, ResolvePhase, ResolveRequest, ResolveRequestKind,
+};
+
 use crate::id;
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
@@ -93,12 +97,68 @@ pub(crate) fn import_resolves_to_dep(
     }
 }
 
+/// A lightweight reader backed by a set of known file IDs.
+/// Used during smart invalidation where only `file_exists` is needed
+/// and the full file map is mutably borrowed.
+struct FileIdSetReader<'a> {
+    ids: &'a rustc_hash::FxHashSet<String>,
+}
+
+impl ProjectResolverReader for FileIdSetReader<'_> {
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        self.ids.contains(canonical_id)
+    }
+    fn read_text(&self, _canonical_id: &str) -> Option<Arc<str>> {
+        None // Not needed for existence-only resolution
+    }
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        if self.ids.contains(canonical_id) {
+            Some(canonical_id.to_string())
+        } else {
+            None
+        }
+    }
+}
+
+/// Like [`import_resolves_to_dep`], but also consults the project resolver
+/// for aliased specifiers that heuristic matching cannot handle.
+pub(crate) fn import_resolves_to_dep_with_resolver(
+    file: &FileEntry,
+    import_source: &str,
+    dependency_id: &str,
+    resolve_extensions: &[String],
+    resolver: Option<&NativeProjectResolver>,
+    file_ids: &rustc_hash::FxHashSet<String>,
+) -> bool {
+    // Try heuristic first (fast path)
+    if import_resolves_to_dep(file, import_source, dependency_id, resolve_extensions) {
+        return true;
+    }
+
+    // If heuristic missed, try the project resolver
+    if let Some(resolver) = resolver {
+        let reader = FileIdSetReader { ids: file_ids };
+        let request = ResolveRequest {
+            importer_id: file.canonical_id.clone(),
+            specifier: import_source.to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::CodegenBlocker,
+        };
+        if let Some(result) = resolver.resolve_with_reader(&reader, &request) {
+            return result.source_id == dependency_id;
+        }
+    }
+
+    false
+}
+
 /// Determine whether a dependent SFC should be invalidated given
 /// which exports changed in a dependency.
 ///
 /// When `dep_source` is available, Tier 3 resolution is attempted: the type
 /// is resolved from the dep file and hashed. If the resolved shape is unchanged,
 /// invalidation is skipped even though the export text changed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn should_invalidate_dependent(
     file: &mut FileEntry,
     dependency_id: &str,
@@ -106,6 +166,8 @@ pub(crate) fn should_invalidate_dependent(
     no_signatures: bool,
     dep_source: Option<&str>,
     resolve_extensions: &[String],
+    resolver: Option<&NativeProjectResolver>,
+    file_ids: &rustc_hash::FxHashSet<String>,
 ) -> bool {
     // If no export signatures available (Tier 1 fallback), always invalidate
     if no_signatures {
@@ -123,7 +185,14 @@ pub(crate) fn should_invalidate_dependent(
         .macro_type_deps
         .iter()
         .filter(|dep| {
-            import_resolves_to_dep(file, &dep.import_source, dependency_id, resolve_extensions)
+            import_resolves_to_dep_with_resolver(
+                file,
+                &dep.import_source,
+                dependency_id,
+                resolve_extensions,
+                resolver,
+                file_ids,
+            )
         })
         .collect();
 
@@ -185,7 +254,14 @@ pub(crate) fn should_invalidate_dependent(
     // Check if the dependent has any runtime (non-type-only) imports from this dep
     let has_runtime_import = file.script_analysis.imports.iter().any(|imp| {
         !imp.is_type_only
-            && import_resolves_to_dep(file, &imp.source, dependency_id, resolve_extensions)
+            && import_resolves_to_dep_with_resolver(
+                file,
+                &imp.source,
+                dependency_id,
+                resolve_extensions,
+                resolver,
+                file_ids,
+            )
     });
 
     if has_runtime_import {
@@ -198,7 +274,14 @@ pub(crate) fn should_invalidate_dependent(
     // conservatively invalidate.
     if file.dependencies.contains(dependency_id)
         && file.script_analysis.imports.iter().all(|imp| {
-            !import_resolves_to_dep(file, &imp.source, dependency_id, resolve_extensions)
+            !import_resolves_to_dep_with_resolver(
+                file,
+                &imp.source,
+                dependency_id,
+                resolve_extensions,
+                resolver,
+                file_ids,
+            )
         })
     {
         return true;
@@ -218,6 +301,7 @@ pub(crate) fn should_invalidate_dependent(
 pub(crate) fn smart_invalidate_dependents(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     reverse_dependencies: &crate::shared::Shared<rustc_hash::FxHashMap<String, BTreeSet<String>>>,
+    project_resolver: &crate::shared::Shared<Option<NativeProjectResolver>>,
     config: &HostConfig,
     dependency_id: &str,
     old_export_signatures: &[verter_analysis::ExportSignature],
@@ -250,10 +334,21 @@ pub(crate) fn smart_invalidate_dependents(
     // Compute which export names changed between old and new signatures
     let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
 
+    let resolver = read_lock(project_resolver);
     let mut files = write_lock(files);
 
     // Get dep source for Tier 3 resolution (clone Arc to avoid borrow conflict)
     let dep_source = files.get(dependency_id).map(|f| Arc::clone(&f.source));
+
+    // Build a read-only snapshot of file IDs for the resolver reader.
+    // We need this because we hold a write lock on files for get_mut(),
+    // but the resolver reader needs shared access to check file_exists().
+    // Only built if the resolver is actually configured.
+    let file_ids: rustc_hash::FxHashSet<String> = if resolver.is_some() {
+        files.keys().cloned().collect()
+    } else {
+        rustc_hash::FxHashSet::default()
+    };
 
     for owner in owners {
         if let Some(file) = files.get_mut(&owner) {
@@ -264,6 +359,8 @@ pub(crate) fn smart_invalidate_dependents(
                 old_export_signatures.is_empty() && new_export_signatures.is_empty(),
                 dep_source.as_deref(),
                 resolve_extensions,
+                resolver.as_ref(),
+                &file_ids,
             ) {
                 file.compile_slots.clear();
             }

@@ -161,6 +161,7 @@ export type {
   HostElementMatch,
   HostSelectorMatchResult,
   HostDependencyResolution,
+  HostIdeProjectConfig,
 } from "./host-types";
 
 import type { HostCompileProfile } from "./host-types";
@@ -281,6 +282,13 @@ export declare class VerterHost {
    * Call before dropping the host to prevent process exit hangs.
    */
   close(): void;
+
+  /**
+   * Configure project-scoped path alias resolution.
+   *
+   * Pass an empty array to clear the resolver.
+   */
+  configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
 }
 
 export {};

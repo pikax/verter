@@ -5305,6 +5305,18 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         generation: my_gen,
         resolver,
     });
+
+    // Push project configs into the host so its internal resolver can
+    // handle aliased imports (e.g., @/components/Foo.vue, #imports)
+    // without relying on external caller-provided dependency resolutions.
+    host.configure_projects(
+        registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+
     *project_registry.write() = Some(registry);
 
     drain_pending_snapshot_provider_sync(
@@ -16519,6 +16531,13 @@ import Child from '@/components/Child.vue'
             generation: 1,
             resolver,
         }));
+        host.configure_projects(
+            registry
+                .projects()
+                .iter()
+                .map(|p| p.to_ide_project_config())
+                .collect(),
+        );
         *project_registry.write() = Some(registry);
 
         // Now aliased import should resolve
@@ -16649,6 +16668,13 @@ import Child from '@/components/Child.vue'
             generation: 1,
             resolver,
         }));
+        host.configure_projects(
+            registry
+                .projects()
+                .iter()
+                .map(|p| p.to_ide_project_config())
+                .collect(),
+        );
         *project_registry.write() = Some(registry);
 
         let provider = Arc::new(MockTypeProvider::new());
@@ -16752,6 +16778,13 @@ import { Overlay } from './components'
             generation: 1,
             resolver,
         }));
+        host.configure_projects(
+            registry
+                .projects()
+                .iter()
+                .map(|p| p.to_ide_project_config())
+                .collect(),
+        );
         *project_registry.write() = Some(registry);
 
         let provider = Arc::new(MockTypeProvider::new());

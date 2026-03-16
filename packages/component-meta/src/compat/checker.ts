@@ -283,6 +283,53 @@ function collectVueFiles(dir: string, files: string[], depth = 0): void {
 }
 
 /**
+ * Parse tsconfig compilerOptions and configure the adapter's project resolver.
+ */
+function configureProjectFromTsconfig(
+  adapter: VerterHostAdapter,
+  tsconfigPath: string,
+  projectRoot: string,
+): void {
+  if (!adapter.configureProjects) return;
+  try {
+    const raw = readFileSync(tsconfigPath, "utf-8");
+    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const config = JSON.parse(stripped) as Record<string, unknown>;
+    configureProjectFromConfigJson(adapter, projectRoot, config);
+  } catch {
+    // tsconfig not readable or invalid — skip project configuration
+  }
+}
+
+/**
+ * Configure the adapter's project resolver from an inline config JSON object.
+ */
+function configureProjectFromConfigJson(
+  adapter: VerterHostAdapter,
+  projectRoot: string,
+  config: Record<string, unknown>,
+): void {
+  if (!adapter.configureProjects) return;
+  const compilerOptions = (config.compilerOptions ?? {}) as Record<string, unknown>;
+  const rawPaths = (compilerOptions.paths ?? {}) as Record<string, string[]>;
+
+  const paths: { pattern: string; targets: string[] }[] = Object.entries(rawPaths).map(
+    ([pattern, targets]) => ({ pattern, targets }),
+  );
+
+  const project = {
+    root: projectRoot,
+    workspaceRoot: projectRoot,
+    compilerOptions: {
+      baseUrl: (compilerOptions.baseUrl as string) ?? undefined,
+      paths: paths.length > 0 ? paths : undefined,
+    },
+  };
+
+  adapter.configureProjects([project]);
+}
+
+/**
  * Create a Volar-compatible checker from a tsconfig.json path.
  *
  * @param tsconfigPath Path to tsconfig.json
@@ -295,6 +342,9 @@ export function createChecker(
   const absPath = resolve(tsconfigPath);
   const projectRoot = dirname(absPath);
   const adapter = createNapiAdapter();
+
+  // Configure project resolver with tsconfig paths so aliased imports resolve
+  configureProjectFromTsconfig(adapter, absPath, projectRoot);
 
   // Discover and bulk-upsert .vue files
   const vueFiles = discoverVueFiles(absPath);
@@ -375,6 +425,9 @@ export function createCheckerByJson(
   const absRoot = resolve(projectRoot);
   const adapter = createNapiAdapter();
   const config = configJson as Record<string, unknown>;
+
+  // Configure project resolver with inline compilerOptions
+  configureProjectFromConfigJson(adapter, absRoot, config);
 
   // Resolve files from include patterns if available, otherwise walk project root
   let vueFiles: string[];

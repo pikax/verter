@@ -21,6 +21,10 @@ use verter_core::compile::{
     compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
 
+use verter_analysis::project_resolver::{
+    ProjectResolverReader, ResolvePhase, ResolveRequest, ResolveRequestKind,
+};
+
 use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
@@ -36,6 +40,31 @@ type ExternalTypeCache = rustc_hash::FxHashMap<
     (String, String),
     Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
 >;
+
+/// Bridges the host's in-memory file map to the [`ProjectResolverReader`] trait,
+/// allowing the [`NativeProjectResolver`] to probe for files without filesystem access.
+pub(crate) struct HostFileMapReader<'a> {
+    pub files: &'a FxHashMap<String, FileEntry>,
+}
+
+impl ProjectResolverReader for HostFileMapReader<'_> {
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        self.files.contains_key(canonical_id)
+    }
+
+    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.files.get(canonical_id).map(|e| e.source.clone())
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        // In-memory host has no symlinks; return the canonical ID as-is.
+        if self.files.contains_key(canonical_id) {
+            Some(canonical_id.to_string())
+        } else {
+            None
+        }
+    }
+}
 
 impl VerterHost {
     /// Expand a relative import specifier into all candidate canonical IDs.
@@ -88,7 +117,25 @@ impl VerterHost {
             }
         }
 
-        // Phase 3: Direct path probing for relative specifiers.
+        // Phase 3: Project resolver (tsconfig paths, workspace aliases).
+        // Uses the configured NativeProjectResolver to resolve aliased specifiers.
+        // Only probes files that are already loaded in the host.
+        if let Some(resolver) = &*read_lock(&self.project_resolver) {
+            let reader = HostFileMapReader { files };
+            let request = ResolveRequest {
+                importer_id: owner_canonical.to_string(),
+                specifier: import_source.to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::CodegenBlocker,
+            };
+            if let Some(result) = resolver.resolve_with_reader(&reader, &request) {
+                if files.contains_key(&result.source_id) {
+                    return Some(result.source_id);
+                }
+            }
+        }
+
+        // Phase 4: Direct path probing for relative specifiers.
         // Resolves `./types` → `/src/types`, then tries extensions and /index variants.
         let direct = crate::id::resolve_external(owner_canonical, import_source);
         if files.contains_key(direct.as_str()) {
@@ -108,7 +155,7 @@ impl VerterHost {
             }
         }
 
-        // Phase 4: Fall back to dependency set matching for non-relative specifiers
+        // Phase 5: Fall back to dependency set matching for non-relative specifiers
         // that weren't in `dependency_resolutions` (e.g., auto-discovered deps).
         let normalized = import_source.strip_prefix("./").unwrap_or(import_source);
         for dep in &owner_entry.dependencies {

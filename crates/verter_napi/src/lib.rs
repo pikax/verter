@@ -246,6 +246,39 @@ impl From<NapiCompileProfile> for FfiCompileProfile {
 }
 
 #[napi(object)]
+#[derive(Default, Clone)]
+pub struct NapiIdeProjectConfig {
+    pub root: String,
+    pub workspaceRoot: String,
+    pub tsconfigPath: Option<String>,
+    pub providerRoot: Option<String>,
+    pub workspaceAliases: Option<Vec<NapiWorkspaceAlias>>,
+    pub compilerOptions: Option<NapiIdeProjectCompilerOptions>,
+    pub references: Option<Vec<String>>,
+}
+
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct NapiWorkspaceAlias {
+    pub find: String,
+    pub replacement: String,
+}
+
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct NapiIdeProjectCompilerOptions {
+    pub baseUrl: Option<String>,
+    pub paths: Option<Vec<NapiTsConfigPath>>,
+}
+
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct NapiTsConfigPath {
+    pub pattern: String,
+    pub targets: Vec<String>,
+}
+
+#[napi(object)]
 #[derive(Clone)]
 pub struct NapiVirtualNodeKind {
     pub kind: String,
@@ -953,6 +986,39 @@ fn host_virtual_file_to_napi(
     }
 }
 
+fn napi_project_config_to_ide(
+    config: NapiIdeProjectConfig,
+) -> verter_analysis::project_resolver::IdeProjectConfig {
+    let mut ide = verter_analysis::project_resolver::IdeProjectConfig::new(
+        config.root.clone(),
+        config.workspaceRoot,
+        config.tsconfigPath,
+    );
+    if let Some(provider_root) = config.providerRoot {
+        ide.provider_root = provider_root;
+    }
+    if let Some(aliases) = config.workspaceAliases {
+        ide.workspace_aliases = aliases
+            .into_iter()
+            .map(|a| verter_analysis::project_resolver::WorkspaceAlias {
+                find: a.find,
+                replacement: a.replacement,
+            })
+            .collect();
+    }
+    if let Some(opts) = config.compilerOptions {
+        ide.compiler_options.base_url = opts.baseUrl;
+        if let Some(paths) = opts.paths {
+            ide.compiler_options.paths =
+                paths.into_iter().map(|p| (p.pattern, p.targets)).collect();
+        }
+    }
+    if let Some(refs) = config.references {
+        ide.references = refs;
+    }
+    ide
+}
+
 fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
     NapiResolvedId {
         canonicalId: input.canonical_id,
@@ -1402,6 +1468,25 @@ impl NapiVerterHost {
 
     /// Release all cached data (files, aliases, dependency graph).
     ///
+    /// Configure project-scoped path alias resolution.
+    ///
+    /// Accepts a list of project configs describing tsconfig paths, workspace
+    /// aliases, and project references. The host uses these to resolve aliased
+    /// import specifiers (e.g. `@/components/Foo.vue`, `#imports`) without
+    /// relying on external caller-provided resolutions.
+    ///
+    /// Pass an empty array to clear the resolver.
+    #[napi(js_name = "configureProjects")]
+    pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let configs: Vec<verter_analysis::project_resolver::IdeProjectConfig> = projects
+                .into_iter()
+                .map(napi_project_config_to_ide)
+                .collect();
+            self.inner.configure_projects(configs);
+        }))
+    }
+
     /// Call this before dropping the host to allow the Rust allocator to free
     /// backing memory immediately, rather than waiting for GC finalisation.
     /// This prevents the Node.js process from hanging on exit.
