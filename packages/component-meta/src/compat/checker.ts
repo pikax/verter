@@ -9,7 +9,7 @@
  * ```
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { resolve, dirname, basename, extname } from "node:path";
 import { createNapiAdapter } from "../host-adapter.js";
 import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
@@ -268,7 +268,6 @@ function discoverVueFiles(tsconfigPath: string): string[] {
 function collectVueFiles(dir: string, files: string[], depth = 0): void {
   if (depth > 10) return; // Prevent infinite recursion
   try {
-    const { readdirSync } = require("node:fs") as typeof import("node:fs");
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const full = resolve(dir, entry.name);
@@ -328,7 +327,6 @@ export function createChecker(
  * Handles specific file paths and `dir/**\/*` glob patterns.
  */
 function resolveIncludePatterns(rootDir: string, include: string[]): string[] {
-  const { existsSync, statSync } = require("node:fs") as typeof import("node:fs");
   const files: string[] = [];
 
   for (const pattern of include) {

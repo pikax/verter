@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+
 /**
  * Zod adapter — converts TypeDescriptor trees to Zod schemas.
  *
@@ -127,8 +129,8 @@ export function propsToZodString(meta: ComponentMeta): string {
  */
 function getZod(): typeof import("zod") {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require("zod");
+    const _require = typeof require === "function" ? require : createRequire(import.meta.url);
+    return _require("zod");
   } catch {
     throw new Error(
       "@verter/component-meta/zod runtime mode requires `zod` as a peer dependency. " +

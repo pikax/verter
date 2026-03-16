@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+
 /**
  * Unified host adapter interface that works with both NAPI and WASM backends.
  *
@@ -73,8 +75,9 @@ export function wrapWasmHost(host: {
  * Lazily loads `@verter/native`.
  */
 export function createNapiAdapter(): VerterHostAdapter {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const native = require("@verter/native");
+  // @verter/native is CJS-only — use createRequire for ESM compatibility.
+  const _require = typeof require === "function" ? require : createRequire(import.meta.url);
+  const native = _require("@verter/native");
   const host = new native.VerterHost({ devMode: false, analysisLevel: "full" });
   return wrapNapiHost(host);
 }
