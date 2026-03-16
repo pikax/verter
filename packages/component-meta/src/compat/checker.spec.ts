@@ -267,4 +267,69 @@ defineEmits<{
     const checker = new ComponentMetaChecker(adapter, "/tmp", {});
     expect(() => checker.getProgram()).toThrow();
   });
+
+  it("runtime defineProps preserves JSDoc descriptions and tags", () => {
+    const adapter = createNapiAdapter();
+    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+
+    const source = `<script setup lang="ts">
+defineProps({
+  /** The display label */
+  label: String,
+  /** Size variant
+   * @default 'md'
+   */
+  size: { type: String, default: 'md' },
+  noDoc: Number,
+})
+</script>
+<template><div /></template>`;
+
+    checker.updateFile("Runtime.vue", source);
+    const meta = checker.getComponentMeta("Runtime.vue");
+
+    // Positive: label has JSDoc description
+    const labelProp = meta.props.find((p) => p.name === "label");
+    expect(labelProp).toBeDefined();
+    expect(labelProp!.description).toBe("The display label");
+    expect(labelProp!.tags).toEqual([]);
+
+    // Positive: size has JSDoc description and @default tag
+    const sizeProp = meta.props.find((p) => p.name === "size");
+    expect(sizeProp).toBeDefined();
+    expect(sizeProp!.description).toBe("Size variant");
+    expect(sizeProp!.tags.length).toBeGreaterThanOrEqual(1);
+    expect(sizeProp!.tags[0].name).toBe("default");
+
+    // Negative: noDoc has empty description (compat maps null → "")
+    const noDocProp = meta.props.find((p) => p.name === "noDoc");
+    expect(noDocProp).toBeDefined();
+    expect(noDocProp!.description).toBe("");
+    expect(noDocProp!.tags).toEqual([]);
+  });
+
+  it("enum schema uses array format (Volar parity)", () => {
+    const adapter = createNapiAdapter();
+    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+
+    const source = `<script setup lang="ts">
+defineProps<{
+  color?: 'red' | 'blue'
+}>()
+</script>
+<template><div /></template>`;
+
+    checker.updateFile("Enum.vue", source);
+    const meta = checker.getComponentMeta("Enum.vue");
+
+    const colorProp = meta.props.find((p) => p.name === "color");
+    expect(colorProp).toBeDefined();
+    const schema = colorProp!.schema;
+    // Should be enum with array schema, not numeric-keyed object
+    expect(typeof schema).not.toBe("string");
+    if (typeof schema !== "string") {
+      expect(schema.kind).toBe("enum");
+      expect(Array.isArray(schema.schema)).toBe(true);
+    }
+  });
 });

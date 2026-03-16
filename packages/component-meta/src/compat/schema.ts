@@ -45,15 +45,10 @@ function convertType(
     case "union": {
       const type = td.types.map(typeDescriptorToString).join(" | ");
       if (ignore?.(type)) return type;
-      // Volar uses Record<string, PropertyMetaSchema> with numeric string keys
-      const schema: Record<string, PropertyMetaSchema> = {};
-      td.types.forEach((t, i) => {
-        schema[String(i)] = convertType(t, ignore, typeRegistry, visited);
-      });
       return {
         kind: "enum",
         type,
-        schema,
+        schema: td.types.map((t) => convertType(t, ignore, typeRegistry, visited)),
       };
     }
 
@@ -85,15 +80,10 @@ function convertType(
     case "tuple": {
       const type = `[${td.elements.map(typeDescriptorToString).join(", ")}]`;
       if (ignore?.(type)) return type;
-      // Volar uses Record<string, PropertyMetaSchema> with numeric string keys for tuples
-      const schema: Record<string, PropertyMetaSchema> = {};
-      td.elements.forEach((t, i) => {
-        schema[String(i)] = convertType(t, ignore, typeRegistry, visited);
-      });
       return {
         kind: "array",
         type,
-        schema,
+        schema: td.elements.map((t) => convertType(t, ignore, typeRegistry, visited)),
       };
     }
 

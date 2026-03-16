@@ -30,14 +30,19 @@ export interface PropertyMeta {
 
 /**
  * Recursive schema type for property metadata.
- * A string represents a simple type; an object represents a compound type.
+ * Matches Volar's discriminated union: enum/array/event use arrays, object uses Record.
+ * Intersection schemas use `Record<string, PropertyMetaSchema>` as a known divergence
+ * (vue-component-meta flattens intersections to merged properties via TS checker).
  */
 export type PropertyMetaSchema =
   | string
+  | { kind: "enum"; type: string; schema?: PropertyMetaSchema[] }
+  | { kind: "array"; type: string; schema?: PropertyMetaSchema[] }
+  | { kind: "event"; type: string; schema?: PropertyMetaSchema[] }
   | {
-      kind: "enum" | "object" | "array";
+      kind: "object";
       type: string;
-      schema?: PropertyMetaSchema[] | Record<string, PropertyMetaSchema>;
+      schema?: Record<string, PropertyMeta> | Record<string, PropertyMetaSchema>;
     };
 
 /**

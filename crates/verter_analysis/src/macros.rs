@@ -1055,7 +1055,7 @@ fn extract_prop_fields(
     // Runtime: extract from first argument
     if let Some(first_arg) = call.arguments.first() {
         if let Some(expr) = first_arg.as_expression() {
-            let rt = extract_prop_fields_from_runtime(expr, source);
+            let rt = extract_prop_fields_from_runtime(expr, source, comments);
             return PropFieldExtraction {
                 fields: rt.fields,
                 default_keys: rt.default_keys,
@@ -1204,7 +1204,11 @@ fn extract_ts_as_type(ts_as: &TSAsExpression<'_>, source: &str) -> Option<String
 ///
 /// For object form, detects both shorthand (`name: String`) and expanded
 /// (`name: { type: String, default: 'Hello' }`) property definitions.
-fn extract_prop_fields_from_runtime(expr: &Expression<'_>, source: &str) -> RuntimePropExtraction {
+fn extract_prop_fields_from_runtime(
+    expr: &Expression<'_>,
+    source: &str,
+    comments: &[Comment],
+) -> RuntimePropExtraction {
     match expr {
         Expression::ObjectExpression(obj) => {
             let mut fields = Vec::new();
@@ -1277,13 +1281,15 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>, source: &str) -> Runt
                     }
                 }
 
+                let (description, tags) = extract_jsdoc_for(comments, p.key.span().start, source);
+
                 fields.push(AnalyzedPropField {
                     name: key_name,
                     is_optional,
                     span: p.key.span().into(),
                     type_annotation,
-                    description: None,
-                    tags: Vec::new(),
+                    description,
+                    tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
                 });
@@ -2835,6 +2841,36 @@ defineExpose({ props })
         assert_eq!(fields[1].tags[0].text.as_deref(), Some("'md'"));
 
         // noDoc has no JSDoc
+        assert!(fields[2].description.is_none());
+        assert!(fields[2].tags.is_empty());
+    }
+
+    #[test]
+    fn jsdoc_on_runtime_prop_fields() {
+        let code = r#"defineProps({
+            /** The display label */
+            label: String,
+            /** Size variant
+             * @default 'md'
+             */
+            size: { type: String, default: 'md' },
+            noDoc: Number,
+        })"#;
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(fields.len(), 3);
+
+        // Positive: label has description, no tags
+        assert_eq!(fields[0].description.as_deref(), Some("The display label"));
+        assert!(fields[0].tags.is_empty());
+
+        // Positive: size has description and @default tag
+        assert_eq!(fields[1].description.as_deref(), Some("Size variant"));
+        assert_eq!(fields[1].tags.len(), 1);
+        assert_eq!(fields[1].tags[0].name, "default");
+        assert_eq!(fields[1].tags[0].text.as_deref(), Some("'md'"));
+
+        // Negative: noDoc has no JSDoc
         assert!(fields[2].description.is_none());
         assert!(fields[2].tags.is_empty());
     }

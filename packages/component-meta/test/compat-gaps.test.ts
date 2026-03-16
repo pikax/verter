@@ -194,9 +194,10 @@ describe("P2: Prop Default Values", () => {
 
   test("TS script setup: should extract default from withDefaults or options", () => {
     // SFC: defineProps({ hello: { type: String, default: 'Hello' } })
+    // vue-component-meta includes | undefined for optional props (verified from source)
     const prop = getProp("StringPropDefault.vue", "hello");
     expect(prop).toBeDefined();
-    expect(prop!.type).toBe("string");
+    expect(prop!.type).toBe("string | undefined");
     expect(prop!.default).toBeDefined();
     expect(prop!.default).toBe("Hello");
   });

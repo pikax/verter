@@ -99,7 +99,7 @@ describe("typeDescriptorToSchema", () => {
     expect(schema).toEqual({
       kind: "object",
       type: "string & number",
-      schema: ["string", "number"],
+      schema: { "0": "string", "1": "number" },
     });
   });
 
@@ -121,14 +121,24 @@ describe("typeDescriptorToSchema", () => {
     });
   });
 
-  it("converts objects to object schema", () => {
+  it("converts objects to object schema with PropertyMeta-like entries", () => {
     const schema = typeDescriptorToSchema(
       object([{ name: "x", type: primitive("string"), optional: false }]),
     );
     expect(schema).toEqual({
       kind: "object",
       type: "{ x: string }",
-      schema: ["string"],
+      schema: {
+        x: {
+          name: "x",
+          global: false,
+          description: "",
+          tags: [],
+          required: true,
+          type: "string",
+          schema: "string",
+        },
+      },
     });
   });
 
