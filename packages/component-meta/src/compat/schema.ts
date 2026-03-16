@@ -45,20 +45,30 @@ function convertType(
     case "union": {
       const type = td.types.map(typeDescriptorToString).join(" | ");
       if (ignore?.(type)) return type;
+      // Volar uses Record<string, PropertyMetaSchema> with numeric string keys
+      const schema: Record<string, PropertyMetaSchema> = {};
+      td.types.forEach((t, i) => {
+        schema[String(i)] = convertType(t, ignore, typeRegistry, visited);
+      });
       return {
         kind: "enum",
         type,
-        schema: td.types.map((t) => convertType(t, ignore, typeRegistry, visited)),
+        schema,
       };
     }
 
     case "intersection": {
       const type = td.types.map(typeDescriptorToString).join(" & ");
       if (ignore?.(type)) return type;
+      // Volar uses Record<string, PropertyMetaSchema> with numeric string keys
+      const schema: Record<string, PropertyMetaSchema> = {};
+      td.types.forEach((t, i) => {
+        schema[String(i)] = convertType(t, ignore, typeRegistry, visited);
+      });
       return {
         kind: "object",
         type,
-        schema: td.types.map((t) => convertType(t, ignore, typeRegistry, visited)),
+        schema,
       };
     }
 
@@ -75,20 +85,42 @@ function convertType(
     case "tuple": {
       const type = `[${td.elements.map(typeDescriptorToString).join(", ")}]`;
       if (ignore?.(type)) return type;
+      // Volar uses Record<string, PropertyMetaSchema> with numeric string keys for tuples
+      const schema: Record<string, PropertyMetaSchema> = {};
+      td.elements.forEach((t, i) => {
+        schema[String(i)] = convertType(t, ignore, typeRegistry, visited);
+      });
       return {
         kind: "array",
         type,
-        schema: td.elements.map((t) => convertType(t, ignore, typeRegistry, visited)),
+        schema,
       };
     }
 
     case "object": {
       const type = `{ ${td.properties.map((p) => `${p.name}${p.optional ? "?" : ""}: ${typeDescriptorToString(p.type)}`).join("; ")} }`;
       if (ignore?.(type)) return type;
+      // Volar uses Record<string, PropertyMeta-like> with property names as keys.
+      // Each value includes name, required, type, description, tags, global, schema.
+      // The actual Volar runtime format is richer than the declared PropertyMetaSchema type.
+      const schema: Record<string, PropertyMetaSchema> = {};
+      td.properties.forEach((p) => {
+        // Cast needed: Volar's runtime shape includes PropertyMeta fields
+        // (name, required, etc.) beyond what PropertyMetaSchema declares.
+        schema[p.name] = {
+          name: p.name,
+          global: false,
+          description: "",
+          tags: [],
+          required: !p.optional,
+          type: typeDescriptorToString(p.type),
+          schema: convertType(p.type, ignore, typeRegistry, visited),
+        } as unknown as PropertyMetaSchema;
+      });
       return {
         kind: "object",
         type,
-        schema: td.properties.map((p) => convertType(p.type, ignore, typeRegistry, visited)),
+        schema,
       };
     }
 

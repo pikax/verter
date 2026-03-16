@@ -324,6 +324,45 @@ export function createChecker(
 }
 
 /**
+ * Resolve files from tsconfig-style include patterns.
+ * Handles specific file paths and `dir/**\/*` glob patterns.
+ */
+function resolveIncludePatterns(rootDir: string, include: string[]): string[] {
+  const { existsSync, statSync } = require("node:fs") as typeof import("node:fs");
+  const files: string[] = [];
+
+  for (const pattern of include) {
+    const absPattern = resolve(rootDir, pattern);
+
+    // Check if it's a specific file path (has a file extension)
+    if (/\.\w+$/.test(pattern) && !pattern.includes("*")) {
+      if (existsSync(absPattern)) {
+        files.push(absPattern);
+      }
+      continue;
+    }
+
+    // Handle glob patterns like "dir/**/*" — walk the directory part
+    const globIndex = pattern.indexOf("*");
+    if (globIndex !== -1) {
+      const dirPart = pattern.substring(0, globIndex).replace(/[/\\]+$/, "");
+      const absDir = resolve(rootDir, dirPart);
+      if (existsSync(absDir) && statSync(absDir).isDirectory()) {
+        collectVueFiles(absDir, files);
+      }
+      continue;
+    }
+
+    // Plain directory path — walk it
+    if (existsSync(absPattern) && statSync(absPattern).isDirectory()) {
+      collectVueFiles(absPattern, files);
+    }
+  }
+
+  return [...new Set(files)];
+}
+
+/**
  * Create a Volar-compatible checker from an inline tsconfig JSON object.
  *
  * @param projectRoot Root directory for the project
@@ -332,15 +371,23 @@ export function createChecker(
  */
 export function createCheckerByJson(
   projectRoot: string,
-  _configJson: object,
+  configJson: object,
   options?: MetaCheckerOptions,
 ): ComponentMetaChecker {
   const absRoot = resolve(projectRoot);
   const adapter = createNapiAdapter();
+  const config = configJson as Record<string, unknown>;
 
-  // Discover .vue files under project root
-  const vueFiles: string[] = [];
-  collectVueFiles(absRoot, vueFiles);
+  // Resolve files from include patterns if available, otherwise walk project root
+  let vueFiles: string[];
+  const include = config.include as string[] | undefined;
+  if (include && include.length > 0) {
+    vueFiles = resolveIncludePatterns(absRoot, include);
+  } else {
+    vueFiles = [];
+    collectVueFiles(absRoot, vueFiles);
+  }
+
   for (const filePath of vueFiles) {
     try {
       const content = readFileSync(filePath, "utf-8");
