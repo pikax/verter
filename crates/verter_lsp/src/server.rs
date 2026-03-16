@@ -6519,6 +6519,11 @@ impl VerterLanguageServer {
     pub(crate) async fn test_ensure_synced(&self, uri: &tower_lsp_server::ls_types::Uri) {
         self.ensure_current_file_synced(uri).await;
     }
+
+    /// Install a project registry (test harness access).
+    pub(crate) fn install_project_registry(&self, registry: crate::config::ProjectRegistry) {
+        *self.project_registry.write() = Some(registry);
+    }
 }
 
 impl LanguageServer for VerterLanguageServer {

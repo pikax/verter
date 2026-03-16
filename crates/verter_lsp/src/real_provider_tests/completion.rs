@@ -1,6 +1,6 @@
 //! Completion tests ported from E2E suite.
 
-use crate::test_harness::{canary_assert_known_limitation, real_provider_test};
+use crate::test_harness::real_provider_test;
 
 // ---------------------------------------------------------------------------
 // App.vue template completions — ~12 assertions
@@ -158,20 +158,7 @@ real_provider_test!(
         // --- JsTemplateCases.vue: state.label member access ---
         let pos = session.find_position(&js_uri, "state.label", 6);
         let labels = session.completion_labels(&js_uri, pos, None).await;
-        if session.is_tsgo() {
-            // CANARY (TSGO): JS SFC with JSDoc @type annotation — member access on
-            // `state.label` returns component-scope completions instead of member
-            // completions. TSGO does not resolve JSDoc type annotations for member
-            // access in JavaScript Vue SFCs. When TSGO gains this capability, this
-            // canary fires and should be promoted to real asserts.
-            let has_label = labels.contains(&"label".to_string());
-            canary_assert_known_limitation!(
-                !has_label,
-                "TSGO JS SFC member access does not resolve JSDoc types (got: {labels:?})"
-            );
-        } else {
-            assert!(labels.contains(&"label".to_string()), "JS SFC member should complete label, got: {labels:?}");
-            assert!(labels.contains(&"done".to_string()), "JS SFC member should complete done, got: {labels:?}");
-        }
+        assert!(labels.contains(&"label".to_string()), "JS SFC member should complete label, got: {labels:?}");
+        assert!(labels.contains(&"done".to_string()), "JS SFC member should complete done, got: {labels:?}");
     }
 );

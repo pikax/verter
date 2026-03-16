@@ -1,8 +1,6 @@
 //! Go-to-definition tests ported from E2E suite.
 
-use crate::test_harness::{
-    canary_assert_known_limitation, real_provider_test, RealProviderTestSession,
-};
+use crate::test_harness::{real_provider_test, RealProviderTestSession};
 
 // ---------------------------------------------------------------------------
 // Same-file definitions (script bindings used in template)
@@ -239,29 +237,19 @@ real_provider_test!(
             return;
         }
 
-        // CANARY: <MyComp → MyComp.vue via @/ alias
-        // Limitation: harness `IdeProjectConfig` may not fully resolve tsconfig `paths`
-        // aliases. Both providers resolve to same file (import binding) instead of
-        // following through the `@/` alias to the source component file.
+        // <MyComp → MyComp.vue via @/ alias
         let pos = session.find_position(&uri, "<MyComp", 1);
         let locs = session.definition_locations(&uri, pos).await;
         assert!(!locs.is_empty(), "<MyComp via alias should have definitions");
         let def_path = RealProviderTestSession::uri_to_path(&locs[0].uri);
-        canary_assert_known_limitation!(
-            !def_path.contains("MyComp.vue"),
-            "@/ alias go-to-def resolves to same file instead of MyComp.vue (got: {def_path})"
-        );
+        assert!(def_path.contains("MyComp.vue"), "<MyComp should go to MyComp.vue, got: {def_path}");
         assert!(!def_path.ends_with(".tsx"), "<MyComp should NOT go to .tsx, got: {def_path}");
 
-        // CANARY: Import binding: import MyComp → MyComp.vue via @/ alias
-        // Limitation: same as above — @/ alias resolution not followed through.
+        // Import binding: import MyComp → MyComp.vue via @/ alias
         let pos = session.find_position(&uri, "import MyComp", 7);
         let locs = session.definition_locations(&uri, pos).await;
         assert!(!locs.is_empty(), "MyComp import should have definitions");
         let def_path = RealProviderTestSession::uri_to_path(&locs[0].uri);
-        canary_assert_known_limitation!(
-            !def_path.contains("MyComp.vue"),
-            "@/ alias import go-to-def resolves to same file instead of MyComp.vue (got: {def_path})"
-        );
+        assert!(def_path.contains("MyComp.vue"), "MyComp import should go to MyComp.vue, got: {def_path}");
     }
 );
