@@ -154,13 +154,13 @@ jobs:
 
       - name: Checkout PR
         if: github.event_name == 'issue_comment'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: refs/pull/${{ needs.check-trigger.outputs.pr-number }}/head
 
       - name: Checkout
         if: github.event_name != 'issue_comment'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup pnpm
         if: steps.source.outputs.source == 'artifact'
@@ -168,7 +168,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.source.outputs.source == 'artifact'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: lts/*
           cache: pnpm
@@ -213,7 +213,7 @@ jobs:
 
       - name: Upload Verter packages artifact
         if: steps.source.outputs.source == 'artifact'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: verter-packages
           path: dist/*.tgz
@@ -225,7 +225,7 @@ jobs:
           echo "dist_tag=${{ steps.source.outputs.dist-tag }}" >> source-info.txt
 
       - name: Upload source info
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: source-info
           path: source-info.txt
@@ -405,7 +405,7 @@ jobs:
 
     steps:
       - name: Download source info
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: source-info
 
@@ -417,7 +417,7 @@ jobs:
           echo "dist-tag=$dist_tag" >> $GITHUB_OUTPUT
 
       - name: Checkout test project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ matrix.project.repo }}
           ref: ${{ matrix.project.branch }}
@@ -431,7 +431,7 @@ jobs:
           version: 9
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: lts/*
 
@@ -542,7 +542,7 @@ jobs:
 
       - name: Download Verter packages
         if: steps.source.outputs.source == 'artifact'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: verter-packages
           path: verter-packages
@@ -1099,7 +1099,7 @@ jobs:
 
       - name: Upload project report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: report-${{ matrix.project.name }}
           path: |
@@ -1108,7 +1108,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: logs-${{ matrix.project.name }}
           path: |
@@ -1132,7 +1132,7 @@ jobs:
     if: always()
     steps:
       - name: Download all reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: report-*
           path: reports
@@ -1226,7 +1226,7 @@ jobs:
           echo "$FAILED" > failed-count.txt
 
       - name: Upload aggregate summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: integration-test-summary
           path: integration-test-summary.md

@@ -25,7 +25,7 @@ jobs:
       is-prerelease: ${{ steps.check.outputs.is-prerelease }}
       dist-tag: ${{ steps.check.outputs.dist-tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: check
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -47,7 +47,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: lts/*
           cache: pnpm
@@ -108,9 +108,9 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: lts/*
           cache: pnpm
@@ -137,7 +137,7 @@ jobs:
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.target, 'aarch64-apple') && '11.0' || startsWith(matrix.target, 'x86_64-apple') && '10.12' || '' }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: native-${{ matrix.target }}
           path: packages/native/dist/*.node
@@ -171,11 +171,11 @@ jobs:
             binary: verter-tsc.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -187,7 +187,7 @@ jobs:
       - name: Build verter-tsc binary
         run: cargo build --release --package verter_tsc --target ${{ matrix.target }}
         shell: bash
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tsc-${{ matrix.npm-pkg }}
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
@@ -226,11 +226,11 @@ jobs:
             binary: verter-lsp.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -255,7 +255,7 @@ jobs:
             cargo build --release --package verter_lsp --target ${{ matrix.target }}
           fi
         shell: bash
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: lsp-${{ matrix.vsce-target }}
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
@@ -269,11 +269,11 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -285,7 +285,7 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: lts/*
           cache: pnpm
@@ -294,7 +294,7 @@ jobs:
         run: pnpm run build:wasm
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wasm
           path: |
@@ -313,7 +313,7 @@ jobs:
       name: crates-io
       url: https://crates.io/crates/verter_core
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish verter_span
@@ -360,9 +360,9 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: lts/*
           cache: pnpm
@@ -370,7 +370,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # Download all native artifacts into platform package dirs
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: native-*
           path: /tmp/native-artifacts
@@ -394,7 +394,7 @@ jobs:
           done
 
       # Download all tsc artifacts into platform package dirs
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: tsc-*
           path: /tmp/tsc-artifacts
@@ -415,7 +415,7 @@ jobs:
           done
 
       # Download WASM artifact
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: wasm
           path: packages/wasm/
@@ -573,9 +573,9 @@ jobs:
       name: vscode-marketplace
       url: https://marketplace.visualstudio.com/items?itemName=pikax.verter-vscode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: lts/*
           cache: pnpm
@@ -586,13 +586,13 @@ jobs:
         run: pnpm run build:ts
 
       # Download all LSP binaries
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: lsp-*
           path: /tmp/lsp-artifacts
 
       # Download all native binaries
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: native-*
           path: /tmp/native-artifacts
@@ -678,7 +678,7 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       # Upload all VSIX files for GitHub Release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: vsix
           path: /tmp/verter-vscode-*.vsix
@@ -695,7 +695,7 @@ jobs:
       name: github-releases
       url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -719,17 +719,17 @@ jobs:
             git push origin HEAD:main
           fi
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: native-*
           path: /tmp/release-assets/native
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: wasm
           path: /tmp/release-assets/wasm
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: vsix
           path: /tmp/release-assets/vsix
