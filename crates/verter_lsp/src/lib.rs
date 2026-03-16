@@ -22,6 +22,10 @@ mod uri;
 
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod real_provider_tests;
+#[cfg(test)]
+mod test_harness;
 
 use std::sync::Arc;
 use verter_host::VerterHost;

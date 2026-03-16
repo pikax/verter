@@ -40,4 +40,5 @@ path = "src/main.rs"
 
 [dev-dependencies]
 futures-util = "0.3"
+paste = "1"
 tempfile = "3.26.0"

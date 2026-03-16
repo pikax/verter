@@ -6502,6 +6502,25 @@ fn filter_type_provider_completion_result(
     }
 }
 
+// Test-only accessors for the cross-module test harness (`test_harness.rs`).
+#[cfg(test)]
+impl VerterLanguageServer {
+    /// Install a resolver snapshot (test harness access).
+    pub(crate) fn install_resolver_snapshot(&self, snapshot: ResolverSnapshot) {
+        *self.resolver_snapshot.write() = Some(snapshot);
+    }
+
+    /// Access the document registry (test harness access).
+    pub(crate) fn test_documents(&self) -> &std::sync::Arc<crate::documents::DocumentRegistry> {
+        &self.documents
+    }
+
+    /// Trigger interactive file sync to the type provider (test harness access).
+    pub(crate) async fn test_ensure_synced(&self, uri: &tower_lsp_server::ls_types::Uri) {
+        self.ensure_current_file_synced(uri).await;
+    }
+}
+
 impl LanguageServer for VerterLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         tracing::info!("verter-lsp initializing");
