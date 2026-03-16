@@ -116,8 +116,24 @@ fn collect_type_references_recursive(ts_type: &TSType<'_>, refs: &mut Vec<String
         }
         TSType::TSTupleType(tuple) => {
             for elem in &tuple.element_types {
-                // TSTupleElement can be converted to TSType via to_ts_type()
-                collect_type_references_recursive(elem.to_ts_type(), refs);
+                match elem {
+                    TSTupleElement::TSOptionalType(opt) => {
+                        collect_type_references_recursive(&opt.type_annotation, refs);
+                    }
+                    TSTupleElement::TSRestType(rest) => {
+                        collect_type_references_recursive(&rest.type_annotation, refs);
+                    }
+                    TSTupleElement::TSNamedTupleMember(named) => {
+                        if let Some(t) = named.element_type.as_ts_type() {
+                            collect_type_references_recursive(t, refs);
+                        }
+                    }
+                    _ => {
+                        if let Some(t) = elem.as_ts_type() {
+                            collect_type_references_recursive(t, refs);
+                        }
+                    }
+                }
             }
         }
         TSType::TSConditionalType(cond) => {
@@ -2023,6 +2039,26 @@ mod tests {
     fn indexed_access() {
         let refs = parse_type_refs("T[K]");
         assert_eq!(refs, vec!["T", "K"]);
+    }
+
+    #[test]
+    fn tuple_with_optional_element() {
+        // Regression: TSTupleElement::TSOptionalType panics with to_ts_type()
+        let refs = parse_type_refs("[string, MyType?]");
+        assert_eq!(refs, vec!["MyType"]);
+    }
+
+    #[test]
+    fn tuple_with_rest_element() {
+        // Regression: TSTupleElement::TSRestType panics with to_ts_type()
+        let refs = parse_type_refs("[string, ...MyType[]]");
+        assert_eq!(refs, vec!["MyType"]);
+    }
+
+    #[test]
+    fn tuple_with_named_element() {
+        let refs = parse_type_refs("[name: string, value: MyType]");
+        assert_eq!(refs, vec!["MyType"]);
     }
 
     fn parse_macros(code: &str) -> Vec<AnalyzedMacro> {

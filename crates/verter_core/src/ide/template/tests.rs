@@ -2671,6 +2671,57 @@ const arrowPos = ref({})
     );
 }
 
+#[test]
+fn class_merge_with_script_attrs_and_generic() {
+    // Regression: Popover.vue with attrs="{ class: string, style: string }" on
+    // <script setup> produces duplicate class/style attributes in JSX.
+    let source = r#"<script setup lang="ts" attrs="{ class: string, style: string }" generic="T extends object">
+import { ref } from 'vue'
+const show = ref(false)
+const onClickWrapper = () => {}
+</script>
+<template>
+  <span
+    ref="wrapperElm"
+    class="ns-popover--wrapper"
+    :class="$attrs.class"
+    :style="$attrs.style as any"
+    @click="onClickWrapper"
+  >
+    <slot name="reference" />
+  </span>
+</template>"#;
+    let output = gen_tsx_template(source);
+
+    eprintln!("=== ATTRS+GENERIC OUTPUT ===\n{}\n=== END ===", output);
+
+    // Positive: should use normalizeClass for merged class
+    assert!(
+        output.contains("normalizeClass"),
+        "should use normalizeClass for merged class: {output}"
+    );
+
+    // Critical: must have exactly 1 class= attribute (no duplicates → ts(17001))
+    let class_count = output.matches("class=").count();
+    assert_eq!(
+        class_count, 1,
+        "should have exactly 1 class= attribute, got {class_count}: {output}"
+    );
+
+    // Critical: must have exactly 1 style= attribute (no duplicates)
+    let style_count = output.matches("style=").count();
+    assert_eq!(
+        style_count, 1,
+        "should have exactly 1 style= attribute, got {style_count}: {output}"
+    );
+
+    // Negative: must not have double closing brace from normalizeClass
+    assert!(
+        !output.contains("])}}"),
+        "must not have extra closing brace: {output}"
+    );
+}
+
 // ── Split overwrite tests for source map accuracy ────────────────
 
 /// `v-bind="$attrs"` must produce `{...___VERTER___instance.$attrs}` using split

@@ -14026,3 +14026,171 @@ fn dotted_slot_names_true_duplicate_still_detected() {
         result.errors
     );
 }
+
+/// Regression: Full Popover.vue with attrs, generic, class/style merge, and
+/// components. Must not produce duplicate class/style attributes (ts(17001)).
+#[test]
+fn ide_no_duplicate_attrs_full_popover_with_components() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("Popover.vue".to_string()),
+        target: CompileTarget::IDE,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions::default();
+    let source = r#"<script setup lang="ts" attrs="{ class: string, style: string }" generic="T extends object">
+import { computed, ref, useTemplateRef } from 'vue'
+import { Popup } from '../Popup'
+import { PopoverItem } from './components'
+
+const props = withDefaults(defineProps<{
+  actions?: { text: string }[]
+  actionsDirection?: string
+  showArrow?: boolean
+}>(), {
+  actions: () => [],
+  actionsDirection: 'vertical',
+  showArrow: false,
+})
+
+const show = defineModel<boolean>('show', { default: false })
+const emit = defineEmits({ select: (action: { text: string }, index: number) => true })
+const onClickWrapper = () => {}
+const floatingStyles = ref({})
+const arrowPos = ref({})
+</script>
+<template>
+  <span
+    ref="wrapperElm"
+    class="ns-popover--wrapper"
+    :class="$attrs.class"
+    :style="$attrs.style as any"
+    @click="onClickWrapper"
+  >
+    <slot name="reference" />
+  </span>
+  <Popup
+    ref="popupElm"
+    v-model:show="show"
+    class="ns-popover"
+    :duration="1"
+    position=""
+    :style="[floatingStyles, $attrs.style]"
+    lazy-render
+  >
+    <div v-if="showArrow" ref="arrowElm" class="ns-popover__arrow" :style="[arrowPos]"></div>
+    <div
+      role="menu"
+      class="ns-popover__content"
+      :class="{
+        'ns-popover__content--horizontal': props.actionsDirection === 'horizontal',
+      }"
+    >
+      <slot>
+        <PopoverItem
+          v-for="(action, index) in props.actions"
+          :key="index"
+          :text="action.text"
+          @click="emit('select', action, index)"
+        />
+      </slot>
+    </div>
+  </Popup>
+</template>"#;
+    let result = compile(source, &options, &verter_opts, &alloc);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tsx = result.tsx.as_ref().expect("TSX output");
+    let code = &tsx.code;
+
+    // Verify TSX parses cleanly (OXC catches duplicate JSX attributes)
+    let alloc2 = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc2, code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "TSX parse errors: {:?}\n--- code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        code
+    );
+}
+
+/// Regression: Popover.vue with `attrs="{ class: string, style: string }"`
+/// and `generic="T extends object"` on `<script setup>` must not produce
+/// duplicate class/style attributes in TSX output (ts(17001)).
+#[test]
+fn ide_no_duplicate_class_style_with_script_attrs_and_generic() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("Popover.vue".to_string()),
+        target: CompileTarget::IDE,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions::default();
+    let source = r#"<script setup lang="ts" attrs="{ class: string, style: string }" generic="T extends object">
+import { ref } from 'vue'
+const show = ref(false)
+const onClickWrapper = () => {}
+const floatingStyles = ref({})
+const showArrow = ref(false)
+const arrowPos = ref({})
+</script>
+<template>
+  <span
+    ref="wrapperElm"
+    class="ns-popover--wrapper"
+    :class="$attrs.class"
+    :style="$attrs.style as any"
+    @click="onClickWrapper"
+  >
+    <slot name="reference" />
+  </span>
+</template>"#;
+    let result = compile(source, &options, &verter_opts, &alloc);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tsx = result.tsx.as_ref().expect("TSX output");
+    let code = &tsx.code;
+
+    eprintln!("=== FULL IDE OUTPUT ===\n{}\n=== END ===", code);
+
+    // Count class= and style= occurrences in the template portion
+    // (skip type construct declarations which may mention class/style)
+    let template_start = code.find("<>").unwrap_or(0);
+    let template_portion = &code[template_start..];
+
+    let class_count = template_portion.matches("class=").count();
+    assert!(
+        class_count <= 1,
+        "should have at most 1 class= attribute in template JSX, got {class_count}:\n{template_portion}"
+    );
+
+    let style_count = template_portion.matches("style=").count();
+    assert!(
+        style_count <= 1,
+        "should have at most 1 style= attribute in template JSX, got {style_count}:\n{template_portion}"
+    );
+
+    // Verify no duplicate attribute names (TSX should parse cleanly)
+    let alloc2 = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc2, code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "TSX parse errors (may indicate duplicate attrs): {:?}\n--- code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        code
+    );
+}
