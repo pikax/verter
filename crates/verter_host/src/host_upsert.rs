@@ -275,7 +275,10 @@ impl VerterHost {
             }
 
             // Script imports
+            let mut seen_specifiers: rustc_hash::FxHashSet<String> =
+                rustc_hash::FxHashSet::default();
             for imp in &result_data.imports {
+                seen_specifiers.insert(imp.source.clone());
                 if imp.source.starts_with('.') || imp.source.starts_with("../") {
                     parsed_edges.push(verter_vfs::ParsedEdge::Relative {
                         specifier: imp.source.clone(),
@@ -297,8 +300,53 @@ impl VerterHost {
                 }
             }
 
-            self.workspace
-                .record_parsed_edges(&canonical_id, &parsed_edges);
+            // Module references (dynamic imports, require() calls, etc.)
+            // that were NOT already covered by the static imports loop above.
+            for modref in &result_data.module_references {
+                let kind = if modref.is_type_only {
+                    verter_vfs::ResolveRequestKind::TypeImport
+                } else {
+                    verter_vfs::ResolveRequestKind::EsmImport
+                };
+
+                // Exact literal specifier
+                if let Some(ref specifier) = modref.literal_specifier {
+                    if !specifier.is_empty() && !seen_specifiers.contains(specifier.as_str()) {
+                        seen_specifiers.insert(specifier.clone());
+                        if specifier.starts_with('.') || specifier.starts_with("../") {
+                            parsed_edges.push(verter_vfs::ParsedEdge::Relative {
+                                specifier: specifier.clone(),
+                                kind,
+                            });
+                        } else {
+                            parsed_edges.push(verter_vfs::ParsedEdge::Bare {
+                                specifier: specifier.clone(),
+                                kind,
+                            });
+                        }
+                    }
+                }
+
+                // Finite set specifiers (e.g., dynamic import with template literal)
+                for specifier in &modref.finite_specifiers {
+                    if !specifier.is_empty() && !seen_specifiers.contains(specifier.as_str()) {
+                        seen_specifiers.insert(specifier.clone());
+                        if specifier.starts_with('.') || specifier.starts_with("../") {
+                            parsed_edges.push(verter_vfs::ParsedEdge::Relative {
+                                specifier: specifier.clone(),
+                                kind,
+                            });
+                        } else {
+                            parsed_edges.push(verter_vfs::ParsedEdge::Bare {
+                                specifier: specifier.clone(),
+                                kind,
+                            });
+                        }
+                    }
+                }
+            }
+
+            self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
         }
 
         build_upsert_result(

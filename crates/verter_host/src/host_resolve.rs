@@ -97,7 +97,23 @@ impl VerterHost {
     ) -> Option<String> {
         let owner_entry = files.get(owner_canonical)?;
 
-        // Phase 1: Exact lookup via structured dependency resolution records.
+        // Phase 0: Workspace resolution (authoritative).
+        // The workspace's resolution chain (exact resolutions → project resolver)
+        // is the primary resolution path. Internal phases are fallback for WASM.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(result) = self.ws().resolve_import(
+                owner_canonical,
+                import_source,
+                verter_vfs::ResolveRequestKind::EsmImport,
+            ) {
+                if files.contains_key(&result.source_id) {
+                    return Some(result.source_id);
+                }
+            }
+        }
+
+        // Phase 1: Legacy exact lookup (WASM fallback / transition).
         // If the caller provided a resolution for this specifier, use it.
         if let Some(resolution) = owner_entry.dependency_resolutions.get(import_source) {
             if let Some(ref resolved_id) = resolution.resolved_canonical_id {
@@ -109,7 +125,7 @@ impl VerterHost {
                 return None;
             }
 
-            // Phase 2: Candidate list — return first loaded candidate.
+            // Phase 1b: Candidate list — return first loaded candidate.
             for candidate in &resolution.possible_canonical_ids {
                 if files.contains_key(candidate.as_str()) {
                     return Some(candidate.clone());
@@ -117,26 +133,9 @@ impl VerterHost {
             }
         }
 
-        // Phase 2.5: Workspace resolution (VFS-backed).
-        // Consults the workspace's resolution chain (exact resolutions → project
-        // resolver) which supports tsconfig paths, workspace aliases, and Vite
-        // aliases. Only returns a match if the resolved file is loaded in the host.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(result) = self.workspace.resolve_import(
-                owner_canonical,
-                import_source,
-                verter_vfs::ResolveRequestKind::EsmImport,
-            ) {
-                if files.contains_key(&result.source_id) {
-                    return Some(result.source_id);
-                }
-            }
-        }
-
-        // Phase 3: Project resolver (tsconfig paths, workspace aliases).
-        // Legacy fallback: uses the host's internal NativeProjectResolver.
-        // In the new architecture, Phase 2.5 (workspace) handles this.
+        // Phase 2: Legacy project resolver (WASM fallback / transition).
+        // Uses the host's internal NativeProjectResolver.
+        // In the new architecture, Phase 0 (workspace) handles this.
         // Kept for backward compatibility with WASM and callers that use
         // configure_projects() without a workspace.
         if let Some(resolver) = &*read_lock(&self.project_resolver) {
@@ -154,7 +153,7 @@ impl VerterHost {
             }
         }
 
-        // Phase 4: Direct path probing for relative specifiers.
+        // Phase 3: Direct path probing for relative specifiers.
         // Resolves `./types` → `/src/types`, then tries extensions and /index variants.
         let direct = crate::id::resolve_external(owner_canonical, import_source);
         if files.contains_key(direct.as_str()) {
@@ -174,7 +173,7 @@ impl VerterHost {
             }
         }
 
-        // Phase 5: Fall back to dependency set matching for non-relative specifiers
+        // Phase 4: Fall back to dependency set matching for non-relative specifiers
         // that weren't in `dependency_resolutions` (e.g., auto-discovered deps).
         let normalized = import_source.strip_prefix("./").unwrap_or(import_source);
         for dep in &owner_entry.dependencies {

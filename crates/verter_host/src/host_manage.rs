@@ -555,6 +555,27 @@ impl VerterHost {
     ) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
+        // Build VFS exact resolutions before the loop consumes the data.
+        #[cfg(not(target_arch = "wasm32"))]
+        let vfs_resolutions: Vec<verter_vfs::ExactResolution> = resolutions
+            .iter()
+            .map(|r| verter_vfs::ExactResolution {
+                specifier: r.specifier.clone(),
+                resolved_canonical_id: r.resolved_canonical_id.as_ref().map(|id| {
+                    let norm = canonicalize_id(id);
+                    norm.into_owned()
+                }),
+                possible_canonical_ids: r
+                    .possible_canonical_ids
+                    .iter()
+                    .map(|c| {
+                        let norm = canonicalize_id(c);
+                        norm.into_owned()
+                    })
+                    .collect(),
+            })
+            .collect();
+
         // Single write lock to avoid TOCTOU race between read-read-write.
         let (old_deps, new_deps) = {
             let mut files = write_lock(&self.files);
@@ -595,6 +616,10 @@ impl VerterHost {
         };
 
         self.update_reverse_deps(&canonical, &old_deps, &new_deps);
+
+        // Sync exact resolutions to workspace.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.ws().set_exact_resolutions(&canonical, vfs_resolutions);
     }
 
     /// Returns all known canonical file IDs and their file kinds.

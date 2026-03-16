@@ -92,8 +92,9 @@ pub struct VerterHost {
     pub(crate) config: HostConfig,
     /// VFS workspace providing file reads, import resolution, and edge recording.
     /// Only available on native targets (not WASM).
+    /// Wrapped in RwLock so the workspace can be swapped (e.g., LSP wiring).
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) workspace: Arc<dyn verter_vfs::WorkspaceAccess>,
+    pub(crate) workspace: parking_lot::RwLock<Arc<dyn verter_vfs::WorkspaceAccess>>,
     pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
@@ -125,7 +126,7 @@ impl VerterHost {
     pub fn new(config: HostConfig, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) -> Self {
         Self {
             config,
-            workspace,
+            workspace: parking_lot::RwLock::new(workspace),
             files: default_shared(FxHashMap::default()),
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
@@ -172,10 +173,27 @@ impl VerterHost {
         Self::new(config)
     }
 
-    /// Get a reference to the workspace.
+    /// Get a clone of the workspace Arc.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn workspace(&self) -> &Arc<dyn verter_vfs::WorkspaceAccess> {
-        &self.workspace
+    pub fn workspace(&self) -> Arc<dyn verter_vfs::WorkspaceAccess> {
+        self.workspace.read().clone()
+    }
+
+    /// Swap the workspace backing this host.
+    ///
+    /// Used by the LSP to wire the host to the same `FilesystemWorkspace`
+    /// used for direct mutation access.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_workspace(&self, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) {
+        *self.workspace.write() = workspace;
+    }
+
+    /// Clone the workspace Arc for internal use.
+    /// Acquires a short-lived read lock, clones the Arc, and releases.
+    /// Do NOT hold the returned Arc across blocking calls.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ws(&self) -> Arc<dyn verter_vfs::WorkspaceAccess> {
+        self.workspace.read().clone()
     }
 
     /// Resolve an import through the workspace (VFS).
@@ -188,7 +206,7 @@ impl VerterHost {
         parent_canonical_id: &str,
         import_source: &str,
     ) -> Option<String> {
-        self.workspace
+        self.ws()
             .resolve_import(
                 parent_canonical_id,
                 import_source,
@@ -226,9 +244,13 @@ impl VerterHost {
         let resolver = if projects.is_empty() {
             None
         } else {
-            Some(NativeProjectResolver::new(projects))
+            Some(NativeProjectResolver::new(projects.clone()))
         };
         *write_lock(&self.project_resolver) = resolver;
+
+        // Sync to workspace so the VFS resolver stays in sync.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.ws().configure_resolver(projects);
     }
 
     #[cfg(feature = "host_metrics")]
@@ -343,6 +365,61 @@ impl VerterHost {
         old_export_signatures: &[verter_analysis::ExportSignature],
         new_export_signatures: &[verter_analysis::ExportSignature],
     ) {
+        // Native path: read reverse deps from workspace (authoritative source),
+        // then merge with the legacy reverse_dependencies map for backward
+        // compatibility (standalone hosts, tests without exact resolutions).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ws = self.ws();
+            let mut owners: BTreeSet<String> =
+                ws.reverse_deps_for(dependency_id).into_iter().collect();
+            // Also check extensionless variant
+            if let Some(stem) = deps::strip_configured_extension(
+                dependency_id,
+                &self.config.resolve_extensions,
+                None,
+            ) {
+                for o in ws.reverse_deps_for(stem) {
+                    owners.insert(o);
+                }
+            }
+
+            // Merge with legacy reverse_dependencies (captures deps from
+            // update_reverse_deps that the workspace may not have).
+            {
+                let rev = shared::read_lock(&self.reverse_dependencies);
+                if let Some(legacy) = rev.get(dependency_id) {
+                    for o in legacy {
+                        owners.insert(o.clone());
+                    }
+                }
+                if let Some(stem) = deps::strip_configured_extension(
+                    dependency_id,
+                    &self.config.resolve_extensions,
+                    None,
+                ) {
+                    if let Some(more) = rev.get(stem) {
+                        for o in more {
+                            owners.insert(o.clone());
+                        }
+                    }
+                }
+            }
+
+            deps::smart_invalidate_dependents_with_owners(
+                &self.files,
+                owners,
+                &self.project_resolver,
+                &self.config,
+                dependency_id,
+                old_export_signatures,
+                new_export_signatures,
+            );
+            return;
+        }
+
+        // WASM fallback: use legacy reverse_dependencies map.
+        #[allow(unreachable_code)]
         deps::smart_invalidate_dependents(
             &self.files,
             &self.reverse_dependencies,
@@ -373,6 +450,7 @@ mod tests {
     };
     use super::*;
     use verter_analysis::AnalysisScope;
+    use verter_vfs::WorkspaceAccess;
 
     fn profile_dev() -> CompileProfile {
         CompileProfile {
@@ -2843,7 +2921,7 @@ mod tests {
         let ws_ref = host.workspace();
         // Compare trait object pointer identity via data pointer
         let ptr1 = Arc::as_ptr(&ws) as *const () as usize;
-        let ptr2 = Arc::as_ptr(ws_ref) as *const () as usize;
+        let ptr2 = Arc::as_ptr(&ws_ref) as *const () as usize;
         assert_eq!(ptr1, ptr2, "workspace() should return the same Arc");
     }
 
@@ -2904,6 +2982,305 @@ mod tests {
         assert!(
             !debug_str.contains("workspace"),
             "Debug should not expose workspace internals"
+        );
+    }
+
+    // ── VFS authoritative host runtime tests ──
+
+    #[test]
+    fn set_workspace_swaps_resolution_source() {
+        // Start with a standalone host (MemoryWorkspace).
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        // Upsert two files: a parent and a dependency.
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<script setup>\nimport Btn from './Btn.vue'\n</script>\n<template><Btn/></template>",
+        );
+        upsert_vue(
+            &host,
+            "/src/Btn.vue",
+            "<template><button>click</button></template>",
+        );
+
+        // Build a NEW workspace that has exact resolution wired.
+        let new_ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        new_ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from("<script setup>\nimport Btn from './Btn.vue'\n</script>\n<template><Btn/></template>"),
+        );
+        new_ws.inject_file(
+            "/src/Btn.vue".to_string(),
+            Arc::from("<template><button>click</button></template>"),
+        );
+        // Set exact resolution: ./Btn.vue -> /src/Btn.vue
+        new_ws.set_exact_resolutions(
+            "/src/App.vue",
+            vec![verter_vfs::ExactResolution {
+                specifier: "./Btn.vue".to_string(),
+                resolved_canonical_id: Some("/src/Btn.vue".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        // Swap the workspace.
+        host.set_workspace(new_ws.clone() as Arc<dyn verter_vfs::WorkspaceAccess>);
+
+        // Positive: resolve_import_via_workspace should use the new workspace.
+        let result = host.resolve_import_via_workspace("/src/App.vue", "./Btn.vue");
+        assert_eq!(
+            result.as_deref(),
+            Some("/src/Btn.vue"),
+            "set_workspace should make the new workspace's exact resolutions available"
+        );
+
+        // Negative: the old standalone workspace should no longer be used.
+        // (The new workspace doesn't have an arbitrary specifier.)
+        let no_result = host.resolve_import_via_workspace("/src/App.vue", "./NotExist.vue");
+        assert!(
+            no_result.is_none(),
+            "specifiers not in the new workspace should not resolve"
+        );
+    }
+
+    #[test]
+    fn configure_projects_syncs_to_workspace() {
+        use verter_analysis::project_resolver::IdeProjectConfig;
+
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+        // Inject files into the workspace.
+        ws.inject_file(
+            "/my-project/src/App.vue".to_string(),
+            Arc::from("<script setup>\nimport Foo from '@/Foo.vue'\n</script>\n<template><Foo/></template>"),
+        );
+        ws.inject_file(
+            "/my-project/src/Foo.vue".to_string(),
+            Arc::from("<template><div>Foo</div></template>"),
+        );
+
+        // Configure project with a path alias: @ -> /my-project/src
+        let mut project = IdeProjectConfig::new(
+            "/my-project".to_string(),
+            "/my-project".to_string(),
+            Some("/my-project/tsconfig.json".to_string()),
+        );
+        project.compiler_options.paths =
+            vec![("@/*".to_string(), vec!["/my-project/src/*".to_string()])];
+        host.configure_projects(vec![project]);
+
+        // Positive: workspace should now resolve @/Foo.vue via the synced resolver.
+        let result = ws.resolve_import(
+            "/my-project/src/App.vue",
+            "@/Foo.vue",
+            verter_vfs::ResolveRequestKind::EsmImport,
+        );
+        assert!(
+            result.is_some(),
+            "configure_projects should sync resolver to workspace"
+        );
+        assert_eq!(
+            result.unwrap().source_id,
+            "/my-project/src/Foo.vue",
+            "workspace resolver should resolve @/Foo.vue"
+        );
+
+        // Negative: non-matching alias should not resolve.
+        let no_result = ws.resolve_import(
+            "/my-project/src/App.vue",
+            "~/Bar.vue",
+            verter_vfs::ResolveRequestKind::EsmImport,
+        );
+        assert!(
+            no_result.is_none(),
+            "non-matching alias should not resolve via workspace"
+        );
+    }
+
+    #[test]
+    fn set_import_dependencies_syncs_exact_resolutions_to_workspace() {
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+        // Upsert the parent file.
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<script setup>\nimport Btn from '@comp/Btn.vue'\n</script>\n<template><Btn/></template>",
+        );
+        // Upsert the dependency.
+        upsert_vue(
+            &host,
+            "/src/components/Btn.vue",
+            "<template><button/></template>",
+        );
+
+        // Set import dependencies (simulating bundler/LSP resolution).
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![DependencyResolution {
+                specifier: "@comp/Btn.vue".to_string(),
+                resolved_canonical_id: Some("/src/components/Btn.vue".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        // Positive: workspace should now have exact resolution for this specifier.
+        let result = ws.resolve_import(
+            "/src/App.vue",
+            "@comp/Btn.vue",
+            verter_vfs::ResolveRequestKind::EsmImport,
+        );
+        assert!(
+            result.is_some(),
+            "set_import_dependencies should sync exact resolutions to workspace"
+        );
+        assert_eq!(
+            result.unwrap().source_id,
+            "/src/components/Btn.vue",
+            "workspace exact resolution should match the provided dependency"
+        );
+
+        // Negative: other specifiers should not resolve.
+        let no_result = ws.resolve_import(
+            "/src/App.vue",
+            "@comp/Other.vue",
+            verter_vfs::ResolveRequestKind::EsmImport,
+        );
+        assert!(
+            no_result.is_none(),
+            "specifiers not in set_import_dependencies should not resolve"
+        );
+    }
+
+    #[test]
+    fn workspace_resolution_is_phase_0_primary() {
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+        // Inject files.
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                "<script setup>\nimport T from './types'\n</script>\n<template><div/></template>",
+            ),
+        );
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from("export type Foo = string;"),
+        );
+
+        // Upsert both into the host.
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<script setup>\nimport T from './types'\n</script>\n<template><div/></template>",
+        );
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export type Foo = string;"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+        // Set exact resolution on workspace ONLY (not on host's dependency_resolutions).
+        ws.set_exact_resolutions(
+            "/src/App.vue",
+            vec![verter_vfs::ExactResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        // Positive: workspace Phase 0 should resolve ./types -> /src/types.ts
+        // even though the host's legacy Phase 1 has no dependency_resolutions for it.
+        let result = host.resolve_import_via_workspace("/src/App.vue", "./types");
+        assert_eq!(
+            result.as_deref(),
+            Some("/src/types.ts"),
+            "workspace Phase 0 should be primary resolution source"
+        );
+
+        // Negative: random specifiers still don't resolve.
+        let no_result = host.resolve_import_via_workspace("/src/App.vue", "./nonexistent");
+        assert!(
+            no_result.is_none(),
+            "unresolvable specifiers should still return None"
+        );
+    }
+
+    #[test]
+    fn smart_invalidation_reads_workspace_reverse_deps() {
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+
+        // Inject files into the workspace.
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from("export interface Props { name: string }"),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from("<script setup lang=\"ts\">\nimport type { Props } from './types'\ndefineProps<Props>()\n</script>\n<template><div/></template>"),
+        );
+
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+        // Upsert both files.
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export interface Props { name: string }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<script setup lang=\"ts\">\nimport type { Props } from './types'\ndefineProps<Props>()\n</script>\n<template><div/></template>",
+        );
+
+        // Simulate the bundler/LSP resolution flow: after upsert, the caller
+        // provides resolved import dependencies. set_import_dependencies now
+        // syncs exact resolutions to the workspace.
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        // Positive: workspace should now have /src/App.vue as a reverse dep
+        // of /src/types.ts via exact_resolved_deps.
+        let rev_deps = ws.reverse_deps_for("/src/types.ts");
+        assert!(
+            rev_deps.contains(&"/src/App.vue".to_string()),
+            "workspace reverse deps should include App.vue after set_import_dependencies (got: {:?})",
+            rev_deps,
+        );
+
+        // Negative: non-imported files should NOT appear as reverse deps.
+        let other_rev = ws.reverse_deps_for("/src/something-else.ts");
+        assert!(
+            !other_rev.contains(&"/src/App.vue".to_string()),
+            "unrelated files should not appear in reverse deps"
         );
     }
 }

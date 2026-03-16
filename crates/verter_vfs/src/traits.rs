@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::types::{FileKind, ParsedEdge, ProjectOwnership, ResolveRequestKind, ResolveResult};
+use crate::types::{
+    ExactResolution, ExactResolutionResult, FileKind, ParsedEdge, ProjectOwnership,
+    ResolveRequestKind, ResolveResult,
+};
 
 /// Workspace access trait for the compilation host.
 ///
@@ -61,4 +64,22 @@ pub trait WorkspaceAccess: Send + Sync {
 
     /// Query forward deps (files this file imports).
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String>;
+
+    // ── Mutation methods (called by host for backward compat) ──
+
+    /// Set exact resolutions for a file (authoritative specifier->canonical_id).
+    /// Called by the host when `set_import_dependencies()` is used.
+    /// Default: no-op. Concrete workspaces override to delegate to EdgeStore.
+    fn set_exact_resolutions(
+        &self,
+        _canonical_id: &str,
+        _resolutions: Vec<ExactResolution>,
+    ) -> ExactResolutionResult {
+        ExactResolutionResult::default()
+    }
+
+    /// Configure the project resolver from a list of project configs.
+    /// Called by the host when `configure_projects()` is used.
+    /// Default: no-op. Concrete workspaces override to rebuild the resolver.
+    fn configure_resolver(&self, _projects: Vec<crate::resolver::IdeProjectConfig>) {}
 }

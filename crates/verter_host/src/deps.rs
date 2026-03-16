@@ -291,6 +291,52 @@ pub(crate) fn should_invalidate_dependent(
     false
 }
 
+/// Smart invalidation using a pre-computed set of owner canonical IDs.
+///
+/// Used by the native (non-WASM) path where reverse deps are read from the
+/// workspace's authoritative EdgeStore instead of the host's legacy
+/// `reverse_dependencies` map.
+pub(crate) fn smart_invalidate_dependents_with_owners(
+    files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
+    owners: BTreeSet<String>,
+    project_resolver: &crate::shared::Shared<Option<NativeProjectResolver>>,
+    config: &HostConfig,
+    dependency_id: &str,
+    old_export_signatures: &[verter_analysis::ExportSignature],
+    new_export_signatures: &[verter_analysis::ExportSignature],
+) {
+    if owners.is_empty() {
+        return;
+    }
+
+    let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
+    let resolver = read_lock(project_resolver);
+    let mut files = write_lock(files);
+    let dep_source = files.get(dependency_id).map(|f| Arc::clone(&f.source));
+    let file_ids: rustc_hash::FxHashSet<String> = if resolver.is_some() {
+        files.keys().cloned().collect()
+    } else {
+        rustc_hash::FxHashSet::default()
+    };
+
+    for owner in owners {
+        if let Some(file) = files.get_mut(&owner) {
+            if should_invalidate_dependent(
+                file,
+                dependency_id,
+                &changed_exports,
+                old_export_signatures.is_empty() && new_export_signatures.is_empty(),
+                dep_source.as_deref(),
+                &config.resolve_extensions,
+                resolver.as_ref(),
+                &file_ids,
+            ) {
+                file.compile_slots.clear();
+            }
+        }
+    }
+}
+
 /// Smart invalidation: when a dependency changes, only invalidate dependent
 /// SFCs whose macro-consumed types were actually affected.
 ///

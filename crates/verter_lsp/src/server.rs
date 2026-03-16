@@ -5344,6 +5344,10 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             },
         ));
         workspace.set_project_graph(vfs_build.graph);
+        // Wire the workspace into the host so resolution, edge recording, and
+        // reverse-dep queries use the VFS as the authoritative source.
+        let workspace_arc: Arc<dyn verter_vfs::WorkspaceAccess> = workspace.clone();
+        host.set_workspace(workspace_arc);
         *vfs_workspace.write() = Some(workspace);
         tracing::info!(
             "VFS filesystem workspace initialized with {} roots",

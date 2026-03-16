@@ -170,6 +170,35 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.engine.forward_deps_for(canonical_id)
     }
+
+    fn set_exact_resolutions(
+        &self,
+        canonical_id: &str,
+        resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        self.engine.set_exact_resolutions(canonical_id, resolutions)
+    }
+
+    fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
+        let vfs_configs: Vec<crate::project_graph::VfsProjectConfig> = projects
+            .into_iter()
+            .map(|p| crate::project_graph::VfsProjectConfig {
+                root: p.root.clone(),
+                rank: crate::project_graph::ProjectRank::Explicit,
+                tsconfig_path: p.tsconfig_path.clone(),
+                root_files: vec![],
+                extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
+                workspace_root: p.workspace_root.clone(),
+                workspace_aliases: p.workspace_aliases.clone(),
+                compiler_options: p.compiler_options.clone(),
+                references: p.references.clone(),
+                membership: p.membership.clone(),
+            })
+            .collect();
+        let graph = crate::project_graph::ProjectGraph::from_configs(vfs_configs);
+        *self.engine.project_graph.write() = graph;
+        self.engine.rebuild_resolver();
+    }
 }
 
 // ── ProjectResolverReader implementation ──

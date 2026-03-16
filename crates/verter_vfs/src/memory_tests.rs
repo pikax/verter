@@ -736,3 +736,140 @@ fn add_explicit_project() {
         "should own file after adding explicit project"
     );
 }
+
+// ── WorkspaceAccess trait mutation methods ──
+
+#[test]
+fn trait_set_exact_resolutions_delegates_to_engine() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from("<template>hi</template>"),
+    );
+    ws.inject_file(
+        "/src/utils.ts".to_string(),
+        Arc::from("export const x = 1;"),
+    );
+
+    // Call via trait method.
+    let result = WorkspaceAccess::set_exact_resolutions(
+        &ws,
+        "/src/App.vue",
+        vec![ExactResolution {
+            specifier: "./utils".to_string(),
+            resolved_canonical_id: Some("/src/utils.ts".to_string()),
+            possible_canonical_ids: vec![],
+        }],
+    );
+
+    // Positive: should return without panic; newly_resolved can be empty
+    // because the exact resolution doesn't trigger edge recording.
+    let _ = result;
+
+    // Positive: resolve_import should now find it via exact resolution.
+    let resolved = ws.resolve_import("/src/App.vue", "./utils", ResolveRequestKind::EsmImport);
+    assert!(
+        resolved.is_some(),
+        "trait set_exact_resolutions should make specifier resolvable"
+    );
+    assert_eq!(resolved.unwrap().source_id, "/src/utils.ts");
+
+    // Negative: other specifiers still don't resolve.
+    let no_result = ws.resolve_import("/src/App.vue", "./other", ResolveRequestKind::EsmImport);
+    assert!(
+        no_result.is_none(),
+        "specifiers not in exact resolutions should not resolve"
+    );
+}
+
+#[test]
+fn trait_configure_resolver_builds_project_resolver() {
+    use crate::resolver::IdeProjectConfig;
+
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file(
+        "/proj/src/App.vue".to_string(),
+        Arc::from("<template>hi</template>"),
+    );
+    ws.inject_file(
+        "/proj/src/Foo.vue".to_string(),
+        Arc::from("<template>foo</template>"),
+    );
+
+    // Configure with a path alias: @ -> /proj/src
+    let mut project = IdeProjectConfig::new(
+        "/proj".to_string(),
+        "/proj".to_string(),
+        Some("/proj/tsconfig.json".to_string()),
+    );
+    project.compiler_options.paths = vec![("@/*".to_string(), vec!["/proj/src/*".to_string()])];
+
+    // Call via trait method.
+    WorkspaceAccess::configure_resolver(&ws, vec![project]);
+
+    // Positive: workspace resolver should now resolve @/Foo.vue.
+    let resolved = ws.resolve_import(
+        "/proj/src/App.vue",
+        "@/Foo.vue",
+        ResolveRequestKind::EsmImport,
+    );
+    assert!(
+        resolved.is_some(),
+        "trait configure_resolver should make alias resolvable"
+    );
+    assert_eq!(resolved.unwrap().source_id, "/proj/src/Foo.vue");
+
+    // Negative: non-matching alias.
+    let no_result = ws.resolve_import(
+        "/proj/src/App.vue",
+        "~/Bar.vue",
+        ResolveRequestKind::EsmImport,
+    );
+    assert!(no_result.is_none(), "non-matching alias should not resolve");
+}
+
+#[test]
+fn trait_configure_resolver_empty_clears_resolver() {
+    use crate::resolver::IdeProjectConfig;
+
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file(
+        "/proj/src/App.vue".to_string(),
+        Arc::from("<template>hi</template>"),
+    );
+    ws.inject_file(
+        "/proj/src/Foo.vue".to_string(),
+        Arc::from("<template>foo</template>"),
+    );
+
+    // First configure with a resolver.
+    let mut project = IdeProjectConfig::new(
+        "/proj".to_string(),
+        "/proj".to_string(),
+        Some("/proj/tsconfig.json".to_string()),
+    );
+    project.compiler_options.paths = vec![("@/*".to_string(), vec!["/proj/src/*".to_string()])];
+    WorkspaceAccess::configure_resolver(&ws, vec![project]);
+
+    // Verify it works.
+    let resolved = ws.resolve_import(
+        "/proj/src/App.vue",
+        "@/Foo.vue",
+        ResolveRequestKind::EsmImport,
+    );
+    assert!(resolved.is_some(), "should resolve before clearing");
+
+    // Clear it.
+    WorkspaceAccess::configure_resolver(&ws, vec![]);
+
+    // The resolver is rebuilt from empty configs, so aliases should no longer resolve.
+    let after_clear = ws.resolve_import(
+        "/proj/src/App.vue",
+        "@/Foo.vue",
+        ResolveRequestKind::EsmImport,
+    );
+    assert!(
+        after_clear.is_none(),
+        "clearing resolver should stop alias resolution"
+    );
+}
