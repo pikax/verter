@@ -187,6 +187,7 @@ impl TestSessionBuilder {
             service,
             provider,
             workspace_id,
+            kind: self.kind,
             _drain_handle: drain_handle,
         };
 
@@ -213,6 +214,7 @@ pub(crate) struct RealProviderTestSession {
     service: tower_lsp_server::LspService<VerterLanguageServer>,
     provider: Arc<dyn TypeProvider>,
     workspace_id: String,
+    kind: TestProviderKind,
     _drain_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -220,6 +222,16 @@ impl RealProviderTestSession {
     /// Access the underlying server.
     pub(crate) fn server(&self) -> &VerterLanguageServer {
         self.service.inner()
+    }
+
+    /// Which provider backend this session uses.
+    pub(crate) fn provider_kind(&self) -> TestProviderKind {
+        self.kind
+    }
+
+    /// Returns `true` when this session uses TSGO.
+    pub(crate) fn is_tsgo(&self) -> bool {
+        matches!(self.kind, TestProviderKind::Tsgo)
     }
 
     /// Build a `file://` URI from a fixture-relative path.
@@ -280,6 +292,41 @@ impl RealProviderTestSession {
         doc.line_index
             .offset_to_position(offset as u32)
             .expect("valid position")
+    }
+
+    /// Find the Nth (0-indexed) occurrence of `needle` and add `delta`.
+    pub(crate) fn find_nth_position(
+        &self,
+        uri: &Uri,
+        needle: &str,
+        n: usize,
+        delta: usize,
+    ) -> Position {
+        let doc = self
+            .server()
+            .test_documents()
+            .get(uri)
+            .expect("document should be open");
+        let mut start = 0;
+        let mut count = 0;
+        loop {
+            match doc.source[start..].find(needle) {
+                Some(pos) => {
+                    let abs_pos = start + pos;
+                    if count == n {
+                        return doc
+                            .line_index
+                            .offset_to_position((abs_pos + delta) as u32)
+                            .expect("valid position");
+                    }
+                    count += 1;
+                    start = abs_pos + 1;
+                }
+                None => {
+                    panic!("needle `{needle}` occurrence {n} not found (only {count} occurrences)")
+                }
+            }
+        }
     }
 
     /// Ensure the current file is synced to the type provider.
@@ -377,6 +424,134 @@ impl RealProviderTestSession {
                 None
             }
         }
+    }
+
+    /// Get go-to-definition locations flattened to `Vec<Location>`.
+    pub(crate) async fn definition_locations(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Vec<Location> {
+        match self.definitions(uri, position).await {
+            Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+            Some(GotoDefinitionResponse::Array(locs)) => locs,
+            Some(GotoDefinitionResponse::Link(links)) => links
+                .into_iter()
+                .map(|link| Location {
+                    uri: link.target_uri,
+                    range: link.target_selection_range,
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Get references at a position (includes declaration).
+    pub(crate) async fn references(&self, uri: &Uri, position: Position) -> Vec<Location> {
+        let params = ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+        };
+        match self.server().references(params).await {
+            Ok(Some(locs)) => locs,
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                eprintln!("references error: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Call prepare_rename at a position.
+    pub(crate) async fn prepare_rename(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Option<PrepareRenameResponse> {
+        let params = TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        };
+        match self.server().prepare_rename(params).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("prepare_rename error: {e}");
+                None
+            }
+        }
+    }
+
+    /// Call rename at a position with a new name.
+    pub(crate) async fn rename_edits(
+        &self,
+        uri: &Uri,
+        position: Position,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: new_name.to_string(),
+            work_done_progress_params: Default::default(),
+        };
+        match self.server().rename(params).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("rename error: {e}");
+                None
+            }
+        }
+    }
+
+    /// Get document symbols flattened to a list of names.
+    pub(crate) async fn document_symbols(&self, uri: &Uri) -> Vec<String> {
+        let params = DocumentSymbolParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        match self.server().document_symbol(params).await {
+            Ok(Some(DocumentSymbolResponse::Flat(syms))) => {
+                syms.into_iter().map(|s| s.name).collect()
+            }
+            Ok(Some(DocumentSymbolResponse::Nested(syms))) => {
+                fn collect_names(syms: Vec<DocumentSymbol>, out: &mut Vec<String>) {
+                    for s in syms {
+                        out.push(s.name);
+                        if let Some(children) = s.children {
+                            collect_names(children, out);
+                        }
+                    }
+                }
+                let mut names = Vec::new();
+                collect_names(syms, &mut names);
+                names
+            }
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                eprintln!("document_symbol error: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Extract a filesystem path from a URI (for assertions).
+    /// Returns a forward-slash path without the `file://` scheme.
+    pub(crate) fn uri_to_path(uri: &Uri) -> String {
+        uri.to_string()
+            .strip_prefix("file:///")
+            .unwrap_or_else(|| uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str()))
+            .replace("%3A", ":")
+            .replace("%20", " ")
     }
 
     /// Retry-loop waiting for the provider to warm up.
@@ -497,3 +672,29 @@ macro_rules! real_provider_test {
 }
 
 pub(crate) use real_provider_test;
+
+/// Canary assertion for known provider/harness limitations.
+///
+/// Asserts that the **known-broken behavior still holds**. When the limitation is fixed
+/// (the condition becomes false), the canary panics — signaling the fix should be
+/// promoted to a real `assert!`.
+///
+/// Usage: `canary_assert_known_limitation!(broken_condition, "description of limitation");`
+///
+/// - If `broken_condition` is true → the limitation still exists → test passes (logs a note)
+/// - If `broken_condition` is false → the limitation was fixed → test **fails** with a
+///   message to promote the canary to a real assertion
+macro_rules! canary_assert_known_limitation {
+    ($broken_cond:expr, $($arg:tt)+) => {
+        if $broken_cond {
+            eprintln!("  CANARY (known limitation still present): {}", format_args!($($arg)+));
+        } else {
+            panic!(
+                "CANARY RESOLVED — limitation no longer present, promote to real assert!: {}",
+                format_args!($($arg)+)
+            );
+        }
+    };
+}
+
+pub(crate) use canary_assert_known_limitation;
