@@ -43,27 +43,31 @@ function convertType(
       return typeof td.value === "string" ? `"${td.value}"` : String(td.value);
 
     case "union": {
-      const type = td.types.map(typeDescriptorToString).join(" | ");
+      // Flatten nested unions so optional literal unions produce a flat array
+      // e.g. ('error' | 'primary') | undefined → ['undefined', '"error"', '"primary"']
+      // instead of [{ kind: 'enum', schema: [...] }, 'undefined']
+      const flat = flattenUnionTypes(td.types);
+      const type = flat.map(typeDescriptorToString).join(" | ");
       if (ignore?.(type)) return type;
       return {
         kind: "enum",
         type,
-        schema: td.types.map((t) => convertType(t, ignore, typeRegistry, visited)),
+        schema: flat.map((t) => convertType(t, ignore, typeRegistry, visited)),
       };
     }
 
     case "intersection": {
       const type = td.types.map(typeDescriptorToString).join(" & ");
       if (ignore?.(type)) return type;
-      // Volar uses Record<string, PropertyMetaSchema> with numeric string keys
-      const schema: Record<string, PropertyMetaSchema> = {};
-      td.types.forEach((t, i) => {
-        schema[String(i)] = convertType(t, ignore, typeRegistry, visited);
-      });
+      // Use array format for Volar compat — cast needed since TypeScript types
+      // declare object schema as Record, but arrays work at runtime and match
+      // how stripeTypeScriptInternalTypesSchema processes them.
       return {
-        kind: "object",
+        kind: "object" as const,
         type,
-        schema,
+        schema: td.types.map((t) =>
+          convertType(t, ignore, typeRegistry, visited),
+        ) as unknown as Record<string, PropertyMetaSchema>,
       };
     }
 
@@ -88,7 +92,10 @@ function convertType(
     }
 
     case "object": {
-      const type = `{ ${td.properties.map((p) => `${p.name}${p.optional ? "?" : ""}: ${typeDescriptorToString(p.type)}`).join("; ")} }`;
+      // Use typeDescriptorToSafeString for property types to avoid including literal
+      // quotes in the type string — downstream consumers (nuxt-component-meta) can
+      // falsely detect objects as enums if the type string contains `"` and `|`.
+      const type = `{ ${td.properties.map((p) => `${p.name}${p.optional ? "?" : ""}: ${typeDescriptorToSafeString(p.type)}`).join("; ")} }`;
       if (ignore?.(type)) return type;
       // Volar uses Record<string, PropertyMeta-like> with property names as keys.
       // Each value includes name, required, type, description, tags, global, schema.
@@ -167,7 +174,7 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
     case "literal":
       return typeof td.value === "string" ? `"${td.value}"` : String(td.value);
     case "union":
-      return td.types.map(typeDescriptorToString).join(" | ");
+      return flattenUnionTypes(td.types).map(typeDescriptorToString).join(" | ");
     case "intersection":
       return td.types.map(typeDescriptorToString).join(" & ");
     case "array":
@@ -187,4 +194,38 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
     case "unknown":
       return td.rawType || "unknown";
   }
+}
+
+/**
+ * Like typeDescriptorToString but renders literal values without quotes.
+ * Used in object type strings to avoid triggering false enum detection
+ * in downstream consumers that check for `"` and `|` in type strings.
+ */
+function typeDescriptorToSafeString(td: TypeDescriptor): string {
+  switch (td.kind) {
+    case "literal":
+      return typeof td.value === "string" ? td.value : String(td.value);
+    case "union":
+      return flattenUnionTypes(td.types).map(typeDescriptorToSafeString).join(" | ");
+    case "intersection":
+      return td.types.map(typeDescriptorToSafeString).join(" & ");
+    default:
+      return typeDescriptorToString(td);
+  }
+}
+
+/**
+ * Flatten nested unions into a single flat array of types.
+ * `(A | B) | C` → `[A, B, C]`
+ */
+function flattenUnionTypes(types: TypeDescriptor[]): TypeDescriptor[] {
+  const result: TypeDescriptor[] = [];
+  for (const t of types) {
+    if (t.kind === "union") {
+      result.push(...flattenUnionTypes(t.types));
+    } else {
+      result.push(t);
+    }
+  }
+  return result;
 }

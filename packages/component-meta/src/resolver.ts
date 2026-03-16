@@ -75,6 +75,7 @@ const enum TokenKind {
 interface Token {
   kind: TokenKind;
   value: string;
+  start: number; // character offset in original input
 }
 
 function tokenize(input: string): Token[] {
@@ -93,14 +94,14 @@ function tokenize(input: string): Token[] {
 
     // Arrow =>
     if (ch === "=" && input[i + 1] === ">") {
-      tokens.push({ kind: TokenKind.Arrow, value: "=>" });
+      tokens.push({ kind: TokenKind.Arrow, value: "=>", start: i });
       i += 2;
       continue;
     }
 
     // Spread ...
     if (ch === "." && input[i + 1] === "." && input[i + 2] === ".") {
-      tokens.push({ kind: TokenKind.DotDotDot, value: "..." });
+      tokens.push({ kind: TokenKind.DotDotDot, value: "...", start: i });
       i += 3;
       continue;
     }
@@ -124,13 +125,14 @@ function tokenize(input: string): Token[] {
     };
 
     if (ch in single) {
-      tokens.push({ kind: single[ch], value: ch });
+      tokens.push({ kind: single[ch], value: ch, start: i });
       i++;
       continue;
     }
 
     // String literal (single or double quoted)
     if (ch === "'" || ch === '"') {
+      const startPos = i;
       const quote = ch;
       let str = "";
       i++; // skip opening quote
@@ -144,12 +146,13 @@ function tokenize(input: string): Token[] {
         }
       }
       i++; // skip closing quote
-      tokens.push({ kind: TokenKind.StringLiteral, value: str });
+      tokens.push({ kind: TokenKind.StringLiteral, value: str, start: startPos });
       continue;
     }
 
     // Number literal (including negative)
     if (ch === "-" || (ch >= "0" && ch <= "9")) {
+      const startPos = i;
       let num = ch;
       i++;
       while (i < len && ((input[i] >= "0" && input[i] <= "9") || input[i] === ".")) {
@@ -158,7 +161,7 @@ function tokenize(input: string): Token[] {
       }
       // Only treat as number if it's actually a number (not just "-")
       if (num !== "-") {
-        tokens.push({ kind: TokenKind.NumberLiteral, value: num });
+        tokens.push({ kind: TokenKind.NumberLiteral, value: num, start: startPos });
         continue;
       }
       // Fallback: treat "-" as unknown
@@ -167,6 +170,7 @@ function tokenize(input: string): Token[] {
 
     // Identifier (also handles `true`, `false`, `readonly`, `keyof`, `typeof`, `infer`)
     if ((ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch === "_" || ch === "$") {
+      const identStart = i;
       let ident = ch;
       i++;
       while (i < len) {
@@ -184,7 +188,7 @@ function tokenize(input: string): Token[] {
           break;
         }
       }
-      tokens.push({ kind: TokenKind.Identifier, value: ident });
+      tokens.push({ kind: TokenKind.Identifier, value: ident, start: identStart });
       continue;
     }
 
@@ -192,7 +196,7 @@ function tokenize(input: string): Token[] {
     i++;
   }
 
-  tokens.push({ kind: TokenKind.EOF, value: "" });
+  tokens.push({ kind: TokenKind.EOF, value: "", start: i });
   return tokens;
 }
 
@@ -481,8 +485,9 @@ class Parser {
   }
 
   private parseObjectType(): TypeDescriptor {
-    this.expect(TokenKind.LBrace);
+    const openBrace = this.expect(TokenKind.LBrace);
     const properties: ObjectProperty[] = [];
+    let hasIndexSignature = false;
 
     while (this.peek().kind !== TokenKind.RBrace && this.peek().kind !== TokenKind.EOF) {
       // Skip `readonly` modifier
@@ -494,6 +499,7 @@ class Parser {
 
       // Index signature `[key: string]: Type` — skip and continue
       if (this.peek().kind === TokenKind.LBracket) {
+        hasIndexSignature = true;
         // Skip everything until we find the matching `]`
         this.advance(); // consume `[`
         let depth = 1;
@@ -526,7 +532,17 @@ class Parser {
       }
     }
 
-    this.expect(TokenKind.RBrace);
+    const closeBrace = this.expect(TokenKind.RBrace);
+    // If the object has only index signatures and no named properties,
+    // fall back to unknown with rawType to preserve the original text.
+    if (properties.length === 0 && hasIndexSignature) {
+      let rawType = this.input.slice(openBrace.start, closeBrace.start + 1).trim();
+      // Normalize trailing semicolon for TypeScript/Volar compat
+      if (!rawType.endsWith("; }")) {
+        rawType = rawType.replace(/\s*\}$/, "; }");
+      }
+      return unknown(rawType);
+    }
     return object(properties);
   }
 

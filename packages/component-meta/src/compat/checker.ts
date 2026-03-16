@@ -30,16 +30,41 @@ export function mapPropMeta(
   return {
     name: prop.name,
     description: prop.description ?? "",
-    type: prop.rawType ?? typeDescriptorToString(prop.type),
+    type: normalizeTypeString(prop.rawType ?? typeDescriptorToString(prop.type)),
     required: prop.required,
     global: false,
-    default: prop.default,
+    default: evaluateDefault(prop.default),
     tags: (prop.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
     })),
     schema: typeDescriptorToSchema(prop.type, options, typeRegistry),
   };
+}
+
+/**
+ * Normalize Array<T> syntax to T[] for consistency with Volar output.
+ */
+function normalizeTypeString(type: string): string {
+  const match = type.match(/^Array<(.+)>$/);
+  if (match) return `${match[1]}[]`;
+  return type;
+}
+
+/**
+ * Evaluate common default value patterns to match Volar's behavior.
+ * Volar evaluates simple defaults; verter stores the raw source text.
+ */
+function evaluateDefault(val: string | undefined): string | undefined {
+  if (val === undefined) return undefined;
+  // Arrow function returning empty object: () => ({})
+  if (/^\(\)\s*=>\s*\(\s*\{\s*\}\s*\)$/.test(val)) return "{}";
+  // Arrow function returning empty array: () => []
+  if (/^\(\)\s*=>\s*\[\s*\]$/.test(val)) return "[]";
+  // Arrow function returning array literal: () => ['a', 'b']
+  const arrowArrMatch = val.match(/^\(\)\s*=>\s*(\[.*\])$/);
+  if (arrowArrMatch) return arrowArrMatch[1];
+  return val;
 }
 
 /**
@@ -158,6 +183,12 @@ export class ComponentMetaChecker {
         } catch {
           // Ignore parse errors
         }
+      }
+      // Extract locally-defined interfaces/types from SFC content
+      // for runtime-style defineProps that reference local types
+      const sfcContent = this.trackedFiles.get(absPath);
+      if (sfcContent) {
+        extractLocalInterfaces(sfcContent, typeRegistry);
       }
     }
     const meta = extractComponentMeta(this.adapter, absPath, absPath);
@@ -311,6 +342,69 @@ export class ComponentMetaChecker {
     // Try exact path (might already have extension)
     if (existsSync(base)) return base;
     return null;
+  }
+}
+
+/**
+ * Extract locally-defined interface/type declarations from SFC content
+ * and add them to the type registry.
+ *
+ * Handles simple interface definitions like:
+ * ```ts
+ * interface Foo { name: string; age: number }
+ * ```
+ *
+ * Does NOT overwrite existing registry entries.
+ */
+function extractLocalInterfaces(sfcContent: string, registry: Map<string, string>): void {
+  // Extract script content (both <script setup> and <script>)
+  const scriptBlocks = sfcContent.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g);
+  for (const match of scriptBlocks) {
+    const script = match[1];
+    // Match interface declarations: interface Name { ... }
+    // Use a balanced brace matching approach
+    const interfacePattern = /\binterface\s+(\w+)(?:\s+extends\s+[^{]+)?\s*\{/g;
+    let ifMatch;
+    while ((ifMatch = interfacePattern.exec(script)) !== null) {
+      const name = ifMatch[1];
+      if (registry.has(name)) continue;
+      // Find the matching closing brace
+      const startIdx = ifMatch.index + ifMatch[0].length - 1; // position of opening {
+      let depth = 1;
+      let i = startIdx + 1;
+      while (i < script.length && depth > 0) {
+        if (script[i] === "{") depth++;
+        else if (script[i] === "}") depth--;
+        i++;
+      }
+      if (depth === 0) {
+        const body = script.slice(startIdx, i); // includes { and }
+        registry.set(name, body);
+      }
+    }
+
+    // Match type alias declarations: type Name = ...
+    const typePattern = /\btype\s+(\w+)(?:<[^>]*>)?\s*=\s*/g;
+    let typeMatch;
+    while ((typeMatch = typePattern.exec(script)) !== null) {
+      const name = typeMatch[1];
+      if (registry.has(name)) continue;
+      // Extract the type value until the next unbalanced semicolon or newline
+      const startIdx = typeMatch.index + typeMatch[0].length;
+      let depth = 0;
+      let i = startIdx;
+      while (i < script.length) {
+        const ch = script[i];
+        if (ch === "{" || ch === "(" || ch === "<") depth++;
+        else if (ch === "}" || ch === ")" || ch === ">") depth--;
+        else if (depth === 0 && (ch === "\n" || ch === ";")) break;
+        i++;
+      }
+      const value = script.slice(startIdx, i).trim();
+      if (value) {
+        registry.set(name, value);
+      }
+    }
   }
 }
 

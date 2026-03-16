@@ -99,7 +99,7 @@ describe("typeDescriptorToSchema", () => {
     expect(schema).toEqual({
       kind: "object",
       type: "string & number",
-      schema: { "0": "string", "1": "number" },
+      schema: ["string", "number"],
     });
   });
 
