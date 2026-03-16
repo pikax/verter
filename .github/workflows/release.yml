@@ -677,7 +677,10 @@ jobs:
 
             # --- Clean previous build output ---
             rm -rf packages/vue-vscode/dist/node_modules
-            rm -rf packages/vue-vscode/node_modules/@verter
+            # Only remove packages that package.mjs will recreate as real copies.
+            # Keep @verter/language-shared (pnpm symlink) — esbuild bundles it.
+            rm -rf packages/vue-vscode/node_modules/@verter/typescript-plugin
+            rm -rf packages/vue-vscode/node_modules/@verter/native
 
             # --- Build & package (package.mjs handles dep copying + version patching + vsce) ---
             cd packages/vue-vscode
