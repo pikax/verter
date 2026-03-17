@@ -95,12 +95,18 @@ export function wrapWasmHost(host: {
 /**
  * Create a standalone host adapter using the NAPI backend.
  * Lazily loads `@verter/native`.
+ *
+ * @param workspace Optional workspace for workspace-backed resolution.
+ *                  When provided, creates the host with `VerterHost.withWorkspace()`.
  */
-export function createNapiAdapter(): VerterHostAdapter {
+export function createNapiAdapter(workspace?: unknown): VerterHostAdapter {
   // @verter/native is CJS-only — use createRequire for ESM compatibility.
   const _require = typeof require === "function" ? require : createRequire(import.meta.url);
   const native = _require("@verter/native");
-  const host = new native.VerterHost({ devMode: false, analysisLevel: "full" });
+  const config = { devMode: false, analysisLevel: "full" as const };
+  const host = workspace
+    ? native.VerterHost.withWorkspace(config, workspace)
+    : new native.VerterHost(config);
   return wrapNapiHost(host);
 }
 

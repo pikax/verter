@@ -204,6 +204,9 @@ fn discover_empty_dir() {
 
 #[test]
 fn parse_base_url() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -211,7 +214,12 @@ fn parse_base_url() {
     )
     .unwrap();
 
-    let opts = load_compiler_options(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let opts = load_compiler_options(&ws, &tsconfig_path);
     assert!(opts.base_url.is_some(), "should extract baseUrl");
     let base = opts.base_url.unwrap();
     // baseUrl should be resolved to absolute path
@@ -222,6 +230,9 @@ fn parse_base_url() {
 
 #[test]
 fn parse_paths() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -229,7 +240,12 @@ fn parse_paths() {
     )
     .unwrap();
 
-    let opts = load_compiler_options(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let opts = load_compiler_options(&ws, &tsconfig_path);
     assert_eq!(opts.paths.len(), 1, "should extract one path mapping");
     assert_eq!(opts.paths[0].0, "@/*");
     assert_eq!(opts.paths[0].1.len(), 1);
@@ -241,6 +257,9 @@ fn parse_paths() {
 
 #[test]
 fn parse_extends_inherits_options() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.base.json"),
@@ -253,7 +272,12 @@ fn parse_extends_inherits_options() {
     )
     .unwrap();
 
-    let opts = load_compiler_options(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let opts = load_compiler_options(&ws, &tsconfig_path);
     assert!(
         opts.base_url.is_some(),
         "should inherit baseUrl from extends"
@@ -263,6 +287,9 @@ fn parse_extends_inherits_options() {
 
 #[test]
 fn parse_extends_override() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.base.json"),
@@ -275,7 +302,12 @@ fn parse_extends_override() {
     )
     .unwrap();
 
-    let opts = load_compiler_options(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let opts = load_compiler_options(&ws, &tsconfig_path);
     assert_eq!(opts.paths.len(), 1);
     // Should use the overridden value, not the base
     assert!(
@@ -291,7 +323,10 @@ fn parse_extends_override() {
 
 #[test]
 fn parse_nonexistent_file() {
-    let opts = load_compiler_options(Path::new("/nonexistent/tsconfig.json"));
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let opts = load_compiler_options(&ws, "/nonexistent/tsconfig.json");
     assert!(opts.base_url.is_none());
     assert!(opts.paths.is_empty());
 }
@@ -302,6 +337,9 @@ fn parse_nonexistent_file() {
 
 #[test]
 fn membership_match_all_when_no_filters() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -309,7 +347,12 @@ fn membership_match_all_when_no_filters() {
     )
     .unwrap();
 
-    let membership = load_project_membership(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let membership = load_project_membership(&ws, &tsconfig_path);
     assert!(
         matches!(membership, ProjectMembership::MatchAll),
         "should be MatchAll when no files/include/exclude"
@@ -318,6 +361,9 @@ fn membership_match_all_when_no_filters() {
 
 #[test]
 fn membership_with_include() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -325,7 +371,12 @@ fn membership_with_include() {
     )
     .unwrap();
 
-    let membership = load_project_membership(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let membership = load_project_membership(&ws, &tsconfig_path);
     match membership {
         ProjectMembership::IncludeExclude { include, .. } => {
             assert!(!include.is_empty(), "should have include patterns");
@@ -340,6 +391,9 @@ fn membership_with_include() {
 
 #[test]
 fn membership_with_exclude() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -347,7 +401,12 @@ fn membership_with_exclude() {
     )
     .unwrap();
 
-    let membership = load_project_membership(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let membership = load_project_membership(&ws, &tsconfig_path);
     match membership {
         ProjectMembership::IncludeExclude { exclude, .. } => {
             assert!(!exclude.is_empty(), "should have exclude patterns");
@@ -362,6 +421,9 @@ fn membership_with_exclude() {
 
 #[test]
 fn references_from_solution_style() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     let app_dir = tmp.path().join("app");
     std::fs::create_dir_all(&app_dir).unwrap();
@@ -373,7 +435,12 @@ fn references_from_solution_style() {
     )
     .unwrap();
 
-    let refs = load_project_references(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let refs = load_project_references(&ws, &tsconfig_path);
     assert_eq!(refs.len(), 1, "should find 1 reference");
     assert!(
         refs[0].contains("app") && refs[0].ends_with("tsconfig.json"),
@@ -384,6 +451,9 @@ fn references_from_solution_style() {
 
 #[test]
 fn references_empty_when_none() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -391,7 +461,12 @@ fn references_empty_when_none() {
     )
     .unwrap();
 
-    let refs = load_project_references(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let refs = load_project_references(&ws, &tsconfig_path);
     assert!(refs.is_empty(), "should be empty when no references");
 }
 
@@ -401,6 +476,9 @@ fn references_empty_when_none() {
 
 #[test]
 fn solution_style_detected() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -408,14 +486,18 @@ fn solution_style_detected() {
     )
     .unwrap();
 
+    let workspace_root = tmp.path().to_string_lossy().replace('\\', "/");
     assert!(
-        has_solution_style_tsconfig(tmp.path()),
+        has_solution_style_tsconfig(&ws, &workspace_root),
         "should detect solution-style tsconfig"
     );
 }
 
 #[test]
 fn no_solution_style_without_references() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("tsconfig.json"),
@@ -423,19 +505,24 @@ fn no_solution_style_without_references() {
     )
     .unwrap();
 
+    let workspace_root = tmp.path().to_string_lossy().replace('\\', "/");
     assert!(
-        !has_solution_style_tsconfig(tmp.path()),
+        !has_solution_style_tsconfig(&ws, &workspace_root),
         "should not detect solution-style without references"
     );
 }
 
 #[test]
 fn no_solution_style_empty_references() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(tmp.path().join("tsconfig.json"), r#"{ "references": [] }"#).unwrap();
 
+    let workspace_root = tmp.path().to_string_lossy().replace('\\', "/");
     assert!(
-        !has_solution_style_tsconfig(tmp.path()),
+        !has_solution_style_tsconfig(&ws, &workspace_root),
         "should not detect solution-style with empty references"
     );
 }
@@ -456,21 +543,29 @@ fn normalize_path_collapses_dots() {
 
 #[test]
 fn resolve_relative_extends() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(tmp.path().join("tsconfig.base.json"), "{}").unwrap();
 
-    let resolved = resolve_tsconfig_extends(tmp.path(), "./tsconfig.base.json");
+    let tsconfig_dir = tmp.path().to_string_lossy().replace('\\', "/");
+    let resolved = resolve_tsconfig_extends(&ws, &tsconfig_dir, "./tsconfig.base.json");
     assert!(resolved.is_some(), "should resolve relative extends");
 }
 
 #[test]
 fn resolve_extends_adds_json_extension() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     // with_extension("json") replaces the last extension, so
     // `./base` becomes `./base.json` (which is what we want to find)
     std::fs::write(tmp.path().join("base.json"), "{}").unwrap();
 
-    let resolved = resolve_tsconfig_extends(tmp.path(), "./base");
+    let tsconfig_dir = tmp.path().to_string_lossy().replace('\\', "/");
+    let resolved = resolve_tsconfig_extends(&ws, &tsconfig_dir, "./base");
     assert!(resolved.is_some(), "should try .json extension");
     assert!(
         resolved.unwrap().ends_with("base.json"),
@@ -480,8 +575,12 @@ fn resolve_extends_adds_json_extension() {
 
 #[test]
 fn resolve_extends_nonexistent() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
-    let resolved = resolve_tsconfig_extends(tmp.path(), "./nonexistent");
+    let tsconfig_dir = tmp.path().to_string_lossy().replace('\\', "/");
+    let resolved = resolve_tsconfig_extends(&ws, &tsconfig_dir, "./nonexistent");
     assert!(
         resolved.is_none(),
         "should return None for nonexistent extends"
@@ -495,6 +594,9 @@ fn resolve_extends_nonexistent() {
 /// Child inherits baseUrl from base, overrides paths → must use base's baseUrl.
 #[test]
 fn raw_paths_json_inherits_base_url_when_child_overrides_paths() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     // Base: defines baseUrl
@@ -511,11 +613,16 @@ fn raw_paths_json_inherits_base_url_when_child_overrides_paths() {
     )
     .unwrap();
 
-    let result = raw_paths_json(&tmp.path().join("tsconfig.json"));
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let result = raw_paths_json(&ws, &tsconfig_path);
     let (base_url, paths) = result.expect("should find paths");
 
     // baseUrl should come from the base config (resolved to its directory)
-    let expected_base = normalize_path_buf(tmp.path());
+    let expected_base = crate::resolver::normalize_canonical_id(&tmp.path().to_string_lossy());
     assert_eq!(
         base_url, expected_base,
         "baseUrl should be inherited from base config, not default to child dir"
@@ -536,6 +643,9 @@ fn raw_paths_json_inherits_base_url_when_child_overrides_paths() {
 /// Child overrides baseUrl but inherits paths → must use child's baseUrl.
 #[test]
 fn raw_paths_json_child_base_url_overrides_inherited_paths() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     let sub = tmp.path().join("packages/app");
     std::fs::create_dir_all(&sub).unwrap();
@@ -554,11 +664,15 @@ fn raw_paths_json_child_base_url_overrides_inherited_paths() {
     )
     .unwrap();
 
-    let result = raw_paths_json(&sub.join("tsconfig.json"));
+    let tsconfig_path = sub
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let result = raw_paths_json(&ws, &tsconfig_path);
     let (base_url, paths) = result.expect("should find paths");
 
     // baseUrl should be the child's override (packages/app/)
-    let expected_base = normalize_path_buf(&sub);
+    let expected_base = crate::resolver::normalize_canonical_id(&sub.to_string_lossy());
     assert_eq!(
         base_url, expected_base,
         "baseUrl should be child's override, not base's"

@@ -3492,6 +3492,7 @@ dependencies = [
  "serde_json",
  "verter_analysis",
  "verter_span",
+ "verter_vfs",
 ]
 
 [[package]]
@@ -3599,6 +3600,7 @@ dependencies = [
  "verter_ffi",
  "verter_host",
  "verter_span",
+ "verter_vfs",
 ]
 
 [[package]]
@@ -3624,6 +3626,7 @@ dependencies = [
  "tempfile",
  "verter_core",
  "verter_host",
+ "verter_vfs",
  "walkdir",
 ]
 
@@ -3642,6 +3645,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]

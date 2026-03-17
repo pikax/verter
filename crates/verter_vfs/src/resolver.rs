@@ -7,10 +7,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::types::{
-    ProviderTarget, ResolutionKind, ResolveRequest, ResolveRequestKind, ResolveResult,
+    ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
+    ResolveRequestKind, ResolveResult,
 };
 
 // ── Types ──
@@ -107,22 +107,6 @@ impl IdeProjectConfig {
             }
         }
     }
-}
-
-// ── Trait ──
-
-/// File system abstraction used by [`ProjectResolver`] during resolution.
-///
-/// Both `MemoryWorkspace` and `FilesystemWorkspace` implement this trait,
-/// allowing the resolver to probe file existence and read `package.json`
-/// without depending on a concrete workspace type.
-pub trait ProjectResolverReader: Send + Sync {
-    /// Read file content as text. Used for `package.json` parsing during resolution.
-    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>>;
-    /// Check whether a file exists at the given canonical path.
-    fn file_exists(&self, canonical_id: &str) -> bool;
-    /// Resolve symlinks and return the real path, or `None` if not found.
-    fn realpath(&self, canonical_id: &str) -> Option<String>;
 }
 
 // ── ProjectResolver ──
@@ -226,10 +210,14 @@ impl ProjectResolver {
     /// project references) requires an owning project.
     pub fn resolve_with_reader(
         &self,
-        reader: &dyn ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         request: &ResolveRequest,
     ) -> Option<ResolveResult> {
         let importer_owner = self.owner_for_file(&request.importer_id);
+        let ctx = ResolutionContext {
+            phase: request.phase,
+            kind: request.kind,
+        };
 
         let (source_id, resolution_kind) = match importer_owner {
             Some(owner) => self.resolve_source_id(
@@ -237,7 +225,7 @@ impl ProjectResolver {
                 owner,
                 &request.importer_id,
                 &request.specifier,
-                request.kind,
+                ctx,
             )?,
             None => {
                 // No owning project — try owner-independent branches only
@@ -245,7 +233,7 @@ impl ProjectResolver {
                     reader,
                     &request.importer_id,
                     &request.specifier,
-                    request.kind,
+                    ctx,
                 )?
             }
         };
@@ -313,10 +301,10 @@ impl ProjectResolver {
     /// - `node_modules` resolution
     fn resolve_source_id_unowned(
         &self,
-        reader: &dyn ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         importer_id: &str,
         specifier: &str,
-        kind: ResolveRequestKind,
+        ctx: ResolutionContext,
     ) -> Option<(String, ResolutionKind)> {
         // Relative / absolute
         if is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
@@ -331,7 +319,7 @@ impl ProjectResolver {
 
         // #imports
         if specifier.starts_with('#') {
-            if let Some(resolved) = resolve_package_imports(reader, importer_id, specifier, kind) {
+            if let Some(resolved) = resolve_package_imports(reader, importer_id, specifier, ctx) {
                 return Some((resolved, ResolutionKind::PackageImports));
             }
             return None;
@@ -339,7 +327,7 @@ impl ProjectResolver {
 
         // node_modules
         if let Some((resolved, resolution_kind)) =
-            resolve_node_modules_package(reader, importer_id, specifier, kind)
+            resolve_node_modules_package(reader, importer_id, specifier, ctx)
         {
             return Some((resolved, resolution_kind));
         }
@@ -349,11 +337,11 @@ impl ProjectResolver {
 
     fn resolve_source_id(
         &self,
-        reader: &dyn ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         importer_owner: &IdeProjectConfig,
         importer_id: &str,
         specifier: &str,
-        kind: ResolveRequestKind,
+        ctx: ResolutionContext,
     ) -> Option<(String, ResolutionKind)> {
         if is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
             let importer_dir = parent_dir(importer_id);
@@ -392,14 +380,14 @@ impl ProjectResolver {
         }
 
         if specifier.starts_with('#') {
-            if let Some(resolved) = resolve_package_imports(reader, importer_id, specifier, kind) {
+            if let Some(resolved) = resolve_package_imports(reader, importer_id, specifier, ctx) {
                 return Some((resolved, ResolutionKind::PackageImports));
             }
             return None;
         }
 
         if let Some((resolved, resolution_kind)) =
-            resolve_node_modules_package(reader, importer_id, specifier, kind)
+            resolve_node_modules_package(reader, importer_id, specifier, ctx)
         {
             return Some((resolved, resolution_kind));
         }
@@ -414,7 +402,7 @@ impl ProjectResolver {
     /// Returns `None` if no alias matches or the importer has no owning project.
     pub fn preferred_specifier(
         &self,
-        reader: &dyn ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         importer_id: &str,
         target_id: &str,
     ) -> Option<String> {
@@ -480,7 +468,7 @@ impl ProjectResolver {
 
     fn resolve_project_references(
         &self,
-        reader: &dyn ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         importer_owner: &IdeProjectConfig,
         specifier: &str,
     ) -> Option<String> {
@@ -544,7 +532,7 @@ fn matches_any_pattern_for_root(path: &str, root: &str, patterns: &[String]) -> 
 }
 
 fn resolve_tsconfig_paths(
-    reader: &dyn ProjectResolverReader,
+    reader: &dyn crate::traits::WorkspaceAccess,
     project: &IdeProjectConfig,
     specifier: &str,
 ) -> Option<String> {
@@ -675,7 +663,7 @@ fn sorted_workspace_aliases(aliases: &[WorkspaceAlias]) -> Vec<&WorkspaceAlias> 
     aliases
 }
 
-fn probe_path(reader: &dyn ProjectResolverReader, base: &str) -> Option<String> {
+fn probe_path(reader: &dyn crate::traits::WorkspaceAccess, base: &str) -> Option<String> {
     let base = normalize_canonical_id(base);
     let has_extension = Path::new(&base).extension().is_some();
 
@@ -702,7 +690,10 @@ fn probe_path(reader: &dyn ProjectResolverReader, base: &str) -> Option<String> 
     None
 }
 
-fn resolve_existing_path(reader: &dyn ProjectResolverReader, candidate: &str) -> Option<String> {
+fn resolve_existing_path(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    candidate: &str,
+) -> Option<String> {
     let normalized = normalize_canonical_id(candidate);
     if !reader.file_exists(&normalized) {
         return None;
@@ -831,10 +822,10 @@ fn project_rank(project: &IdeProjectConfig) -> u8 {
 }
 
 fn resolve_package_imports(
-    reader: &dyn ProjectResolverReader,
+    reader: &dyn crate::traits::WorkspaceAccess,
     importer_id: &str,
     specifier: &str,
-    kind: ResolveRequestKind,
+    ctx: ResolutionContext,
 ) -> Option<String> {
     for directory in ancestor_dirs(importer_id) {
         let Some(package_json) = read_json(reader, &join_paths(&directory, "package.json")) else {
@@ -850,7 +841,7 @@ fn resolve_package_imports(
             continue;
         };
         if let Some(resolved) =
-            resolve_package_target(reader, &directory, entry, captured.as_deref(), kind)
+            resolve_package_target(reader, &directory, entry, captured.as_deref(), ctx)
         {
             return Some(resolved);
         }
@@ -860,10 +851,10 @@ fn resolve_package_imports(
 }
 
 fn resolve_node_modules_package(
-    reader: &dyn ProjectResolverReader,
+    reader: &dyn crate::traits::WorkspaceAccess,
     importer_id: &str,
     specifier: &str,
-    kind: ResolveRequestKind,
+    ctx: ResolutionContext,
 ) -> Option<(String, ResolutionKind)> {
     let (package_name, subpath) = split_package_specifier(specifier)?;
     for directory in ancestor_dirs(importer_id) {
@@ -878,7 +869,7 @@ fn resolve_node_modules_package(
                     format!("./{subpath}")
                 };
                 if let Some(resolved) =
-                    resolve_package_exports(reader, &package_dir, exports, &export_key, kind)
+                    resolve_package_exports(reader, &package_dir, exports, &export_key, ctx)
                 {
                     return Some((resolved, ResolutionKind::PackageExports));
                 }
@@ -887,7 +878,7 @@ fn resolve_node_modules_package(
             }
 
             if let Some(resolved) =
-                resolve_legacy_package(reader, &package_dir, &package_json, subpath)
+                resolve_legacy_package(reader, &package_dir, &package_json, subpath, ctx)
             {
                 return Some((resolved, ResolutionKind::NodeModules));
             }
@@ -907,16 +898,16 @@ fn resolve_node_modules_package(
 }
 
 fn resolve_package_exports(
-    reader: &dyn ProjectResolverReader,
+    reader: &dyn crate::traits::WorkspaceAccess,
     package_dir: &str,
     exports: &serde_json::Value,
     export_key: &str,
-    kind: ResolveRequestKind,
+    ctx: ResolutionContext,
 ) -> Option<String> {
     match exports {
         serde_json::Value::String(_) | serde_json::Value::Array(_) => {
             if export_key == "." {
-                resolve_package_target(reader, package_dir, exports, None, kind)
+                resolve_package_target(reader, package_dir, exports, None, ctx)
             } else {
                 None
             }
@@ -924,30 +915,39 @@ fn resolve_package_exports(
         serde_json::Value::Object(map) => {
             if !map.keys().any(|key| key.starts_with('.')) {
                 if export_key == "." {
-                    return resolve_package_target(reader, package_dir, exports, None, kind);
+                    return resolve_package_target(reader, package_dir, exports, None, ctx);
                 }
                 return None;
             }
 
             let (entry, captured) = match_package_mapping(map, export_key)?;
-            resolve_package_target(reader, package_dir, entry, captured.as_deref(), kind)
+            resolve_package_target(reader, package_dir, entry, captured.as_deref(), ctx)
         }
         _ => None,
     }
 }
 
 fn resolve_legacy_package(
-    reader: &dyn ProjectResolverReader,
+    reader: &dyn crate::traits::WorkspaceAccess,
     package_dir: &str,
     package_json: &serde_json::Value,
     subpath: &str,
+    ctx: ResolutionContext,
 ) -> Option<String> {
     if !subpath.is_empty() {
         return probe_path(reader, &join_paths(package_dir, subpath));
     }
 
-    for key in ["types", "typings", "main"] {
-        let Some(target) = package_json.get(key).and_then(|value| value.as_str()) else {
+    let keys: &[&str] = match (ctx.phase, ctx.kind) {
+        (_, ResolveRequestKind::RequireCall) => &["main"],
+        (
+            ResolvePhase::CodegenBlocker,
+            ResolveRequestKind::EsmImport | ResolveRequestKind::SfcSrcAttr,
+        ) => &["module", "main"],
+        _ => &["types", "typings", "main"],
+    };
+    for key in keys {
+        let Some(target) = package_json.get(*key).and_then(|value| value.as_str()) else {
             continue;
         };
         if let Some(resolved) = probe_path(reader, &resolve_package_path(package_dir, target, None))
@@ -960,11 +960,11 @@ fn resolve_legacy_package(
 }
 
 fn resolve_package_target(
-    reader: &dyn ProjectResolverReader,
+    reader: &dyn crate::traits::WorkspaceAccess,
     package_dir: &str,
     value: &serde_json::Value,
     captured: Option<&str>,
-    kind: ResolveRequestKind,
+    ctx: ResolutionContext,
 ) -> Option<String> {
     match value {
         serde_json::Value::String(target) => {
@@ -972,14 +972,14 @@ fn resolve_package_target(
         }
         serde_json::Value::Array(items) => items
             .iter()
-            .find_map(|item| resolve_package_target(reader, package_dir, item, captured, kind)),
+            .find_map(|item| resolve_package_target(reader, package_dir, item, captured, ctx)),
         serde_json::Value::Object(map) => {
-            for condition in package_conditions(kind) {
+            for condition in package_conditions(ctx) {
                 let Some(entry) = map.get(*condition) else {
                     continue;
                 };
                 if let Some(resolved) =
-                    resolve_package_target(reader, package_dir, entry, captured, kind)
+                    resolve_package_target(reader, package_dir, entry, captured, ctx)
                 {
                     return Some(resolved);
                 }
@@ -990,12 +990,17 @@ fn resolve_package_target(
     }
 }
 
-fn package_conditions(kind: ResolveRequestKind) -> &'static [&'static str] {
-    match kind {
-        ResolveRequestKind::RequireCall => &["types", "require", "default"],
-        ResolveRequestKind::EsmImport
-        | ResolveRequestKind::TypeImport
-        | ResolveRequestKind::SfcSrcAttr => &["types", "import", "default"],
+fn package_conditions(ctx: ResolutionContext) -> &'static [&'static str] {
+    match (ctx.phase, ctx.kind) {
+        (_, ResolveRequestKind::RequireCall) => &["require", "default"],
+        (
+            ResolvePhase::CodegenBlocker,
+            ResolveRequestKind::EsmImport | ResolveRequestKind::SfcSrcAttr,
+        ) => &["import", "default"],
+        (ResolvePhase::CodegenBlocker, ResolveRequestKind::TypeImport) => {
+            &["types", "import", "default"]
+        }
+        (ResolvePhase::ProviderGraph, _) => &["types", "import", "default"],
     }
 }
 
@@ -1049,8 +1054,11 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
     result
 }
 
-fn read_json(reader: &dyn ProjectResolverReader, canonical_id: &str) -> Option<serde_json::Value> {
-    let text = reader.read_text(canonical_id)?;
+fn read_json(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    canonical_id: &str,
+) -> Option<serde_json::Value> {
+    let text = reader.read_file(canonical_id)?;
     serde_json::from_str(&text).ok()
 }
 

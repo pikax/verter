@@ -1,32 +1,27 @@
 //! Tsconfig discovery and parsing for project configuration.
 //!
-//! Discovers `tsconfig.json` files under workspace roots, parses them with
-//! `extends` resolution, and extracts membership filters, compiler options,
-//! and project references. Only the DISCOVERY and PARSING parts are ported
-//! here — lint config stays in `verter_diagnostics`.
+//! All filesystem access goes through `&dyn WorkspaceAccess`.
 
 use std::path::{Path, PathBuf};
 
-use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
+use crate::resolver::{
+    join_paths, normalize_canonical_id, parent_dir, IdeProjectCompilerOptions, ProjectMembership,
+};
+use crate::traits::WorkspaceAccess;
 
 /// Maximum depth for tsconfig `extends` chain resolution.
-/// Prevents infinite loops from circular extends.
 const MAX_TSCONFIG_EXTENDS_DEPTH: u8 = 8;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A discovered tsconfig.json and its containing directory.
 #[derive(Debug, Clone)]
 pub struct TsConfigEntry {
-    /// Canonical path to the tsconfig.json file (forward slashes).
     pub path: String,
-    /// Directory containing the tsconfig (forward slashes).
     pub root: String,
 }
 
-/// Parsed contents of a single tsconfig.json.
 #[derive(Debug, Clone)]
 pub struct ParsedTsConfig {
     pub compiler_options: IdeProjectCompilerOptions,
@@ -38,8 +33,6 @@ pub struct ParsedTsConfig {
 // JSON Comment Stripping
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Strip `//` and `/* */` comments from JSON (tsconfig supports them).
-/// Also strips trailing commas before `}` or `]`.
 pub fn strip_json_comments(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -48,12 +41,11 @@ pub fn strip_json_comments(input: &str) -> String {
 
     while i < len {
         if bytes[i] == b'"' {
-            // Inside a string literal — find the closing quote
             let start = i;
             i += 1;
             while i < len {
                 if bytes[i] == b'\\' && i + 1 < len {
-                    i += 2; // skip escaped char
+                    i += 2;
                 } else if bytes[i] == b'"' {
                     i += 1;
                     break;
@@ -63,22 +55,19 @@ pub fn strip_json_comments(input: &str) -> String {
             }
             result.push_str(&input[start..i]);
         } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            // Single-line comment — skip to end of line
             i += 2;
             while i < len && bytes[i] != b'\n' {
                 i += 1;
             }
         } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            // Multi-line comment — skip to */
             i += 2;
             while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                 i += 1;
             }
             if i + 1 < len {
-                i += 2; // skip */
+                i += 2;
             }
         } else {
-            // Non-string, non-comment content — find next boundary and copy slice.
             let start = i;
             i += 1;
             while i < len
@@ -96,7 +85,6 @@ pub fn strip_json_comments(input: &str) -> String {
     strip_trailing_commas(&result)
 }
 
-/// Remove trailing commas before `}` or `]` in JSON.
 fn strip_trailing_commas(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -105,7 +93,6 @@ fn strip_trailing_commas(input: &str) -> String {
 
     while i < len {
         if bytes[i] == b'"' {
-            // Copy string literals unchanged
             let start = i;
             i += 1;
             while i < len {
@@ -120,8 +107,6 @@ fn strip_trailing_commas(input: &str) -> String {
             }
             result.push_str(&input[start..i]);
         } else if bytes[i] == b',' {
-            // Check if this comma is followed only by whitespace/newlines
-            // and then a closing bracket
             let mut j = i + 1;
             while j < len
                 && (bytes[j] == b' ' || bytes[j] == b'\n' || bytes[j] == b'\r' || bytes[j] == b'\t')
@@ -129,7 +114,6 @@ fn strip_trailing_commas(input: &str) -> String {
                 j += 1;
             }
             if j < len && (bytes[j] == b'}' || bytes[j] == b']') {
-                // Skip the trailing comma
                 i += 1;
             } else {
                 result.push(bytes[i] as char);
@@ -145,13 +129,12 @@ fn strip_trailing_commas(input: &str) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Tsconfig Discovery
+// Tsconfig Discovery (uses glob — the one function that still needs disk)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Discover all tsconfig.json files under a workspace root.
-///
-/// Finds both `tsconfig.json` and variant files like `tsconfig.app.json`,
-/// `tsconfig.node.json`, etc. Excludes `node_modules` and dot-directories.
+/// Uses glob patterns — this is the one function that still touches disk directly
+/// via `glob::glob`. All other functions take `&dyn WorkspaceAccess`.
 pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
     let mut entries = Vec::new();
     let root_str = root.to_string_lossy().replace('\\', "/");
@@ -164,32 +147,24 @@ pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
         match glob::glob(glob_pattern) {
             Ok(paths) => {
                 for entry in paths.flatten() {
-                    // Only check components below the root (skip the root prefix
-                    // itself — on Windows tempdir paths may start with `.tmp...`).
                     let relative_components: Vec<_> =
                         entry.components().skip(root_component_count).collect();
-
-                    // Skip node_modules
                     if relative_components
                         .iter()
                         .any(|c| c.as_os_str() == "node_modules")
                     {
                         continue;
                     }
-                    // Skip dot-directories (only in the relative part)
                     if relative_components.iter().any(|c| {
                         let name = c.as_os_str().to_string_lossy();
                         name.starts_with('.') && name != "."
                     }) {
                         continue;
                     }
-
                     let entry_str = entry.to_string_lossy().replace('\\', "/");
-                    // Skip duplicates (tsconfig.json matches both patterns)
                     if entries.iter().any(|e: &TsConfigEntry| e.path == entry_str) {
                         continue;
                     }
-
                     if let Some(dir) = entry.parent() {
                         entries.push(TsConfigEntry {
                             path: entry_str,
@@ -208,15 +183,17 @@ pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Tsconfig Parsing
+// Tsconfig Parsing — all workspace-backed
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Parse a tsconfig.json and extract compiler options, membership, and references.
-/// Follows `extends` chains.
-pub fn parse_tsconfig_json(path: &Path) -> Option<ParsedTsConfig> {
-    let compiler_options = load_compiler_options(path);
-    let membership = load_project_membership(path);
-    let references = load_project_references(path);
+/// Parse a tsconfig.json. All file reads go through `ws`.
+pub fn parse_tsconfig_json(
+    ws: &dyn WorkspaceAccess,
+    tsconfig_path: &str,
+) -> Option<ParsedTsConfig> {
+    let compiler_options = load_compiler_options(ws, tsconfig_path);
+    let membership = load_project_membership(ws, tsconfig_path);
+    let references = load_project_references(ws, tsconfig_path);
     Some(ParsedTsConfig {
         compiler_options,
         membership,
@@ -225,28 +202,32 @@ pub fn parse_tsconfig_json(path: &Path) -> Option<ParsedTsConfig> {
 }
 
 /// Load compiler options from a tsconfig.json, following `extends`.
-pub fn load_compiler_options(tsconfig_path: &Path) -> IdeProjectCompilerOptions {
-    load_compiler_options_inner(tsconfig_path, 0).unwrap_or_default()
+pub fn load_compiler_options(
+    ws: &dyn WorkspaceAccess,
+    tsconfig_path: &str,
+) -> IdeProjectCompilerOptions {
+    load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default()
 }
 
 fn load_compiler_options_inner(
-    tsconfig_path: &Path,
+    ws: &dyn WorkspaceAccess,
+    tsconfig_path: &str,
     depth: u8,
 ) -> Option<IdeProjectCompilerOptions> {
     if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
         return None;
     }
 
-    let tsconfig_dir = tsconfig_path.parent()?;
-    let content = std::fs::read_to_string(tsconfig_path).ok()?;
+    let tsconfig_dir = parent_dir(tsconfig_path);
+    let content = ws.read_file(tsconfig_path)?;
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
     let inherited = json
         .get("extends")
         .and_then(|value| value.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(tsconfig_dir, extends))
-        .and_then(|base_path| load_compiler_options_inner(&base_path, depth + 1))
+        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
+        .and_then(|base_path| load_compiler_options_inner(ws, &base_path, depth + 1))
         .unwrap_or_default();
 
     let mut compiler_options = inherited;
@@ -258,7 +239,7 @@ fn load_compiler_options_inner(
         .get("baseUrl")
         .and_then(|value| value.as_str())
     {
-        compiler_options.base_url = Some(resolve_path_value(tsconfig_dir, base_url));
+        compiler_options.base_url = Some(resolve_path_value(&tsconfig_dir, base_url));
     }
 
     if let Some(paths) = raw_compiler_options
@@ -268,7 +249,7 @@ fn load_compiler_options_inner(
         let base_url = compiler_options
             .base_url
             .clone()
-            .unwrap_or_else(|| tsconfig_dir.to_string_lossy().replace('\\', "/"));
+            .unwrap_or(tsconfig_dir.clone());
         compiler_options.paths = paths
             .iter()
             .map(|(pattern, targets)| {
@@ -288,25 +269,29 @@ fn load_compiler_options_inner(
 }
 
 /// Load project membership (files/include/exclude) from a tsconfig.json.
-pub fn load_project_membership(tsconfig_path: &Path) -> ProjectMembership {
-    load_project_membership_inner(tsconfig_path, 0).unwrap_or(ProjectMembership::MatchAll)
+pub fn load_project_membership(ws: &dyn WorkspaceAccess, tsconfig_path: &str) -> ProjectMembership {
+    load_project_membership_inner(ws, tsconfig_path, 0).unwrap_or(ProjectMembership::MatchAll)
 }
 
-fn load_project_membership_inner(tsconfig_path: &Path, depth: u8) -> Option<ProjectMembership> {
+fn load_project_membership_inner(
+    ws: &dyn WorkspaceAccess,
+    tsconfig_path: &str,
+    depth: u8,
+) -> Option<ProjectMembership> {
     if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
         return None;
     }
 
-    let tsconfig_dir = tsconfig_path.parent()?;
-    let content = std::fs::read_to_string(tsconfig_path).ok()?;
+    let tsconfig_dir = parent_dir(tsconfig_path);
+    let content = ws.read_file(tsconfig_path)?;
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
     let inherited = json
         .get("extends")
         .and_then(|value| value.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(tsconfig_dir, extends))
-        .and_then(|base_path| load_project_membership_inner(&base_path, depth + 1))
+        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
+        .and_then(|base_path| load_project_membership_inner(ws, &base_path, depth + 1))
         .unwrap_or(ProjectMembership::MatchAll);
 
     let has_files = json.get("files").is_some();
@@ -329,21 +314,21 @@ fn load_project_membership_inner(tsconfig_path: &Path, depth: u8) -> Option<Proj
     if has_files {
         files = json_string_array(&json, "files")
             .into_iter()
-            .map(|value| resolve_membership_path(tsconfig_dir, &value, false))
+            .map(|value| resolve_membership_path(&tsconfig_dir, &value, false))
             .collect();
     }
 
     if has_include {
         include = json_string_array(&json, "include")
             .into_iter()
-            .map(|value| resolve_membership_path(tsconfig_dir, &value, true))
+            .map(|value| resolve_membership_path(&tsconfig_dir, &value, true))
             .collect();
     }
 
     if has_exclude {
         exclude = json_string_array(&json, "exclude")
             .into_iter()
-            .map(|value| resolve_membership_path(tsconfig_dir, &value, true))
+            .map(|value| resolve_membership_path(&tsconfig_dir, &value, true))
             .collect();
     }
 
@@ -355,11 +340,9 @@ fn load_project_membership_inner(tsconfig_path: &Path, depth: u8) -> Option<Proj
 }
 
 /// Load project references from a tsconfig.json.
-pub fn load_project_references(tsconfig_path: &Path) -> Vec<String> {
-    let Some(tsconfig_dir) = tsconfig_path.parent() else {
-        return Vec::new();
-    };
-    let Ok(content) = std::fs::read_to_string(tsconfig_path) else {
+pub fn load_project_references(ws: &dyn WorkspaceAccess, tsconfig_path: &str) -> Vec<String> {
+    let tsconfig_dir = parent_dir(tsconfig_path);
+    let Some(content) = ws.read_file(tsconfig_path) else {
         return Vec::new();
     };
     let cleaned = strip_json_comments(&content);
@@ -372,24 +355,43 @@ pub fn load_project_references(tsconfig_path: &Path) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.get("path").and_then(|value| value.as_str()))
-        .filter_map(|reference| resolve_tsconfig_reference(tsconfig_dir, reference))
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .filter_map(|reference| resolve_tsconfig_reference(ws, &tsconfig_dir, reference))
         .collect()
 }
 
-/// Check if a workspace has any solution-style tsconfig.json (non-empty references).
-pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
-    if is_solution_style_tsconfig(&workspace_root.join("tsconfig.json")) {
+/// Check if a workspace has any solution-style tsconfig.json.
+pub fn has_solution_style_tsconfig(ws: &dyn WorkspaceAccess, workspace_root: &str) -> bool {
+    let tsconfig = join_paths(workspace_root, "tsconfig.json");
+    if is_solution_style_tsconfig(ws, &tsconfig) {
         return true;
     }
 
-    // Check subdirectories up to 2 levels deep (monorepo packages)
-    for depth1 in read_subdirs(workspace_root) {
-        if is_solution_style_tsconfig(&depth1.join("tsconfig.json")) {
+    let Ok(depth1_entries) = ws.read_dir(workspace_root) else {
+        return false;
+    };
+    for d1 in &depth1_entries {
+        if !d1.is_dir {
+            continue;
+        }
+        let name = d1.path.rsplit('/').next().unwrap_or(&d1.path);
+        if name.starts_with('.') || name == "node_modules" || name == "dist" {
+            continue;
+        }
+        if is_solution_style_tsconfig(ws, &join_paths(&d1.path, "tsconfig.json")) {
             return true;
         }
-        for depth2 in read_subdirs(&depth1) {
-            if is_solution_style_tsconfig(&depth2.join("tsconfig.json")) {
+        let Ok(depth2_entries) = ws.read_dir(&d1.path) else {
+            continue;
+        };
+        for d2 in &depth2_entries {
+            if !d2.is_dir {
+                continue;
+            }
+            let name2 = d2.path.rsplit('/').next().unwrap_or(&d2.path);
+            if name2.starts_with('.') || name2 == "node_modules" || name2 == "dist" {
+                continue;
+            }
+            if is_solution_style_tsconfig(ws, &join_paths(&d2.path, "tsconfig.json")) {
                 return true;
             }
         }
@@ -398,61 +400,73 @@ pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
     false
 }
 
+fn is_solution_style_tsconfig(ws: &dyn WorkspaceAccess, tsconfig_path: &str) -> bool {
+    let Some(content) = ws.read_file(tsconfig_path) else {
+        return false;
+    };
+    let cleaned = strip_json_comments(&content);
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
+        return false;
+    };
+    json.get("references")
+        .and_then(|v| v.as_array())
+        .is_some_and(|refs| !refs.is_empty())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Raw Paths Extraction (for tsserver configure_paths)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Extract the raw `baseUrl` and `paths` JSON from a tsconfig for passing to tsserver.
-///
-/// Follows `extends` and `references` to find the effective paths.
-/// Returns `(baseUrl, paths)` as raw JSON values, or `None` if no paths found.
-pub fn raw_paths_json(tsconfig_path: &Path) -> Option<(String, serde_json::Value)> {
-    raw_paths_json_inner(tsconfig_path, 0)
+/// Extract the raw `baseUrl` and `paths` JSON from a tsconfig.
+pub fn raw_paths_json(
+    ws: &dyn WorkspaceAccess,
+    tsconfig_path: &str,
+) -> Option<(String, serde_json::Value)> {
+    raw_paths_json_inner(ws, tsconfig_path, 0)
 }
 
-fn raw_paths_json_inner(tsconfig_path: &Path, depth: u8) -> Option<(String, serde_json::Value)> {
+fn raw_paths_json_inner(
+    ws: &dyn WorkspaceAccess,
+    tsconfig_path: &str,
+    depth: u8,
+) -> Option<(String, serde_json::Value)> {
     if depth > 5 {
         return None;
     }
 
-    let tsconfig_dir = tsconfig_path.parent()?;
-    let content = std::fs::read_to_string(tsconfig_path).ok()?;
+    let tsconfig_dir = parent_dir(tsconfig_path);
+    let content = ws.read_file(tsconfig_path)?;
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    // Resolve inherited (baseUrl, paths) from extends chain.
     let inherited = json
         .get("extends")
         .and_then(|v| v.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(tsconfig_dir, extends))
-        .and_then(|base_path| raw_paths_json_inner(&base_path, depth + 1));
+        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
+        .and_then(|base_path| raw_paths_json_inner(ws, &base_path, depth + 1));
 
-    // Extract this config's own compilerOptions fields.
     let co = json.get("compilerOptions");
     let own_base_url = co
         .and_then(|c| c.get("baseUrl"))
         .and_then(|v| v.as_str())
-        .map(|b| normalize_path_buf(&tsconfig_dir.join(b)));
+        .map(|b| resolve_path_value(&tsconfig_dir, b));
     let own_paths = co.and_then(|c| c.get("paths")).cloned();
 
-    // Per-field merge: child fields override inherited, missing fields inherit.
     match (own_paths, own_base_url, inherited) {
-        // Child has paths (overrides or new) — use child paths + best baseUrl
         (Some(paths), Some(base_url), _) => Some((base_url, paths)),
         (Some(paths), None, Some((inherited_base_url, _))) => Some((inherited_base_url, paths)),
-        (Some(paths), None, None) => Some((normalize_path_buf(tsconfig_dir), paths)),
-        // Child has no paths — inherit paths, but child baseUrl overrides if present
+        (Some(paths), None, None) => Some((tsconfig_dir, paths)),
         (None, Some(base_url), Some((_, inherited_paths))) => Some((base_url, inherited_paths)),
         (None, _, Some(inherited)) => Some(inherited),
-        // No paths anywhere in this config — try references
         (None, _, None) => {
             if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
                 for ref_entry in refs {
                     if let Some(ref_path) = ref_entry.get("path").and_then(|v| v.as_str()) {
                         if let Some(ref_tsconfig) =
-                            resolve_tsconfig_reference(tsconfig_dir, ref_path)
+                            resolve_tsconfig_reference(ws, &tsconfig_dir, ref_path)
                         {
-                            if let Some(result) = raw_paths_json_inner(&ref_tsconfig, depth + 1) {
+                            if let Some(result) = raw_paths_json_inner(ws, &ref_tsconfig, depth + 1)
+                            {
                                 return Some(result);
                             }
                         }
@@ -468,104 +482,73 @@ fn raw_paths_json_inner(tsconfig_path: &Path, depth: u8) -> Option<(String, serd
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Resolve `extends` field from tsconfig.json to an absolute path.
-pub fn resolve_tsconfig_extends(tsconfig_dir: &Path, extends: &str) -> Option<PathBuf> {
+/// Resolve `extends` field from tsconfig.json.
+pub fn resolve_tsconfig_extends(
+    ws: &dyn WorkspaceAccess,
+    tsconfig_dir: &str,
+    extends: &str,
+) -> Option<String> {
     if extends.starts_with('.') {
-        // Relative path
-        let resolved = tsconfig_dir.join(extends);
-        if resolved.exists() {
+        let resolved = join_paths(tsconfig_dir, extends);
+        if ws.file_exists(&resolved) {
             return Some(resolved);
         }
-        let with_json = resolved.with_extension("json");
-        if with_json.exists() {
+        let with_json = format!("{resolved}.json");
+        if ws.file_exists(&with_json) {
             return Some(with_json);
         }
     } else {
-        // Package name — try node_modules resolution
-        let mut dir = tsconfig_dir;
+        let mut dir = tsconfig_dir.to_string();
         loop {
-            let candidate = dir.join("node_modules").join(extends);
-            if candidate.exists() {
+            let nm = join_paths(&dir, "node_modules");
+            let candidate = join_paths(&nm, extends);
+            if ws.file_exists(&candidate) {
                 return Some(candidate);
             }
-            let with_json = candidate.with_extension("json");
-            if with_json.exists() {
+            let with_json = format!("{candidate}.json");
+            if ws.file_exists(&with_json) {
                 return Some(with_json);
             }
-            // Try as directory with tsconfig.json
-            let as_dir = dir.join("node_modules").join(extends).join("tsconfig.json");
-            if as_dir.exists() {
+            let as_dir = join_paths(&candidate, "tsconfig.json");
+            if ws.file_exists(&as_dir) {
                 return Some(as_dir);
             }
-            match dir.parent() {
-                Some(parent) if parent != dir => dir = parent,
-                _ => break,
+            let next = parent_dir(&dir);
+            if next == dir || next.is_empty() {
+                break;
             }
+            dir = next;
         }
     }
     None
 }
 
-/// Resolve a `references[].path` entry to the actual tsconfig file path.
-fn resolve_tsconfig_reference(tsconfig_dir: &Path, ref_path: &str) -> Option<PathBuf> {
-    let resolved = tsconfig_dir.join(ref_path);
+fn resolve_tsconfig_reference(
+    ws: &dyn WorkspaceAccess,
+    tsconfig_dir: &str,
+    ref_path: &str,
+) -> Option<String> {
+    let resolved = join_paths(tsconfig_dir, ref_path);
 
-    // Direct file reference
-    if resolved.is_file() {
+    if ws.file_exists(&resolved) && !ws.is_dir(&resolved) {
         return Some(resolved);
     }
 
-    // Directory reference -> look for tsconfig.json inside
-    if resolved.is_dir() {
-        let tsconfig = resolved.join("tsconfig.json");
-        if tsconfig.exists() {
+    if ws.is_dir(&resolved) {
+        let tsconfig = join_paths(&resolved, "tsconfig.json");
+        if ws.file_exists(&tsconfig) {
             return Some(tsconfig);
         }
     }
 
-    // Try with .json extension
-    let with_json = if resolved.extension().is_none() {
-        resolved.with_extension("json")
-    } else {
-        return None;
-    };
-    if with_json.exists() {
-        return Some(with_json);
+    if !resolved.contains('.') || resolved.ends_with('/') {
+        let with_json = format!("{resolved}.json");
+        if ws.file_exists(&with_json) {
+            return Some(with_json);
+        }
     }
 
     None
-}
-
-fn is_solution_style_tsconfig(tsconfig_path: &Path) -> bool {
-    let content = match std::fs::read_to_string(tsconfig_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let cleaned = strip_json_comments(&content);
-    let json: serde_json::Value = match serde_json::from_str(&cleaned) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    json.get("references")
-        .and_then(|v| v.as_array())
-        .is_some_and(|refs| !refs.is_empty())
-}
-
-fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_ok_and(|ft| ft.is_dir()) && {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                !name.starts_with('.') && name != "node_modules" && name != "dist"
-            }
-        })
-        .map(|e| e.path())
-        .collect()
 }
 
 fn json_string_array(json: &serde_json::Value, key: &str) -> Vec<String> {
@@ -577,14 +560,13 @@ fn json_string_array(json: &serde_json::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-fn resolve_membership_path(tsconfig_dir: &Path, value: &str, allow_directory_glob: bool) -> String {
-    let resolved = if Path::new(value).is_absolute() {
-        PathBuf::from(value)
+fn resolve_membership_path(tsconfig_dir: &str, value: &str, allow_directory_glob: bool) -> String {
+    let normalized = if crate::resolver::is_absolute_specifier(value) {
+        normalize_canonical_id(value)
     } else {
-        tsconfig_dir.join(value)
+        join_paths(tsconfig_dir, value)
     };
 
-    let normalized = resolved.to_string_lossy().replace('\\', "/");
     if !allow_directory_glob {
         return normalized;
     }
@@ -593,30 +575,28 @@ fn resolve_membership_path(tsconfig_dir: &Path, value: &str, allow_directory_glo
         return normalized;
     }
 
-    if Path::new(&resolved)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some()
-    {
-        return normalized;
+    if let Some(last_segment) = normalized.rsplit('/').next() {
+        if last_segment.contains('.') {
+            return normalized;
+        }
     }
 
     format!("{normalized}/**/*")
 }
 
-fn resolve_path_value(tsconfig_dir: &Path, value: &str) -> String {
-    if Path::new(value).is_absolute() {
-        normalize_path_buf(&PathBuf::from(value))
+fn resolve_path_value(tsconfig_dir: &str, value: &str) -> String {
+    if crate::resolver::is_absolute_specifier(value) {
+        normalize_canonical_id(value)
     } else {
-        normalize_path_buf(&tsconfig_dir.join(value))
+        join_paths(tsconfig_dir, value)
     }
 }
 
 fn resolve_path_target(base_url: &str, value: &str) -> String {
-    if Path::new(value).is_absolute() {
-        normalize_path_buf(&PathBuf::from(value))
+    if crate::resolver::is_absolute_specifier(value) {
+        normalize_canonical_id(value)
     } else {
-        normalize_path_buf(&PathBuf::from(base_url).join(value))
+        join_paths(base_url, value)
     }
 }
 

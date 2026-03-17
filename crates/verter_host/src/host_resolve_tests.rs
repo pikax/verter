@@ -930,10 +930,27 @@ fn directory_index_resolution_follows_extension_priority() {
     );
 }
 
-/// Candidate-list fallback resolves to first loaded candidate.
+/// Exact resolution resolves to specified canonical ID.
 #[test]
 fn candidate_list_resolves_to_first_loaded() {
     let host = strict_host();
+    // Configure workspace with @/ alias
+    host.workspace().configure_resolver(vec![
+        verter_analysis::project_resolver::IdeProjectConfig {
+            root: "/src".to_string(),
+            workspace_root: "/src".to_string(),
+            tsconfig_path: None,
+            provider_root: "/src".to_string(),
+            workspace_aliases: vec![verter_vfs::WorkspaceAlias {
+                find: "@/".to_string(),
+                replacement: "/src/".to_string(),
+            }],
+            compiler_options: verter_analysis::project_resolver::IdeProjectCompilerOptions::default(
+            ),
+            references: vec![],
+            membership: verter_analysis::project_resolver::ProjectMembership::MatchAll,
+        },
+    ]);
     let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
     upsert_vue(&host, "/src/Comp.vue", source);
     // Only the second candidate is loaded
@@ -947,11 +964,8 @@ fn candidate_list_resolves_to_first_loaded() {
         "/src/Comp.vue",
         vec![crate::DependencyResolution {
             specifier: "@/types".to_string(),
-            resolved_canonical_id: None,
-            possible_canonical_ids: vec![
-                "/src/types-a/index.ts".to_string(),
-                "/src/types-b/index.ts".to_string(),
-            ],
+            resolved_canonical_id: Some("/src/types-b/index.ts".to_string()),
+            possible_canonical_ids: vec![],
         }],
     );
 

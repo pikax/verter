@@ -1,10 +1,7 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import { SourceMap } from "node:module";
-import type { VerterHost } from "@verter/native";
-import {
-  hydrateMacroTypeDependencies,
-  type MacroTypeDependencyAccess,
-} from "./macroTypeHydration";
+import type { VerterHost, Workspace } from "@verter/native";
+import { hydrateMacroTypeDependencies, type MacroTypeDependencyAccess } from "./macroTypeHydration";
 import type { VuePublicApiMode } from "./utils";
 import { normalizePath, toVueVirtualFileName } from "./utils";
 
@@ -15,6 +12,7 @@ export interface CachedVirtualPublicApi {
   sourceMap: SourceMap | null;
 }
 
+let workspace: Workspace | null = null;
 let host: VerterHost | null = null;
 let loadFailed = false;
 let loadError: string | null = null;
@@ -42,10 +40,7 @@ function setCachedVirtualPublicApi(
   virtualPublicApiCache.set(normalized + ".d.ts", entry);
 }
 
-function clearCachedVirtualPublicApi(
-  fileName: string,
-  mode?: VuePublicApiMode,
-): void {
+function clearCachedVirtualPublicApi(fileName: string, mode?: VuePublicApiMode): void {
   const normalized = normalizePath(fileName);
   if (!mode || mode === "public") {
     virtualPublicApiCache.delete(toVueVirtualFileName(normalized, "public"));
@@ -88,9 +83,7 @@ function lineColumnToOffset(text: string, line: number, column: number): number 
   return offset + column - 1;
 }
 
-export function getCachedVirtualPublicApi(
-  fileName: string,
-): CachedVirtualPublicApi | undefined {
+export function getCachedVirtualPublicApi(fileName: string): CachedVirtualPublicApi | undefined {
   return virtualPublicApiCache.get(normalizePath(fileName));
 }
 
@@ -118,11 +111,7 @@ export function remapVirtualSpan(
     return null;
   }
 
-  const originalOffset = lineColumnToOffset(
-    originalText,
-    origin.lineNumber,
-    origin.columnNumber,
-  );
+  const originalOffset = lineColumnToOffset(originalText, origin.lineNumber, origin.columnNumber);
   if (originalOffset == null) {
     return null;
   }
@@ -136,13 +125,16 @@ export function remapVirtualSpan(
   };
 }
 
-function getHost(): VerterHost | null {
+function getHost(projectRoot: string): VerterHost | null {
   if (host) return host;
   if (loadFailed) return null;
 
   try {
     const native: typeof import("@verter/native") = require("@verter/native");
-    host = new native.VerterHost();
+    if (!workspace) {
+      workspace = new native.Workspace([projectRoot]);
+    }
+    host = native.VerterHost.withWorkspace({}, workspace);
     return host;
   } catch (e: unknown) {
     loadFailed = true;
@@ -155,15 +147,18 @@ export const parseFile = (
   fileName: string,
   content: string,
   logger: tsModule.server.Logger,
+  projectRoot: string,
   access?: MacroTypeDependencyAccess,
   mode: VuePublicApiMode = "public",
 ): string => {
   logger.info(`[Verter] parsing ${fileName}`);
 
-  const h = getHost();
+  const h = getHost(projectRoot);
   if (!h) {
     clearCachedVirtualPublicApi(fileName, mode);
-    logger.info(`[Verter] native binary not available, returning stub${loadError ? ` (error: ${loadError})` : ""}`);
+    logger.info(
+      `[Verter] native binary not available, returning stub${loadError ? ` (error: ${loadError})` : ""}`,
+    );
     return FALLBACK_STUB;
   }
 

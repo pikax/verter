@@ -26,25 +26,22 @@ pub fn normalize_fs_path(path: &str) -> String {
         .to_string()
 }
 
-impl crate::project_resolver::ProjectResolverReader for HostFsProjectResolverReader<'_> {
-    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+impl verter_vfs::WorkspaceAccess for HostFsProjectResolverReader<'_> {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         ensure_source_loaded_into_host(self.host, canonical_id);
         self.host.get_source(canonical_id)
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.host.get_source(canonical_id).is_some()
-            || std::path::Path::new(&normalize_fs_path(canonical_id)).is_file()
+            || self.host.workspace().file_exists(canonical_id)
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         if self.host.get_source(canonical_id).is_some() {
             return Some(normalize_fs_path(canonical_id));
         }
-
-        std::fs::canonicalize(normalize_fs_path(canonical_id))
-            .ok()
-            .map(|path| normalize_fs_path(&path.to_string_lossy()))
+        self.host.workspace().realpath(canonical_id)
     }
 }
 
@@ -60,14 +57,13 @@ pub fn ensure_source_loaded_into_host(host: &VerterHost, canonical_id: &str) -> 
     if host.get_source(canonical_id).is_some() {
         return true;
     }
-    let normalized = normalize_fs_path(canonical_id);
-    let Ok(source) = std::fs::read_to_string(&normalized) else {
+    let Some(source) = host.workspace().read_file(canonical_id) else {
         return false;
     };
     host.upsert(UpsertRequest {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
-        source: Arc::from(source.as_str()),
+        source,
         file_kind: file_kind_for_canonical_id(canonical_id),
         aliases: Vec::new(),
     })
@@ -147,7 +143,7 @@ pub fn hydrate_cached(
     cache: &HydrationCache,
     host: &VerterHost,
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     canonical_id: &str,
     resolver_generation: u64,
 ) {
@@ -244,7 +240,7 @@ fn probe_and_load_relative(
 pub fn hydrate_vue_compile_blockers(
     host: &VerterHost,
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     canonical_id: &str,
 ) {
     let mut pending = vec![canonical_id.to_string()];
@@ -318,7 +314,7 @@ pub fn file_kind_for_canonical_id(canonical_id: &str) -> FileKind {
 
 fn load_resolved_file_into_host(
     host: &VerterHost,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     canonical_id: &str,
 ) -> bool {
     // Try the ingress (real filesystem) first, then fall back to the reader
@@ -326,7 +322,7 @@ fn load_resolved_file_into_host(
     if ensure_source_loaded_into_host(host, canonical_id) {
         return true;
     }
-    let Some(source) = reader.read_text(canonical_id) else {
+    let Some(source) = reader.read_file(canonical_id) else {
         return false;
     };
     host.upsert(UpsertRequest {
@@ -341,7 +337,7 @@ fn load_resolved_file_into_host(
 
 fn track_loaded_dependency(
     host: &VerterHost,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     owner_id: &str,
     specifier: &str,
     dep_id: &str,
@@ -368,7 +364,7 @@ fn track_loaded_dependency(
 fn resolve_and_load_blocker(
     host: &VerterHost,
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     owner_id: &str,
     specifier: &str,
     kind: crate::project_resolver::ResolveRequestKind,
@@ -402,7 +398,7 @@ fn analyzed_module_reference_request_kind(
 /// Returns `(specifier, resolved_canonical_id)` pairs.
 fn collect_resolved_codegen_dependencies(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     module_references: &[verter_analysis::AnalyzedModuleReference],
 ) -> Vec<(String, String)> {
@@ -478,8 +474,8 @@ mod tests {
         }
     }
 
-    impl crate::project_resolver::ProjectResolverReader for TestResolverReader {
-        fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+    impl verter_vfs::WorkspaceAccess for TestResolverReader {
+        fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
             self.texts.get(&canonical_id.replace('\\', "/")).cloned()
         }
 
@@ -793,8 +789,8 @@ mod tests {
     }
 
     #[test]
-    fn reader_read_text_routes_through_ingress() {
-        use crate::project_resolver::ProjectResolverReader;
+    fn reader_read_file_routes_through_ingress() {
+        use verter_vfs::WorkspaceAccess;
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("types.ts");
         std::fs::write(&file_path, "export type T = string;").unwrap();
@@ -805,14 +801,14 @@ mod tests {
         assert!(host.get_source(&canonical_id).is_none());
 
         let reader = HostFsProjectResolverReader::new(&host);
-        let content = reader.read_text(&canonical_id);
+        let content = reader.read_file(&canonical_id);
         assert!(content.is_some(), "reader should return content from disk");
         assert_eq!(content.unwrap().as_ref(), "export type T = string;");
 
-        // After read_text, file should be in the host (ingress side effect)
+        // After read_file, file should be in the host (ingress side effect)
         assert!(
             host.get_source(&canonical_id).is_some(),
-            "read_text must load file into host via ingress"
+            "read_file must load file into host via ingress"
         );
     }
 }

@@ -2498,6 +2498,8 @@ fn resolve_import_via_workspace_uses_exact_resolutions() {
         "/src/App.vue",
         vec![verter_vfs::ExactResolution {
             specifier: "./Child.vue".to_string(),
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/src/Child.vue".to_string()),
             possible_canonical_ids: vec!["/src/Child.vue".to_string()],
         }],
@@ -2585,6 +2587,8 @@ fn set_workspace_swaps_resolution_source() {
         "/src/App.vue",
         vec![verter_vfs::ExactResolution {
             specifier: "./Btn.vue".to_string(),
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/src/Btn.vue".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -2645,7 +2649,10 @@ fn configure_projects_syncs_to_workspace() {
     let result = ws.resolve_import(
         "/my-project/src/App.vue",
         "@/Foo.vue",
-        verter_vfs::ResolveRequestKind::EsmImport,
+        verter_vfs::ResolutionContext {
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
         result.is_some(),
@@ -2661,7 +2668,10 @@ fn configure_projects_syncs_to_workspace() {
     let no_result = ws.resolve_import(
         "/my-project/src/App.vue",
         "~/Bar.vue",
-        verter_vfs::ResolveRequestKind::EsmImport,
+        verter_vfs::ResolutionContext {
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
         no_result.is_none(),
@@ -2703,7 +2713,10 @@ fn set_import_dependencies_syncs_exact_resolutions_to_workspace() {
     let result = ws.resolve_import(
         "/src/App.vue",
         "@comp/Btn.vue",
-        verter_vfs::ResolveRequestKind::EsmImport,
+        verter_vfs::ResolutionContext {
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
         result.is_some(),
@@ -2719,7 +2732,10 @@ fn set_import_dependencies_syncs_exact_resolutions_to_workspace() {
     let no_result = ws.resolve_import(
         "/src/App.vue",
         "@comp/Other.vue",
-        verter_vfs::ResolveRequestKind::EsmImport,
+        verter_vfs::ResolutionContext {
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
         no_result.is_none(),
@@ -2766,6 +2782,8 @@ fn workspace_resolution_is_phase_0_primary() {
         "/src/App.vue",
         vec![verter_vfs::ExactResolution {
             specifier: "./types".to_string(),
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/src/types.ts".to_string()),
             possible_canonical_ids: vec![],
         }],

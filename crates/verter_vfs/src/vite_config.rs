@@ -77,11 +77,14 @@ const VITE_CONFIG_NAMES: &[&str] = &[
 ];
 
 /// Find the vite config file in a project root, checking all extensions.
-pub fn find_vite_config(project_root: &Path) -> Option<PathBuf> {
+pub fn find_vite_config(
+    ws: &dyn crate::traits::WorkspaceAccess,
+    project_root: &str,
+) -> Option<String> {
     VITE_CONFIG_NAMES
         .iter()
-        .map(|name| project_root.join(name))
-        .find(|p| p.exists())
+        .map(|name| crate::resolver::join_paths(project_root, name))
+        .find(|p| ws.file_exists(p))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -113,21 +116,24 @@ pub fn normalize_alias_pair(find: &str, replacement: &str, config_dir: &Path) ->
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Statically analyze a Vite config to extract `resolve.alias` without execution.
-pub fn analyze_vite_config(project_root: &Path) -> ViteConfigAnalysis {
-    let config_path = match find_vite_config(project_root) {
+pub fn analyze_vite_config(
+    ws: &dyn crate::traits::WorkspaceAccess,
+    project_root: &str,
+) -> ViteConfigAnalysis {
+    let config_path_str = match find_vite_config(ws, project_root) {
         Some(p) => p,
         None => return ViteConfigAnalysis::NotFound,
     };
 
-    let config_path_str = config_path.to_string_lossy().replace('\\', "/");
-    let config_dir = config_path.parent().unwrap_or(project_root);
+    let config_dir_str = crate::resolver::parent_dir(&config_path_str);
+    let config_dir = std::path::Path::new(&config_dir_str);
 
-    let source = match std::fs::read_to_string(&config_path) {
-        Ok(s) => s,
-        Err(e) => {
+    let source = match ws.read_file(&config_path_str) {
+        Some(s) => s.to_string(),
+        None => {
             return ViteConfigAnalysis::Complex {
                 config_path: config_path_str,
-                reason: format!("cannot read config file: {e}"),
+                reason: "cannot read config file".to_string(),
             };
         }
     };
@@ -874,16 +880,24 @@ const {{ pathToFileURL }} = require('url');
     None
 }
 
-/// Legacy wrapper: discover vite aliases via trusted execution.
-pub fn discover_vite_aliases(project_root: &Path, node_path: &str) -> Vec<(String, String)> {
-    let config_path = match find_vite_config(project_root) {
+/// Discover vite aliases via trusted execution.
+pub fn discover_vite_aliases(
+    ws: &dyn crate::traits::WorkspaceAccess,
+    project_root: &str,
+    node_path: &str,
+) -> Vec<(String, String)> {
+    let config_path_str = match find_vite_config(ws, project_root) {
         Some(p) => p,
         None => return Vec::new(),
     };
+    let config_path =
+        PathBuf::from(config_path_str.replace('/', if cfg!(windows) { "\\" } else { "/" }));
+    let root_path =
+        PathBuf::from(project_root.replace('/', if cfg!(windows) { "\\" } else { "/" }));
 
-    match execute_trusted_vite_config(&config_path, project_root, node_path) {
+    match execute_trusted_vite_config(&config_path, &root_path, node_path) {
         Some(result) => result.aliases,
-        None => get_lkg(&config_path.to_string_lossy().replace('\\', "/")).unwrap_or_default(),
+        None => get_lkg(&config_path_str).unwrap_or_default(),
     }
 }
 

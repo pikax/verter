@@ -8,12 +8,8 @@
 //! a const value AND no parent uses `v-bind` spread on the component.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_analysis::project_resolver::{
-    NativeProjectResolver, ResolvePhase, ResolveRequest, ResolveRequestKind,
-};
 use verter_analysis::template::PropValueConstness;
 
-use crate::host_resolve::HostFileMapReader;
 use crate::shared::read_lock;
 use crate::VerterHost;
 
@@ -97,22 +93,15 @@ impl VerterHost {
 
                 // Resolve component to canonical ID.
                 let child_canonical = match &component.import_source {
-                    Some(source) => {
-                        // Try to resolve the import source to a canonical ID.
-                        // Uses multiple strategies:
-                        // 1. Direct/normalized match in file map
-                        // 2. Alias map (for tsconfig paths, vite aliases like @/, #/)
-                        // 3. Project resolver (tsconfig paths, workspace aliases)
-                        // 4. Parent's resolved dependencies (matching raw import → canonical)
-                        resolve_import_to_canonical(
-                            &files,
-                            &read_lock(&self.alias_to_canonical),
-                            read_lock(&self.project_resolver).as_ref(),
-                            entry,
-                            source,
-                        )
-                    }
-                    None => None, // Unresolved (global or unimported)
+                    Some(source) => self.resolve_via_vfs(
+                        &entry.canonical_id,
+                        source,
+                        verter_vfs::ResolutionContext {
+                            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                            kind: verter_vfs::ResolveRequestKind::EsmImport,
+                        },
+                    ),
+                    None => None,
                 };
 
                 let child_id = match child_canonical {
@@ -235,156 +224,6 @@ impl VerterHost {
     }
 }
 
-/// Resolve an import source to a canonical file ID.
-///
-/// Uses multiple strategies in order of specificity:
-/// 0. Exact structured dependency resolution (from `set_import_dependencies`)
-/// 1. Direct match in file map
-/// 2. Normalized (strip `./`) match
-/// 3. Relative resolution against the parent file's canonical ID
-/// 4. Host alias map (for tsconfig paths, vite aliases like `@/`, `#/`, `~/`),
-///    then project resolver (tsconfig paths, workspace aliases, project references)
-/// 5. Parent's resolved dependencies (match raw import source suffix against
-///    canonical dependency paths — handles `@/components/Child.vue` when the
-///    parent's dependency set already contains `/project/src/components/Child.vue`)
-/// 6. Basename match (test helper — files registered by basename only)
-/// 7. Extension guessing (`.vue`, `/index.vue`)
-pub(crate) fn resolve_import_to_canonical(
-    files: &rustc_hash::FxHashMap<String, crate::types::FileEntry>,
-    alias_map: &rustc_hash::FxHashMap<String, String>,
-    project_resolver: Option<&NativeProjectResolver>,
-    parent_entry: &crate::types::FileEntry,
-    import_source: &str,
-) -> Option<String> {
-    // Phase 0: Exact structured dependency resolution.
-    // If the caller provided a resolution for this specifier, prefer it.
-    if let Some(resolution) = parent_entry.dependency_resolutions.get(import_source) {
-        if let Some(ref resolved_id) = resolution.resolved_canonical_id {
-            if files.contains_key(resolved_id.as_str()) {
-                return Some(resolved_id.clone());
-            }
-        }
-        for candidate in &resolution.possible_canonical_ids {
-            if files.contains_key(candidate.as_str()) {
-                return Some(candidate.clone());
-            }
-        }
-    }
-
-    // Direct match
-    if files.contains_key(import_source) {
-        return Some(import_source.to_string());
-    }
-
-    // Strip leading `./` and try again
-    let normalized = import_source.strip_prefix("./").unwrap_or(import_source);
-    if normalized != import_source && files.contains_key(normalized) {
-        return Some(normalized.to_string());
-    }
-
-    let resolved_relative = if import_source.starts_with('.') {
-        let relative = crate::id::resolve_external(&parent_entry.canonical_id, import_source);
-        if files.contains_key(relative.as_str()) {
-            return Some(relative.clone());
-        }
-        Some(relative)
-    } else {
-        None
-    };
-
-    // Host alias map (tsconfig paths, vite aliases)
-    for candidate in [import_source, normalized] {
-        if let Some(canonical) = alias_map.get(candidate) {
-            if files.contains_key(canonical) {
-                return Some(canonical.clone());
-            }
-        }
-    }
-
-    // Project resolver (tsconfig paths, workspace aliases, project references)
-    if let Some(resolver) = project_resolver {
-        let reader = HostFileMapReader { files };
-        let request = ResolveRequest {
-            importer_id: parent_entry.canonical_id.clone(),
-            specifier: import_source.to_string(),
-            kind: ResolveRequestKind::EsmImport,
-            phase: ResolvePhase::CodegenBlocker,
-        };
-        if let Some(result) = resolver.resolve_with_reader(&reader, &request) {
-            if files.contains_key(&result.source_id) {
-                return Some(result.source_id);
-            }
-        }
-    }
-
-    // Parent's resolved dependencies: match import source suffix against
-    // canonical dependency paths. This handles aliased imports like
-    // `@/components/Child.vue` → `/project/src/components/Child.vue`.
-    //
-    // The parent's `dependencies` are already resolved to canonical IDs
-    // by the caller (unplugin/LSP) via `set_import_dependencies()`.
-    // We check if any dependency's path ends with the import source's
-    // path component (after stripping the alias prefix).
-    for dep in &parent_entry.dependencies {
-        if files.contains_key(dep.as_str()) {
-            // Check if the dependency ends with the import source
-            if dep.ends_with(import_source) || dep.ends_with(normalized) {
-                return Some(dep.clone());
-            }
-            // Also check basename match: import_source's last component
-            // matches dependency's last component.
-            if let Some(import_basename) = normalized.rsplit('/').next() {
-                if let Some(dep_basename) = dep.rsplit('/').next() {
-                    if !dep_basename.is_empty() && import_basename == dep_basename {
-                        return Some(dep.clone());
-                    }
-                }
-                // Also try backslash (Windows paths)
-                if let Some(dep_basename) = dep.rsplit('\\').next() {
-                    if !dep_basename.is_empty() && import_basename == dep_basename {
-                        return Some(dep.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    // Basename match: if normalized path's filename matches a canonical ID
-    // (common in test setups where files are registered by basename only)
-    if let Some(basename) = normalized.rsplit('/').next() {
-        if basename != normalized && files.contains_key(basename) {
-            return Some(basename.to_string());
-        }
-    }
-
-    // Try common extensions (.vue, .ts, .js, index files)
-    // Include the resolved relative path if available (handles `./components` → `src/components.ts`)
-    let resolved_ref = resolved_relative.as_deref().unwrap_or(import_source);
-    for candidate in [import_source, normalized, resolved_ref] {
-        for ext in &[
-            ".vue",
-            "/index.vue",
-            ".ts",
-            ".tsx",
-            ".js",
-            "/index.ts",
-            "/index.js",
-        ] {
-            let with_ext = format!("{}{}", candidate, ext);
-            if files.contains_key(&with_ext) {
-                return Some(with_ext);
-            }
-            if let Some(canonical) = alias_map.get(&with_ext) {
-                if files.contains_key(canonical) {
-                    return Some(canonical.clone());
-                }
-            }
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -424,7 +263,7 @@ mod tests {
         // Child component with a `msg` prop
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String })
 </script>
@@ -434,7 +273,7 @@ defineProps({ msg: String })
         // Parent passes a literal string (const)
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
@@ -442,12 +281,12 @@ import Child from './Child.vue'
         );
 
         // Compile both
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result = host.compute_cross_file_optimizations();
         // Child.vue should have "msg" as const prop
-        let child_consts = result.const_prop_overrides.get("Child.vue");
+        let child_consts = result.const_prop_overrides.get("/project/Child.vue");
         assert!(
             child_consts.is_some(),
             "Expected const props for Child.vue, got none. Overrides: {:?}",
@@ -467,7 +306,7 @@ import Child from './Child.vue'
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String })
 </script>
@@ -477,7 +316,7 @@ defineProps({ msg: String })
         // Parent A passes const
         upsert_vue(
             &host,
-            "ParentA.vue",
+            "/project/ParentA.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
@@ -487,7 +326,7 @@ import Child from './Child.vue'
         // Parent B passes dynamic ref
         upsert_vue(
             &host,
-            "ParentB.vue",
+            "/project/ParentB.vue",
             r#"<script setup>
 import { ref } from 'vue'
 import Child from './Child.vue'
@@ -496,13 +335,13 @@ const msg = ref('world')
 <template><Child :msg="msg" /></template>"#,
         );
 
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "ParentA.vue");
-        compile_file(&host, "ParentB.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/ParentA.vue");
+        compile_file(&host, "/project/ParentB.vue");
 
         let result = host.compute_cross_file_optimizations();
         // msg should NOT be const because ParentB passes dynamic
-        let child_consts = result.const_prop_overrides.get("Child.vue");
+        let child_consts = result.const_prop_overrides.get("/project/Child.vue");
         let has_msg = child_consts.is_some_and(|s| s.contains("msg"));
         assert!(
             !has_msg,
@@ -517,19 +356,21 @@ const msg = ref('world')
 
         upsert_vue(
             &host,
-            "Root.vue",
+            "/project/Root.vue",
             r#"<script setup>
 defineProps({ title: String })
 </script>
 <template><div>{{ title }}</div></template>"#,
         );
 
-        compile_file(&host, "Root.vue");
+        compile_file(&host, "/project/Root.vue");
 
         let result = host.compute_cross_file_optimizations();
         // No parent uses Root, so it shouldn't have any const props
         assert!(
-            !result.const_prop_overrides.contains_key("Root.vue"),
+            !result
+                .const_prop_overrides
+                .contains_key("/project/Root.vue"),
             "Root with no parents should not have const props"
         );
     }
@@ -541,7 +382,7 @@ defineProps({ title: String })
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String, count: Number })
 </script>
@@ -550,7 +391,7 @@ defineProps({ msg: String, count: Number })
 
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import Child from './Child.vue'
 const props = { msg: 'hello', count: 42 }
@@ -558,12 +399,14 @@ const props = { msg: 'hello', count: 42 }
 <template><Child v-bind="props" /></template>"#,
         );
 
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result = host.compute_cross_file_optimizations();
         assert!(
-            !result.const_prop_overrides.contains_key("Child.vue"),
+            !result
+                .const_prop_overrides
+                .contains_key("/project/Child.vue"),
             "Spread should prevent all prop optimizations"
         );
         // Should have a diagnostic about spread
@@ -583,11 +426,11 @@ const props = { msg: 'hello', count: 42 }
 
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<template><GlobalComp msg="hello" /></template>"#,
         );
 
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result = host.compute_cross_file_optimizations();
         // GlobalComp has no import source, should be skipped entirely
@@ -613,7 +456,7 @@ const props = { msg: 'hello', count: 42 }
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String })
 </script>
@@ -622,7 +465,7 @@ defineProps({ msg: String })
 
         upsert_vue(
             &host,
-            "ParentA.vue",
+            "/project/ParentA.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
@@ -631,19 +474,19 @@ import Child from './Child.vue'
 
         upsert_vue(
             &host,
-            "ParentB.vue",
+            "/project/ParentB.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
 <template><Child msg="world" /></template>"#,
         );
 
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "ParentA.vue");
-        compile_file(&host, "ParentB.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/ParentA.vue");
+        compile_file(&host, "/project/ParentB.vue");
 
         let result = host.compute_cross_file_optimizations();
-        let child_consts = result.const_prop_overrides.get("Child.vue");
+        let child_consts = result.const_prop_overrides.get("/project/Child.vue");
         assert!(
             child_consts.is_some_and(|s| s.contains("msg")),
             "msg should be const when all parents pass const values"
@@ -658,7 +501,7 @@ import Child from './Child.vue'
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String, label: { type: String, default: 'default' } })
 </script>
@@ -668,18 +511,18 @@ defineProps({ msg: String, label: { type: String, default: 'default' } })
         // Parent passes msg but not label
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
 <template><Child msg="hello" /></template>"#,
         );
 
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result = host.compute_cross_file_optimizations();
-        let child_consts = result.const_prop_overrides.get("Child.vue");
+        let child_consts = result.const_prop_overrides.get("/project/Child.vue");
         assert!(child_consts.is_some(), "Expected const props for Child.vue");
         let consts = child_consts.unwrap();
         assert!(consts.contains("msg"), "msg should be const");
@@ -766,13 +609,22 @@ import Child from '@/components/Child.vue'
         compile_file(&host, "/project/src/components/Child.vue");
         compile_file(&host, "/project/src/App.vue");
 
-        // Register alias in host alias map (as LSP/unplugin would do)
+        // Configure workspace resolver with alias (as LSP/unplugin would do)
         {
-            let mut aliases = crate::shared::write_lock(&host.alias_to_canonical);
-            aliases.insert(
-                "@/components/Child.vue".to_string(),
-                "/project/src/components/Child.vue".to_string(),
-            );
+            use verter_analysis::project_resolver::*;
+            host.workspace().configure_resolver(vec![IdeProjectConfig {
+                root: "/project".to_string(),
+                workspace_root: "/project".to_string(),
+                tsconfig_path: None,
+                provider_root: "/project".to_string(),
+                workspace_aliases: vec![WorkspaceAlias {
+                    find: "@/".to_string(),
+                    replacement: "/project/src/".to_string(),
+                }],
+                compiler_options: IdeProjectCompilerOptions::default(),
+                references: vec![],
+                membership: ProjectMembership::MatchAll,
+            }]);
         }
 
         let result = host.compute_cross_file_optimizations();
@@ -793,7 +645,7 @@ import Child from '@/components/Child.vue'
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String })
 </script>
@@ -801,18 +653,20 @@ defineProps({ msg: String })
         );
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
 <template><Child msg="hello" /></template>"#,
         );
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result = host.compute_cross_file_optimizations();
         assert!(
-            result.changed_files.contains(&"Child.vue".to_string()),
+            result
+                .changed_files
+                .contains(&"/project/Child.vue".to_string()),
             "First computation should list all optimized files as changed"
         );
     }
@@ -824,7 +678,7 @@ import Child from './Child.vue'
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String })
 </script>
@@ -832,14 +686,14 @@ defineProps({ msg: String })
         );
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
 <template><Child msg="hello" /></template>"#,
         );
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         // First computation
         let _ = host.compute_cross_file_optimizations();
@@ -859,7 +713,7 @@ import Child from './Child.vue'
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String })
 </script>
@@ -867,22 +721,24 @@ defineProps({ msg: String })
         );
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import Child from './Child.vue'
 </script>
 <template><Child msg="hello" /></template>"#,
         );
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result1 = host.compute_cross_file_optimizations();
-        assert!(result1.const_prop_overrides.contains_key("Child.vue"));
+        assert!(result1
+            .const_prop_overrides
+            .contains_key("/project/Child.vue"));
 
         // Now parent changes to dynamic prop
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import { ref } from 'vue'
 import Child from './Child.vue'
@@ -890,15 +746,19 @@ const msg = ref('hello')
 </script>
 <template><Child :msg="msg" /></template>"#,
         );
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result2 = host.compute_cross_file_optimizations();
         assert!(
-            !result2.const_prop_overrides.contains_key("Child.vue"),
+            !result2
+                .const_prop_overrides
+                .contains_key("/project/Child.vue"),
             "Child should no longer have const props"
         );
         assert!(
-            result2.changed_files.contains(&"Child.vue".to_string()),
+            result2
+                .changed_files
+                .contains(&"/project/Child.vue".to_string()),
             "Child.vue should be in changed_files after parent made prop dynamic"
         );
     }
@@ -910,7 +770,7 @@ const msg = ref('hello')
 
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             r#"<script setup>
 defineProps({ msg: String })
 </script>
@@ -919,7 +779,7 @@ defineProps({ msg: String })
 
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             r#"<script setup>
 import { ref } from 'vue'
 import Child from './Child.vue'
@@ -928,13 +788,15 @@ const comp = ref(Child)
 <template><component :is="comp" msg="hello" /></template>"#,
         );
 
-        compile_file(&host, "Child.vue");
-        compile_file(&host, "Parent.vue");
+        compile_file(&host, "/project/Child.vue");
+        compile_file(&host, "/project/Parent.vue");
 
         let result = host.compute_cross_file_optimizations();
         // Dynamic component usage should not contribute to render tree
         assert!(
-            !result.const_prop_overrides.contains_key("Child.vue"),
+            !result
+                .const_prop_overrides
+                .contains_key("/project/Child.vue"),
             "Dynamic component usage should not create render tree edges"
         );
     }

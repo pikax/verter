@@ -216,7 +216,10 @@ impl TestSessionBuilder {
         //    can resolve path aliases in go-to-definition and completions.
         let tsconfig_path = std::path::PathBuf::from(&tsconfig_path_str);
         if tsconfig_path.exists() {
-            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&tsconfig_path) {
+            let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+            if let Some((base_url, paths)) =
+                verter_vfs::config::raw_paths_json(&ws, &tsconfig_path_str)
+            {
                 let _ = provider.configure_paths(&base_url, paths).await;
             }
         }

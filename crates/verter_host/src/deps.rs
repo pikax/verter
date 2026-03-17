@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use verter_analysis::project_resolver::{
-    NativeProjectResolver, ProjectResolverReader, ResolvePhase, ResolveRequest, ResolveRequestKind,
+    NativeProjectResolver, ResolvePhase, ResolveRequest, ResolveRequestKind,
 };
 
 use crate::id;
@@ -104,11 +104,11 @@ struct FileIdSetReader<'a> {
     ids: &'a rustc_hash::FxHashSet<String>,
 }
 
-impl ProjectResolverReader for FileIdSetReader<'_> {
+impl verter_vfs::WorkspaceAccess for FileIdSetReader<'_> {
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.ids.contains(canonical_id)
     }
-    fn read_text(&self, _canonical_id: &str) -> Option<Arc<str>> {
+    fn read_file(&self, _canonical_id: &str) -> Option<Arc<str>> {
         None // Not needed for existence-only resolution
     }
     fn realpath(&self, canonical_id: &str) -> Option<String> {

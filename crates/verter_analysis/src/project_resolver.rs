@@ -1,6 +1,6 @@
 //! Project resolver — re-exported from `verter_vfs::resolver`.
 //!
-//! All resolver types, the `ProjectResolverReader` trait, and the
+//! All resolver types and the
 //! `ProjectResolver` (aliased as `NativeProjectResolver`) now live in
 //! `verter_vfs`. This module re-exports them for backward compatibility
 //! and adds analysis-dependent utility functions that reference
@@ -19,11 +19,11 @@ pub use verter_vfs::resolver::{
     build_known_file_index, collapse_path, is_absolute_specifier, is_relative_specifier,
     join_paths, normalize_canonical_id, normalize_known_file_id, parent_dir,
     resolve_known_dependency_base, resolve_known_dependency_id, IdeProjectCompilerOptions,
-    IdeProjectConfig, NativeProjectResolver, ProjectMembership, ProjectResolver,
-    ProjectResolverReader, WorkspaceAlias,
+    IdeProjectConfig, NativeProjectResolver, ProjectMembership, ProjectResolver, WorkspaceAlias,
 };
 pub use verter_vfs::types::{
-    ProviderTarget, ResolutionKind, ResolvePhase, ResolveRequest, ResolveRequestKind, ResolveResult,
+    ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
+    ResolveRequestKind, ResolveResult,
 };
 
 // ── Analysis-dependent functions ──

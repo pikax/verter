@@ -228,6 +228,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             virtualInfo.sourceFileName,
             file,
             logger,
+            directory,
             macroTypeAccess,
             virtualInfo.mode,
           );
@@ -238,7 +239,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const file = _readFile(fileName);
       if (isVue(fileName) && file) {
         logger.info("[Verter] readFile - " + fileName + " -- " + file.length);
-        return parseFile(fileName, file, logger, macroTypeAccess);
+        return parseFile(fileName, file, logger, directory, macroTypeAccess);
       }
       return file;
     };

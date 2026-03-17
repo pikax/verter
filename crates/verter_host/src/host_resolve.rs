@@ -21,10 +21,6 @@ use verter_core::compile::{
     compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
 
-use verter_analysis::project_resolver::{
-    ProjectResolverReader, ResolvePhase, ResolveRequest, ResolveRequestKind,
-};
-
 use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
@@ -40,31 +36,6 @@ type ExternalTypeCache = rustc_hash::FxHashMap<
     (String, String),
     Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
 >;
-
-/// Bridges the host's in-memory file map to the [`ProjectResolverReader`] trait,
-/// allowing the [`NativeProjectResolver`] to probe for files without filesystem access.
-pub(crate) struct HostFileMapReader<'a> {
-    pub files: &'a FxHashMap<String, FileEntry>,
-}
-
-impl ProjectResolverReader for HostFileMapReader<'_> {
-    fn file_exists(&self, canonical_id: &str) -> bool {
-        self.files.contains_key(canonical_id)
-    }
-
-    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.files.get(canonical_id).map(|e| e.source.clone())
-    }
-
-    fn realpath(&self, canonical_id: &str) -> Option<String> {
-        // In-memory host has no symlinks; return the canonical ID as-is.
-        if self.files.contains_key(canonical_id) {
-            Some(canonical_id.to_string())
-        } else {
-            None
-        }
-    }
-}
 
 impl VerterHost {
     /// Expand a relative import specifier into all candidate canonical IDs.
@@ -91,101 +62,20 @@ impl VerterHost {
 
     fn resolve_loaded_dependency_canonical(
         &self,
-        files: &FxHashMap<String, FileEntry>,
+        _files: &FxHashMap<String, FileEntry>,
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        let owner_entry = files.get(owner_canonical)?;
-
-        // Phase 0: Workspace resolution (authoritative).
-        // The workspace's resolution chain (exact resolutions → project resolver)
-        // is the primary resolution path. Internal phases are fallback for WASM.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(result) = self.ws().resolve_import(
+        self.ws()
+            .resolve_import(
                 owner_canonical,
                 import_source,
-                verter_vfs::ResolveRequestKind::EsmImport,
-            ) {
-                if files.contains_key(&result.source_id) {
-                    return Some(result.source_id);
-                }
-            }
-        }
-
-        // Phase 1: Legacy exact lookup (WASM fallback / transition).
-        // If the caller provided a resolution for this specifier, use it.
-        if let Some(resolution) = owner_entry.dependency_resolutions.get(import_source) {
-            if let Some(ref resolved_id) = resolution.resolved_canonical_id {
-                if files.contains_key(resolved_id.as_str()) {
-                    return Some(resolved_id.clone());
-                }
-                // Exact resolution exists but file not loaded — don't fall through
-                // to heuristics (the caller knows best).
-                return None;
-            }
-
-            // Phase 1b: Candidate list — return first loaded candidate.
-            for candidate in &resolution.possible_canonical_ids {
-                if files.contains_key(candidate.as_str()) {
-                    return Some(candidate.clone());
-                }
-            }
-        }
-
-        // Phase 2: Legacy project resolver (WASM fallback / transition).
-        // Uses the host's internal NativeProjectResolver.
-        // In the new architecture, Phase 0 (workspace) handles this.
-        // Kept for backward compatibility with WASM and callers that use
-        // configure_projects() without a workspace.
-        if let Some(resolver) = &*read_lock(&self.project_resolver) {
-            let reader = HostFileMapReader { files };
-            let request = ResolveRequest {
-                importer_id: owner_canonical.to_string(),
-                specifier: import_source.to_string(),
-                kind: ResolveRequestKind::EsmImport,
-                phase: ResolvePhase::CodegenBlocker,
-            };
-            if let Some(result) = resolver.resolve_with_reader(&reader, &request) {
-                if files.contains_key(&result.source_id) {
-                    return Some(result.source_id);
-                }
-            }
-        }
-
-        // Phase 3: Direct path probing for relative specifiers.
-        // Resolves `./types` → `/src/types`, then tries extensions and /index variants.
-        let direct = crate::id::resolve_external(owner_canonical, import_source);
-        if files.contains_key(direct.as_str()) {
-            return Some(direct);
-        }
-        for ext in &self.config.resolve_extensions {
-            let with_ext = format!("{}{}", direct, ext);
-            if files.contains_key(with_ext.as_str()) {
-                return Some(with_ext);
-            }
-        }
-        // Try directory index files: ./types → ./types/index.ts, etc.
-        for ext in &self.config.resolve_extensions {
-            let index_path = format!("{}/index{}", direct, ext);
-            if files.contains_key(index_path.as_str()) {
-                return Some(index_path);
-            }
-        }
-
-        // Phase 4: Fall back to dependency set matching for non-relative specifiers
-        // that weren't in `dependency_resolutions` (e.g., auto-discovered deps).
-        let normalized = import_source.strip_prefix("./").unwrap_or(import_source);
-        for dep in &owner_entry.dependencies {
-            if !files.contains_key(dep.as_str()) {
-                continue;
-            }
-            if dep.ends_with(import_source) || dep.ends_with(normalized) {
-                return Some(dep.clone());
-            }
-        }
-
-        None
+                verter_vfs::ResolutionContext {
+                    phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                    kind: verter_vfs::ResolveRequestKind::EsmImport,
+                },
+            )
+            .map(|r| r.source_id)
     }
 
     #[allow(clippy::too_many_arguments)]

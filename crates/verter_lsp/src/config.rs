@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 ///
 /// Delegates to VFS config.
 pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
-    verter_vfs::config::has_solution_style_tsconfig(workspace_root)
+    let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+    verter_vfs::config::has_solution_style_tsconfig(&ws, &workspace_root.to_string_lossy())
 }
 
 pub use verter_diagnostics::{
@@ -337,12 +338,13 @@ impl ProjectRegistry {
             let discovered = verter_vfs::config::discover_tsconfigs(&root_path);
 
             for entry in &discovered {
-                let tsconfig_path = PathBuf::from(&entry.path);
                 let project_root = entry.root.clone();
                 let project_root_path = PathBuf::from(&project_root);
-                let membership = verter_vfs::config::load_project_membership(&tsconfig_path);
-                let compiler_options = verter_vfs::config::load_compiler_options(&tsconfig_path);
-                let references = verter_vfs::config::load_project_references(&tsconfig_path);
+                let ws =
+                    verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+                let membership = verter_vfs::config::load_project_membership(&ws, &entry.path);
+                let compiler_options = verter_vfs::config::load_compiler_options(&ws, &entry.path);
+                let references = verter_vfs::config::load_project_references(&ws, &entry.path);
                 // Tsconfig-backed projects use tsconfig paths as the sole alias source.
                 // Vite aliases are only applied to fallback (no-tsconfig) projects.
                 let workspace_aliases = Vec::new();
@@ -510,12 +512,13 @@ impl ProjectRegistry {
             let discovered = verter_vfs::config::discover_tsconfigs(&root_path);
 
             for entry in &discovered {
-                let tsconfig_path = PathBuf::from(&entry.path);
                 let project_root = entry.root.clone();
                 let project_root_path = PathBuf::from(&project_root);
-                let membership = verter_vfs::config::load_project_membership(&tsconfig_path);
-                let compiler_options = verter_vfs::config::load_compiler_options(&tsconfig_path);
-                let references = verter_vfs::config::load_project_references(&tsconfig_path);
+                let ws =
+                    verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+                let membership = verter_vfs::config::load_project_membership(&ws, &entry.path);
+                let compiler_options = verter_vfs::config::load_compiler_options(&ws, &entry.path);
+                let references = verter_vfs::config::load_project_references(&ws, &entry.path);
                 let lint = discover_lint_config(&project_root_path);
                 let ssr_enabled = detect_ssr_project(&project_root_path, &lint);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());

@@ -133,15 +133,15 @@ impl Engine {
     /// includes it.
     pub(crate) fn resolve_import(
         &self,
-        reader: &dyn crate::resolver::ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         importer_id: &str,
         specifier: &str,
-        kind: crate::types::ResolveRequestKind,
+        ctx: crate::types::ResolutionContext,
     ) -> Option<crate::types::ResolveResult> {
         // 1. Check exact resolutions (authoritative, no fallthrough)
         {
             let edges = self.edges.read();
-            if let Some(exact) = edges.get_exact_resolution(importer_id, specifier) {
+            if let Some(exact) = edges.get_exact_resolution(importer_id, specifier, ctx) {
                 return exact.resolved_canonical_id.as_ref().map(|id| {
                     crate::types::ResolveResult {
                         source_id: id.clone(),
@@ -155,20 +155,24 @@ impl Engine {
             }
         }
 
-        // 2. Project resolver
+        // 2. Project resolver (or default empty resolver for basic path resolution)
         let result = {
             let resolver_guard = self.resolver.read();
-            if let Some(resolver) = resolver_guard.as_ref() {
-                let request = crate::types::ResolveRequest {
-                    importer_id: importer_id.to_string(),
-                    specifier: specifier.to_string(),
-                    kind,
-                    phase: crate::types::ResolvePhase::CodegenBlocker,
-                };
-                resolver.resolve_with_reader(reader, &request)
-            } else {
-                None
-            }
+            let default_resolver;
+            let resolver = match resolver_guard.as_ref() {
+                Some(r) => r,
+                None => {
+                    default_resolver = crate::resolver::ProjectResolver::default();
+                    &default_resolver
+                }
+            };
+            let request = crate::types::ResolveRequest {
+                importer_id: importer_id.to_string(),
+                specifier: specifier.to_string(),
+                kind: ctx.kind,
+                phase: ctx.phase,
+            };
+            resolver.resolve_with_reader(reader, &request)
         };
 
         // Cache successful resolution in the forward/reverse dep graph
@@ -193,7 +197,7 @@ impl Engine {
     /// Compute the preferred alias-based import specifier for a target file.
     pub(crate) fn preferred_specifier(
         &self,
-        reader: &dyn crate::resolver::ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         importer_id: &str,
         target_id: &str,
     ) -> Option<String> {
@@ -204,7 +208,7 @@ impl Engine {
 
     /// Record parsed edges, eagerly resolving relative/src edges via the resolver.
     ///
-    /// `reader` is the workspace implementing `ProjectResolverReader`, used by
+    /// `reader` is the workspace implementing `WorkspaceAccess`, used by
     /// `resolve_import` internally.
     ///
     /// For `ExternalSrc` edges: if a pre-resolved path is provided, it is used
@@ -212,7 +216,7 @@ impl Engine {
     /// resolver (supporting alias-based `<script src>` / `<template src>`).
     pub(crate) fn record_parsed_edges(
         &self,
-        reader: &dyn crate::resolver::ProjectResolverReader,
+        reader: &dyn crate::traits::WorkspaceAccess,
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
     ) {
@@ -222,8 +226,11 @@ impl Engine {
         for edge in edges {
             match edge {
                 crate::types::ParsedEdge::Relative { specifier, kind } => {
-                    if let Some(result) =
-                        self.resolve_import(reader, canonical_id, specifier, *kind)
+                    let ctx = crate::types::ResolutionContext {
+                        phase: crate::types::ResolvePhase::CodegenBlocker,
+                        kind: *kind,
+                    };
+                    if let Some(result) = self.resolve_import(reader, canonical_id, specifier, ctx)
                     {
                         eagerly_resolved.push(result.source_id);
                     }
@@ -238,12 +245,13 @@ impl Engine {
                     } else {
                         // No pre-resolved path — resolve through project resolver
                         // (supports alias-based src attributes like <script src="@/setup.ts">)
-                        if let Some(result) = self.resolve_import(
-                            reader,
-                            canonical_id,
-                            specifier,
-                            crate::types::ResolveRequestKind::SfcSrcAttr,
-                        ) {
+                        let ctx = crate::types::ResolutionContext {
+                            phase: crate::types::ResolvePhase::CodegenBlocker,
+                            kind: crate::types::ResolveRequestKind::SfcSrcAttr,
+                        };
+                        if let Some(result) =
+                            self.resolve_import(reader, canonical_id, specifier, ctx)
+                        {
                             eagerly_resolved.push(result.source_id);
                         }
                     }

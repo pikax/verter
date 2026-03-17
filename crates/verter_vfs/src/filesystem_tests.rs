@@ -1,7 +1,9 @@
 use super::*;
 use crate::changes::WorkspaceChange;
 use crate::traits::WorkspaceAccess;
-use crate::types::{ExactResolution, FileKind, ResolveRequestKind};
+use crate::types::{
+    ExactResolution, FileKind, ResolutionContext, ResolvePhase, ResolveRequestKind,
+};
 
 // ── FilesystemWorkspace::read_file with disk fallback ──
 
@@ -198,6 +200,8 @@ fn set_exact_resolutions() {
         "d:/project/src/app.vue",
         vec![ExactResolution {
             specifier: "./utils".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("d:/project/src/utils.ts".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -211,7 +215,10 @@ fn set_exact_resolutions() {
     let resolve = ws.resolve_import(
         "d:/project/src/app.vue",
         "./utils",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(resolve.is_some());
     assert_eq!(resolve.unwrap().source_id, "d:/project/src/utils.ts");

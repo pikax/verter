@@ -20,6 +20,8 @@ export {
   mapComponentMeta,
 } from "./checker.js";
 
+export type { CheckerWorkspace } from "./checker.js";
+
 export type {
   PropertyMeta,
   PropertyMetaSchema,

@@ -53,8 +53,8 @@ impl TestReader {
     }
 }
 
-impl ProjectResolverReader for TestReader {
-    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+impl crate::traits::WorkspaceAccess for TestReader {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.texts
             .get(&normalize_canonical_id(canonical_id))
             .cloned()
@@ -1274,5 +1274,225 @@ fn preferred_specifier_workspace_alias_no_double_slash() {
     assert!(
         !specifier.contains("//"),
         "specifier must not contain double-slash: {specifier}"
+    );
+}
+
+// ── Context-aware resolution tests (Phase 0) ──
+
+/// Same specifier → different target depending on (phase, kind).
+/// Package with `exports: { ".": { "types": "./d.ts", "import": "./index.js" } }`
+///
+/// - `(CodegenBlocker, EsmImport)` → index.js  (runtime entry)
+/// - `(ProviderGraph, EsmImport)` → d.ts       (type entry)
+/// - `(CodegenBlocker, TypeImport)` → d.ts      (type entry)
+#[test]
+fn context_aware_exports_codegen_esm_picks_runtime() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/pkg/index.js",
+        "/workspace/node_modules/pkg/d.ts",
+    ]);
+    reader.add_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "exports": { ".": { "types": "./d.ts", "import": "./index.js" } } }"#,
+    );
+
+    // CodegenBlocker + EsmImport → runtime entry (index.js)
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "pkg".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("CodegenBlocker + EsmImport should resolve");
+    assert_eq!(
+        result.source_id, "/workspace/node_modules/pkg/index.js",
+        "CodegenBlocker+EsmImport should pick runtime entry (import condition)"
+    );
+}
+
+#[test]
+fn context_aware_exports_provider_esm_picks_types() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/pkg/index.js",
+        "/workspace/node_modules/pkg/d.ts",
+    ]);
+    reader.add_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "exports": { ".": { "types": "./d.ts", "import": "./index.js" } } }"#,
+    );
+
+    // ProviderGraph + EsmImport → type entry (d.ts)
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "pkg".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("ProviderGraph + EsmImport should resolve");
+    assert_eq!(
+        result.source_id, "/workspace/node_modules/pkg/d.ts",
+        "ProviderGraph should pick type entry (types condition)"
+    );
+}
+
+#[test]
+fn context_aware_exports_codegen_type_import_picks_types() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/pkg/index.js",
+        "/workspace/node_modules/pkg/d.ts",
+    ]);
+    reader.add_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "exports": { ".": { "types": "./d.ts", "import": "./index.js" } } }"#,
+    );
+
+    // CodegenBlocker + TypeImport → type entry (d.ts)
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "pkg".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("CodegenBlocker + TypeImport should resolve");
+    assert_eq!(
+        result.source_id, "/workspace/node_modules/pkg/d.ts",
+        "CodegenBlocker+TypeImport should pick type entry (types condition)"
+    );
+}
+
+/// Legacy package (no exports field): `{ "types": "./t.d.ts", "main": "./m.js" }`
+///
+/// - `(CodegenBlocker, EsmImport)` → m.js  (module/main keys)
+/// - `(ProviderGraph, EsmImport)` → t.d.ts (types key)
+#[test]
+fn context_aware_legacy_codegen_picks_main() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/legacy/m.js",
+        "/workspace/node_modules/legacy/t.d.ts",
+    ]);
+    reader.add_file(
+        "/workspace/node_modules/legacy/package.json",
+        r#"{ "types": "./t.d.ts", "main": "./m.js" }"#,
+    );
+
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "legacy".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("CodegenBlocker legacy should resolve");
+    assert_eq!(
+        result.source_id, "/workspace/node_modules/legacy/m.js",
+        "CodegenBlocker+EsmImport legacy should pick main"
+    );
+}
+
+#[test]
+fn context_aware_legacy_provider_picks_types() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/legacy/m.js",
+        "/workspace/node_modules/legacy/t.d.ts",
+    ]);
+    reader.add_file(
+        "/workspace/node_modules/legacy/package.json",
+        r#"{ "types": "./t.d.ts", "main": "./m.js" }"#,
+    );
+
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "legacy".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("ProviderGraph legacy should resolve");
+    assert_eq!(
+        result.source_id, "/workspace/node_modules/legacy/t.d.ts",
+        "ProviderGraph legacy should pick types"
+    );
+}
+
+/// RequireCall → CJS entry via "require" export condition.
+#[test]
+fn context_aware_require_picks_cjs() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/dual/index.mjs",
+        "/workspace/node_modules/dual/index.cjs",
+    ]);
+    reader.add_file(
+        "/workspace/node_modules/dual/package.json",
+        r#"{ "exports": { ".": { "import": "./index.mjs", "require": "./index.cjs" } } }"#,
+    );
+
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "dual".to_string(),
+                kind: ResolveRequestKind::RequireCall,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("RequireCall should resolve");
+    assert_eq!(
+        result.source_id, "/workspace/node_modules/dual/index.cjs",
+        "RequireCall should pick CJS entry via require condition"
     );
 }

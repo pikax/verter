@@ -26,10 +26,24 @@ pub enum ResolveRequestKind {
 }
 
 /// Which dependency graph is asking for resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolvePhase {
     CodegenBlocker,
     ProviderGraph,
+}
+
+/// Resolution context — determines which target a specifier resolves to.
+///
+/// Different `(phase, kind)` combinations produce different results for the
+/// same specifier. For example:
+/// - `(CodegenBlocker, EsmImport)` → runtime entry (`index.js`, `"import"` condition)
+/// - `(CodegenBlocker, TypeImport)` → type entry (`index.d.ts`, `"types"` condition)
+/// - `(ProviderGraph, *)` → type entry (`"types"` condition)
+/// - `(*, RequireCall)` → CJS entry (`"require"` condition)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResolutionContext {
+    pub phase: ResolvePhase,
+    pub kind: ResolveRequestKind,
 }
 
 /// Where the resolved file should be exposed to the provider layer.
@@ -94,10 +108,15 @@ pub enum ParsedEdge {
     },
 }
 
-/// An exact resolution injected by the bundler or LSP (authoritative).
+/// An exact resolution override injected by bundler or LSP.
+///
+/// Keyed by `(specifier, phase, kind)` in the edge store, so different
+/// contexts can resolve the same specifier to different targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactResolution {
     pub specifier: String,
+    pub phase: ResolvePhase,
+    pub kind: ResolveRequestKind,
     pub resolved_canonical_id: Option<String>,
     pub possible_canonical_ids: Vec<String>,
 }

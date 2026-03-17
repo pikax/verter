@@ -234,8 +234,8 @@ impl<'a> LspProjectResolverReader<'a> {
     }
 }
 
-impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader<'_> {
-    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+impl verter_vfs::WorkspaceAccess for LspProjectResolverReader<'_> {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         crate::compile_blockers::ensure_source_loaded_into_host(
             self.documents.host(),
             canonical_id,
@@ -245,24 +245,20 @@ impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader
 
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.documents.host().get_source(canonical_id).is_some()
-            || std::path::Path::new(&crate::compile_blockers::normalize_fs_path(canonical_id))
-                .is_file()
+            || self.documents.host().workspace().file_exists(canonical_id)
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         if self.documents.host().get_source(canonical_id).is_some() {
             return Some(crate::compile_blockers::normalize_fs_path(canonical_id));
         }
-
-        std::fs::canonicalize(crate::compile_blockers::normalize_fs_path(canonical_id))
-            .ok()
-            .map(|path| crate::compile_blockers::normalize_fs_path(&path.to_string_lossy()))
+        self.documents.host().workspace().realpath(canonical_id)
     }
 }
 
 pub(crate) fn rewrite_non_vue_source_with_resolver(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     source: &str,
     module_references: &[verter_host::ScriptModuleReference],
@@ -308,7 +304,7 @@ pub(crate) fn rewrite_non_vue_source_with_resolver(
 
 pub(crate) fn prepare_non_vue_provider_sync(
     snapshot: Option<&ResolverSnapshot>,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     source: &str,
     module_references: &[verter_host::ScriptModuleReference],
@@ -338,7 +334,7 @@ pub(crate) fn prepare_non_vue_provider_sync(
 
 pub(crate) fn collect_resolved_provider_dependencies(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     module_references: &[verter_host::ScriptModuleReference],
 ) -> Vec<crate::project_resolver::ResolveResult> {
@@ -393,7 +389,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
 
 pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     module_references: &[verter_analysis::AnalyzedModuleReference],
 ) -> Vec<crate::project_resolver::ResolveResult> {
@@ -788,7 +784,7 @@ where
 
 pub(super) fn collect_priority_vue_targets_from_module_references(
     snapshot: Option<&ResolverSnapshot>,
-    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     module_references: &[verter_analysis::AnalyzedModuleReference],
 ) -> Vec<String> {

@@ -91,9 +91,7 @@ use std::sync::Arc;
 pub struct VerterHost {
     pub(crate) config: HostConfig,
     /// VFS workspace providing file reads, import resolution, and edge recording.
-    /// Only available on native targets (not WASM).
     /// Wrapped in RwLock so the workspace can be swapped (e.g., LSP wiring).
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) workspace: parking_lot::RwLock<Arc<dyn verter_vfs::WorkspaceAccess>>,
     pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
@@ -138,11 +136,15 @@ impl VerterHost {
         }
     }
 
-    /// Create a new host (WASM variant, no workspace).
+    /// Create a new host (WASM variant, backed by MemoryWorkspace).
     #[cfg(target_arch = "wasm32")]
     pub fn new(config: HostConfig) -> Self {
+        let ws: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
         Self {
             config,
+            workspace: parking_lot::RwLock::new(ws),
             files: default_shared(FxHashMap::default()),
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
@@ -174,33 +176,21 @@ impl VerterHost {
     }
 
     /// Get a clone of the workspace Arc.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn workspace(&self) -> Arc<dyn verter_vfs::WorkspaceAccess> {
         self.workspace.read().clone()
     }
 
     /// Swap the workspace backing this host.
-    ///
-    /// Used by the LSP to wire the host to the same `FilesystemWorkspace`
-    /// used for direct mutation access.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_workspace(&self, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) {
         *self.workspace.write() = workspace;
     }
 
     /// Clone the workspace Arc for internal use.
-    /// Acquires a short-lived read lock, clones the Arc, and releases.
-    /// Do NOT hold the returned Arc across blocking calls.
-    #[cfg(not(target_arch = "wasm32"))]
     fn ws(&self) -> Arc<dyn verter_vfs::WorkspaceAccess> {
         self.workspace.read().clone()
     }
 
     /// Resolve an import through the workspace (VFS).
-    ///
-    /// Uses the workspace's resolution chain: exact resolutions (authoritative)
-    /// then project resolver then no fallthrough.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn resolve_import_via_workspace(
         &self,
         parent_canonical_id: &str,
@@ -210,16 +200,28 @@ impl VerterHost {
             .resolve_import(
                 parent_canonical_id,
                 import_source,
-                verter_vfs::ResolveRequestKind::EsmImport,
+                verter_vfs::ResolutionContext {
+                    phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                    kind: verter_vfs::ResolveRequestKind::EsmImport,
+                },
             )
             .map(|r| r.source_id)
     }
 
+    /// Resolve an import through the VFS with full resolution context.
+    /// Sole resolution path on all targets.
+    pub(crate) fn resolve_via_vfs(
+        &self,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_vfs::ResolutionContext,
+    ) -> Option<String> {
+        self.ws()
+            .resolve_import(parent_canonical_id, import_source, ctx)
+            .map(|r| r.source_id)
+    }
+
     /// Compute the preferred alias-based import specifier for a target file.
-    ///
-    /// Returns the shortest tsconfig-path or workspace-alias specifier that
-    /// round-trips correctly. Returns `None` if no alias matches.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn preferred_specifier(&self, importer_id: &str, target_id: &str) -> Option<String> {
         self.ws().preferred_specifier(importer_id, target_id)
     }

@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 #[test]
 fn config_discovery_priority_order() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     // Create multiple config files
@@ -13,7 +16,7 @@ fn config_discovery_priority_order() {
     }
 
     // Should find vite.config.ts first (highest priority)
-    let found = find_vite_config(tmp.path());
+    let found = find_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/"));
     assert!(found.is_some(), "should find vite config");
     assert!(
         found.unwrap().ends_with("vite.config.ts"),
@@ -22,7 +25,7 @@ fn config_discovery_priority_order() {
 
     // Remove .ts, should fall back to .js
     std::fs::remove_file(tmp.path().join("vite.config.ts")).unwrap();
-    let found = find_vite_config(tmp.path());
+    let found = find_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/"));
     assert!(
         found.unwrap().ends_with("vite.config.js"),
         "should fall back to .js"
@@ -31,8 +34,11 @@ fn config_discovery_priority_order() {
 
 #[test]
 fn config_discovery_not_found() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
-    assert!(find_vite_config(tmp.path()).is_none());
+    assert!(find_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")).is_none());
 }
 
 // ── Alias normalization ──────────────────────────────────────────────
@@ -76,6 +82,9 @@ fn normalize_absolute_replacement_preserved() {
 
 #[test]
 fn static_analysis_simple_object_alias() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -85,7 +94,7 @@ fn static_analysis_simple_object_alias() {
     )
     .unwrap();
 
-    let result = analyze_vite_config(tmp.path());
+    let result = analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/"));
     match &result {
         ViteConfigAnalysis::Resolved {
             aliases,
@@ -115,6 +124,9 @@ fn static_analysis_simple_object_alias() {
 
 #[test]
 fn static_analysis_define_config_wrapper() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -125,7 +137,7 @@ export default defineConfig({ resolve: { alias: { '@': './src' } } })"#,
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Resolved { aliases, .. } => {
             assert_eq!(aliases.len(), 1);
             assert_eq!(aliases[0].0, "@/");
@@ -139,6 +151,9 @@ export default defineConfig({ resolve: { alias: { '@': './src' } } })"#,
 
 #[test]
 fn static_analysis_const_indirection() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -149,7 +164,7 @@ export default config;"#,
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Resolved { aliases, .. } => {
             assert_eq!(aliases.len(), 1);
             assert_eq!(aliases[0].0, "@/");
@@ -163,6 +178,9 @@ export default config;"#,
 
 #[test]
 fn static_analysis_template_literal_value() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -172,7 +190,7 @@ fn static_analysis_template_literal_value() {
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Resolved { aliases, .. } => {
             assert_eq!(aliases.len(), 1);
             assert_eq!(aliases[0].0, "@/");
@@ -183,6 +201,9 @@ fn static_analysis_template_literal_value() {
 
 #[test]
 fn static_analysis_array_format() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
     std::fs::create_dir_all(tmp.path().join("lib")).unwrap();
@@ -200,7 +221,7 @@ fn static_analysis_array_format() {
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Resolved { aliases, .. } => {
             assert_eq!(aliases.len(), 2);
             assert!(aliases.iter().any(|(f, _)| f == "@/"));
@@ -215,6 +236,9 @@ fn static_analysis_array_format() {
 
 #[test]
 fn static_analysis_new_url_import_meta() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -230,7 +254,7 @@ fn static_analysis_new_url_import_meta() {
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Resolved { aliases, .. } => {
             assert_eq!(aliases.len(), 1);
             assert_eq!(aliases[0].0, "@/");
@@ -245,6 +269,9 @@ fn static_analysis_new_url_import_meta() {
 
 #[test]
 fn static_analysis_file_url_to_path() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
 
@@ -261,7 +288,7 @@ export default {
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Resolved { aliases, .. } => {
             assert_eq!(aliases.len(), 1);
             assert_eq!(aliases[0].0, "@/");
@@ -278,6 +305,9 @@ export default {
 
 #[test]
 fn static_analysis_function_export_is_complex() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     std::fs::write(
@@ -289,7 +319,7 @@ export default defineConfig(({ mode }) => ({
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Complex { reason, .. } => {
             assert!(
                 reason.contains("function") || reason.contains("arrow"),
@@ -305,6 +335,9 @@ export default defineConfig(({ mode }) => ({
 
 #[test]
 fn static_analysis_process_env_is_complex() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     std::fs::write(
@@ -314,7 +347,7 @@ export default { resolve: { alias: { '@': dir } } }"#,
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Complex { reason, .. } => {
             assert!(
                 reason.contains("process.env"),
@@ -327,6 +360,9 @@ export default { resolve: { alias: { '@': dir } } }"#,
 
 #[test]
 fn static_analysis_import_meta_env_is_complex() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     std::fs::write(
@@ -336,7 +372,7 @@ export default { resolve: { alias: { '@': './src' } } }"#,
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Complex { reason, .. } => {
             assert!(reason.contains("import.meta.env"));
         }
@@ -346,6 +382,9 @@ export default { resolve: { alias: { '@': './src' } } }"#,
 
 #[test]
 fn static_analysis_dynamic_import_is_complex() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     std::fs::write(
@@ -355,7 +394,7 @@ export default { resolve: { alias: { '@': './src' } } }"#,
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Complex { reason, .. } => {
             assert!(
                 reason.contains("dynamic import"),
@@ -368,6 +407,9 @@ export default { resolve: { alias: { '@': './src' } } }"#,
 
 #[test]
 fn static_analysis_non_allowlisted_package_is_complex() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     std::fs::write(
@@ -377,7 +419,7 @@ export default { resolve: { alias: { '@': './src' } } }"#,
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Complex { reason, .. } => {
             assert!(
                 reason.contains("lodash"),
@@ -390,6 +432,9 @@ export default { resolve: { alias: { '@': './src' } } }"#,
 
 #[test]
 fn static_analysis_computed_key_is_complex() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     std::fs::write(
@@ -399,7 +444,7 @@ export default { resolve: { alias: { [key]: './src' } } }"#,
     )
     .unwrap();
 
-    match analyze_vite_config(tmp.path()) {
+    match analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")) {
         ViteConfigAnalysis::Complex { reason, .. } => {
             assert!(
                 reason.contains("computed"),
@@ -412,10 +457,13 @@ export default { resolve: { alias: { [key]: './src' } } }"#,
 
 #[test]
 fn static_analysis_not_found() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
 
     assert!(matches!(
-        analyze_vite_config(tmp.path()),
+        analyze_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/")),
         ViteConfigAnalysis::NotFound
     ));
 }

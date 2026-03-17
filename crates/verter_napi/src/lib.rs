@@ -1042,6 +1042,136 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 
 /// In-memory virtual file host for Vue SFC compilation.
 ///
+// ═══════════════════════════════════════════════════════════════════════════
+// Workspace
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Workspace object backed by `FilesystemWorkspace`.
+///
+/// Provides file access, import resolution, and project configuration.
+/// Construct first, then pass to `VerterHost.withWorkspace()`.
+#[napi(js_name = "Workspace")]
+pub struct NapiWorkspace {
+    inner: std::sync::Arc<verter_vfs::FilesystemWorkspace>,
+}
+
+#[napi]
+impl NapiWorkspace {
+    /// Create a new workspace rooted at the given directories.
+    ///
+    /// The workspace auto-discovers tsconfigs, builds the project graph,
+    /// and populates the resolver.
+    #[napi(constructor)]
+    pub fn new(roots: Vec<String>) -> Self {
+        let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions {
+            roots,
+            eager_preload: false,
+        });
+        Self {
+            inner: std::sync::Arc::new(ws),
+        }
+    }
+
+    /// Read a file from the workspace (overlay → snapshot → disk).
+    #[napi(js_name = "readFile")]
+    pub fn read_file(&self, path: String) -> Option<String> {
+        use verter_vfs::WorkspaceAccess;
+        self.inner.read_file(&path).map(|s| s.to_string())
+    }
+
+    /// Check if a file exists in the workspace.
+    #[napi(js_name = "fileExists")]
+    pub fn file_exists(&self, path: String) -> bool {
+        use verter_vfs::WorkspaceAccess;
+        self.inner.file_exists(&path)
+    }
+
+    /// Check if a path is a directory.
+    #[napi(js_name = "isDir")]
+    pub fn is_dir(&self, path: String) -> bool {
+        use verter_vfs::WorkspaceAccess;
+        self.inner.is_dir(&path)
+    }
+
+    /// Write file content. Creates parent directories as needed.
+    #[napi(js_name = "writeFile")]
+    pub fn write_file(&self, path: String, content: String) -> Result<()> {
+        use verter_vfs::WorkspaceAccess;
+        self.inner
+            .write_file(&path, &content)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
+    }
+
+    /// Resolve an import specifier with context.
+    #[napi(js_name = "resolveImport")]
+    pub fn resolve_import(
+        &self,
+        importer: String,
+        specifier: String,
+        phase: Option<String>,
+        kind: Option<String>,
+    ) -> Option<String> {
+        use verter_vfs::WorkspaceAccess;
+        let phase = match phase.as_deref() {
+            Some("provider") => verter_vfs::ResolvePhase::ProviderGraph,
+            _ => verter_vfs::ResolvePhase::CodegenBlocker,
+        };
+        let kind = match kind.as_deref() {
+            Some("type") => verter_vfs::ResolveRequestKind::TypeImport,
+            Some("require") => verter_vfs::ResolveRequestKind::RequireCall,
+            Some("src") => verter_vfs::ResolveRequestKind::SfcSrcAttr,
+            _ => verter_vfs::ResolveRequestKind::EsmImport,
+        };
+        let ctx = verter_vfs::ResolutionContext { phase, kind };
+        self.inner
+            .resolve_import(&importer, &specifier, ctx)
+            .map(|r| r.source_id)
+    }
+
+    /// Configure project resolver from tsconfig/alias data.
+    /// Replaces (not merges with) any auto-discovered graph.
+    #[napi(js_name = "configureProjects")]
+    pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let configs: Vec<verter_analysis::project_resolver::IdeProjectConfig> = projects
+                .into_iter()
+                .map(napi_project_config_to_ide)
+                .collect();
+            use verter_vfs::WorkspaceAccess;
+            self.inner.configure_resolver(configs);
+        }))
+    }
+
+    /// Notify workspace that an editor buffer is open/changed.
+    #[napi(js_name = "notifyUpsert")]
+    pub fn notify_upsert(&self, canonical_id: String, source: Buffer) -> Result<()> {
+        use verter_vfs::WorkspaceAccess;
+        let source_str = std::str::from_utf8(&source)
+            .map_err(|e| Error::new(Status::InvalidArg, format!("invalid UTF-8: {e}")))?;
+        self.inner
+            .notify_upsert(&canonical_id, std::sync::Arc::from(source_str));
+        Ok(())
+    }
+
+    /// Notify workspace that an editor buffer was closed.
+    #[napi(js_name = "notifyClose")]
+    pub fn notify_close(&self, canonical_id: String) {
+        use verter_vfs::WorkspaceAccess;
+        self.inner.notify_close(&canonical_id);
+    }
+
+    /// Notify workspace that a file was deleted.
+    #[napi(js_name = "notifyDelete")]
+    pub fn notify_delete(&self, canonical_id: String) {
+        use verter_vfs::WorkspaceAccess;
+        self.inner.notify_delete(&canonical_id);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Host
+// ═══════════════════════════════════════════════════════════════════════════
+
 /// Manages a collection of Vue SFCs and their compiled virtual files (script,
 /// template, styles). Files are upserted as source, then lazily compiled into
 /// virtual outputs that a bundler or LSP can request individually.
@@ -1066,6 +1196,23 @@ impl NapiVerterHost {
             inner: host::VerterHost::new_standalone(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
             ),
+        })
+    }
+
+    /// Creates a new `VerterHost` backed by the given workspace.
+    ///
+    /// The workspace handles all file access and import resolution.
+    /// Use `workspace.configureProjects()` before calling this to set up
+    /// the project resolver.
+    #[napi(factory)]
+    pub fn with_workspace(
+        config: Option<NapiHostConfig>,
+        workspace: &NapiWorkspace,
+    ) -> Result<Self> {
+        let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
+        let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+        Ok(Self {
+            inner: host::VerterHost::new(host_config, workspace.inner.clone()),
         })
     }
 
@@ -1524,6 +1671,20 @@ impl NapiVerterHost {
         catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.close();
         }))
+    }
+
+    /// Resolve an import specifier through the host's resolution chain.
+    ///
+    /// Uses VFS-first-then-fallback pattern (same as internal resolution).
+    #[napi(js_name = "resolveImport")]
+    pub fn resolve_import_napi(
+        &self,
+        importer: String,
+        specifier: String,
+        #[napi(ts_arg_type = "string | undefined")] _phase: Option<String>,
+        #[napi(ts_arg_type = "string | undefined")] _kind: Option<String>,
+    ) -> Option<String> {
+        self.inner.resolve_import(&importer, &specifier)
     }
 
     /// Returns a snapshot of host performance metrics.

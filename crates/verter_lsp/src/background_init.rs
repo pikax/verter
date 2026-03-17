@@ -152,12 +152,13 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             let Some(tsconfig_path) = project.tsconfig_path.as_deref() else {
                 continue;
             };
-            let tsconfig_path = std::path::PathBuf::from(tsconfig_path);
-            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&tsconfig_path) {
+            let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&ws, tsconfig_path)
+            {
                 tracing::info!(
                     "configuring tsserver paths for {} via {} (baseUrl: {})",
                     project.root,
-                    tsconfig_path.display(),
+                    tsconfig_path,
                     base_url,
                 );
                 if let Err(e) = tp.configure_paths(&base_url, paths).await {
@@ -220,11 +221,12 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             trusted_files: vite_opts.trusted_files.clone(),
             node_path: vite_opts.node_path.clone(),
         };
-        let vfs_build = verter_vfs::ProjectGraph::from_workspace_roots(&roots, &vfs_vite_opts);
         let ws = vfs_workspace
             .read()
             .clone()
             .expect("workspace created in initialize()");
+        let vfs_build =
+            verter_vfs::ProjectGraph::from_workspace_roots(&*ws, &roots, &vfs_vite_opts);
         ws.set_project_graph(vfs_build.graph);
         tracing::info!("VFS project graph updated with {} roots", roots.len());
     }
@@ -927,7 +929,8 @@ pub(super) fn owner_path_config_for_source(
 ) -> Option<(String, serde_json::Value)> {
     let owner = snapshot.resolver.owner_for_file(canonical_id)?;
     let tsconfig_path = owner.tsconfig_path.as_deref()?;
-    verter_vfs::config::raw_paths_json(std::path::Path::new(tsconfig_path))
+    let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+    verter_vfs::config::raw_paths_json(&ws, tsconfig_path)
 }
 
 pub(crate) async fn configure_provider_paths_for_source(

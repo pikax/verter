@@ -10,6 +10,7 @@
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config;
+pub mod error;
 pub mod exact_resolution;
 pub mod filesystem;
 pub mod memory;
@@ -33,8 +34,9 @@ pub use changes::{ChangeResult, OwnedFileInfo, OwnershipDiff, WorkspaceChange};
 pub use config::{
     discover_tsconfigs, has_solution_style_tsconfig, load_compiler_options,
     load_project_membership, load_project_references, normalize_path_buf, parse_tsconfig_json,
-    resolve_tsconfig_extends, strip_json_comments, ParsedTsConfig, TsConfigEntry,
+    raw_paths_json, resolve_tsconfig_extends, strip_json_comments, ParsedTsConfig, TsConfigEntry,
 };
+pub use error::{DirEntry, VfsError};
 pub use exact_resolution::EdgeStore;
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
 pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
@@ -45,13 +47,13 @@ pub use project_graph::ProjectGraphBuildResult;
 pub use project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 pub use resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
-    ProjectResolver, ProjectResolverReader, WorkspaceAlias,
+    ProjectResolver, WorkspaceAlias,
 };
 pub use traits::WorkspaceAccess;
 pub use types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
-    ProjectOwnership, ProviderTarget, ResolutionKind, ResolvePhase, ResolveRequest,
-    ResolveRequestKind, ResolveResult,
+    ProjectOwnership, ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase,
+    ResolveRequest, ResolveRequestKind, ResolveResult,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use vite_config::{

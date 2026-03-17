@@ -1,27 +1,46 @@
 use super::*;
-use crate::types::{ExactResolution, ResolveRequestKind};
+use crate::types::{ExactResolution, ResolutionContext, ResolvePhase, ResolveRequestKind};
+
+/// Default context used by most tests (CodegenBlocker + EsmImport).
+fn default_ctx() -> ResolutionContext {
+    ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    }
+}
+
+/// Helper to build an ExactResolution with default context.
+fn exact(specifier: &str, resolved: Option<&str>, possible: Vec<&str>) -> ExactResolution {
+    ExactResolution {
+        specifier: specifier.to_string(),
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+        resolved_canonical_id: resolved.map(|s| s.to_string()),
+        possible_canonical_ids: possible.into_iter().map(|s| s.to_string()).collect(),
+    }
+}
 
 #[test]
 fn exact_resolution_not_found_for_unknown_file() {
     let store = EdgeStore::new();
-    assert!(store.get_exact_resolution("src/foo.vue", "./bar").is_none());
+    assert!(store
+        .get_exact_resolution("src/foo.vue", "./bar", default_ctx())
+        .is_none());
     assert!(!store.has_exact_resolutions("src/foo.vue"));
 }
 
 #[test]
 fn set_exact_resolutions_stores_and_retrieves() {
     let mut store = EdgeStore::new();
-    let resolutions = vec![ExactResolution {
-        specifier: "./bar".to_string(),
-        resolved_canonical_id: Some("src/bar.vue".to_string()),
-        possible_canonical_ids: vec!["src/bar.vue".to_string()],
-    }];
+    let resolutions = vec![exact("./bar", Some("src/bar.vue"), vec!["src/bar.vue"])];
 
     let result = store.set_exact_resolutions("src/foo.vue", resolutions);
     assert_eq!(result.newly_resolved, vec!["src/bar.vue"]);
     assert!(store.has_exact_resolutions("src/foo.vue"));
 
-    let res = store.get_exact_resolution("src/foo.vue", "./bar").unwrap();
+    let res = store
+        .get_exact_resolution("src/foo.vue", "./bar", default_ctx())
+        .unwrap();
     assert_eq!(res.resolved_canonical_id.as_deref(), Some("src/bar.vue"));
 }
 
@@ -31,16 +50,8 @@ fn set_exact_resolutions_updates_forward_deps() {
     store.set_exact_resolutions(
         "src/foo.vue",
         vec![
-            ExactResolution {
-                specifier: "./bar".to_string(),
-                resolved_canonical_id: Some("src/bar.vue".to_string()),
-                possible_canonical_ids: vec![],
-            },
-            ExactResolution {
-                specifier: "./baz".to_string(),
-                resolved_canonical_id: Some("src/baz.vue".to_string()),
-                possible_canonical_ids: vec![],
-            },
+            exact("./bar", Some("src/bar.vue"), vec![]),
+            exact("./baz", Some("src/baz.vue"), vec![]),
         ],
     );
 
@@ -54,11 +65,7 @@ fn set_exact_resolutions_updates_reverse_deps() {
     let mut store = EdgeStore::new();
     store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "./bar".to_string(),
-            resolved_canonical_id: Some("src/bar.vue".to_string()),
-            possible_canonical_ids: vec![],
-        }],
+        vec![exact("./bar", Some("src/bar.vue"), vec![])],
     );
 
     let rev = store.reverse_deps("src/bar.vue");
@@ -91,11 +98,7 @@ fn record_parsed_edges_clears_exact_resolutions() {
     // Set exact resolutions first
     store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "./bar".to_string(),
-            resolved_canonical_id: Some("src/bar.vue".to_string()),
-            possible_canonical_ids: vec![],
-        }],
+        vec![exact("./bar", Some("src/bar.vue"), vec![])],
     );
     assert!(store.has_exact_resolutions("src/foo.vue"));
 
@@ -143,11 +146,7 @@ fn remove_file_cleans_up_all_state() {
     let mut store = EdgeStore::new();
     store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "./bar".to_string(),
-            resolved_canonical_id: Some("src/bar.vue".to_string()),
-            possible_canonical_ids: vec![],
-        }],
+        vec![exact("./bar", Some("src/bar.vue"), vec![])],
     );
 
     // Also make another file depend on foo
@@ -206,11 +205,7 @@ fn exact_resolution_with_none_canonical_id() {
     let mut store = EdgeStore::new();
     let result = store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "nonexistent".to_string(),
-            resolved_canonical_id: None,
-            possible_canonical_ids: vec!["maybe/a.ts".to_string()],
-        }],
+        vec![exact("nonexistent", None, vec!["maybe/a.ts"])],
     );
 
     assert!(
@@ -221,7 +216,7 @@ fn exact_resolution_with_none_canonical_id() {
     assert!(store.has_exact_resolutions("src/foo.vue"));
 
     let res = store
-        .get_exact_resolution("src/foo.vue", "nonexistent")
+        .get_exact_resolution("src/foo.vue", "nonexistent", default_ctx())
         .unwrap();
     assert!(res.resolved_canonical_id.is_none());
     assert_eq!(res.possible_canonical_ids, vec!["maybe/a.ts"]);
@@ -236,11 +231,7 @@ fn set_exact_resolutions_replaces_old_exact_deps() {
     // First round: foo depends on bar via exact resolution
     store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "./bar".to_string(),
-            resolved_canonical_id: Some("src/bar.vue".to_string()),
-            possible_canonical_ids: vec![],
-        }],
+        vec![exact("./bar", Some("src/bar.vue"), vec![])],
     );
     assert_eq!(store.forward_deps("src/foo.vue"), vec!["src/bar.vue"]);
     assert_eq!(store.reverse_deps("src/bar.vue"), vec!["src/foo.vue"]);
@@ -248,11 +239,7 @@ fn set_exact_resolutions_replaces_old_exact_deps() {
     // Second round: foo now depends on baz instead of bar
     store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "./baz".to_string(),
-            resolved_canonical_id: Some("src/baz.vue".to_string()),
-            possible_canonical_ids: vec![],
-        }],
+        vec![exact("./baz", Some("src/baz.vue"), vec![])],
     );
 
     // bar should be GONE from forward deps
@@ -281,11 +268,7 @@ fn set_exact_resolutions_empty_clears_all_exact_deps() {
 
     store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "./bar".to_string(),
-            resolved_canonical_id: Some("src/bar.vue".to_string()),
-            possible_canonical_ids: vec![],
-        }],
+        vec![exact("./bar", Some("src/bar.vue"), vec![])],
     );
 
     // Replace with empty set
@@ -311,11 +294,7 @@ fn exact_deps_and_eager_deps_are_independent() {
     // Add exact resolutions on top
     store.set_exact_resolutions(
         "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "lib".to_string(),
-            resolved_canonical_id: Some("node_modules/lib/index.ts".to_string()),
-            possible_canonical_ids: vec![],
-        }],
+        vec![exact("lib", Some("node_modules/lib/index.ts"), vec![])],
     );
 
     let mut fwd = store.forward_deps("src/foo.vue");
@@ -380,5 +359,132 @@ fn record_parsed_edges_clears_lazily_resolved_deps() {
     assert!(
         store.reverse_deps("node_modules/vue/index.ts").is_empty(),
         "lazily resolved dep must be cleared on re-record"
+    );
+}
+
+// ── Context-keyed exact resolution tests ──
+
+#[test]
+fn same_specifier_different_context_resolves_differently() {
+    let mut store = EdgeStore::new();
+
+    // Set two resolutions for the same specifier but different (phase, kind)
+    store.set_exact_resolutions(
+        "src/foo.vue",
+        vec![
+            ExactResolution {
+                specifier: "pkg".to_string(),
+                phase: ResolvePhase::CodegenBlocker,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("node_modules/pkg/index.js".to_string()),
+                possible_canonical_ids: vec![],
+            },
+            ExactResolution {
+                specifier: "pkg".to_string(),
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("node_modules/pkg/index.d.ts".to_string()),
+                possible_canonical_ids: vec![],
+            },
+        ],
+    );
+
+    // CodegenBlocker + EsmImport → index.js
+    let codegen_ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let codegen = store
+        .get_exact_resolution("src/foo.vue", "pkg", codegen_ctx)
+        .expect("CodegenBlocker exact should exist");
+    assert_eq!(
+        codegen.resolved_canonical_id.as_deref(),
+        Some("node_modules/pkg/index.js"),
+    );
+
+    // ProviderGraph + EsmImport → index.d.ts
+    let provider_ctx = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let provider = store
+        .get_exact_resolution("src/foo.vue", "pkg", provider_ctx)
+        .expect("ProviderGraph exact should exist");
+    assert_eq!(
+        provider.resolved_canonical_id.as_deref(),
+        Some("node_modules/pkg/index.d.ts"),
+    );
+
+    // A different kind should NOT match
+    let type_ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    assert!(
+        store
+            .get_exact_resolution("src/foo.vue", "pkg", type_ctx)
+            .is_none(),
+        "TypeImport context should not match EsmImport resolutions"
+    );
+}
+
+#[test]
+fn context_keyed_replacement_only_affects_matching_context() {
+    let mut store = EdgeStore::new();
+
+    // Set codegen resolution
+    store.set_exact_resolutions(
+        "src/foo.vue",
+        vec![
+            ExactResolution {
+                specifier: "pkg".to_string(),
+                phase: ResolvePhase::CodegenBlocker,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("old.js".to_string()),
+                possible_canonical_ids: vec![],
+            },
+            ExactResolution {
+                specifier: "pkg".to_string(),
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("old.d.ts".to_string()),
+                possible_canonical_ids: vec![],
+            },
+        ],
+    );
+
+    // Replace ALL exact resolutions (this replaces both)
+    store.set_exact_resolutions(
+        "src/foo.vue",
+        vec![ExactResolution {
+            specifier: "pkg".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("new.js".to_string()),
+            possible_canonical_ids: vec![],
+        }],
+    );
+
+    let codegen_ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let provider_ctx = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+
+    // CodegenBlocker should see the new value
+    let codegen = store
+        .get_exact_resolution("src/foo.vue", "pkg", codegen_ctx)
+        .expect("codegen should exist");
+    assert_eq!(codegen.resolved_canonical_id.as_deref(), Some("new.js"));
+
+    // ProviderGraph was cleared by set_exact_resolutions (it replaces ALL)
+    assert!(
+        store
+            .get_exact_resolution("src/foo.vue", "pkg", provider_ctx)
+            .is_none(),
+        "provider context should be cleared after full replacement"
     );
 }

@@ -3,7 +3,10 @@ use crate::changes::WorkspaceChange;
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
 use crate::traits::WorkspaceAccess;
-use crate::types::{ExactResolution, FileKind, ParsedEdge, ProjectOwnership, ResolveRequestKind};
+use crate::types::{
+    ExactResolution, FileKind, ParsedEdge, ProjectOwnership, ResolutionContext, ResolvePhase,
+    ResolveRequestKind,
+};
 
 // ── MemorySnapshot tests ──
 
@@ -266,6 +269,8 @@ fn resolve_import_exact_resolution_found() {
         "d:/project/src/app.vue",
         vec![ExactResolution {
             specifier: "./utils".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("d:/project/src/utils.ts".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -274,7 +279,10 @@ fn resolve_import_exact_resolution_found() {
     let result = ws.resolve_import(
         "d:/project/src/app.vue",
         "./utils",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
 
     assert!(result.is_some(), "exact resolution should return Some");
@@ -291,6 +299,8 @@ fn resolve_import_exact_resolution_authoritative_none() {
         "d:/project/src/app.vue",
         vec![ExactResolution {
             specifier: "./missing".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
             resolved_canonical_id: None,
             possible_canonical_ids: vec![],
         }],
@@ -299,7 +309,10 @@ fn resolve_import_exact_resolution_authoritative_none() {
     let result = ws.resolve_import(
         "d:/project/src/app.vue",
         "./missing",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
 
     assert!(
@@ -342,7 +355,10 @@ fn resolve_import_via_project_resolver() {
     let result = ws.resolve_import(
         "d:/project/src/app.vue",
         "./utils",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
 
     assert!(result.is_some(), "resolver should find ./utils.ts");
@@ -383,7 +399,10 @@ fn resolve_import_via_tsconfig_paths() {
     let result = ws.resolve_import(
         "d:/project/src/app.vue",
         "@/components/Button.vue",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
 
     assert!(
@@ -401,7 +420,10 @@ fn resolve_import_returns_none_for_unknown() {
     let result = ws.resolve_import(
         "d:/project/src/app.vue",
         "./nonexistent",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
 
     assert!(result.is_none(), "should return None for unknown specifier");
@@ -637,6 +659,8 @@ fn set_exact_resolutions_stores_and_retrieves() {
         "d:/project/src/app.vue",
         vec![ExactResolution {
             specifier: "./utils".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("d:/project/src/utils.ts".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -653,7 +677,10 @@ fn set_exact_resolutions_stores_and_retrieves() {
     let result = ws.resolve_import(
         "d:/project/src/app.vue",
         "./utils",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(result.is_some());
     assert_eq!(result.unwrap().source_id, "d:/project/src/utils.ts");
@@ -669,15 +696,19 @@ fn set_project_graph_updates_resolver() {
         Arc::from("export const x = 1;"),
     );
 
-    // No project graph yet — resolve should fail (no resolver)
+    // No project graph yet — relative imports still resolve via basic path probing
+    // (the engine uses a default empty resolver that handles unowned relative paths).
     let result_before = ws.resolve_import(
         "d:/project/src/app.vue",
         "./utils",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
-        result_before.is_none(),
-        "should fail to resolve without project graph"
+        result_before.is_some(),
+        "relative imports should resolve via basic path probing even without project graph"
     );
 
     // Now set the project graph
@@ -699,7 +730,10 @@ fn set_project_graph_updates_resolver() {
     let result_after = ws.resolve_import(
         "d:/project/src/app.vue",
         "./utils",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
         result_after.is_some(),
@@ -757,6 +791,8 @@ fn trait_set_exact_resolutions_delegates_to_engine() {
         "/src/App.vue",
         vec![ExactResolution {
             specifier: "./utils".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/src/utils.ts".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -767,7 +803,14 @@ fn trait_set_exact_resolutions_delegates_to_engine() {
     let _ = result;
 
     // Positive: resolve_import should now find it via exact resolution.
-    let resolved = ws.resolve_import("/src/App.vue", "./utils", ResolveRequestKind::EsmImport);
+    let resolved = ws.resolve_import(
+        "/src/App.vue",
+        "./utils",
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
+    );
     assert!(
         resolved.is_some(),
         "trait set_exact_resolutions should make specifier resolvable"
@@ -775,7 +818,14 @@ fn trait_set_exact_resolutions_delegates_to_engine() {
     assert_eq!(resolved.unwrap().source_id, "/src/utils.ts");
 
     // Negative: other specifiers still don't resolve.
-    let no_result = ws.resolve_import("/src/App.vue", "./other", ResolveRequestKind::EsmImport);
+    let no_result = ws.resolve_import(
+        "/src/App.vue",
+        "./other",
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
+    );
     assert!(
         no_result.is_none(),
         "specifiers not in exact resolutions should not resolve"
@@ -811,7 +861,10 @@ fn trait_configure_resolver_builds_project_resolver() {
     let resolved = ws.resolve_import(
         "/proj/src/App.vue",
         "@/Foo.vue",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
         resolved.is_some(),
@@ -823,7 +876,10 @@ fn trait_configure_resolver_builds_project_resolver() {
     let no_result = ws.resolve_import(
         "/proj/src/App.vue",
         "~/Bar.vue",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(no_result.is_none(), "non-matching alias should not resolve");
 }
@@ -855,7 +911,10 @@ fn trait_configure_resolver_empty_clears_resolver() {
     let resolved = ws.resolve_import(
         "/proj/src/App.vue",
         "@/Foo.vue",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(resolved.is_some(), "should resolve before clearing");
 
@@ -866,10 +925,74 @@ fn trait_configure_resolver_empty_clears_resolver() {
     let after_clear = ws.resolve_import(
         "/proj/src/App.vue",
         "@/Foo.vue",
-        ResolveRequestKind::EsmImport,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
     );
     assert!(
         after_clear.is_none(),
         "clearing resolver should stop alias resolution"
+    );
+}
+
+// ── Context-keyed exact resolution tests (Phase 0) ──
+
+/// Exact overrides keyed by (specifier, phase, kind): different contexts
+/// resolve the same specifier to different targets on the same importer.
+#[test]
+fn exact_resolution_context_keyed_different_targets() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file("d:/project/src/app.vue".to_string(), Arc::from("// app"));
+
+    // Set two exact resolutions for the same specifier but different contexts
+    ws.set_exact_resolutions(
+        "d:/project/src/app.vue",
+        vec![
+            ExactResolution {
+                specifier: "pkg".to_string(),
+                phase: ResolvePhase::CodegenBlocker,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("node_modules/pkg/index.js".to_string()),
+                possible_canonical_ids: vec![],
+            },
+            ExactResolution {
+                specifier: "pkg".to_string(),
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("node_modules/pkg/index.d.ts".to_string()),
+                possible_canonical_ids: vec![],
+            },
+        ],
+    );
+
+    // CodegenBlocker + EsmImport → index.js
+    let codegen_result = ws.resolve_import(
+        "d:/project/src/app.vue",
+        "pkg",
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
+    );
+    assert_eq!(
+        codegen_result.as_ref().map(|r| r.source_id.as_str()),
+        Some("node_modules/pkg/index.js"),
+        "CodegenBlocker exact should resolve to .js"
+    );
+
+    // ProviderGraph + EsmImport → index.d.ts
+    let provider_result = ws.resolve_import(
+        "d:/project/src/app.vue",
+        "pkg",
+        ResolutionContext {
+            phase: ResolvePhase::ProviderGraph,
+            kind: ResolveRequestKind::EsmImport,
+        },
+    );
+    assert_eq!(
+        provider_result.as_ref().map(|r| r.source_id.as_str()),
+        Some("node_modules/pkg/index.d.ts"),
+        "ProviderGraph exact should resolve to .d.ts"
     );
 }

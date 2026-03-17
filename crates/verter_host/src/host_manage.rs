@@ -5,8 +5,6 @@
 
 use std::sync::Arc;
 
-use verter_analysis::project_resolver::NativeProjectResolver;
-
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
 use crate::shared::{read_lock, write_lock};
@@ -319,21 +317,18 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
-        let files = read_lock(&self.files);
-        let alias_map = read_lock(&self.alias_to_canonical);
-        let resolver = read_lock(&self.project_resolver);
-        let Some(entry) = files.get(parent_canonical_id) else {
-            return;
-        };
         for import in &mut snapshot.imports {
             if import.resolved_canonical_id.is_none() {
-                import.resolved_canonical_id = crate::cross_file::resolve_import_to_canonical(
-                    &files,
-                    &alias_map,
-                    resolver.as_ref(),
-                    entry,
-                    &import.source,
-                );
+                let ctx = verter_vfs::ResolutionContext {
+                    phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                    kind: if import.is_type_only {
+                        verter_vfs::ResolveRequestKind::TypeImport
+                    } else {
+                        verter_vfs::ResolveRequestKind::EsmImport
+                    },
+                };
+                import.resolved_canonical_id =
+                    self.resolve_via_vfs(parent_canonical_id, &import.source, ctx);
             }
         }
     }
@@ -524,7 +519,6 @@ impl VerterHost {
 
         // Clean up VFS state (overlay, snapshot, edges) so the file is
         // no longer resolvable or tracked after deletion.
-        #[cfg(not(target_arch = "wasm32"))]
         self.ws().notify_delete(&canonical);
 
         Some(HostRemoveResult {
@@ -560,24 +554,37 @@ impl VerterHost {
     ) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        // Build VFS exact resolutions before the loop consumes the data.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Build VFS exact resolutions for ALL relevant (phase, kind) contexts.
         let vfs_resolutions: Vec<verter_vfs::ExactResolution> = resolutions
             .iter()
-            .map(|r| verter_vfs::ExactResolution {
-                specifier: r.specifier.clone(),
-                resolved_canonical_id: r.resolved_canonical_id.as_ref().map(|id| {
+            .flat_map(|r| {
+                let resolved = r.resolved_canonical_id.as_ref().map(|id| {
                     let norm = canonicalize_id(id);
                     norm.into_owned()
-                }),
-                possible_canonical_ids: r
+                });
+                let possible: Vec<String> = r
                     .possible_canonical_ids
                     .iter()
                     .map(|c| {
                         let norm = canonicalize_id(c);
                         norm.into_owned()
                     })
-                    .collect(),
+                    .collect();
+                use verter_vfs::{ResolvePhase as P, ResolveRequestKind as K};
+                [
+                    (P::CodegenBlocker, K::EsmImport),
+                    (P::CodegenBlocker, K::TypeImport),
+                    (P::ProviderGraph, K::EsmImport),
+                    (P::ProviderGraph, K::TypeImport),
+                ]
+                .into_iter()
+                .map(move |(phase, kind)| verter_vfs::ExactResolution {
+                    specifier: r.specifier.clone(),
+                    phase,
+                    kind,
+                    resolved_canonical_id: resolved.clone(),
+                    possible_canonical_ids: possible.clone(),
+                })
             })
             .collect();
 
@@ -623,7 +630,6 @@ impl VerterHost {
         self.update_reverse_deps(&canonical, &old_deps, &new_deps);
 
         // Sync exact resolutions to workspace.
-        #[cfg(not(target_arch = "wasm32"))]
         self.ws().set_exact_resolutions(&canonical, vfs_resolutions);
     }
 
@@ -777,18 +783,9 @@ impl VerterHost {
     ) -> Option<(String, u32, u32)> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let files = read_lock(&self.files);
-        let alias_map = read_lock(&self.alias_to_canonical);
-        let resolver = read_lock(&self.project_resolver);
         let mut visited = rustc_hash::FxHashSet::default();
 
-        self.follow_reexport_chain(
-            &files,
-            &alias_map,
-            resolver.as_ref(),
-            &canonical,
-            binding_name,
-            &mut visited,
-        )
+        self.follow_reexport_chain(&files, &canonical, binding_name, &mut visited)
     }
 
     /// Internal recursive helper for following re-export chains.
@@ -796,8 +793,6 @@ impl VerterHost {
     fn follow_reexport_chain(
         &self,
         files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
-        alias_map: &rustc_hash::FxHashMap<String, String>,
-        project_resolver: Option<&NativeProjectResolver>,
         canonical_id: &str,
         binding_name: &str,
         visited: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -872,17 +867,16 @@ impl VerterHost {
                 (&sig.reexport_source, &sig.reexport_local)
             {
                 // Resolve the source module to a canonical ID
-                if let Some(target_canonical) = crate::cross_file::resolve_import_to_canonical(
-                    files,
-                    alias_map,
-                    project_resolver,
-                    entry,
-                    source,
-                ) {
+                let resolved_target = {
+                    let ctx = verter_vfs::ResolutionContext {
+                        phase: verter_vfs::ResolvePhase::ProviderGraph,
+                        kind: verter_vfs::ResolveRequestKind::EsmImport,
+                    };
+                    self.resolve_via_vfs(canonical_id, source, ctx)
+                };
+                if let Some(target_canonical) = resolved_target {
                     return self.follow_reexport_chain(
                         files,
-                        alias_map,
-                        project_resolver,
                         &target_canonical,
                         local_name,
                         visited,
@@ -907,17 +901,11 @@ impl VerterHost {
     /// Returns `None` if the import cannot be resolved to a known file
     /// (e.g., bare specifiers like `vue` or unregistered files).
     pub fn resolve_import(&self, parent_canonical_id: &str, import_source: &str) -> Option<String> {
-        let files = read_lock(&self.files);
-        let alias_map = read_lock(&self.alias_to_canonical);
-        let resolver = read_lock(&self.project_resolver);
-        let entry = files.get(parent_canonical_id)?;
-        crate::cross_file::resolve_import_to_canonical(
-            &files,
-            &alias_map,
-            resolver.as_ref(),
-            entry,
-            import_source,
-        )
+        let ctx = verter_vfs::ResolutionContext {
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+        };
+        self.resolve_via_vfs(parent_canonical_id, import_source, ctx)
     }
 
     /// Returns all exports of a file, following re-export chains to their ultimate source.
@@ -930,24 +918,14 @@ impl VerterHost {
     pub fn resolve_exports(&self, canonical_or_alias: &str) -> Vec<ResolvedExport> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let files = read_lock(&self.files);
-        let alias_map = read_lock(&self.alias_to_canonical);
-        let resolver = read_lock(&self.project_resolver);
         let mut visiting = rustc_hash::FxHashSet::default();
-        self.collect_resolved_exports(
-            &files,
-            &alias_map,
-            resolver.as_ref(),
-            &canonical,
-            &mut visiting,
-        )
+        self.collect_resolved_exports(&files, &canonical, &mut visiting)
     }
 
     /// Recursively collect resolved exports from a file, following re-export chains.
     fn collect_resolved_exports(
         &self,
         files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
-        alias_map: &rustc_hash::FxHashMap<String, String>,
-        project_resolver: Option<&NativeProjectResolver>,
         canonical_id: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Vec<ResolvedExport> {
@@ -980,20 +958,15 @@ impl VerterHost {
             if sig.name == "*" {
                 // Wildcard re-export: export * from './module'
                 if let Some(ref source) = sig.reexport_source {
-                    if let Some(target) = crate::cross_file::resolve_import_to_canonical(
-                        files,
-                        alias_map,
-                        project_resolver,
-                        entry,
-                        source,
-                    ) {
-                        let nested = self.collect_resolved_exports(
-                            files,
-                            alias_map,
-                            project_resolver,
-                            &target,
-                            visiting,
-                        );
+                    let resolved_target = {
+                        let ctx = verter_vfs::ResolutionContext {
+                            phase: verter_vfs::ResolvePhase::ProviderGraph,
+                            kind: verter_vfs::ResolveRequestKind::EsmImport,
+                        };
+                        self.resolve_via_vfs(canonical_id, source, ctx)
+                    };
+                    if let Some(target) = resolved_target {
+                        let nested = self.collect_resolved_exports(files, &target, visiting);
                         for mut export in nested {
                             // Trace the source through to the ultimate origin
                             if export.source_canonical_id.is_none() {
@@ -1010,21 +983,15 @@ impl VerterHost {
                 (&sig.reexport_source, &sig.reexport_local)
             {
                 // Named re-export: follow chain to find ultimate source
-                if let Some(target) = crate::cross_file::resolve_import_to_canonical(
-                    files,
-                    alias_map,
-                    project_resolver,
-                    entry,
-                    source,
-                ) {
-                    let resolved = self.resolve_single_export(
-                        files,
-                        alias_map,
-                        project_resolver,
-                        &target,
-                        local_name,
-                        visiting,
-                    );
+                let resolved_target = {
+                    let ctx = verter_vfs::ResolutionContext {
+                        phase: verter_vfs::ResolvePhase::ProviderGraph,
+                        kind: verter_vfs::ResolveRequestKind::EsmImport,
+                    };
+                    self.resolve_via_vfs(canonical_id, source, ctx)
+                };
+                if let Some(target) = resolved_target {
+                    let resolved = self.resolve_single_export(files, &target, local_name, visiting);
                     let (src_id, src_name) = match resolved {
                         Some((cid, n)) => (Some(cid), n),
                         None => (Some(target.clone()), local_name.clone()),
@@ -1064,8 +1031,6 @@ impl VerterHost {
     fn resolve_single_export(
         &self,
         files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
-        alias_map: &rustc_hash::FxHashMap<String, String>,
-        project_resolver: Option<&NativeProjectResolver>,
         canonical_id: &str,
         name: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
@@ -1086,25 +1051,18 @@ impl VerterHost {
                 return Some((canonical_id.to_string(), name.to_string()));
             }
             visiting.insert(canonical_id.to_string());
-            let target = crate::cross_file::resolve_import_to_canonical(
-                files,
-                alias_map,
-                project_resolver,
-                entry,
-                source,
-            );
+            let target = {
+                let ctx = verter_vfs::ResolutionContext {
+                    phase: verter_vfs::ResolvePhase::ProviderGraph,
+                    kind: verter_vfs::ResolveRequestKind::EsmImport,
+                };
+                self.resolve_via_vfs(canonical_id, source, ctx)
+            };
             visiting.remove(canonical_id);
 
             if let Some(target_id) = target {
-                self.resolve_single_export(
-                    files,
-                    alias_map,
-                    project_resolver,
-                    &target_id,
-                    local,
-                    visiting,
-                )
-                .or(Some((target_id, local.clone())))
+                self.resolve_single_export(files, &target_id, local, visiting)
+                    .or(Some((target_id, local.clone())))
             } else {
                 Some((canonical_id.to_string(), name.to_string()))
             }
@@ -1213,16 +1171,16 @@ const msg = ref('hello')
         let host = make_host();
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             "<script setup>\ndefineProps({ msg: String })\n</script>\n<template><div>{{ msg }}</div></template>",
         );
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             "<script setup>\nimport Child from './Child.vue'\n</script>\n<template><Child msg=\"hello\" /></template>",
         );
 
-        let analysis = host.get_analysis("Parent.vue").unwrap();
+        let analysis = host.get_analysis("/project/Parent.vue").unwrap();
         let child_import = analysis
             .imports
             .iter()
@@ -1230,7 +1188,7 @@ const msg = ref('hello')
             .unwrap();
         assert_eq!(
             child_import.resolved_canonical_id.as_deref(),
-            Some("Child.vue"),
+            Some("/project/Child.vue"),
             "relative import should resolve to canonical ID"
         );
     }
@@ -1249,13 +1207,25 @@ const msg = ref('hello')
             "/project/src/App.vue",
             "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><Child/></template>",
         );
-        // Register alias
+        // Configure workspace resolver with alias
         {
-            let mut aliases = crate::shared::write_lock(&host.alias_to_canonical);
-            aliases.insert(
-                "@/components/Child.vue".to_string(),
-                "/project/src/components/Child.vue".to_string(),
-            );
+            use verter_vfs::WorkspaceAccess;
+            host.workspace().configure_resolver(vec![
+                verter_analysis::project_resolver::IdeProjectConfig {
+                    root: "/project".to_string(),
+                    workspace_root: "/project".to_string(),
+                    tsconfig_path: None,
+                    provider_root: "/project".to_string(),
+                    workspace_aliases: vec![verter_vfs::WorkspaceAlias {
+                        find: "@/".to_string(),
+                        replacement: "/project/src/".to_string(),
+                    }],
+                    compiler_options:
+                        verter_analysis::project_resolver::IdeProjectCompilerOptions::default(),
+                    references: vec![],
+                    membership: verter_analysis::project_resolver::ProjectMembership::MatchAll,
+                },
+            ]);
         }
 
         let analysis = host.get_analysis("/project/src/App.vue").unwrap();
@@ -1277,16 +1247,16 @@ const msg = ref('hello')
         let host = make_host();
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             "<script setup>\n</script>\n<template><div/></template>",
         );
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             "<script setup>\nimport Child from './Child'\n</script>\n<template><Child/></template>",
         );
 
-        let analysis = host.get_analysis("Parent.vue").unwrap();
+        let analysis = host.get_analysis("/project/Parent.vue").unwrap();
         let child_import = analysis
             .imports
             .iter()
@@ -1294,7 +1264,7 @@ const msg = ref('hello')
             .unwrap();
         assert_eq!(
             child_import.resolved_canonical_id.as_deref(),
-            Some("Child.vue"),
+            Some("/project/Child.vue"),
             "extension-less import should resolve via .vue guessing"
         );
     }
@@ -1486,19 +1456,22 @@ const msg = ref('hello')
     #[test]
     fn resolve_import_public_method() {
         let host = make_host();
-        upsert_vue(&host, "Child.vue", "<template><div/></template>");
+        upsert_vue(&host, "/project/Child.vue", "<template><div/></template>");
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             "<script setup>\nimport Child from './Child.vue'\n</script>\n<template><Child/></template>",
         );
 
         assert_eq!(
-            host.resolve_import("Parent.vue", "./Child.vue").as_deref(),
-            Some("Child.vue")
+            host.resolve_import("/project/Parent.vue", "./Child.vue")
+                .as_deref(),
+            Some("/project/Child.vue")
         );
         // Bare specifiers that aren't in the file map resolve to None
-        assert!(host.resolve_import("Parent.vue", "lodash").is_none());
+        assert!(host
+            .resolve_import("/project/Parent.vue", "lodash")
+            .is_none());
     }
 
     #[test]
@@ -1546,7 +1519,7 @@ const msg = ref('hello')
         // Composable that returns { x: ref, y: ref, reset: function }
         upsert_ts(
             &host,
-            "useMouse.ts",
+            "/project/useMouse.ts",
             r#"
 import { ref } from 'vue'
 export function useMouse() {
@@ -1561,7 +1534,7 @@ export function useMouse() {
         // SFC that destructures the composable return
         upsert_vue(
             &host,
-            "App.vue",
+            "/project/App.vue",
             r#"<script setup>
 import { useMouse } from './useMouse.ts'
 const { x, y, reset } = useMouse()
@@ -1569,7 +1542,7 @@ const { x, y, reset } = useMouse()
 <template><div>{{ x }} {{ y }}</div></template>"#,
         );
 
-        let analysis = host.get_analysis("App.vue").unwrap();
+        let analysis = host.get_analysis("/project/App.vue").unwrap();
 
         // x and y should be enriched to Ref (from composable return shape)
         let x_binding = analysis.bindings.iter().find(|b| b.name == "x").unwrap();
@@ -1613,24 +1586,24 @@ const { x, y, reset } = useMouse()
         // Target: Popup.vue with a binding
         upsert_vue(
             &host,
-            "Popup.vue",
+            "/project/Popup.vue",
             "<script setup>\nconst message = 'hello'\n</script>\n<template><div>{{ message }}</div></template>",
         );
 
         // Barrel: index.ts re-exports Popup.vue as default
         upsert_ts(
             &host,
-            "index.ts",
+            "/project/index.ts",
             "export { default as Popup } from './Popup.vue'",
         );
 
         // Follow the re-export: "Popup" in index.ts → default in Popup.vue
-        let result = host.get_export_span_follow_reexports("index.ts", "Popup");
+        let result = host.get_export_span_follow_reexports("/project/index.ts", "Popup");
 
         assert!(result.is_some(), "should follow re-export to Popup.vue");
         let (canonical_id, start, end) = result.unwrap();
         assert_eq!(
-            canonical_id, "Popup.vue",
+            canonical_id, "/project/Popup.vue",
             "should resolve to Popup.vue canonical ID"
         );
         assert!(
@@ -1639,7 +1612,7 @@ const { x, y, reset } = useMouse()
         );
         // Negative: should NOT return index.ts
         assert_ne!(
-            canonical_id, "index.ts",
+            canonical_id, "/project/index.ts",
             "must NOT return the barrel file itself"
         );
     }
@@ -1679,38 +1652,45 @@ const { x, y, reset } = useMouse()
         let host = make_host();
 
         // Target: utils.ts with an exported function
-        upsert_ts(&host, "utils.ts", "export function helper() { return 42 }");
+        upsert_ts(
+            &host,
+            "/project/utils.ts",
+            "export function helper() { return 42 }",
+        );
 
         // Barrel: re-exports helper as myHelper
         upsert_ts(
             &host,
-            "index.ts",
+            "/project/index.ts",
             "export { helper as myHelper } from './utils.ts'",
         );
 
-        let result = host.get_export_span_follow_reexports("index.ts", "myHelper");
+        let result = host.get_export_span_follow_reexports("/project/index.ts", "myHelper");
 
         assert!(result.is_some(), "should follow named re-export");
         let (canonical_id, start, end) = result.unwrap();
-        assert_eq!(canonical_id, "utils.ts", "should resolve to utils.ts");
+        assert_eq!(
+            canonical_id, "/project/utils.ts",
+            "should resolve to utils.ts"
+        );
         assert!(start < end, "should have a valid span");
         // Negative: should NOT return barrel
-        assert_ne!(canonical_id, "index.ts");
+        assert_ne!(canonical_id, "/project/index.ts");
     }
 
     #[test]
     fn get_export_span_follows_multi_hop_chain() {
         let host = make_host();
 
-        upsert_ts(&host, "a.ts", "export { b } from './b.ts'");
-        upsert_ts(&host, "b.ts", "export { c as b } from './c.ts'");
-        upsert_ts(&host, "c.ts", "export const c = 42");
+        upsert_ts(&host, "/project/a.ts", "export { b } from './b.ts'");
+        upsert_ts(&host, "/project/b.ts", "export { c as b } from './c.ts'");
+        upsert_ts(&host, "/project/c.ts", "export const c = 42");
 
         // Should follow a→b→c (no depth limit, cycle detection only)
-        let result = host.get_export_span_follow_reexports("a.ts", "b");
+        let result = host.get_export_span_follow_reexports("/project/a.ts", "b");
         assert!(result.is_some(), "should follow the chain");
         let (canonical_id, _, _) = result.unwrap();
-        assert_eq!(canonical_id, "c.ts", "should reach c.ts");
+        assert_eq!(canonical_id, "/project/c.ts", "should reach c.ts");
     }
 
     #[test]
@@ -1754,19 +1734,23 @@ const { x, y, reset } = useMouse()
         // A has a local baz export. Different bindings each hop → not a cycle.
         upsert_ts(
             &host,
-            "a.ts",
+            "/project/a.ts",
             "export { bar as foo } from './b.ts'\nexport const baz = 99",
         );
-        upsert_ts(&host, "b.ts", "export { baz as bar } from './a.ts'");
+        upsert_ts(
+            &host,
+            "/project/b.ts",
+            "export { baz as bar } from './a.ts'",
+        );
 
-        let result = host.get_export_span_follow_reexports("a.ts", "foo");
+        let result = host.get_export_span_follow_reexports("/project/a.ts", "foo");
         assert!(
             result.is_some(),
             "different bindings through same files should resolve, not be treated as cycle"
         );
         let (canonical_id, _, _) = result.unwrap();
         assert_eq!(
-            canonical_id, "a.ts",
+            canonical_id, "/project/a.ts",
             "should resolve to a.ts local baz export"
         );
     }
@@ -1808,17 +1792,20 @@ const { x, y, reset } = useMouse()
                 "export {{ {} as val{} }} from './{}'",
                 next_binding, i, next
             );
-            upsert_ts(&host, &format!("f{}.ts", i), &src);
+            upsert_ts(&host, &format!("/project/f{}.ts", i), &src);
         }
-        upsert_ts(&host, "terminal.ts", "export const val = 'done'");
+        upsert_ts(&host, "/project/terminal.ts", "export const val = 'done'");
 
-        let result = host.get_export_span_follow_reexports("f0.ts", "val0");
+        let result = host.get_export_span_follow_reexports("/project/f0.ts", "val0");
         assert!(
             result.is_some(),
             "15-hop chain should resolve without depth limit"
         );
         let (canonical_id, start, end) = result.unwrap();
-        assert_eq!(canonical_id, "terminal.ts", "should reach terminal.ts");
+        assert_eq!(
+            canonical_id, "/project/terminal.ts",
+            "should reach terminal.ts"
+        );
         assert!(start < end, "should have a valid span");
     }
 
@@ -1962,17 +1949,17 @@ const bar = 1
         let host = make_host();
         upsert_vue(
             &host,
-            "Child.vue",
+            "/project/Child.vue",
             "<script setup>\nconst x = 1\n</script>\n<template><div/></template>",
         );
         upsert_vue(
             &host,
-            "Parent.vue",
+            "/project/Parent.vue",
             "<script setup>\nimport Child from './Child.vue'\n</script>\n<template><Child/></template>",
         );
 
         // First call: enriches imports with resolved_canonical_id
-        let a1 = host.get_analysis("Parent.vue").unwrap();
+        let a1 = host.get_analysis("/project/Parent.vue").unwrap();
         assert!(
             a1.imports[0].resolved_canonical_id.is_some(),
             "enriched import should have resolved_canonical_id"
@@ -1982,7 +1969,7 @@ const bar = 1
         // internal FileEntry's imports still have None
         {
             let files = crate::shared::read_lock(&host.files);
-            let entry = files.get("Parent.vue").unwrap();
+            let entry = files.get("/project/Parent.vue").unwrap();
             assert!(
                 entry.script_analysis.imports[0]
                     .resolved_canonical_id
@@ -2164,27 +2151,27 @@ export { default as Button } from './Button.vue';
 
         upsert_vue(
             &host,
-            "Button.vue",
+            "/project/Button.vue",
             "<script setup>\ndefineProps({ label: String })\n</script>\n<template><button>{{ label }}</button></template>",
         );
 
         upsert_ts(
             &host,
-            "components/index.ts",
+            "/project/components/index.ts",
             "export { default as Button } from './Button.vue';",
         );
 
         // Set up dependency so ./Button.vue resolves from components/index.ts
         host.set_import_dependencies(
-            "components/index.ts",
+            "/project/components/index.ts",
             vec![crate::DependencyResolution {
                 specifier: "./Button.vue".to_string(),
-                resolved_canonical_id: Some("Button.vue".to_string()),
+                resolved_canonical_id: Some("/project/Button.vue".to_string()),
                 possible_canonical_ids: vec![],
             }],
         );
 
-        let exports = host.resolve_exports("components/index.ts");
+        let exports = host.resolve_exports("/project/components/index.ts");
         assert!(
             !exports.is_empty(),
             "barrel file should have resolved exports"
@@ -2196,7 +2183,7 @@ export { default as Button } from './Button.vue';
             .expect("should have 'Button' resolved export");
         assert_eq!(
             button.source_canonical_id.as_deref(),
-            Some("Button.vue"),
+            Some("/project/Button.vue"),
             "Button should resolve to Button.vue"
         );
         assert_eq!(
@@ -2237,21 +2224,21 @@ export { default as Button } from './Button.vue';
 
         upsert_ts(
             &host,
-            "types.ts",
+            "/project/types.ts",
             "export type Foo = string;\nexport type Bar = number;",
         );
-        upsert_ts(&host, "index.ts", "export * from './types';");
+        upsert_ts(&host, "/project/index.ts", "export * from './types';");
 
         host.set_import_dependencies(
-            "index.ts",
+            "/project/index.ts",
             vec![crate::DependencyResolution {
                 specifier: "./types".to_string(),
-                resolved_canonical_id: Some("types.ts".to_string()),
+                resolved_canonical_id: Some("/project/types.ts".to_string()),
                 possible_canonical_ids: vec![],
             }],
         );
 
-        let exports = host.resolve_exports("index.ts");
+        let exports = host.resolve_exports("/project/index.ts");
         assert!(
             exports.iter().any(|e| e.name == "Foo"),
             "wildcard re-export should include Foo"
@@ -2264,7 +2251,7 @@ export { default as Button } from './Button.vue';
         let foo = exports.iter().find(|e| e.name == "Foo").unwrap();
         assert_eq!(
             foo.source_canonical_id.as_deref(),
-            Some("types.ts"),
+            Some("/project/types.ts"),
             "Foo should trace back to types.ts"
         );
     }
@@ -2308,35 +2295,35 @@ export { default as Button } from './Button.vue';
     fn resolve_exports_multi_level_barrel() {
         let host = make_host();
 
-        upsert_ts(&host, "deep.ts", "export const DEEP = 42;");
-        upsert_ts(&host, "mid.ts", "export { DEEP } from './deep';");
-        upsert_ts(&host, "top.ts", "export { DEEP } from './mid';");
+        upsert_ts(&host, "/project/deep.ts", "export const DEEP = 42;");
+        upsert_ts(&host, "/project/mid.ts", "export { DEEP } from './deep';");
+        upsert_ts(&host, "/project/top.ts", "export { DEEP } from './mid';");
 
         host.set_import_dependencies(
-            "mid.ts",
+            "/project/mid.ts",
             vec![crate::DependencyResolution {
                 specifier: "./deep".to_string(),
-                resolved_canonical_id: Some("deep.ts".to_string()),
+                resolved_canonical_id: Some("/project/deep.ts".to_string()),
                 possible_canonical_ids: vec![],
             }],
         );
         host.set_import_dependencies(
-            "top.ts",
+            "/project/top.ts",
             vec![crate::DependencyResolution {
                 specifier: "./mid".to_string(),
-                resolved_canonical_id: Some("mid.ts".to_string()),
+                resolved_canonical_id: Some("/project/mid.ts".to_string()),
                 possible_canonical_ids: vec![],
             }],
         );
 
-        let exports = host.resolve_exports("top.ts");
+        let exports = host.resolve_exports("/project/top.ts");
         let deep = exports
             .iter()
             .find(|e| e.name == "DEEP")
             .expect("should have DEEP");
         assert_eq!(
             deep.source_canonical_id.as_deref(),
-            Some("deep.ts"),
+            Some("/project/deep.ts"),
             "should trace through two levels to deep.ts"
         );
     }

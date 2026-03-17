@@ -18,6 +18,7 @@ host_metrics = ["verter_host/host_metrics"]
 [dependencies]
 verter_core = { path = "../verter_core", version = "0.0.1-beta.1" }
 verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
+verter_vfs = { path = "../verter_vfs", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }

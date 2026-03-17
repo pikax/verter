@@ -1,7 +1,9 @@
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
-use crate::types::{ExactResolution, ExactResolutionResult};
+use crate::types::{
+    ExactResolution, ExactResolutionResult, ResolutionContext, ResolvePhase, ResolveRequestKind,
+};
 
 /// Per-file edge and resolution state.
 ///
@@ -13,8 +15,8 @@ use crate::types::{ExactResolution, ExactResolutionResult};
 /// The union of all three is the full forward-dep set used for reverse-dep tracking.
 #[derive(Debug, Default)]
 pub(crate) struct FileEdgeState {
-    /// Exact resolutions injected by bundler/LSP (specifier → resolution).
-    pub exact_resolutions: FxHashMap<String, ExactResolution>,
+    /// Exact resolutions keyed by (specifier, phase, kind).
+    pub exact_resolutions: FxHashMap<(String, ResolvePhase, ResolveRequestKind), ExactResolution>,
     /// Deps from eagerly resolved edges (relative imports, external src blocks).
     /// Set by `record_parsed_edges()`, cleared and replaced on each call.
     pub eagerly_resolved_deps: BTreeSet<String>,
@@ -57,15 +59,18 @@ impl EdgeStore {
         Self::default()
     }
 
-    /// Get exact resolutions for a file.
+    /// Get exact resolutions for a file, keyed by (specifier, phase, kind).
     pub fn get_exact_resolution(
         &self,
         canonical_id: &str,
         specifier: &str,
+        ctx: ResolutionContext,
     ) -> Option<&ExactResolution> {
-        self.files
-            .get(canonical_id)
-            .and_then(|state| state.exact_resolutions.get(specifier))
+        self.files.get(canonical_id).and_then(|state| {
+            state
+                .exact_resolutions
+                .get(&(specifier.to_string(), ctx.phase, ctx.kind))
+        })
     }
 
     /// Set exact resolutions for a file. Replaces any previous exact resolutions
@@ -95,9 +100,12 @@ impl EdgeStore {
                     }
                 }
             }
-            state
-                .exact_resolutions
-                .insert(resolution.specifier.clone(), resolution);
+            let key = (
+                resolution.specifier.clone(),
+                resolution.phase,
+                resolution.kind,
+            );
+            state.exact_resolutions.insert(key, resolution);
         }
 
         let new_deps = state.all_deps();

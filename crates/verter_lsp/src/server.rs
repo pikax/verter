@@ -33,7 +33,6 @@ use crate::features::organize_imports::organize_imports_actions;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::features::workspace_symbol::workspace_symbols;
-use crate::project_resolver::ProjectResolverReader;
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
     ProviderSyncState, ResolverSnapshot,
@@ -43,6 +42,7 @@ use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
 use crate::tsgo::traits::TypeProvider;
 use crate::LspConfig;
+use verter_vfs::WorkspaceAccess;
 
 // ── Handler tracking for freeze diagnosis ──────────────────────────────
 
@@ -703,7 +703,7 @@ impl VerterLanguageServer {
                 continue;
             }
 
-            let Some(source) = reader.read_text(&canonical_id) else {
+            let Some(source) = reader.read_file(&canonical_id) else {
                 continue;
             };
 

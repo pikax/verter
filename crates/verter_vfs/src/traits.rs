@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::types::{
     ExactResolution, ExactResolutionResult, FileKind, ParsedEdge, ProjectOwnership,
-    ResolveRequestKind, ResolveResult,
+    ResolutionContext, ResolveResult,
 };
 
 /// Workspace access trait for the compilation host.
@@ -33,23 +33,39 @@ pub trait WorkspaceAccess: Send + Sync {
     fn realpath(&self, canonical_id: &str) -> Option<String>;
 
     /// Classify a file by extension.
-    fn classify_file(&self, canonical_id: &str) -> FileKind;
+    /// Default: classifies `.vue` as `VueSfc`, everything else as `NonSfc`.
+    fn classify_file(&self, canonical_id: &str) -> FileKind {
+        if canonical_id.ends_with(".vue") {
+            FileKind::VueSfc
+        } else {
+            FileKind::NonSfc
+        }
+    }
 
     // ── Resolution ──
 
-    /// Resolve an import specifier. All resolution policy is internal:
-    /// exact resolutions (authoritative, suppress fallthrough) → project
-    /// resolver → fallback probing. Host never does its own heuristic
+    /// Resolve an import specifier with full context.
+    ///
+    /// The `ctx` determines which target a specifier resolves to. Different
+    /// `(phase, kind)` combinations produce different package.json condition
+    /// chains and legacy-field lookups. Host never does its own heuristic
     /// resolution when this returns `None`.
+    ///
+    /// Default: `None` (no resolution).
     fn resolve_import(
         &self,
-        importer_id: &str,
-        specifier: &str,
-        kind: ResolveRequestKind,
-    ) -> Option<ResolveResult>;
+        _importer_id: &str,
+        _specifier: &str,
+        _ctx: ResolutionContext,
+    ) -> Option<ResolveResult> {
+        None
+    }
 
     /// Find the owning project for a file.
-    fn owner_for_file(&self, canonical_id: &str) -> Option<ProjectOwnership>;
+    /// Default: `None` (no project ownership).
+    fn owner_for_file(&self, _canonical_id: &str) -> Option<ProjectOwnership> {
+        None
+    }
 
     /// Compute the preferred alias-based import specifier for a target file.
     ///
@@ -66,13 +82,20 @@ pub trait WorkspaceAccess: Send + Sync {
     /// `Relative` and `ExternalSrc` edges via `resolve_import()`. Stores
     /// `Bare` specifiers. Clears `exact_resolutions` for the file.
     /// Replaces `resolved_deps`. Updates reverse-dep graph.
-    fn record_parsed_edges(&self, canonical_id: &str, edges: &[ParsedEdge]);
+    /// Default: no-op.
+    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[ParsedEdge]) {}
 
     /// Query reverse deps (files that import this file).
-    fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String>;
+    /// Default: empty.
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Query forward deps (files this file imports).
-    fn forward_deps_for(&self, canonical_id: &str) -> Vec<String>;
+    /// Default: empty.
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
 
     // ── Mutation methods (called by host for backward compat) ──
 
@@ -111,4 +134,63 @@ pub trait WorkspaceAccess: Send + Sync {
     /// Called by the host when `configure_projects()` is used.
     /// Default: no-op. Concrete workspaces override to rebuild the resolver.
     fn configure_resolver(&self, _projects: Vec<crate::resolver::IdeProjectConfig>) {}
+
+    // ── Directory and mutation operations ──
+
+    /// List entries in a directory.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn read_dir(&self, _dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation("read_dir"))
+    }
+
+    /// Recursively walk a directory tree, filtering directories and files.
+    /// Returns canonical paths of matching files.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn walk(
+        &self,
+        _root: &str,
+        _filter_dir: &dyn Fn(&str) -> bool,
+        _filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation("walk"))
+    }
+
+    /// Write file content. Creates parent directories as needed.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn write_file(&self, _path: &str, _content: &str) -> Result<(), crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation("write_file"))
+    }
+
+    /// Create a directory and all parent directories.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn create_dir_all(&self, _path: &str) -> Result<(), crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation(
+            "create_dir_all",
+        ))
+    }
+
+    /// Delete a file.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn delete_file(&self, _path: &str) -> Result<(), crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation("delete_file"))
+    }
+
+    /// Delete a directory and all its contents.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn delete_dir_all(&self, _path: &str) -> Result<(), crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation(
+            "delete_dir_all",
+        ))
+    }
+
+    /// Copy a file from `src` to `dst`.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn copy_file(&self, _src: &str, _dst: &str) -> Result<(), crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation("copy_file"))
+    }
+
+    /// Check whether a path is a directory.
+    fn is_dir(&self, _path: &str) -> bool {
+        false
+    }
 }

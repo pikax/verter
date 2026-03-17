@@ -183,6 +183,7 @@ impl ProjectGraph {
     /// 2. Create an Inferred fallback config for the root itself
     /// 3. For fallback projects without tsconfigs, optionally analyze vite.config
     pub fn from_workspace_roots(
+        ws: &dyn crate::traits::WorkspaceAccess,
         roots: &[String],
         vite_opts: &crate::vite_config::ViteConfigOptions,
     ) -> ProjectGraphBuildResult {
@@ -205,10 +206,9 @@ impl ProjectGraph {
 
             for entry in &tsconfig_entries {
                 let project_root = entry.root.clone();
-                let tsconfig_path_buf = PathBuf::from(&entry.path);
-                let membership = load_project_membership(&tsconfig_path_buf);
-                let compiler_options = load_compiler_options(&tsconfig_path_buf);
-                let references = load_project_references(&tsconfig_path_buf);
+                let membership = load_project_membership(ws, &entry.path);
+                let compiler_options = load_compiler_options(ws, &entry.path);
+                let references = load_project_references(ws, &entry.path);
 
                 projects.push(VfsProjectConfig {
                     root: project_root,
@@ -230,7 +230,7 @@ impl ProjectGraph {
 
             // For fallback projects without tsconfigs, optionally analyze vite.config
             if vite_opts.enabled && !has_tsconfigs {
-                match analyze_vite_config(&root_path) {
+                match analyze_vite_config(ws, &canonical) {
                     ViteConfigAnalysis::Resolved { aliases, .. } => {
                         if !aliases.is_empty() {
                             fallback_workspace_aliases = aliases

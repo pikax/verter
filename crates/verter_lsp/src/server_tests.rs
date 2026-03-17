@@ -956,8 +956,8 @@ impl TestResolverReader {
     }
 }
 
-impl crate::project_resolver::ProjectResolverReader for TestResolverReader {
-    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+impl verter_vfs::WorkspaceAccess for TestResolverReader {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.texts.get(&canonical_id.replace('\\', "/")).cloned()
     }
 
@@ -6181,12 +6181,12 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         type_resolved
     );
     assert!(
-        reader.read_text(&external_resolved.source_id).is_some(),
+        reader.read_file(&external_resolved.source_id).is_some(),
         "reader should load external src text from {:?}",
         external_resolved
     );
     assert!(
-        reader.read_text(&type_resolved.source_id).is_some(),
+        reader.read_file(&type_resolved.source_id).is_some(),
         "reader should load macro type text from {:?}",
         type_resolved
     );

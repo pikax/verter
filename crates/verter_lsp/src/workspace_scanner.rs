@@ -1331,8 +1331,9 @@ import Child from '@/Child.vue'
                 .is_some(),
             "resolver should match the Vue file to the temp tsconfig owner"
         );
+        let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
         let (expected_base_url, expected_paths) =
-            verter_vfs::config::raw_paths_json(&root.join("tsconfig.json"))
+            verter_vfs::config::raw_paths_json(&ws, &root.join("tsconfig.json").to_string_lossy())
                 .expect("raw_paths_json should read the temp tsconfig");
 
         sync_file_to_provider(

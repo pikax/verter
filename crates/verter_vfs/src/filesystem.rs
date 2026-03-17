@@ -149,10 +149,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        kind: crate::types::ResolveRequestKind,
+        ctx: crate::types::ResolutionContext,
     ) -> Option<crate::types::ResolveResult> {
         self.engine
-            .resolve_import(self, importer_id, specifier, kind)
+            .resolve_import(self, importer_id, specifier, ctx)
     }
 
     fn owner_for_file(&self, canonical_id: &str) -> Option<crate::types::ProjectOwnership> {
@@ -224,21 +224,60 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         *self.engine.project_graph.write() = graph;
         self.engine.rebuild_resolver();
     }
-}
 
-// ── ProjectResolverReader implementation ──
+    // ── Directory and mutation operations (delegate to NativeFs) ──
 
-impl crate::resolver::ProjectResolverReader for FilesystemWorkspace {
-    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
-        crate::traits::WorkspaceAccess::read_file(self, canonical_id)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
+        self.native_fs.read_dir(dir)
     }
 
-    fn file_exists(&self, canonical_id: &str) -> bool {
-        crate::traits::WorkspaceAccess::file_exists(self, canonical_id)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn walk(
+        &self,
+        root: &str,
+        filter_dir: &dyn Fn(&str) -> bool,
+        filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, crate::error::VfsError> {
+        self.native_fs.walk(root, filter_dir, filter_file)
     }
 
-    fn realpath(&self, canonical_id: &str) -> Option<String> {
-        crate::traits::WorkspaceAccess::realpath(self, canonical_id)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
+        self.native_fs.write_file(path, content)?;
+        // Inject into snapshot so subsequent reads see the new content
+        self.engine
+            .snapshot
+            .write()
+            .inject(path.to_string(), Arc::from(content));
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
+        self.native_fs.create_dir_all(path)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn delete_file(&self, path: &str) -> Result<(), crate::error::VfsError> {
+        self.native_fs.delete_file(path)?;
+        self.engine.snapshot.write().remove(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn delete_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
+        self.native_fs.delete_dir_all(path)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn copy_file(&self, src: &str, dst: &str) -> Result<(), crate::error::VfsError> {
+        self.native_fs.copy_file(src, dst)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_dir(&self, path: &str) -> bool {
+        self.native_fs.is_dir(path)
     }
 }
 

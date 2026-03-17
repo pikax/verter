@@ -9,8 +9,8 @@
  * ```
  */
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { resolve, dirname, basename, extname } from "node:path";
+import { readdirSync, existsSync, statSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { createNapiAdapter } from "../host-adapter.js";
 import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
 import { parseType } from "../resolver.js";
@@ -18,6 +18,43 @@ import type { VerterHostAdapter } from "../host-adapter.js";
 import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
 import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
+
+/**
+ * Minimal workspace interface used by the checker.
+ * Matches the Workspace class from @verter/native.
+ */
+export interface CheckerWorkspace {
+  readFile(path: string): string | null;
+  fileExists(path: string): boolean;
+  configureProjects(
+    projects: Array<{
+      root: string;
+      workspaceRoot: string;
+      compilerOptions?: {
+        baseUrl?: string;
+        paths?: Array<{ pattern: string; targets: string[] }>;
+      };
+    }>,
+  ): void;
+}
+
+/**
+ * Read a file using workspace. Workspace is required.
+ */
+function readFileSafe(absPath: string, ws: CheckerWorkspace): string | null {
+  return ws.readFile(normalizePath(absPath)) ?? null;
+}
+
+/**
+ * Check if file exists using workspace. Workspace is required.
+ */
+function fileExistsSafe(absPath: string, ws: CheckerWorkspace): boolean {
+  return ws.fileExists(normalizePath(absPath));
+}
+
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
 
 /**
  * Map a Verter PropMeta to Volar PropertyMeta.
@@ -150,11 +187,18 @@ export class ComponentMetaChecker {
   private options: MetaCheckerOptions;
   private trackedFiles: Map<string, string> = new Map();
   private projectRoot: string;
+  private workspace: CheckerWorkspace;
 
-  constructor(adapter: VerterHostAdapter, projectRoot: string, options?: MetaCheckerOptions) {
+  constructor(
+    workspace: CheckerWorkspace,
+    adapter: VerterHostAdapter,
+    projectRoot: string,
+    options?: MetaCheckerOptions,
+  ) {
     this.adapter = adapter;
     this.projectRoot = projectRoot;
     this.options = options ?? {};
+    this.workspace = workspace;
   }
 
   /**
@@ -267,12 +311,11 @@ export class ComponentMetaChecker {
    */
   reload(): void {
     for (const [absPath] of this.trackedFiles) {
-      try {
-        const content = readFileSync(absPath, "utf-8");
+      const content = readFileSafe(absPath, this.workspace);
+      if (content !== null) {
         this.trackedFiles.set(absPath, content);
         this.adapter.upsert({ inputId: absPath, source: content });
-      } catch {
-        // File may have been deleted
+      } else {
         this.trackedFiles.delete(absPath);
       }
     }
@@ -298,12 +341,10 @@ export class ComponentMetaChecker {
 
   private ensureFile(absPath: string): void {
     if (!this.trackedFiles.has(absPath)) {
-      try {
-        const content = readFileSync(absPath, "utf-8");
+      const content = readFileSafe(absPath, this.workspace);
+      if (content !== null) {
         this.trackedFiles.set(absPath, content);
         this.adapter.upsert({ inputId: absPath, source: content });
-      } catch {
-        // File doesn't exist — will return empty meta
       }
     }
   }
@@ -318,12 +359,10 @@ export class ComponentMetaChecker {
       if (!dep.importSource.startsWith(".")) continue;
       const resolved = this.resolveDepPath(absPath, dep.importSource);
       if (resolved && !this.trackedFiles.has(resolved)) {
-        try {
-          const content = readFileSync(resolved, "utf-8");
+        const content = readFileSafe(resolved, this.workspace);
+        if (content !== null) {
           this.trackedFiles.set(resolved, content);
           this.adapter.upsert({ inputId: resolved, source: content, fileKind: "non_sfc" });
-        } catch {
-          // Dep file not found — skip
         }
       }
     }
@@ -411,12 +450,13 @@ function extractLocalInterfaces(sfcContent: string, registry: Map<string, string
 /**
  * Parse tsconfig.json and discover .vue files.
  */
-function discoverVueFiles(tsconfigPath: string): string[] {
+function discoverVueFiles(tsconfigPath: string, ws: CheckerWorkspace): string[] {
   const absPath = resolve(tsconfigPath);
   const dir = dirname(absPath);
 
   try {
-    const raw = readFileSync(absPath, "utf-8");
+    const raw = readFileSafe(absPath, ws);
+    if (!raw) return [];
     // Strip JSON comments (// and /* */) for tsconfig.json compat
     const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
     const config = JSON.parse(stripped);
@@ -467,16 +507,17 @@ function collectVueFiles(dir: string, files: string[], depth = 0): void {
  * Parse tsconfig compilerOptions and configure the adapter's project resolver.
  */
 function configureProjectFromTsconfig(
+  ws: CheckerWorkspace,
   adapter: VerterHostAdapter,
   tsconfigPath: string,
   projectRoot: string,
 ): void {
-  if (!adapter.configureProjects) return;
+  const raw = readFileSafe(tsconfigPath, ws);
+  if (!raw) return;
   try {
-    const raw = readFileSync(tsconfigPath, "utf-8");
     const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
     const config = JSON.parse(stripped) as Record<string, unknown>;
-    configureProjectFromConfigJson(adapter, projectRoot, config);
+    configureProjectFromConfigJson(ws, adapter, projectRoot, config);
   } catch {
     // tsconfig not readable or invalid — skip project configuration
   }
@@ -486,11 +527,11 @@ function configureProjectFromTsconfig(
  * Configure the adapter's project resolver from an inline config JSON object.
  */
 function configureProjectFromConfigJson(
+  ws: CheckerWorkspace,
   adapter: VerterHostAdapter,
   projectRoot: string,
   config: Record<string, unknown>,
 ): void {
-  if (!adapter.configureProjects) return;
   const compilerOptions = (config.compilerOptions ?? {}) as Record<string, unknown>;
   const rawPaths = (compilerOptions.paths ?? {}) as Record<string, string[]>;
 
@@ -507,7 +548,7 @@ function configureProjectFromConfigJson(
     },
   };
 
-  adapter.configureProjects([project]);
+  ws.configureProjects([project]);
 }
 
 /**
@@ -517,36 +558,33 @@ function configureProjectFromConfigJson(
  * @param options      Checker options
  */
 export function createChecker(
+  workspace: CheckerWorkspace,
   tsconfigPath: string,
   options?: MetaCheckerOptions,
 ): ComponentMetaChecker {
   const absPath = resolve(tsconfigPath);
   const projectRoot = dirname(absPath);
-  const adapter = createNapiAdapter();
+  const adapter = createNapiAdapter(workspace);
 
   // Configure project resolver with tsconfig paths so aliased imports resolve
-  configureProjectFromTsconfig(adapter, absPath, projectRoot);
+  configureProjectFromTsconfig(workspace, adapter, absPath, projectRoot);
 
   // Discover and bulk-upsert .vue files
-  const vueFiles = discoverVueFiles(absPath);
+  const vueFiles = discoverVueFiles(absPath, workspace);
   for (const filePath of vueFiles) {
-    try {
-      const content = readFileSync(filePath, "utf-8");
+    const content = readFileSafe(filePath, workspace);
+    if (content !== null) {
       adapter.upsert({ inputId: filePath, source: content });
-    } catch {
-      // Skip unreadable files
     }
   }
 
-  const checker = new ComponentMetaChecker(adapter, projectRoot, options);
+  const checker = new ComponentMetaChecker(workspace, adapter, projectRoot, options);
 
   // Track discovered files
   for (const filePath of vueFiles) {
-    try {
-      const content = readFileSync(filePath, "utf-8");
+    const content = readFileSafe(filePath, workspace);
+    if (content !== null) {
       (checker as any).trackedFiles.set(filePath, content);
-    } catch {
-      // Skip
     }
   }
 
@@ -599,16 +637,17 @@ function resolveIncludePatterns(rootDir: string, include: string[]): string[] {
  * @param options     Checker options
  */
 export function createCheckerByJson(
+  workspace: CheckerWorkspace,
   projectRoot: string,
   configJson: object,
   options?: MetaCheckerOptions,
 ): ComponentMetaChecker {
   const absRoot = resolve(projectRoot);
-  const adapter = createNapiAdapter();
+  const adapter = createNapiAdapter(workspace);
   const config = configJson as Record<string, unknown>;
 
   // Configure project resolver with inline compilerOptions
-  configureProjectFromConfigJson(adapter, absRoot, config);
+  configureProjectFromConfigJson(workspace, adapter, absRoot, config);
 
   // Resolve files from include patterns if available, otherwise walk project root
   let vueFiles: string[];
@@ -621,21 +660,17 @@ export function createCheckerByJson(
   }
 
   for (const filePath of vueFiles) {
-    try {
-      const content = readFileSync(filePath, "utf-8");
+    const content = readFileSafe(filePath, workspace);
+    if (content !== null) {
       adapter.upsert({ inputId: filePath, source: content });
-    } catch {
-      // Skip
     }
   }
 
-  const checker = new ComponentMetaChecker(adapter, absRoot, options);
+  const checker = new ComponentMetaChecker(workspace, adapter, absRoot, options);
   for (const filePath of vueFiles) {
-    try {
-      const content = readFileSync(filePath, "utf-8");
+    const content = readFileSafe(filePath, workspace);
+    if (content !== null) {
       (checker as any).trackedFiles.set(filePath, content);
-    } catch {
-      // Skip
     }
   }
 

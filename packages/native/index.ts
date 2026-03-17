@@ -211,8 +211,70 @@ export interface NativeBlockOverrideRequest {
 
 export type HostPublicApiMode = "public" | "testing";
 
+// =============================================================================
+// Workspace (filesystem-backed VFS)
+// =============================================================================
+
+/**
+ * Workspace backed by a `FilesystemWorkspace`.
+ *
+ * Provides file access, import resolution, and project configuration.
+ * Construct first, then pass to `VerterHost.withWorkspace()`.
+ */
+export declare class Workspace {
+  /**
+   * Create a new workspace rooted at the given directories.
+   * Auto-discovers tsconfigs, builds the project graph, and populates the resolver.
+   */
+  constructor(roots: string[]);
+
+  /** Read a file from the workspace (overlay → snapshot → disk). */
+  readFile(path: string): string | null;
+  /** Check if a file exists in the workspace. */
+  fileExists(path: string): boolean;
+  /** Check if a path is a directory. */
+  isDir(path: string): boolean;
+  /** Write file content. Creates parent directories as needed. */
+  writeFile(path: string, content: string): void;
+
+  /**
+   * Resolve an import specifier with context.
+   * @param phase - "codegen" (default) or "provider"
+   * @param kind - "esm" (default), "type", "require", or "src"
+   */
+  resolveImport(importer: string, specifier: string, phase?: string, kind?: string): string | null;
+
+  /**
+   * Configure project resolver from tsconfig/alias data.
+   * Replaces (not merges with) any auto-discovered graph.
+   */
+  configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
+
+  /** Notify workspace that an editor buffer is open/changed. */
+  notifyUpsert(canonicalId: string, source: Buffer): void;
+  /** Notify workspace that an editor buffer was closed. */
+  notifyClose(canonicalId: string): void;
+  /** Notify workspace that a file was deleted. */
+  notifyDelete(canonicalId: string): void;
+}
+
+// =============================================================================
+// VerterHost
+// =============================================================================
+
 export declare class VerterHost {
   constructor(config?: import("./host-types").HostConfig);
+
+  /**
+   * Create a host backed by the given workspace.
+   * The workspace handles all file access and import resolution.
+   * Use `workspace.configureProjects()` before calling this.
+   */
+  static withWorkspace(
+    config: import("./host-types").HostConfig | undefined,
+    workspace: Workspace,
+  ): VerterHost;
+
   resolve(rawId: string): import("./host-types").HostResolvedId | null;
   upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
@@ -287,8 +349,18 @@ export declare class VerterHost {
    * Configure project-scoped path alias resolution.
    *
    * Pass an empty array to clear the resolver.
+   *
+   * @deprecated Use `workspace.configureProjects()` instead when using `withWorkspace()`.
    */
   configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
+
+  /**
+   * Resolve an import specifier through the VFS resolution chain.
+   *
+   * @param phase - "codegen" (default) or "provider"
+   * @param kind - "esm" (default), "type", "require", or "src"
+   */
+  resolveImport(importer: string, specifier: string, phase?: string, kind?: string): string | null;
 }
 
 export {};

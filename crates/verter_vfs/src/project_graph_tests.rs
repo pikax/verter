@@ -358,8 +358,11 @@ fn from_workspace_roots_discovers_tsconfigs() {
         enabled: false,
         ..Default::default()
     };
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
 
-    let result = ProjectGraph::from_workspace_roots(&[workspace_str.clone()], &vite_opts);
+    let result = ProjectGraph::from_workspace_roots(&ws, &[workspace_str.clone()], &vite_opts);
 
     // Should have at least 2 projects: discovered + inferred fallback
     assert!(
@@ -423,8 +426,11 @@ fn from_workspace_roots_vite_fallback() {
         enabled: true,
         ..Default::default()
     };
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
 
-    let result = ProjectGraph::from_workspace_roots(&[workspace_str.clone()], &vite_opts);
+    let result = ProjectGraph::from_workspace_roots(&ws, &[workspace_str.clone()], &vite_opts);
 
     // Should have 1 inferred project (no tsconfigs found)
     let inferred = result
@@ -475,8 +481,11 @@ export default defineConfig(({ mode }) => ({
         enabled: true,
         ..Default::default()
     };
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
 
-    let result = ProjectGraph::from_workspace_roots(&[workspace_str.clone()], &vite_opts);
+    let result = ProjectGraph::from_workspace_roots(&ws, &[workspace_str.clone()], &vite_opts);
 
     // Should have 1 trust_required entry
     assert_eq!(
@@ -525,8 +534,11 @@ fn from_workspace_roots_tsconfig_backed_skips_vite() {
         enabled: true,
         ..Default::default()
     };
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
 
-    let result = ProjectGraph::from_workspace_roots(&[workspace_str.clone()], &vite_opts);
+    let result = ProjectGraph::from_workspace_roots(&ws, &[workspace_str.clone()], &vite_opts);
 
     // Tsconfig-backed project should NOT have vite aliases
     let discovered = result
@@ -554,7 +566,10 @@ fn from_workspace_roots_tsconfig_backed_skips_vite() {
 #[test]
 fn from_workspace_roots_empty_roots() {
     let vite_opts = crate::vite_config::ViteConfigOptions::default();
-    let result = ProjectGraph::from_workspace_roots(&[], &vite_opts);
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let result = ProjectGraph::from_workspace_roots(&ws, &[], &vite_opts);
     assert!(
         result.graph.is_empty(),
         "empty roots should produce empty graph"
