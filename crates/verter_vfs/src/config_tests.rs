@@ -487,3 +487,87 @@ fn resolve_extends_nonexistent() {
         "should return None for nonexistent extends"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// raw_paths_json inheritance
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Child inherits baseUrl from base, overrides paths → must use base's baseUrl.
+#[test]
+fn raw_paths_json_inherits_base_url_when_child_overrides_paths() {
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // Base: defines baseUrl
+    std::fs::write(
+        tmp.path().join("tsconfig.base.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@old/*": ["old/*"] } } }"#,
+    )
+    .unwrap();
+
+    // Child: extends base, overrides paths but NOT baseUrl
+    std::fs::write(
+        tmp.path().join("tsconfig.json"),
+        r#"{ "extends": "./tsconfig.base.json", "compilerOptions": { "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .unwrap();
+
+    let result = raw_paths_json(&tmp.path().join("tsconfig.json"));
+    let (base_url, paths) = result.expect("should find paths");
+
+    // baseUrl should come from the base config (resolved to its directory)
+    let expected_base = normalize_path_buf(tmp.path());
+    assert_eq!(
+        base_url, expected_base,
+        "baseUrl should be inherited from base config, not default to child dir"
+    );
+
+    // paths should be the child's override
+    let paths_obj = paths.as_object().expect("paths should be an object");
+    assert!(
+        paths_obj.contains_key("@/*"),
+        "should have child's @/* path"
+    );
+    assert!(
+        !paths_obj.contains_key("@old/*"),
+        "should NOT have base's @old/* path (child overrides entirely)"
+    );
+}
+
+/// Child overrides baseUrl but inherits paths → must use child's baseUrl.
+#[test]
+fn raw_paths_json_child_base_url_overrides_inherited_paths() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sub = tmp.path().join("packages/app");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    // Base at root: defines paths
+    std::fs::write(
+        tmp.path().join("tsconfig.base.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .unwrap();
+
+    // Child in packages/app: overrides baseUrl, inherits paths
+    std::fs::write(
+        sub.join("tsconfig.json"),
+        r#"{ "extends": "../../tsconfig.base.json", "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .unwrap();
+
+    let result = raw_paths_json(&sub.join("tsconfig.json"));
+    let (base_url, paths) = result.expect("should find paths");
+
+    // baseUrl should be the child's override (packages/app/)
+    let expected_base = normalize_path_buf(&sub);
+    assert_eq!(
+        base_url, expected_base,
+        "baseUrl should be child's override, not base's"
+    );
+
+    // paths should be inherited from base
+    let paths_obj = paths.as_object().expect("paths should be an object");
+    assert!(
+        paths_obj.contains_key("@/*"),
+        "should have inherited @/* path from base"
+    );
+}

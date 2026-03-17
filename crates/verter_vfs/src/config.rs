@@ -420,52 +420,48 @@ fn raw_paths_json_inner(tsconfig_path: &Path, depth: u8) -> Option<(String, serd
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    // Check extends first
-    if let Some(extends) = json.get("extends").and_then(|v| v.as_str()) {
-        if let Some(base_path) = resolve_tsconfig_extends(tsconfig_dir, extends) {
-            if let Some(result) = raw_paths_json_inner(&base_path, depth + 1) {
-                // If base has paths, use them (current config may override)
-                let base_result = Some(result);
-                // Check if current config overrides
-                if let Some(co) = json.get("compilerOptions") {
-                    if co.get("paths").is_some() {
-                        // Current config overrides base — fall through
-                    } else {
-                        return base_result;
-                    }
-                } else {
-                    return base_result;
-                }
-            }
-        }
-    }
+    // Resolve inherited (baseUrl, paths) from extends chain.
+    let inherited = json
+        .get("extends")
+        .and_then(|v| v.as_str())
+        .and_then(|extends| resolve_tsconfig_extends(tsconfig_dir, extends))
+        .and_then(|base_path| raw_paths_json_inner(&base_path, depth + 1));
 
-    // Check this config's own compilerOptions.paths
-    if let Some(co) = json.get("compilerOptions") {
-        if let Some(paths) = co.get("paths") {
-            let base_url = co
-                .get("baseUrl")
-                .and_then(|v| v.as_str())
-                .map(|b| normalize_path_buf(&tsconfig_dir.join(b)))
-                .unwrap_or_else(|| normalize_path_buf(tsconfig_dir));
-            return Some((base_url, paths.clone()));
-        }
-    }
+    // Extract this config's own compilerOptions fields.
+    let co = json.get("compilerOptions");
+    let own_base_url = co
+        .and_then(|c| c.get("baseUrl"))
+        .and_then(|v| v.as_str())
+        .map(|b| normalize_path_buf(&tsconfig_dir.join(b)));
+    let own_paths = co.and_then(|c| c.get("paths")).cloned();
 
-    // Follow references
-    if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
-        for ref_entry in refs {
-            if let Some(ref_path) = ref_entry.get("path").and_then(|v| v.as_str()) {
-                if let Some(ref_tsconfig) = resolve_tsconfig_reference(tsconfig_dir, ref_path) {
-                    if let Some(result) = raw_paths_json_inner(&ref_tsconfig, depth + 1) {
-                        return Some(result);
+    // Per-field merge: child fields override inherited, missing fields inherit.
+    match (own_paths, own_base_url, inherited) {
+        // Child has paths (overrides or new) — use child paths + best baseUrl
+        (Some(paths), Some(base_url), _) => Some((base_url, paths)),
+        (Some(paths), None, Some((inherited_base_url, _))) => Some((inherited_base_url, paths)),
+        (Some(paths), None, None) => Some((normalize_path_buf(tsconfig_dir), paths)),
+        // Child has no paths — inherit paths, but child baseUrl overrides if present
+        (None, Some(base_url), Some((_, inherited_paths))) => Some((base_url, inherited_paths)),
+        (None, _, Some(inherited)) => Some(inherited),
+        // No paths anywhere in this config — try references
+        (None, _, None) => {
+            if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
+                for ref_entry in refs {
+                    if let Some(ref_path) = ref_entry.get("path").and_then(|v| v.as_str()) {
+                        if let Some(ref_tsconfig) =
+                            resolve_tsconfig_reference(tsconfig_dir, ref_path)
+                        {
+                            if let Some(result) = raw_paths_json_inner(&ref_tsconfig, depth + 1) {
+                                return Some(result);
+                            }
+                        }
                     }
                 }
             }
+            None
         }
     }
-
-    None
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -717,7 +717,8 @@ fn resolve_existing_path(reader: &dyn ProjectResolverReader, candidate: &str) ->
 
 fn probe_extensions() -> &'static [&'static str] {
     &[
-        ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".vue",
+        ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".vue", ".d.ts", ".d.mts",
+        ".d.cts",
     ]
 }
 
@@ -732,6 +733,9 @@ fn probe_index_files() -> &'static [&'static str] {
         "index.cts",
         "index.cjs",
         "index.vue",
+        "index.d.ts",
+        "index.d.mts",
+        "index.d.cts",
     ]
 }
 

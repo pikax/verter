@@ -915,6 +915,93 @@ fn resolve_alias_requires_project_owner() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// tsconfig paths with non-standard patterns (Nuxt #imports, etc.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tsconfig paths must resolve ANY pattern — `#imports`, `#app/*`, `$lib/*`,
+/// `~/*`, etc. The resolver must not short-circuit based on prefix characters.
+#[test]
+fn resolve_tsconfig_paths_arbitrary_patterns() {
+    let mut p = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    );
+    p.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![
+            (
+                "#imports".to_string(),
+                vec!["/workspace/.nuxt/imports".to_string()],
+            ),
+            (
+                "#app".to_string(),
+                vec!["/workspace/node_modules/nuxt/dist/app".to_string()],
+            ),
+            (
+                "#app/*".to_string(),
+                vec!["/workspace/node_modules/nuxt/dist/app/*".to_string()],
+            ),
+        ],
+    };
+    let resolver = ProjectResolver::new(vec![p]);
+    let reader = TestReader::with_files(&[
+        "/workspace/.nuxt/imports.d.ts",
+        "/workspace/node_modules/nuxt/dist/app/index.d.ts",
+        "/workspace/node_modules/nuxt/dist/app/composables/index.d.ts",
+    ]);
+
+    // Exact match (no wildcard)
+    let r = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/app/App.vue".to_string(),
+            specifier: "#imports".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+    let resolved = r.expect("#imports must resolve via tsconfig paths");
+    assert_eq!(resolved.source_id, "/workspace/.nuxt/imports.d.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
+
+    // Exact match (no wildcard), probes index file
+    let r = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/app/App.vue".to_string(),
+            specifier: "#app".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+    let resolved = r.expect("#app must resolve via tsconfig paths");
+    assert_eq!(
+        resolved.source_id,
+        "/workspace/node_modules/nuxt/dist/app/index.d.ts"
+    );
+    assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
+
+    // Wildcard match
+    let r = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/app/App.vue".to_string(),
+            specifier: "#app/composables".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+    let resolved = r.expect("#app/composables must resolve via tsconfig paths wildcard");
+    assert_eq!(
+        resolved.source_id,
+        "/workspace/node_modules/nuxt/dist/app/composables/index.d.ts"
+    );
+    assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // preferred_specifier tests
 // ═══════════════════════════════════════════════════════════════════════════
 
