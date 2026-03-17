@@ -4,12 +4,11 @@
  * Usage:
  * ```ts
  * import { createChecker } from '@verter/component-meta/compat'
- * const checker = createChecker('./tsconfig.json')
- * const meta = checker.getComponentMeta('./src/MyButton.vue')
+ * const checker = await createChecker('./tsconfig.json')
+ * const meta = await checker.getComponentMeta('./src/MyButton.vue')
  * ```
  */
 
-import { readdirSync, existsSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { createNapiAdapter } from "../host-adapter.js";
 import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
@@ -24,8 +23,11 @@ import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
  * Matches the Workspace class from @verter/native.
  */
 export interface CheckerWorkspace {
-  readFile(path: string): string | null;
-  fileExists(path: string): boolean;
+  readFile(path: string): Promise<string | null>;
+  fileExists(path: string): Promise<boolean>;
+  isDir(path: string): Promise<boolean>;
+  readDir(dir: string): Promise<Array<{ path: string; isDir: boolean }>>;
+  walk(root: string, excludeDirs: string[], extensions?: string[]): Promise<string[]>;
   configureProjects(
     projects: Array<{
       root: string;
@@ -41,14 +43,14 @@ export interface CheckerWorkspace {
 /**
  * Read a file using workspace. Workspace is required.
  */
-function readFileSafe(absPath: string, ws: CheckerWorkspace): string | null {
-  return ws.readFile(normalizePath(absPath)) ?? null;
+async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<string | null> {
+  return (await ws.readFile(normalizePath(absPath))) ?? null;
 }
 
 /**
  * Check if file exists using workspace. Workspace is required.
  */
-function fileExistsSafe(absPath: string, ws: CheckerWorkspace): boolean {
+async function fileExistsSafe(absPath: string, ws: CheckerWorkspace): Promise<boolean> {
   return ws.fileExists(normalizePath(absPath));
 }
 
@@ -204,12 +206,12 @@ export class ComponentMetaChecker {
   /**
    * Get component metadata in Volar-compatible shape.
    */
-  getComponentMeta(filePath: string, _exportName?: string): VolarComponentMeta {
+  async getComponentMeta(filePath: string, _exportName?: string): Promise<VolarComponentMeta> {
     const absPath = resolve(this.projectRoot, filePath);
-    this.ensureFile(absPath);
+    await this.ensureFile(absPath);
     const rawSnapshot = this.adapter.getAnalysis(absPath);
     // Ensure dependency .ts files are in the host for cross-file type resolution
-    this.ensureTypeDependencies(absPath, rawSnapshot);
+    await this.ensureTypeDependencies(absPath, rawSnapshot);
     // Build type registry and enrich with resolved imported types
     const typeRegistry = rawSnapshot ? buildTypeRegistry(rawSnapshot) : undefined;
     if (typeRegistry) {
@@ -283,7 +285,7 @@ export class ComponentMetaChecker {
    * Get export names from a file.
    * For Vue SFCs, this typically returns `["default"]`.
    */
-  getExportNames(_filePath: string): string[] {
+  async getExportNames(_filePath: string): Promise<string[]> {
     // Vue SFCs always have a default export
     return ["default"];
   }
@@ -309,9 +311,9 @@ export class ComponentMetaChecker {
   /**
    * Reload all tracked files from disk.
    */
-  reload(): void {
+  async reload(): Promise<void> {
     for (const [absPath] of this.trackedFiles) {
-      const content = readFileSafe(absPath, this.workspace);
+      const content = await readFileSafe(absPath, this.workspace);
       if (content !== null) {
         this.trackedFiles.set(absPath, content);
         this.adapter.upsert({ inputId: absPath, source: content });
@@ -325,8 +327,8 @@ export class ComponentMetaChecker {
    * Clear all cached files and re-read from disk.
    * Alias for `reload()`.
    */
-  clearCache(): void {
-    this.reload();
+  async clearCache(): Promise<void> {
+    await this.reload();
   }
 
   /**
@@ -339,9 +341,9 @@ export class ComponentMetaChecker {
     );
   }
 
-  private ensureFile(absPath: string): void {
+  private async ensureFile(absPath: string): Promise<void> {
     if (!this.trackedFiles.has(absPath)) {
-      const content = readFileSafe(absPath, this.workspace);
+      const content = await readFileSafe(absPath, this.workspace);
       if (content !== null) {
         this.trackedFiles.set(absPath, content);
         this.adapter.upsert({ inputId: absPath, source: content });
@@ -352,14 +354,14 @@ export class ComponentMetaChecker {
   /**
    * Ensure dependency `.ts` files for cross-file type resolution are in the host.
    */
-  private ensureTypeDependencies(absPath: string, rawSnapshot: unknown): void {
+  private async ensureTypeDependencies(absPath: string, rawSnapshot: unknown): Promise<void> {
     const snapshot = rawSnapshot as { macroTypeDeps?: Array<{ importSource: string }> } | null;
     if (!snapshot?.macroTypeDeps) return;
     for (const dep of snapshot.macroTypeDeps) {
       if (!dep.importSource.startsWith(".")) continue;
-      const resolved = this.resolveDepPath(absPath, dep.importSource);
+      const resolved = await this.resolveDepPath(absPath, dep.importSource);
       if (resolved && !this.trackedFiles.has(resolved)) {
-        const content = readFileSafe(resolved, this.workspace);
+        const content = await readFileSafe(resolved, this.workspace);
         if (content !== null) {
           this.trackedFiles.set(resolved, content);
           this.adapter.upsert({ inputId: resolved, source: content, fileKind: "non_sfc" });
@@ -372,14 +374,14 @@ export class ComponentMetaChecker {
    * Resolve a relative import specifier to an absolute file path,
    * trying common TypeScript extensions.
    */
-  private resolveDepPath(fromPath: string, specifier: string): string | null {
+  private async resolveDepPath(fromPath: string, specifier: string): Promise<string | null> {
     const base = resolve(dirname(fromPath), specifier);
     for (const ext of [".ts", ".tsx", "/index.ts", ".d.ts"]) {
       const candidate = base + ext;
-      if (existsSync(candidate)) return candidate;
+      if (await fileExistsSafe(candidate, this.workspace)) return candidate;
     }
     // Try exact path (might already have extension)
-    if (existsSync(base)) return base;
+    if (await fileExistsSafe(base, this.workspace)) return base;
     return null;
   }
 }
@@ -450,12 +452,12 @@ function extractLocalInterfaces(sfcContent: string, registry: Map<string, string
 /**
  * Parse tsconfig.json and discover .vue files.
  */
-function discoverVueFiles(tsconfigPath: string, ws: CheckerWorkspace): string[] {
+async function discoverVueFiles(tsconfigPath: string, ws: CheckerWorkspace): Promise<string[]> {
   const absPath = resolve(tsconfigPath);
   const dir = dirname(absPath);
 
   try {
-    const raw = readFileSafe(absPath, ws);
+    const raw = await readFileSafe(absPath, ws);
     if (!raw) return [];
     // Strip JSON comments (// and /* */) for tsconfig.json compat
     const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -467,7 +469,7 @@ function discoverVueFiles(tsconfigPath: string, ws: CheckerWorkspace): string[] 
     for (const pattern of include) {
       if (pattern.includes("*.vue") || pattern === "**/*") {
         // Walk the directory for .vue files (lazy — we don't need exhaustive discovery)
-        collectVueFiles(dir, files);
+        await collectVueFiles(dir, files, ws);
         break;
       }
     }
@@ -486,15 +488,22 @@ function discoverVueFiles(tsconfigPath: string, ws: CheckerWorkspace): string[] 
   }
 }
 
-function collectVueFiles(dir: string, files: string[], depth = 0): void {
+async function collectVueFiles(
+  dir: string,
+  files: string[],
+  ws: CheckerWorkspace,
+  depth = 0,
+): Promise<void> {
   if (depth > 10) return; // Prevent infinite recursion
   try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-      const full = resolve(dir, entry.name);
-      if (entry.isDirectory()) {
-        collectVueFiles(full, files, depth + 1);
-      } else if (entry.isFile() && entry.name.endsWith(".vue")) {
+    const entries = await ws.readDir(normalizePath(dir));
+    for (const entry of entries) {
+      const name = entry.path.split("/").pop() ?? "";
+      if (name.startsWith(".") || name === "node_modules") continue;
+      const full = entry.path;
+      if (entry.isDir) {
+        await collectVueFiles(full, files, ws, depth + 1);
+      } else if (name.endsWith(".vue")) {
         files.push(full);
       }
     }
@@ -506,13 +515,13 @@ function collectVueFiles(dir: string, files: string[], depth = 0): void {
 /**
  * Parse tsconfig compilerOptions and configure the adapter's project resolver.
  */
-function configureProjectFromTsconfig(
+async function configureProjectFromTsconfig(
   ws: CheckerWorkspace,
   adapter: VerterHostAdapter,
   tsconfigPath: string,
   projectRoot: string,
-): void {
-  const raw = readFileSafe(tsconfigPath, ws);
+): Promise<void> {
+  const raw = await readFileSafe(tsconfigPath, ws);
   if (!raw) return;
   try {
     const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -557,22 +566,22 @@ function configureProjectFromConfigJson(
  * @param tsconfigPath Path to tsconfig.json
  * @param options      Checker options
  */
-export function createChecker(
+export async function createChecker(
   workspace: CheckerWorkspace,
   tsconfigPath: string,
   options?: MetaCheckerOptions,
-): ComponentMetaChecker {
+): Promise<ComponentMetaChecker> {
   const absPath = resolve(tsconfigPath);
   const projectRoot = dirname(absPath);
   const adapter = createNapiAdapter(workspace);
 
   // Configure project resolver with tsconfig paths so aliased imports resolve
-  configureProjectFromTsconfig(workspace, adapter, absPath, projectRoot);
+  await configureProjectFromTsconfig(workspace, adapter, absPath, projectRoot);
 
   // Discover and bulk-upsert .vue files
-  const vueFiles = discoverVueFiles(absPath, workspace);
+  const vueFiles = await discoverVueFiles(absPath, workspace);
   for (const filePath of vueFiles) {
-    const content = readFileSafe(filePath, workspace);
+    const content = await readFileSafe(filePath, workspace);
     if (content !== null) {
       adapter.upsert({ inputId: filePath, source: content });
     }
@@ -582,7 +591,7 @@ export function createChecker(
 
   // Track discovered files
   for (const filePath of vueFiles) {
-    const content = readFileSafe(filePath, workspace);
+    const content = await readFileSafe(filePath, workspace);
     if (content !== null) {
       (checker as any).trackedFiles.set(filePath, content);
     }
@@ -595,7 +604,11 @@ export function createChecker(
  * Resolve files from tsconfig-style include patterns.
  * Handles specific file paths and `dir/**\/*` glob patterns.
  */
-function resolveIncludePatterns(rootDir: string, include: string[]): string[] {
+async function resolveIncludePatterns(
+  rootDir: string,
+  include: string[],
+  ws: CheckerWorkspace,
+): Promise<string[]> {
   const files: string[] = [];
 
   for (const pattern of include) {
@@ -603,7 +616,7 @@ function resolveIncludePatterns(rootDir: string, include: string[]): string[] {
 
     // Check if it's a specific file path (has a file extension)
     if (/\.\w+$/.test(pattern) && !pattern.includes("*")) {
-      if (existsSync(absPattern)) {
+      if (await ws.fileExists(normalizePath(absPattern))) {
         files.push(absPattern);
       }
       continue;
@@ -614,15 +627,18 @@ function resolveIncludePatterns(rootDir: string, include: string[]): string[] {
     if (globIndex !== -1) {
       const dirPart = pattern.substring(0, globIndex).replace(/[/\\]+$/, "");
       const absDir = resolve(rootDir, dirPart);
-      if (existsSync(absDir) && statSync(absDir).isDirectory()) {
-        collectVueFiles(absDir, files);
+      if ((await ws.fileExists(normalizePath(absDir))) && (await ws.isDir(normalizePath(absDir)))) {
+        await collectVueFiles(absDir, files, ws);
       }
       continue;
     }
 
     // Plain directory path — walk it
-    if (existsSync(absPattern) && statSync(absPattern).isDirectory()) {
-      collectVueFiles(absPattern, files);
+    if (
+      (await ws.fileExists(normalizePath(absPattern))) &&
+      (await ws.isDir(normalizePath(absPattern)))
+    ) {
+      await collectVueFiles(absPattern, files, ws);
     }
   }
 
@@ -636,12 +652,12 @@ function resolveIncludePatterns(rootDir: string, include: string[]): string[] {
  * @param configJson  tsconfig-like configuration object
  * @param options     Checker options
  */
-export function createCheckerByJson(
+export async function createCheckerByJson(
   workspace: CheckerWorkspace,
   projectRoot: string,
   configJson: object,
   options?: MetaCheckerOptions,
-): ComponentMetaChecker {
+): Promise<ComponentMetaChecker> {
   const absRoot = resolve(projectRoot);
   const adapter = createNapiAdapter(workspace);
   const config = configJson as Record<string, unknown>;
@@ -653,14 +669,14 @@ export function createCheckerByJson(
   let vueFiles: string[];
   const include = config.include as string[] | undefined;
   if (include && include.length > 0) {
-    vueFiles = resolveIncludePatterns(absRoot, include);
+    vueFiles = await resolveIncludePatterns(absRoot, include, workspace);
   } else {
     vueFiles = [];
-    collectVueFiles(absRoot, vueFiles);
+    await collectVueFiles(absRoot, vueFiles, workspace);
   }
 
   for (const filePath of vueFiles) {
-    const content = readFileSafe(filePath, workspace);
+    const content = await readFileSafe(filePath, workspace);
     if (content !== null) {
       adapter.upsert({ inputId: filePath, source: content });
     }
@@ -668,7 +684,7 @@ export function createCheckerByJson(
 
   const checker = new ComponentMetaChecker(workspace, adapter, absRoot, options);
   for (const filePath of vueFiles) {
-    const content = readFileSafe(filePath, workspace);
+    const content = await readFileSafe(filePath, workspace);
     if (content !== null) {
       (checker as any).trackedFiles.set(filePath, content);
     }

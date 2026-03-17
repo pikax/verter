@@ -221,6 +221,12 @@ export type HostPublicApiMode = "public" | "testing";
  * Provides file access, import resolution, and project configuration.
  * Construct first, then pass to `VerterHost.withWorkspace()`.
  */
+/** Directory entry returned by `Workspace.readDir()`. */
+export interface WorkspaceDirEntry {
+  path: string;
+  isDir: boolean;
+}
+
 export declare class Workspace {
   /**
    * Create a new workspace rooted at the given directories.
@@ -228,27 +234,62 @@ export declare class Workspace {
    */
   constructor(roots: string[]);
 
+  // ── File reads (async — runs on libuv thread pool) ──
+
   /** Read a file from the workspace (overlay → snapshot → disk). */
-  readFile(path: string): string | null;
+  readFile(path: string): Promise<string | null>;
   /** Check if a file exists in the workspace. */
-  fileExists(path: string): boolean;
+  fileExists(path: string): Promise<boolean>;
   /** Check if a path is a directory. */
-  isDir(path: string): boolean;
+  isDir(path: string): Promise<boolean>;
+  /** Resolve symlinks to real path. Returns null if not found. */
+  realpath(path: string): Promise<string | null>;
+
+  // ── Directory listing (async) ──
+
+  /** List entries in a directory. */
+  readDir(dir: string): Promise<WorkspaceDirEntry[]>;
+  /**
+   * Recursively walk a directory. Returns matching file paths.
+   * @param excludeDirs - Directory names to skip (e.g., ["node_modules", ".git"])
+   * @param extensions - File extensions to include (e.g., [".vue", ".ts"]). Omit for all files.
+   */
+  walk(root: string, excludeDirs: string[], extensions?: string[]): Promise<string[]>;
+
+  // ── File writes (async) ──
+
   /** Write file content. Creates parent directories as needed. */
-  writeFile(path: string, content: string): void;
+  writeFile(path: string, content: string): Promise<void>;
+  /** Create a directory and all parent directories. */
+  createDirAll(path: string): Promise<void>;
+  /** Delete a file. */
+  deleteFile(path: string): Promise<void>;
+  /** Delete a directory and all its contents. */
+  deleteDirAll(path: string): Promise<void>;
+  /** Copy a file from src to dst. */
+  copyFile(src: string, dst: string): Promise<void>;
+
+  // ── Resolution (async) ──
 
   /**
    * Resolve an import specifier with context.
    * @param phase - "codegen" (default) or "provider"
    * @param kind - "esm" (default), "type", "require", or "src"
    */
-  resolveImport(importer: string, specifier: string, phase?: string, kind?: string): string | null;
+  resolveImport(
+    importer: string,
+    specifier: string,
+    phase?: string,
+    kind?: string,
+  ): Promise<string | null>;
 
   /**
    * Configure project resolver from tsconfig/alias data.
    * Replaces (not merges with) any auto-discovered graph.
    */
   configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
+
+  // ── Editor lifecycle ──
 
   /** Notify workspace that an editor buffer is open/changed. */
   notifyUpsert(canonicalId: string, source: Buffer): void;

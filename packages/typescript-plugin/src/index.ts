@@ -1,6 +1,7 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
-import fs from "node:fs";
+// File access uses info.serverHost (TS server's filesystem) in sync contexts
+// and workspace (Rust VFS) in async contexts.
 import {
   getVueVirtualFileInfo,
   isRelativeVue,
@@ -48,7 +49,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const verterTypesVirtualPath = normalizePath(
       path.join(directory, "node_modules", "@verter", "types", "index.d.ts"),
     );
-    const verterTypesInstalled = fs.existsSync(
+    const verterTypesInstalled = info.serverHost.fileExists(
       path.join(directory, "node_modules", "@verter", "types", "index.d.ts"),
     );
     if (!verterTypesInstalled) {
@@ -128,7 +129,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           (candidate) =>
             (baseUrl ? candidate.includes(baseUrl) : true) &&
             candidate.endsWith("/index.ts") &&
-            fs.existsSync(candidate),
+            info.serverHost.fileExists(candidate),
         );
 
         if (!vueModulePath) {

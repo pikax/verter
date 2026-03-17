@@ -12,7 +12,8 @@
  * 4. Upserting the `.d.ts` file into the host
  * 5. Recursively traversing relative imports inside hydrated declaration files
  */
-import type { VerterHost, HostDependencyResolution } from "@verter/native";
+import { dirname, join, parse, resolve } from "path";
+import type { VerterHost, HostDependencyResolution, Workspace } from "@verter/native";
 
 type ResolveHook = (
   source: string,
@@ -96,67 +97,65 @@ function resolvedIdFromHookResult(result: unknown): string | null {
  * checks (in order): `types`, `typings`, `exports["."].types`, sibling `.d.ts`,
  * package-root `index.d.ts`.
  */
-async function findPackageDeclarationEntry(runtimeEntry: string): Promise<string | null> {
-  const fs = await import("fs");
-  const path = await import("path");
-
-  let dir = path.dirname(runtimeEntry);
-  const root = path.parse(dir).root;
+function findPackageDeclarationEntry(ws: Workspace, runtimeEntry: string): string | null {
+  let dir = dirname(runtimeEntry);
+  const root = parse(dir).root;
 
   // Walk up to find package.json
   let pkgJsonPath: string | null = null;
   let pkgDir: string | null = null;
   while (dir !== root) {
-    const candidate = path.join(dir, "package.json");
-    if (fs.existsSync(candidate)) {
+    const candidate = join(dir, "package.json");
+    if (ws.fileExists(normalizePath(candidate))) {
       pkgJsonPath = candidate;
       pkgDir = dir;
       break;
     }
-    dir = path.dirname(dir);
+    dir = dirname(dir);
   }
 
   if (!pkgJsonPath || !pkgDir) return null;
 
   let pkg: Record<string, unknown>;
   try {
-    pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+    const content = ws.readFile(normalizePath(pkgJsonPath));
+    if (content === null) return null;
+    pkg = JSON.parse(content);
   } catch {
     return null;
   }
 
   // 1. `types` field
   if (typeof pkg.types === "string") {
-    const typesPath = path.resolve(pkgDir, pkg.types);
-    if (fs.existsSync(typesPath)) return normalizePath(typesPath);
+    const typesPath = resolve(pkgDir, pkg.types);
+    if (ws.fileExists(normalizePath(typesPath))) return normalizePath(typesPath);
   }
 
   // 2. `typings` field (deprecated alias)
   if (typeof pkg.typings === "string") {
-    const typingsPath = path.resolve(pkgDir, pkg.typings);
-    if (fs.existsSync(typingsPath)) return normalizePath(typingsPath);
+    const typingsPath = resolve(pkgDir, pkg.typings);
+    if (ws.fileExists(normalizePath(typingsPath))) return normalizePath(typingsPath);
   }
 
   // 3. `exports` with `types` condition
   if (pkg.exports && typeof pkg.exports === "object") {
     const typesFromExports = findTypesInExports(pkg.exports as Record<string, unknown>, pkgDir);
     if (typesFromExports) {
-      const fs2 = await import("fs");
-      if (fs2.existsSync(typesFromExports)) return normalizePath(typesFromExports);
+      if (ws.fileExists(normalizePath(typesFromExports))) return normalizePath(typesFromExports);
     }
   }
 
   // 4. Sibling `.d.ts` next to the runtime entry
   const runtimeBase = runtimeEntry.replace(/\.(js|mjs|cjs|jsx)$/, "");
   const siblingDts = runtimeBase + ".d.ts";
-  if (fs.existsSync(siblingDts)) return normalizePath(siblingDts);
+  if (ws.fileExists(normalizePath(siblingDts))) return normalizePath(siblingDts);
 
   const siblingDmts = runtimeBase + ".d.mts";
-  if (fs.existsSync(siblingDmts)) return normalizePath(siblingDmts);
+  if (ws.fileExists(normalizePath(siblingDmts))) return normalizePath(siblingDmts);
 
   // 5. Package-root `index.d.ts`
-  const rootDts = path.join(pkgDir, "index.d.ts");
-  if (fs.existsSync(rootDts)) return normalizePath(rootDts);
+  const rootDts = join(pkgDir, "index.d.ts");
+  if (ws.fileExists(normalizePath(rootDts))) return normalizePath(rootDts);
 
   return null;
 }
@@ -166,11 +165,9 @@ async function findPackageDeclarationEntry(runtimeEntry: string): Promise<string
  * Handles nested condition objects like `{ ".": { "types": "./dist/index.d.ts" } }`.
  */
 function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): string | null {
-  const path = require("path") as typeof import("path");
-
   // Direct `types` condition
   if (typeof exports.types === "string") {
-    return path.resolve(pkgDir, exports.types);
+    return resolve(pkgDir, exports.types);
   }
 
   // Check "." entry
@@ -178,7 +175,7 @@ function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): s
   if (rootExport && typeof rootExport === "object") {
     const root = rootExport as Record<string, unknown>;
     if (typeof root.types === "string") {
-      return path.resolve(pkgDir, root.types);
+      return resolve(pkgDir, root.types);
     }
     // Check nested conditions (e.g. { ".": { "import": { "types": "..." } } })
     for (const key of ["import", "require", "default"]) {
@@ -186,7 +183,7 @@ function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): s
       if (cond && typeof cond === "object") {
         const condObj = cond as Record<string, unknown>;
         if (typeof condObj.types === "string") {
-          return path.resolve(pkgDir, condObj.types);
+          return resolve(pkgDir, condObj.types);
         }
       }
     }
@@ -198,8 +195,7 @@ function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): s
 async function hydrateRelativeDependencyClosure(
   host: VerterHost,
   entryFile: string,
-  fs: typeof import("fs"),
-  path: typeof import("path"),
+  ws: Workspace,
   visited: Set<string>,
 ): Promise<void> {
   const normalizedEntry = normalizePath(entryFile);
@@ -233,7 +229,7 @@ async function hydrateRelativeDependencyClosure(
     for (const source of allSources) {
       if (!isRelativeImport(source)) continue;
 
-      const absBase = path.resolve(path.dirname(currentFile), source);
+      const absBase = resolve(dirname(currentFile), source);
       const candidates = [
         absBase + ".d.ts",
         absBase + ".ts",
@@ -251,7 +247,7 @@ async function hydrateRelativeDependencyClosure(
           });
           break;
         }
-        if (!fs.existsSync(candidate)) continue;
+        if (!ws.fileExists(normalized)) continue;
 
         // .vue files at the end of a barrel chain need their types available
         // for cross-file resolution. Upsert as SFC (not non_sfc) so script
@@ -261,8 +257,10 @@ async function hydrateRelativeDependencyClosure(
         if (normalized.endsWith(".vue")) {
           visited.add(normalized);
           try {
-            const vueSrc = fs.readFileSync(candidate);
-            host.upsert({ inputId: normalized, source: vueSrc });
+            const vueSrc = ws.readFile(normalized);
+            if (vueSrc !== null) {
+              host.upsert({ inputId: normalized, source: vueSrc });
+            }
           } catch {
             // If read fails, just record the resolution without upserting
           }
@@ -275,17 +273,19 @@ async function hydrateRelativeDependencyClosure(
 
         visited.add(normalized);
         try {
-          const depSource = fs.readFileSync(candidate);
-          host.upsert({
-            inputId: normalized,
-            source: depSource,
-            fileKind: "non_sfc",
-          });
-          depResolutions.push({
-            specifier: source,
-            resolvedCanonicalId: normalized,
-          });
-          queue.push(normalized);
+          const depSource = ws.readFile(normalized);
+          if (depSource !== null) {
+            host.upsert({
+              inputId: normalized,
+              source: depSource,
+              fileKind: "non_sfc",
+            });
+            depResolutions.push({
+              specifier: source,
+              resolvedCanonicalId: normalized,
+            });
+            queue.push(normalized);
+          }
           break;
         } catch {
           continue;
@@ -311,6 +311,7 @@ export async function hydrateMacroTypeDeps(
   host: VerterHost,
   filename: string,
   resolveId?: ResolveHook,
+  ws?: Workspace,
 ): Promise<void> {
   // Get the analysis for the entry file to find macro type deps.
   const analysisJson = host.getAnalysis(normalizePath(filename));
@@ -325,8 +326,6 @@ export async function hydrateMacroTypeDeps(
 
   if (!analysis.macroTypeDeps?.length) return;
 
-  const fs = await import("fs");
-  const path = await import("path");
   const hydratedRelativeVisited = new Set<string>();
 
   // Collect unique specifiers from macro type deps.
@@ -350,12 +349,12 @@ export async function hydrateMacroTypeDeps(
       if (result) resolvedPath = result;
     }
 
-    // For relative specifiers without a resolve hook, try filesystem probing
-    if (!resolvedPath && isRelativeImport(specifier)) {
-      const absBase = path.resolve(path.dirname(filename), specifier);
+    // For relative specifiers without a resolve hook, try workspace probing
+    if (!resolvedPath && isRelativeImport(specifier) && ws) {
+      const absBase = resolve(dirname(filename), specifier);
       const candidates = [absBase, absBase + ".vue", absBase + "/index.vue"];
       for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) {
+        if (ws.fileExists(normalizePath(candidate))) {
           resolvedPath = candidate;
           break;
         }
@@ -366,11 +365,15 @@ export async function hydrateMacroTypeDeps(
       const normalized = normalizePath(resolvedPath);
       if (normalized.endsWith(".vue")) {
         // Upsert the .vue file as SFC so the host can read its exported types
-        try {
-          const vueSrc = fs.readFileSync(resolvedPath);
-          host.upsert({ inputId: normalized, source: vueSrc });
-        } catch {
-          // Read failed — skip
+        if (ws) {
+          try {
+            const vueSrc = ws.readFile(normalized);
+            if (vueSrc !== null) {
+              host.upsert({ inputId: normalized, source: vueSrc });
+            }
+          } catch {
+            // Read failed — skip
+          }
         }
         resolutions.push({ specifier, resolvedCanonicalId: normalized });
         continue;
@@ -385,40 +388,47 @@ export async function hydrateMacroTypeDeps(
         // no type info but types.d.ts has the full declarations.
         let effectivePath = resolvedPath;
         let effectiveNormalized = normalized;
-        const jsExtMatch = resolvedPath.match(/\.(js|mjs|cjs)$/);
-        if (jsExtMatch) {
-          const base = resolvedPath.slice(0, -jsExtMatch[0].length);
-          const dtsExts = [".d.ts", ".d.mts", ".d.cts"];
-          for (const ext of dtsExts) {
-            const candidate = base + ext;
-            if (fs.existsSync(candidate)) {
-              effectivePath = candidate;
-              effectiveNormalized = normalizePath(candidate);
-              break;
+        if (ws) {
+          const jsExtMatch = resolvedPath.match(/\.(js|mjs|cjs)$/);
+          if (jsExtMatch) {
+            const base = resolvedPath.slice(0, -jsExtMatch[0].length);
+            const dtsExts = [".d.ts", ".d.mts", ".d.cts"];
+            for (const ext of dtsExts) {
+              const candidate = base + ext;
+              if (ws.fileExists(normalizePath(candidate))) {
+                effectivePath = candidate;
+                effectiveNormalized = normalizePath(candidate);
+                break;
+              }
             }
           }
         }
-        try {
-          const depSrc = fs.readFileSync(effectivePath);
-          host.upsert({ inputId: effectiveNormalized, source: depSrc, fileKind: "non_sfc" });
-        } catch {
-          // Read failed — skip
+        if (ws) {
+          try {
+            const depSrc = ws.readFile(normalizePath(effectivePath));
+            if (depSrc !== null) {
+              host.upsert({ inputId: effectiveNormalized, source: depSrc, fileKind: "non_sfc" });
+            }
+          } catch {
+            // Read failed — skip
+          }
         }
         resolutions.push({ specifier, resolvedCanonicalId: effectiveNormalized });
-        await hydrateRelativeDependencyClosure(
-          host,
-          effectiveNormalized,
-          fs,
-          path,
-          hydratedRelativeVisited,
-        );
+        if (ws) {
+          await hydrateRelativeDependencyClosure(
+            host,
+            effectiveNormalized,
+            ws,
+            hydratedRelativeVisited,
+          );
+        }
         continue;
       }
     }
 
-    // Relative specifier with no resolve hook hit — try filesystem probing
-    if (isRelativeImport(specifier)) {
-      const absBase = path.resolve(path.dirname(filename), specifier);
+    // Relative specifier with no resolve hook hit — try workspace probing
+    if (isRelativeImport(specifier) && ws) {
+      const absBase = resolve(dirname(filename), specifier);
       const probeCandidates = [
         absBase + ".ts",
         absBase + ".d.ts",
@@ -429,22 +439,18 @@ export async function hydrateMacroTypeDeps(
       ];
       let found = false;
       for (const candidate of probeCandidates) {
-        if (fs.existsSync(candidate)) {
+        if (ws.fileExists(normalizePath(candidate))) {
           const normalized = normalizePath(candidate);
           try {
-            const depSrc = fs.readFileSync(candidate);
-            host.upsert({ inputId: normalized, source: depSrc, fileKind: "non_sfc" });
+            const depSrc = ws.readFile(normalized);
+            if (depSrc !== null) {
+              host.upsert({ inputId: normalized, source: depSrc, fileKind: "non_sfc" });
+            }
           } catch {
             // skip
           }
           resolutions.push({ specifier, resolvedCanonicalId: normalized });
-          await hydrateRelativeDependencyClosure(
-            host,
-            normalized,
-            fs,
-            path,
-            hydratedRelativeVisited,
-          );
+          await hydrateRelativeDependencyClosure(host, normalized, ws, hydratedRelativeVisited);
           found = true;
           break;
         }
@@ -485,10 +491,10 @@ export async function hydrateMacroTypeDeps(
 
     let entryPath: string | null = null;
 
-    if (runtimeEntry) {
+    if (runtimeEntry && ws) {
       // Find the declaration entry from package.json, or fall back to the
       // runtime entry itself if it's a .ts/.d.ts file (local project files).
-      entryPath = await findPackageDeclarationEntry(runtimeEntry);
+      entryPath = findPackageDeclarationEntry(ws, runtimeEntry);
       if (!entryPath && (runtimeEntry.endsWith(".ts") || runtimeEntry.endsWith(".d.ts"))) {
         entryPath = runtimeEntry;
       }
@@ -496,7 +502,7 @@ export async function hydrateMacroTypeDeps(
 
     // Fallback: for sub-path specifiers where runtime resolution failed,
     // find the package directory and probe for .d.ts files at the sub-path.
-    if (!entryPath) {
+    if (!entryPath && ws) {
       const { pkgName, subPath } = parseBareSpecifier(specifier);
       if (subPath) {
         let pkgDir: string | null = null;
@@ -504,23 +510,23 @@ export async function hydrateMacroTypeDeps(
           const { createRequire } = await import("module");
           const req = createRequire(filename);
           const pkgJsonPath = req.resolve(pkgName + "/package.json");
-          pkgDir = path.dirname(pkgJsonPath);
+          pkgDir = dirname(pkgJsonPath);
         } catch {
           // Try walking node_modules manually
-          let dir = path.dirname(filename);
-          const root = path.parse(dir).root;
+          let dir = dirname(filename);
+          const root = parse(dir).root;
           while (dir !== root) {
-            const candidate = path.join(dir, "node_modules", pkgName);
-            if (fs.existsSync(path.join(candidate, "package.json"))) {
+            const candidate = join(dir, "node_modules", pkgName);
+            if (ws.fileExists(normalizePath(join(candidate, "package.json")))) {
               pkgDir = candidate;
               break;
             }
-            dir = path.dirname(dir);
+            dir = dirname(dir);
           }
         }
 
         if (pkgDir) {
-          const absBase = path.join(pkgDir, subPath);
+          const absBase = join(pkgDir, subPath);
           const candidates = [
             absBase + ".d.ts",
             absBase + ".d.mts",
@@ -530,7 +536,7 @@ export async function hydrateMacroTypeDeps(
             absBase,
           ];
           for (const candidate of candidates) {
-            if (fs.existsSync(candidate)) {
+            if (ws.fileExists(normalizePath(candidate))) {
               entryPath = normalizePath(candidate);
               break;
             }
@@ -544,28 +550,33 @@ export async function hydrateMacroTypeDeps(
     // Upsert the entry file
     const normalizedEntryPath = normalizePath(entryPath);
 
-    try {
-      const source = fs.readFileSync(entryPath);
-      host.upsert({
-        inputId: normalizedEntryPath,
-        source,
-        fileKind: "non_sfc",
-      });
-      resolutions.push({
-        specifier,
-        resolvedCanonicalId: normalizedEntryPath,
-      });
-    } catch {
-      continue;
-    }
+    if (ws) {
+      try {
+        const source = ws.readFile(normalizedEntryPath);
+        if (source !== null) {
+          host.upsert({
+            inputId: normalizedEntryPath,
+            source,
+            fileKind: "non_sfc",
+          });
+          resolutions.push({
+            specifier,
+            resolvedCanonicalId: normalizedEntryPath,
+          });
+        } else {
+          continue;
+        }
+      } catch {
+        continue;
+      }
 
-    await hydrateRelativeDependencyClosure(
-      host,
-      normalizedEntryPath,
-      fs,
-      path,
-      hydratedRelativeVisited,
-    );
+      await hydrateRelativeDependencyClosure(
+        host,
+        normalizedEntryPath,
+        ws,
+        hydratedRelativeVisited,
+      );
+    }
   }
 
   // Update the entry file's import dependencies to include the hydrated resolutions

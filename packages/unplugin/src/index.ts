@@ -10,7 +10,13 @@ import type {
   HostDependencyResolution,
 } from "@verter/native";
 import type { VerterHost } from "@verter/native";
-import { loadHost, generateComponentId, processStyle, resetHost } from "./core/compiler";
+import {
+  loadHost,
+  getWorkspace,
+  generateComponentId,
+  processStyle,
+  resetHost,
+} from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
 import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
@@ -18,6 +24,11 @@ import { preprocessBlock } from "./core/preprocessor";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
+
+/** Normalize Windows backslashes to forward slashes for the workspace API. */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
 
 type ResolveHook = (
   source: string,
@@ -51,22 +62,20 @@ async function resolveUpsertDependencies(
 ): Promise<void> {
   // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
   if (upsertResult.externalSourceRequests.length > 0) {
-    const fs = await import("fs");
     const path = await import("path");
+    const ws = getWorkspace()!;
     for (const req of upsertResult.externalSourceRequests) {
       const resolvedId: string = req.resolvedCanonicalId;
       const specifier: string = req.specifier;
       // Resolve relative to the owner file's directory
       const absPath = path.resolve(path.dirname(filename), specifier);
-      try {
-        const extSource = fs.readFileSync(absPath);
+      const extSource = ws.readFile(normalizePath(absPath));
+      if (extSource !== null) {
         host.upsert({
           inputId: resolvedId,
           source: extSource,
           fileKind: "non_sfc",
         });
-      } catch {
-        // External source not found; host will report the error.
       }
     }
   }
@@ -79,8 +88,8 @@ async function resolveUpsertDependencies(
     upsertResult.moduleReferences ?? [],
   );
   if (dependencySpecifiers.length > 0) {
-    const fs = await import("fs");
     const path = await import("path");
+    const ws = getWorkspace()!;
     const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".d.ts", ".d.mts", ".d.cts"];
     for (const specifier of dependencySpecifiers) {
       // Try bundler resolve hook first (if available)
@@ -93,8 +102,8 @@ async function resolveUpsertDependencies(
             resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
             continue;
           }
-          try {
-            const depSource = fs.readFileSync(resolvedId);
+          const depSource = ws.readFile(normalizePath(resolvedId));
+          if (depSource !== null) {
             host.upsert({
               inputId: resolvedId,
               source: depSource,
@@ -102,9 +111,8 @@ async function resolveUpsertDependencies(
             });
             resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
             continue;
-          } catch {
-            // Fall through to filesystem probing
           }
+          // readFile returned null — fall through for relative specifiers
         }
         // resolveId returned null or read failed — fall through for relative specifiers
       }
@@ -115,13 +123,13 @@ async function resolveUpsertDependencies(
       const absBase = path.resolve(path.dirname(filename), specifier);
       for (const ext of exts) {
         const fullPath = absBase + ext;
-        if (fullPath.endsWith(".vue") && fs.existsSync(fullPath)) {
+        if (fullPath.endsWith(".vue") && ws.fileExists(normalizePath(fullPath))) {
           resolutions.push({ specifier, resolvedCanonicalId: fullPath });
           break;
         }
         if (fullPath.endsWith(".vue")) continue;
-        try {
-          const depSource = fs.readFileSync(fullPath);
+        const depSource = ws.readFile(normalizePath(fullPath));
+        if (depSource !== null) {
           host.upsert({
             inputId: fullPath,
             source: depSource,
@@ -129,8 +137,6 @@ async function resolveUpsertDependencies(
           });
           resolutions.push({ specifier, resolvedCanonicalId: fullPath });
           break;
-        } catch {
-          continue;
         }
       }
     }
@@ -210,17 +216,14 @@ function createFilter(
 
 /** Detect if a project uses Nuxt by checking for nuxt.config.* or .nuxt/ directory. */
 function detectNuxt(root: string): boolean {
-  try {
-    const fs = require("fs");
-    const path = require("path");
-    const configFiles = ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mts", "nuxt.config.mjs"];
-    for (const f of configFiles) {
-      if (fs.existsSync(path.join(root, f))) return true;
-    }
-    if (fs.existsSync(path.join(root, ".nuxt"))) return true;
-  } catch {
-    // fs/path not available
+  const ws = getWorkspace();
+  if (!ws) return false;
+  const normalizedRoot = normalizePath(root);
+  const configFiles = ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mts", "nuxt.config.mjs"];
+  for (const f of configFiles) {
+    if (ws.fileExists(`${normalizedRoot}/${f}`)) return true;
   }
+  if (ws.isDir(`${normalizedRoot}/.nuxt`)) return true;
   return false;
 }
 
@@ -434,6 +437,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           host,
           filename,
           typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
+          getWorkspace() ?? undefined,
         );
 
         // Preprocess non-native blocks (Pug, CoffeeScript, custom; style skipped in Vite mode)
@@ -610,6 +614,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         host,
         filename,
         typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
+        getWorkspace() ?? undefined,
       );
 
       // Preprocess non-native blocks (Pug, CoffeeScript, custom; style skipped in Vite mode)

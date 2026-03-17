@@ -1,5 +1,9 @@
-import { readdir, readFile } from "fs/promises";
 import { join } from "path";
+import { getWorkspace } from "./compiler";
+
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
 
 const EXCLUDED_DIRS = new Set(["node_modules"]);
 
@@ -22,9 +26,10 @@ async function walkDir(
   filter: (filename: string) => boolean,
   result: Map<string, string>,
 ): Promise<void> {
+  const ws = getWorkspace()!;
   let entries;
   try {
-    entries = await readdir(dir, { withFileTypes: true });
+    entries = ws.readDir(normalizePath(dir));
   } catch {
     return;
   }
@@ -32,23 +37,23 @@ async function walkDir(
   const subdirPromises: Promise<void>[] = [];
 
   for (const entry of entries) {
-    const name = entry.name;
+    const name = entry.path.split("/").pop()!;
 
-    if (entry.isDirectory()) {
+    if (entry.isDir) {
       // Skip node_modules and dot-directories
       if (EXCLUDED_DIRS.has(name) || name.startsWith(".")) continue;
       subdirPromises.push(walkDir(join(dir, name), filter, result));
       continue;
     }
 
-    if (!entry.isFile()) continue;
-
-    const absPath = join(dir, name).replace(/\\/g, "/");
+    const absPath = normalizePath(join(dir, name));
     if (!filter(absPath)) continue;
 
     try {
-      const content = await readFile(join(dir, name), "utf-8");
-      result.set(absPath, content);
+      const content = ws.readFile(normalizePath(join(dir, name)));
+      if (content !== null) {
+        result.set(absPath, content);
+      }
     } catch {
       // Skip unreadable files
     }

@@ -125,6 +125,18 @@ export function remapVirtualSpan(
   };
 }
 
+export function getWorkspace(projectRoot: string): Workspace | null {
+  if (workspace) return workspace;
+  if (loadFailed) return null;
+  try {
+    const native: typeof import("@verter/native") = require("@verter/native");
+    workspace = new native.Workspace([projectRoot]);
+    return workspace;
+  } catch {
+    return null;
+  }
+}
+
 function getHost(projectRoot: string): VerterHost | null {
   if (host) return host;
   if (loadFailed) return null;

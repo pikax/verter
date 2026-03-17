@@ -1046,6 +1046,13 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 // Workspace
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Directory entry returned by `Workspace.readDir()`.
+#[napi(object)]
+pub struct NapiDirEntry {
+    pub path: String,
+    pub is_dir: bool,
+}
+
 /// Workspace object backed by `FilesystemWorkspace`.
 ///
 /// Provides file access, import resolution, and project configuration.
@@ -1072,45 +1079,136 @@ impl NapiWorkspace {
         }
     }
 
+    // ── Async filesystem operations ──
+    //
+    // All filesystem methods are async to avoid blocking the Node.js event loop.
+    // The underlying VFS operations are synchronous but run on the libuv thread pool.
+
     /// Read a file from the workspace (overlay → snapshot → disk).
     #[napi(js_name = "readFile")]
-    pub fn read_file(&self, path: String) -> Option<String> {
+    pub async fn read_file(&self, path: String) -> Result<Option<String>> {
         use verter_vfs::WorkspaceAccess;
-        self.inner.read_file(&path).map(|s| s.to_string())
+        Ok(self.inner.read_file(&path).map(|s| s.to_string()))
     }
 
     /// Check if a file exists in the workspace.
     #[napi(js_name = "fileExists")]
-    pub fn file_exists(&self, path: String) -> bool {
+    pub async fn file_exists(&self, path: String) -> Result<bool> {
         use verter_vfs::WorkspaceAccess;
-        self.inner.file_exists(&path)
+        Ok(self.inner.file_exists(&path))
     }
 
     /// Check if a path is a directory.
     #[napi(js_name = "isDir")]
-    pub fn is_dir(&self, path: String) -> bool {
+    pub async fn is_dir(&self, path: String) -> Result<bool> {
         use verter_vfs::WorkspaceAccess;
-        self.inner.is_dir(&path)
+        Ok(self.inner.is_dir(&path))
     }
 
     /// Write file content. Creates parent directories as needed.
     #[napi(js_name = "writeFile")]
-    pub fn write_file(&self, path: String, content: String) -> Result<()> {
+    pub async fn write_file(&self, path: String, content: String) -> Result<()> {
         use verter_vfs::WorkspaceAccess;
         self.inner
             .write_file(&path, &content)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
     }
 
+    /// Read directory entries. Returns array of { path, isDir }.
+    #[napi(js_name = "readDir")]
+    pub async fn read_dir(&self, dir: String) -> Result<Vec<NapiDirEntry>> {
+        use verter_vfs::WorkspaceAccess;
+        self.inner
+            .read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|e| NapiDirEntry {
+                        path: e.path,
+                        is_dir: e.is_dir,
+                    })
+                    .collect()
+            })
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
+    }
+
+    /// Recursively walk a directory. Returns matching file paths.
+    #[napi(js_name = "walk")]
+    pub async fn walk(
+        &self,
+        root: String,
+        exclude_dirs: Vec<String>,
+        extensions: Option<Vec<String>>,
+    ) -> Result<Vec<String>> {
+        use verter_vfs::WorkspaceAccess;
+        let exts = extensions;
+        self.inner
+            .walk(
+                &root,
+                &|dir_path| {
+                    let name = dir_path.rsplit('/').next().unwrap_or(dir_path);
+                    !exclude_dirs.iter().any(|ex| ex == name)
+                },
+                &|file_path| match &exts {
+                    Some(ext_list) => ext_list.iter().any(|ext| file_path.ends_with(ext.as_str())),
+                    None => true,
+                },
+            )
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
+    }
+
+    /// Delete a file.
+    #[napi(js_name = "deleteFile")]
+    pub async fn delete_file(&self, path: String) -> Result<()> {
+        use verter_vfs::WorkspaceAccess;
+        self.inner
+            .delete_file(&path)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
+    }
+
+    /// Create a directory and all parent directories.
+    #[napi(js_name = "createDirAll")]
+    pub async fn create_dir_all(&self, path: String) -> Result<()> {
+        use verter_vfs::WorkspaceAccess;
+        self.inner
+            .create_dir_all(&path)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
+    }
+
+    /// Delete a directory and all its contents.
+    #[napi(js_name = "deleteDirAll")]
+    pub async fn delete_dir_all(&self, path: String) -> Result<()> {
+        use verter_vfs::WorkspaceAccess;
+        self.inner
+            .delete_dir_all(&path)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
+    }
+
+    /// Copy a file from src to dst.
+    #[napi(js_name = "copyFile")]
+    pub async fn copy_file(&self, src: String, dst: String) -> Result<()> {
+        use verter_vfs::WorkspaceAccess;
+        self.inner
+            .copy_file(&src, &dst)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
+    }
+
+    /// Resolve symlinks to real path. Returns null if not found.
+    #[napi(js_name = "realpath")]
+    pub async fn realpath(&self, path: String) -> Result<Option<String>> {
+        use verter_vfs::WorkspaceAccess;
+        Ok(self.inner.realpath(&path))
+    }
+
     /// Resolve an import specifier with context.
     #[napi(js_name = "resolveImport")]
-    pub fn resolve_import(
+    pub async fn resolve_import(
         &self,
         importer: String,
         specifier: String,
         phase: Option<String>,
         kind: Option<String>,
-    ) -> Option<String> {
+    ) -> Result<Option<String>> {
         use verter_vfs::WorkspaceAccess;
         let phase = match phase.as_deref() {
             Some("provider") => verter_vfs::ResolvePhase::ProviderGraph,
@@ -1123,9 +1221,10 @@ impl NapiWorkspace {
             _ => verter_vfs::ResolveRequestKind::EsmImport,
         };
         let ctx = verter_vfs::ResolutionContext { phase, kind };
-        self.inner
+        Ok(self
+            .inner
             .resolve_import(&importer, &specifier, ctx)
-            .map(|r| r.source_id)
+            .map(|r| r.source_id))
     }
 
     /// Configure project resolver from tsconfig/alias data.
