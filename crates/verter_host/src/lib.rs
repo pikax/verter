@@ -215,6 +215,15 @@ impl VerterHost {
             .map(|r| r.source_id)
     }
 
+    /// Compute the preferred alias-based import specifier for a target file.
+    ///
+    /// Returns the shortest tsconfig-path or workspace-alias specifier that
+    /// round-trips correctly. Returns `None` if no alias matches.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn preferred_specifier(&self, importer_id: &str, target_id: &str) -> Option<String> {
+        self.ws().preferred_specifier(importer_id, target_id)
+    }
+
     /// Release all cached data (files, aliases, dependency graph).
     ///
     /// After calling `close()` the host is empty but still usable (you could
@@ -251,6 +260,24 @@ impl VerterHost {
         // Sync to workspace so the VFS resolver stays in sync.
         #[cfg(not(target_arch = "wasm32"))]
         self.ws().configure_resolver(projects);
+    }
+
+    /// Set the host's internal project resolver for compilation (Phase 2 fallback).
+    ///
+    /// Does NOT sync to the workspace — workspace resolver comes from
+    /// `set_project_graph()` on the `FilesystemWorkspace`. Use this when
+    /// the workspace resolver is populated separately (e.g., by the LSP's
+    /// `background_init` which calls `set_project_graph()` directly).
+    pub fn set_internal_resolver(
+        &self,
+        projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
+    ) {
+        let resolver = if projects.is_empty() {
+            None
+        } else {
+            Some(NativeProjectResolver::new(projects))
+        };
+        *write_lock(&self.project_resolver) = resolver;
     }
 
     #[cfg(feature = "host_metrics")]

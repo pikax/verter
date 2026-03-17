@@ -711,3 +711,481 @@ fn native_project_resolver_alias_works() {
         "NativeProjectResolver alias should be interchangeable with ProjectResolver"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Step 1: Owner-independent resolution tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Relative imports should resolve even when the importer has no owning project.
+#[test]
+fn resolve_relative_without_project_owner() {
+    // Only project is /workspace — importer is /other/src/App.ts (unowned)
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/other/src/Foo.vue"]);
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/other/src/App.ts".to_string(),
+            specifier: "./Foo.vue".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+
+    let resolved = result.expect("relative import should resolve for unowned importer");
+    assert_eq!(resolved.source_id, "/other/src/Foo.vue");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::Relative);
+    assert!(
+        !resolved.source_id.is_empty(),
+        "source_id must not be empty"
+    );
+}
+
+/// When an unowned importer resolves a relative path to a file owned by a project,
+/// the result should carry the correct owner metadata (provider_id, provider_target, etc.).
+#[test]
+fn resolve_relative_unowned_to_owned_target() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            // Importer is outside /workspace — unowned
+            importer_id: "/external/tool.ts".to_string(),
+            specifier: "../workspace/src/Foo.vue".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+
+    let resolved = result.expect("unowned importer resolving to owned target should work");
+    assert_eq!(resolved.source_id, "/workspace/src/Foo.vue");
+    assert_eq!(
+        resolved.provider_target,
+        ProviderTarget::VuePublicApi,
+        "Vue target owned by a project should get VuePublicApi"
+    );
+    assert!(
+        resolved.provider_id.ends_with(".vue.ts"),
+        "provider_id for owned Vue target should be .vue.ts: {}",
+        resolved.provider_id
+    );
+    assert_eq!(
+        resolved.owner_tsconfig_path.as_deref(),
+        Some("/workspace/tsconfig.app.json"),
+        "owner_tsconfig_path should come from the TARGET's project"
+    );
+}
+
+/// Absolute path imports should resolve for unowned importers.
+#[test]
+fn resolve_absolute_without_project_owner() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/unowned/tool.ts".to_string(),
+            specifier: "/workspace/src/Foo.vue".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+
+    let resolved = result.expect("absolute import should resolve for unowned importer");
+    assert_eq!(resolved.source_id, "/workspace/src/Foo.vue");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::Relative);
+}
+
+/// Bare node_modules imports should resolve for unowned importers.
+#[test]
+fn resolve_node_modules_without_project_owner() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&["/unowned/node_modules/vue/dist/vue.d.ts"]);
+    reader.add_file(
+        "/unowned/node_modules/vue/package.json",
+        r#"{ "types": "./dist/vue.d.ts" }"#,
+    );
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/unowned/src/App.ts".to_string(),
+            specifier: "vue".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+
+    let resolved = result.expect("node_modules import should resolve for unowned importer");
+    assert_eq!(
+        resolved.source_id,
+        "/unowned/node_modules/vue/dist/vue.d.ts"
+    );
+    assert_eq!(resolved.resolution_kind, ResolutionKind::NodeModules);
+    assert!(
+        !resolved.source_id.is_empty(),
+        "source_id must not be empty"
+    );
+}
+
+/// Package #imports should resolve for unowned importers.
+#[test]
+fn resolve_hash_import_without_project_owner() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&["/unowned/src/utils.ts"]);
+    reader.add_file(
+        "/unowned/package.json",
+        r##"{ "imports": { "#app": "./src/utils.ts" } }"##,
+    );
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/unowned/src/main.ts".to_string(),
+            specifier: "#app".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+
+    let resolved = result.expect("#imports should resolve for unowned importer");
+    assert_eq!(resolved.source_id, "/unowned/src/utils.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::PackageImports);
+}
+
+/// Alias-based resolution (tsconfig paths) should NOT work for unowned importers.
+#[test]
+fn resolve_alias_requires_project_owner() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/unowned/tool.ts".to_string(),
+            specifier: "@/Foo.vue".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+
+    assert!(
+        result.is_none(),
+        "alias resolution must NOT work for unowned importer — got: {result:?}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// preferred_specifier tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn preferred_specifier_returns_tsconfig_alias() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    let result =
+        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
+
+    assert_eq!(
+        result.as_deref(),
+        Some("@/Foo.vue"),
+        "should return tsconfig path alias"
+    );
+}
+
+#[test]
+fn preferred_specifier_returns_none_when_no_match() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/other/Foo.vue"]);
+
+    let result = resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/other/Foo.vue");
+
+    assert!(
+        result.is_none(),
+        "target outside all aliases should return None — got: {result:?}"
+    );
+}
+
+#[test]
+fn preferred_specifier_prefers_shortest() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![
+            ("@/*".to_string(), vec!["/workspace/src/*".to_string()]),
+            (
+                "@components/*".to_string(),
+                vec!["/workspace/src/components/*".to_string()],
+            ),
+        ],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/components/Bar.vue"]);
+
+    let result = resolver.preferred_specifier(
+        &reader,
+        "/workspace/src/App.ts",
+        "/workspace/src/components/Bar.vue",
+    );
+
+    assert_eq!(
+        result.as_deref(),
+        Some("@components/Bar.vue"),
+        "should prefer shorter (more specific) alias"
+    );
+}
+
+#[test]
+fn preferred_specifier_round_trips() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    let specifier = resolver
+        .preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue")
+        .expect("should find alias specifier");
+
+    // Forward-resolve the specifier and verify it matches the original target
+    let request = ResolveRequest {
+        importer_id: "/workspace/src/App.ts".to_string(),
+        specifier: specifier.clone(),
+        kind: ResolveRequestKind::EsmImport,
+        phase: ResolvePhase::ProviderGraph,
+    };
+    let forward = resolver
+        .resolve_with_reader(&reader, &request)
+        .expect("forward resolve of preferred specifier should succeed");
+
+    assert_eq!(
+        forward.source_id, "/workspace/src/Foo.vue",
+        "round-trip: forward({specifier}) should resolve to original target"
+    );
+}
+
+#[test]
+fn preferred_specifier_none_for_provider_paths() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    // .vue.ts is a provider path, not a real file — should not match
+    let result = resolver.preferred_specifier(
+        &reader,
+        "/workspace/src/App.ts",
+        "/workspace/src/Foo.vue.ts",
+    );
+
+    assert!(
+        result.is_none(),
+        "provider paths (.vue.ts) should return None — got: {result:?}"
+    );
+}
+
+#[test]
+fn preferred_specifier_multi_target_first_wins() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    // "@/*" maps to both src/ and lib/, first target wins
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![(
+            "@/*".to_string(),
+            vec![
+                "/workspace/src/*".to_string(),
+                "/workspace/lib/*".to_string(),
+            ],
+        )],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue", "/workspace/lib/Foo.vue"]);
+
+    // Target in src/ — first target, should round-trip successfully
+    let result =
+        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
+    assert_eq!(
+        result.as_deref(),
+        Some("@/Foo.vue"),
+        "target in first replacement should produce alias"
+    );
+}
+
+#[test]
+fn preferred_specifier_multi_target_shadowed() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    // "@/*" maps to src/ first, then lib/. Target in lib/ is shadowed.
+    app_project.compiler_options = IdeProjectCompilerOptions {
+        base_url: None,
+        paths: vec![(
+            "@/*".to_string(),
+            vec![
+                "/workspace/src/*".to_string(),
+                "/workspace/lib/*".to_string(),
+            ],
+        )],
+    };
+    let resolver = ProjectResolver::new(vec![app_project]);
+    // Only lib/Bar.vue exists (NOT src/Bar.vue)
+    let reader = TestReader::with_files(&["/workspace/lib/Bar.vue"]);
+
+    // Target is lib/Bar.vue — @/Bar.vue forward-resolves to lib/Bar.vue
+    // (src/Bar.vue doesn't exist, so TypeScript tries lib/ next)
+    let result =
+        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/lib/Bar.vue");
+    assert_eq!(
+        result.as_deref(),
+        Some("@/Bar.vue"),
+        "when first target doesn't exist, second target should round-trip"
+    );
+}
+
+#[test]
+fn preferred_specifier_workspace_alias_fallback() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    // No tsconfig paths, but has a workspace alias
+    app_project.workspace_aliases = vec![WorkspaceAlias {
+        find: "~/".to_string(),
+        replacement: "/workspace/src/".to_string(),
+    }];
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    let result =
+        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
+
+    assert_eq!(
+        result.as_deref(),
+        Some("~/Foo.vue"),
+        "workspace alias should be used when no tsconfig paths match"
+    );
+}
+
+/// Vite normalization stores find with trailing slash (`@/`) and replacement
+/// WITHOUT trailing slash (`/workspace/src`). The reverse-alias must not
+/// produce double-slash specifiers like `@//Foo.vue`.
+#[test]
+fn preferred_specifier_workspace_alias_no_double_slash() {
+    let mut app_project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    );
+    // Simulates Vite's normalize_alias_pair output:
+    // find = "@/" (with trailing slash), replacement = "/workspace/src" (NO trailing slash)
+    app_project.workspace_aliases = vec![WorkspaceAlias {
+        find: "@/".to_string(),
+        replacement: "/workspace/src".to_string(),
+    }];
+    let resolver = ProjectResolver::new(vec![app_project]);
+    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
+
+    let result =
+        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
+
+    let specifier = result.expect("should find workspace alias specifier");
+    assert_eq!(
+        specifier, "@/Foo.vue",
+        "must NOT produce double-slash like @//Foo.vue"
+    );
+    assert!(
+        !specifier.contains("//"),
+        "specifier must not contain double-slash: {specifier}"
+    );
+}

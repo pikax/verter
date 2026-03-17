@@ -102,6 +102,11 @@ impl VerterHost {
                 let old_aliases = existing.aliases.clone();
                 drop(files);
                 self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
+                // Sync to workspace so the resolver sees this file even on the
+                // no-change fast path (e.g., first open matches scanner content).
+                // FilesystemWorkspace sets the overlay; MemoryWorkspace no-ops.
+                #[cfg(not(target_arch = "wasm32"))]
+                self.ws().notify_upsert(&canonical_id, req.source.clone());
                 return Ok(HostUpdateResult {
                     canonical_id,
                     changed: false,
@@ -346,7 +351,9 @@ impl VerterHost {
                 }
             }
 
-            self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
+            let ws = self.ws();
+            ws.record_parsed_edges(&canonical_id, &parsed_edges);
+            ws.notify_upsert(&canonical_id, req.source.clone());
         }
 
         build_upsert_result(

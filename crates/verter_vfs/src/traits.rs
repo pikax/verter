@@ -51,6 +51,15 @@ pub trait WorkspaceAccess: Send + Sync {
     /// Find the owning project for a file.
     fn owner_for_file(&self, canonical_id: &str) -> Option<ProjectOwnership>;
 
+    /// Compute the preferred alias-based import specifier for a target file.
+    ///
+    /// Returns the shortest tsconfig-path or workspace-alias specifier that
+    /// round-trips back to `target_id` via `resolve_import()`. Returns `None`
+    /// if no alias matches or the importer is unowned.
+    fn preferred_specifier(&self, _importer_id: &str, _target_id: &str) -> Option<String> {
+        None
+    }
+
     // ── Edge recording (called by host during upsert) ──
 
     /// Record parsed edges from a file's imports. Eagerly resolves
@@ -77,6 +86,26 @@ pub trait WorkspaceAccess: Send + Sync {
     ) -> ExactResolutionResult {
         ExactResolutionResult::default()
     }
+
+    /// Notify the workspace that a file was upserted into the host.
+    ///
+    /// Sets an overlay so the VFS resolver can find open/in-memory files that
+    /// may not yet exist on disk. Called by the host during `upsert()`.
+    /// Default: no-op (MemoryWorkspace manages its own snapshot).
+    fn notify_upsert(&self, _canonical_id: &str, _source: Arc<str>) {}
+
+    /// Notify the workspace that an editor buffer was closed.
+    ///
+    /// Clears the overlay AND invalidates the snapshot cache so the next
+    /// read falls through to disk (picking up any saves made while the
+    /// overlay was active). Default: no-op.
+    fn notify_close(&self, _canonical_id: &str) {}
+
+    /// Notify the workspace that a file was deleted.
+    ///
+    /// Clears overlay, removes snapshot, and removes edge-store data so
+    /// the file is no longer resolvable or tracked. Default: no-op.
+    fn notify_delete(&self, _canonical_id: &str) {}
 
     /// Configure the project resolver from a list of project configs.
     /// Called by the host when `configure_projects()` is used.

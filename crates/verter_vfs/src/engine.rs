@@ -190,6 +190,18 @@ impl Engine {
         self.project_graph.read().owner_for_file(canonical_id)
     }
 
+    /// Compute the preferred alias-based import specifier for a target file.
+    pub(crate) fn preferred_specifier(
+        &self,
+        reader: &dyn crate::resolver::ProjectResolverReader,
+        importer_id: &str,
+        target_id: &str,
+    ) -> Option<String> {
+        let resolver_guard = self.resolver.read();
+        let resolver = resolver_guard.as_ref()?;
+        resolver.preferred_specifier(reader, importer_id, target_id)
+    }
+
     /// Record parsed edges, eagerly resolving relative/src edges via the resolver.
     ///
     /// `reader` is the workspace implementing `ProjectResolverReader`, used by

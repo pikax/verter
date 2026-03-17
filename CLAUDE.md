@@ -167,11 +167,13 @@ TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner r
 In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
 
 **Key types** (`crates/verter_lsp/src/config.rs`):
-- `ProjectConfig` — per-project: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path` and `vite_config_deps`
-- `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `resolve_alias()`, `find_project_root()`, `linter_for()`
+- `ProjectConfig` — per-project: root path, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path` and `vite_config_deps`
+- `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `find_project_root()`, `linter_for()`
 - `RegistryBuildResult` — returned from `from_workspace_roots()`, contains `registry` + `trust_required` list
 
-**Path alias resolution** (tsconfig-first policy): Tsconfig-backed projects use ONLY `tsconfig.json` `compilerOptions.paths` — Vite aliases are never merged. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
+**Import resolution** (single VFS authority): All LSP import resolution goes through `WorkspaceAccess::resolve_import()` via the VFS `FilesystemWorkspace`. The workspace is created in `initialize()` with an empty project graph (enabling relative/node_modules resolution immediately), then `background_init` populates the full project graph via `set_project_graph()` for alias resolution. The host's internal `project_resolver` (set via `set_internal_resolver()`) is used only for compilation — never for LSP resolution. `preferred_specifier()` provides reverse-alias lookup for auto-imports.
+
+**Tsconfig/vite config discovery** delegates to `verter_vfs::config` — all tsconfig parsing, membership, references, and `raw_paths_json` live in VFS. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
 1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
 2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
 

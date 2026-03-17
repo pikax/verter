@@ -522,6 +522,11 @@ impl VerterHost {
             }
         }
 
+        // Clean up VFS state (overlay, snapshot, edges) so the file is
+        // no longer resolvable or tracked after deletion.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.ws().notify_delete(&canonical);
+
         Some(HostRemoveResult {
             canonical_id: canonical,
         })

@@ -144,7 +144,10 @@ impl TestSessionBuilder {
             TestProviderKind::Tsgo => crate::TypeProviderKind::Tsgo,
         };
 
-        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
+            verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+        );
+        let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&provider);
         let (service, socket) = tower_lsp_server::LspService::new(move |client| {
@@ -190,6 +193,15 @@ impl TestSessionBuilder {
         let vite_opts = crate::vite_config::ViteConfigOptions::default();
         let build_result =
             crate::config::ProjectRegistry::from_workspace_roots(&[root_uri.clone()], &vite_opts);
+        // Sync resolver to host's VFS so resolve_import_via_workspace works
+        host.configure_projects(
+            build_result
+                .registry
+                .projects()
+                .iter()
+                .map(|p| p.to_ide_project_config())
+                .collect(),
+        );
         server.install_project_registry(build_result.registry);
 
         // Replicate the lifecycle from `initialized()`:
@@ -204,9 +216,7 @@ impl TestSessionBuilder {
         //    can resolve path aliases in go-to-definition and completions.
         let tsconfig_path = std::path::PathBuf::from(&tsconfig_path_str);
         if tsconfig_path.exists() {
-            if let Some((base_url, paths)) =
-                crate::config::TsConfigPathResolver::raw_paths_json(&tsconfig_path)
-            {
+            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&tsconfig_path) {
                 let _ = provider.configure_paths(&base_url, paths).await;
             }
         }

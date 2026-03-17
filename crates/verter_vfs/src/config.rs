@@ -399,7 +399,77 @@ pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Private Helpers
+// Raw Paths Extraction (for tsserver configure_paths)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Extract the raw `baseUrl` and `paths` JSON from a tsconfig for passing to tsserver.
+///
+/// Follows `extends` and `references` to find the effective paths.
+/// Returns `(baseUrl, paths)` as raw JSON values, or `None` if no paths found.
+pub fn raw_paths_json(tsconfig_path: &Path) -> Option<(String, serde_json::Value)> {
+    raw_paths_json_inner(tsconfig_path, 0)
+}
+
+fn raw_paths_json_inner(tsconfig_path: &Path, depth: u8) -> Option<(String, serde_json::Value)> {
+    if depth > 5 {
+        return None;
+    }
+
+    let tsconfig_dir = tsconfig_path.parent()?;
+    let content = std::fs::read_to_string(tsconfig_path).ok()?;
+    let cleaned = strip_json_comments(&content);
+    let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+
+    // Check extends first
+    if let Some(extends) = json.get("extends").and_then(|v| v.as_str()) {
+        if let Some(base_path) = resolve_tsconfig_extends(tsconfig_dir, extends) {
+            if let Some(result) = raw_paths_json_inner(&base_path, depth + 1) {
+                // If base has paths, use them (current config may override)
+                let base_result = Some(result);
+                // Check if current config overrides
+                if let Some(co) = json.get("compilerOptions") {
+                    if co.get("paths").is_some() {
+                        // Current config overrides base — fall through
+                    } else {
+                        return base_result;
+                    }
+                } else {
+                    return base_result;
+                }
+            }
+        }
+    }
+
+    // Check this config's own compilerOptions.paths
+    if let Some(co) = json.get("compilerOptions") {
+        if let Some(paths) = co.get("paths") {
+            let base_url = co
+                .get("baseUrl")
+                .and_then(|v| v.as_str())
+                .map(|b| normalize_path_buf(&tsconfig_dir.join(b)))
+                .unwrap_or_else(|| normalize_path_buf(tsconfig_dir));
+            return Some((base_url, paths.clone()));
+        }
+    }
+
+    // Follow references
+    if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
+        for ref_entry in refs {
+            if let Some(ref_path) = ref_entry.get("path").and_then(|v| v.as_str()) {
+                if let Some(ref_tsconfig) = resolve_tsconfig_reference(tsconfig_dir, ref_path) {
+                    if let Some(result) = raw_paths_json_inner(&ref_tsconfig, depth + 1) {
+                        return Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Resolve `extends` field from tsconfig.json to an absolute path.

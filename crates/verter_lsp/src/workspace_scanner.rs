@@ -75,7 +75,7 @@ pub struct WorkspaceScannerConfig {
     pub is_tsgo: bool,
     /// Compile profile for IDE output.
     pub tsx_profile: CompileProfile,
-    /// Coverage patterns from `TsConfigDiscovery` (e.g., `"C:/project/src/**"`).
+    /// Coverage patterns from `verter_vfs::config::discover_tsconfigs()` (e.g., `"C:/project/src/**"`).
     pub tsconfig_patterns: Vec<String>,
     /// Optional oneshot channel fired after the full scanner loop completes
     /// (both Phase 1 `.vue` files and Phase 2 non-Vue source files).
@@ -1332,7 +1332,7 @@ import Child from '@/Child.vue'
             "resolver should match the Vue file to the temp tsconfig owner"
         );
         let (expected_base_url, expected_paths) =
-            crate::config::TsConfigPathResolver::raw_paths_json(&root.join("tsconfig.json"))
+            verter_vfs::config::raw_paths_json(&root.join("tsconfig.json"))
                 .expect("raw_paths_json should read the temp tsconfig");
 
         sync_file_to_provider(

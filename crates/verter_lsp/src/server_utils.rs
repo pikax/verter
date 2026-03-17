@@ -90,8 +90,10 @@ pub(super) fn build_workspace_components(
         // Convert to PascalCase: `my-button` → `MyButton`, `index` stays `Index`
         let component_name = to_pascal_case(stem);
 
-        // Compute relative path from current file to this file
-        let import_path = compute_relative_path(current_dir, file_id);
+        // Prefer alias-based path (e.g. @/components/Foo.vue) over relative
+        let import_path = host
+            .preferred_specifier(current_file_id, file_id)
+            .unwrap_or_else(|| compute_relative_path(current_dir, file_id));
 
         components.push(crate::features::completion::WorkspaceComponent {
             name: component_name,
@@ -491,7 +493,6 @@ pub(super) fn import_resolved_matches_target(resolved: &str, target: &str) -> bo
 /// can resolve component types for diagnostic computation.
 pub(crate) fn resolve_component_for(
     host: &verter_host::VerterHost,
-    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
     parent_canonical_id: &str,
     import_source: &str,
 ) -> Option<verter_host::FileAnalysisSnapshot> {
@@ -530,16 +531,12 @@ pub(crate) fn resolve_component_for(
         }
     }
 
-    // Try 2: Path alias resolution (per-project)
+    // Try 2: VFS resolution (path aliases, tsconfig paths, disk probing)
+    if let Some(resolved_path) =
+        host.resolve_import_via_workspace(parent_canonical_id, import_source)
     {
-        let registry_guard = project_registry.read();
-        if let Some(ref registry) = *registry_guard {
-            if let Some(resolved_path) = registry.resolve_alias(parent_canonical_id, import_source)
-            {
-                if let Some(a) = read_component_analysis(&resolved_path) {
-                    return Some(a);
-                }
-            }
+        if let Some(a) = read_component_analysis(&resolved_path) {
+            return Some(a);
         }
     }
 
@@ -737,52 +734,10 @@ pub(super) fn did_open_provider_sync_policy(
 /// in `background_init` after the project registry becomes available.
 pub(super) fn resolve_import_specifier_standalone(
     host: &verter_host::VerterHost,
-    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
     parent_canonical_id: &str,
     specifier: &str,
 ) -> Option<String> {
-    // 1. Host resolution (dependency map from compile)
-    if let Some(resolved) = host.resolve_import(parent_canonical_id, specifier) {
-        return Some(resolved);
-    }
-
-    // 2. Project registry alias resolution (tsconfig paths)
-    {
-        let registry_guard = project_registry.read();
-        if let Some(registry) = registry_guard.as_ref() {
-            if let Some(resolved) = registry.resolve_alias(parent_canonical_id, specifier) {
-                return Some(resolved);
-            }
-        }
-    }
-
-    // 3. Relative FS fallback
-    if specifier.starts_with('.') {
-        let resolved = verter_host::resolve_external(parent_canonical_id, specifier);
-        let candidates = if std::path::Path::new(&resolved).extension().is_some() {
-            vec![resolved.clone()]
-        } else {
-            vec![
-                format!("{resolved}.ts"),
-                format!("{resolved}.tsx"),
-                format!("{resolved}.js"),
-                format!("{resolved}.vue"),
-                format!("{resolved}/index.ts"),
-                format!("{resolved}/index.js"),
-                format!("{resolved}/index.vue"),
-            ]
-        };
-        for candidate in candidates {
-            if std::path::Path::new(&candidate).exists() {
-                return Some(candidate);
-            }
-        }
-        if resolved.ends_with(".vue") {
-            return Some(resolved);
-        }
-    }
-
-    None
+    host.resolve_import_via_workspace(parent_canonical_id, specifier)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -964,9 +919,7 @@ pub(crate) fn compute_verter_diagnostics_for(
                 crate::features::component_diagnostics::component_usage_diagnostics(
                     &analysis,
                     &doc.line_index,
-                    &|import_source| {
-                        resolve_component_for(host, project_registry, &canonical_id, import_source)
-                    },
+                    &|import_source| resolve_component_for(host, &canonical_id, import_source),
                 ),
             );
 

@@ -21,6 +21,7 @@ pub fn document_drop_edit(
     blocks: &[SfcBlock],
     line_index: &LineIndex,
     target_uri: &Uri,
+    preferred_import_path: Option<&str>,
 ) -> Option<WorkspaceEdit> {
     // Only handle .vue file drops
     if !dropped_uri.ends_with(".vue") {
@@ -39,8 +40,11 @@ pub fn document_drop_edit(
     // Extract component name from dropped file path
     let component_name = extract_component_name(dropped_uri)?;
 
-    // Compute relative import path from target to dropped file
-    let import_path = compute_relative_path(target_uri.as_str(), dropped_uri);
+    // Use preferred alias path if available, otherwise compute relative
+    let import_path = match preferred_import_path {
+        Some(path) => path.to_string(),
+        None => compute_relative_path(target_uri.as_str(), dropped_uri),
+    };
 
     // Build the component tag to insert
     let tag = format!("<{component_name} />");
@@ -165,6 +169,7 @@ mod tests {
             &crate::documents::sfc_scanner::scan_sfc_blocks("<template>\n  <div/>\n</template>\n"),
             &LineIndex::new_utf16("<template>\n  <div/>\n</template>\n"),
             &"file:///project/App.vue".parse().unwrap(),
+            None,
         );
         assert!(
             result.is_none(),

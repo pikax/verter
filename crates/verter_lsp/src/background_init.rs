@@ -127,10 +127,10 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // Log discovered projects
     for project in registry.projects() {
         tracing::info!(
-            "project config: root={}, tsconfig={:?}, aliases={}, lint_explicit={}",
+            "project config: root={}, tsconfig={:?}, workspace_aliases={}, lint_explicit={}",
             project.root,
             project.tsconfig_path,
-            !project.path_resolver.is_empty(),
+            project.workspace_aliases.len(),
             project.lint_explicitly_configured,
         );
     }
@@ -153,9 +153,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 continue;
             };
             let tsconfig_path = std::path::PathBuf::from(tsconfig_path);
-            if let Some((base_url, paths)) =
-                crate::config::TsConfigPathResolver::raw_paths_json(&tsconfig_path)
-            {
+            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&tsconfig_path) {
                 tracing::info!(
                     "configuring tsserver paths for {} via {} (baseUrl: {})",
                     project.root,
@@ -203,10 +201,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         resolver,
     });
 
-    // Push project configs into the host so its internal resolver can
-    // handle aliased imports (e.g., @/components/Foo.vue, #imports)
-    // without relying on external caller-provided dependency resolutions.
-    host.configure_projects(
+    // Set the host's internal resolver for compilation without syncing to
+    // the workspace — the workspace resolver comes from set_project_graph().
+    host.set_internal_resolver(
         registry
             .projects()
             .iter()
@@ -214,9 +211,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             .collect(),
     );
 
-    // Build VFS filesystem workspace with the same project configuration.
-    // The workspace provides disk-backed file reads, project ownership, and
-    // import resolution through the WorkspaceAccess trait.
+    // Update the existing VFS workspace's project graph. The workspace was
+    // created in initialize() with an empty graph; now populate it with the
+    // discovered tsconfig/vite configuration so alias resolution works.
     {
         let vfs_vite_opts = verter_vfs::ViteConfigOptions {
             enabled: vite_opts.enabled,
@@ -224,22 +221,12 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             node_path: vite_opts.node_path.clone(),
         };
         let vfs_build = verter_vfs::ProjectGraph::from_workspace_roots(&roots, &vfs_vite_opts);
-        let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-            verter_vfs::FilesystemOptions {
-                roots: roots.clone(),
-                eager_preload: false,
-            },
-        ));
-        workspace.set_project_graph(vfs_build.graph);
-        // Wire the workspace into the host so resolution, edge recording, and
-        // reverse-dep queries use the VFS as the authoritative source.
-        let workspace_arc: Arc<dyn verter_vfs::WorkspaceAccess> = workspace.clone();
-        host.set_workspace(workspace_arc);
-        *vfs_workspace.write() = Some(workspace);
-        tracing::info!(
-            "VFS filesystem workspace initialized with {} roots",
-            roots.len()
-        );
+        let ws = vfs_workspace
+            .read()
+            .clone()
+            .expect("workspace created in initialize()");
+        ws.set_project_graph(vfs_build.graph);
+        tracing::info!("VFS project graph updated with {} roots", roots.len());
     }
 
     *project_registry.write() = Some(registry);
@@ -261,7 +248,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // re-run the import collection pipeline and sync any missing .vue.ts files.
     let aliased_imports_synced = resync_aliased_imports_for_open_files(
         &documents,
-        &project_registry,
         project_sync.as_ref(),
         &resolver_snapshot,
         &provider_sync_states,
@@ -605,7 +591,6 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
 /// `.vue.ts` files before the E2E diagnostic check.
 pub(super) async fn resync_aliased_imports_for_open_files(
     documents: &DocumentRegistry,
-    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
     project_sync: Option<&ProjectSync>,
     resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
@@ -642,9 +627,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         let ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
             &analysis.imports,
             Some(&canonical_id),
-            |parent, specifier| {
-                resolve_import_specifier_standalone(host, project_registry, parent, specifier)
-            },
+            |parent, specifier| resolve_import_specifier_standalone(host, parent, specifier),
         );
 
         // Dynamic imports via module_references
@@ -795,12 +778,9 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 let Some(import_source) = component.import_source.as_deref() else {
                     continue;
                 };
-                let Some(resolved) = resolve_import_specifier_standalone(
-                    host,
-                    project_registry,
-                    &canonical_id,
-                    import_source,
-                ) else {
+                let Some(resolved) =
+                    resolve_import_specifier_standalone(host, &canonical_id, import_source)
+                else {
                     continue;
                 };
                 if resolved.ends_with(".vue") {
@@ -819,12 +799,9 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                     for module_ref in barrel_analysis.module_references.iter() {
                         if let Some(specifier) = &module_ref.literal_specifier {
                             if specifier.ends_with(".vue") {
-                                if let Some(vue_id) = resolve_import_specifier_standalone(
-                                    host,
-                                    project_registry,
-                                    &resolved,
-                                    specifier,
-                                ) {
+                                if let Some(vue_id) =
+                                    resolve_import_specifier_standalone(host, &resolved, specifier)
+                                {
                                     if vue_id.ends_with(".vue")
                                         && seen_barrel_vue.insert(vue_id.clone())
                                     {
@@ -950,7 +927,7 @@ pub(super) fn owner_path_config_for_source(
 ) -> Option<(String, serde_json::Value)> {
     let owner = snapshot.resolver.owner_for_file(canonical_id)?;
     let tsconfig_path = owner.tsconfig_path.as_deref()?;
-    crate::config::TsConfigPathResolver::raw_paths_json(std::path::Path::new(tsconfig_path))
+    verter_vfs::config::raw_paths_json(std::path::Path::new(tsconfig_path))
 }
 
 pub(crate) async fn configure_provider_paths_for_source(
@@ -1321,9 +1298,9 @@ pub(super) fn collect_tsconfig_patterns(roots: &[String]) -> Vec<String> {
     for root_uri in roots {
         let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
         let root_path = std::path::PathBuf::from(&canonical);
-        let mut ts_discovery = crate::config::TsConfigDiscovery::new();
-        ts_discovery.discover(&root_path);
-        patterns.extend(ts_discovery.configs().iter().map(|e| e.pattern.clone()));
+        for entry in verter_vfs::config::discover_tsconfigs(&root_path) {
+            patterns.push(format!("{}/**", entry.root));
+        }
     }
     patterns
 }

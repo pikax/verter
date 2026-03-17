@@ -219,20 +219,50 @@ impl ProjectResolver {
     /// Tries workspace aliases, tsconfig paths, baseUrl, project references,
     /// `package.json` `#imports`, and `node_modules` in order. Returns both
     /// the source path and the provider-graph path for the type provider.
+    ///
+    /// When the importer has no owning project, owner-independent branches
+    /// (relative/absolute, `#imports`, `node_modules`) are still attempted.
+    /// Only alias-based resolution (workspace aliases, tsconfig paths, baseUrl,
+    /// project references) requires an owning project.
     pub fn resolve_with_reader(
         &self,
         reader: &dyn ProjectResolverReader,
         request: &ResolveRequest,
     ) -> Option<ResolveResult> {
-        let importer_owner = self.owner_for_file(&request.importer_id)?;
-        let (source_id, resolution_kind) = self.resolve_source_id(
-            reader,
-            importer_owner,
-            &request.importer_id,
-            &request.specifier,
-            request.kind,
-        )?;
+        let importer_owner = self.owner_for_file(&request.importer_id);
 
+        let (source_id, resolution_kind) = match importer_owner {
+            Some(owner) => self.resolve_source_id(
+                reader,
+                owner,
+                &request.importer_id,
+                &request.specifier,
+                request.kind,
+            )?,
+            None => {
+                // No owning project — try owner-independent branches only
+                self.resolve_source_id_unowned(
+                    reader,
+                    &request.importer_id,
+                    &request.specifier,
+                    request.kind,
+                )?
+            }
+        };
+
+        Some(self.build_resolve_result(request, source_id, resolution_kind))
+    }
+
+    /// Build a [`ResolveResult`] from a resolved source path.
+    ///
+    /// Looks up `owner_for_file()` on the **target** (not importer) for correct
+    /// `provider_id`/`provider_specifier`/`provider_target`/`owner_tsconfig_path`.
+    fn build_resolve_result(
+        &self,
+        request: &ResolveRequest,
+        source_id: String,
+        resolution_kind: ResolutionKind,
+    ) -> ResolveResult {
         let target_owner = self.owner_for_file(&source_id);
         let provider_id = target_owner
             .and_then(|_| self.provider_id_for_source(&source_id))
@@ -265,14 +295,56 @@ impl ProjectResolver {
             request.specifier.clone()
         };
 
-        Some(ResolveResult {
+        ResolveResult {
             owner_tsconfig_path: target_owner.and_then(|project| project.tsconfig_path.clone()),
             source_id,
             provider_id,
             provider_specifier,
             provider_target,
             resolution_kind,
-        })
+        }
+    }
+
+    /// Resolve owner-independent branches only (no tsconfig paths, aliases, etc.).
+    ///
+    /// Used when the importer has no owning project. Only attempts:
+    /// - Relative/absolute path resolution
+    /// - `#imports` (package.json imports field)
+    /// - `node_modules` resolution
+    fn resolve_source_id_unowned(
+        &self,
+        reader: &dyn ProjectResolverReader,
+        importer_id: &str,
+        specifier: &str,
+        kind: ResolveRequestKind,
+    ) -> Option<(String, ResolutionKind)> {
+        // Relative / absolute
+        if is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
+            let importer_dir = parent_dir(importer_id);
+            let base = if is_absolute_specifier(specifier) {
+                normalize_canonical_id(specifier)
+            } else {
+                join_paths(&importer_dir, specifier)
+            };
+            return probe_path(reader, &base).map(|resolved| (resolved, ResolutionKind::Relative));
+        }
+
+        // #imports
+        if specifier.starts_with('#') {
+            if let Some(resolved) = resolve_package_imports(reader, importer_id, specifier, kind) {
+                return Some((resolved, ResolutionKind::PackageImports));
+            }
+            return None;
+        }
+
+        // node_modules
+        if let Some((resolved, resolution_kind)) =
+            resolve_node_modules_package(reader, importer_id, specifier, kind)
+        {
+            return Some((resolved, resolution_kind));
+        }
+
+        None
     }
 
     fn resolve_source_id(
@@ -333,6 +405,77 @@ impl ProjectResolver {
         }
 
         None
+    }
+
+    /// Compute the preferred import specifier for a target file relative to an importer.
+    ///
+    /// Returns the shortest alias-based specifier (tsconfig paths or workspace aliases)
+    /// that round-trips back to the original target via `resolve_with_reader()`.
+    /// Returns `None` if no alias matches or the importer has no owning project.
+    pub fn preferred_specifier(
+        &self,
+        reader: &dyn ProjectResolverReader,
+        importer_id: &str,
+        target_id: &str,
+    ) -> Option<String> {
+        let owner = self.owner_for_file(importer_id)?;
+        let normalized_target = normalize_canonical_id(target_id);
+        let mut candidates: Vec<String> = Vec::new();
+
+        // 1. Collect candidates from tsconfig paths
+        let base_url = owner
+            .compiler_options
+            .base_url
+            .as_deref()
+            .unwrap_or(owner.root.as_str());
+
+        for (pattern, targets) in &owner.compiler_options.paths {
+            for target_template in targets {
+                if let Some(specifier) =
+                    reverse_tsconfig_path(base_url, pattern, target_template, &normalized_target)
+                {
+                    candidates.push(specifier);
+                }
+            }
+        }
+
+        // 2. Collect candidates from workspace aliases
+        for alias in &owner.workspace_aliases {
+            let mut replacement = normalize_canonical_id(&alias.replacement);
+            // Ensure replacement ends with '/' for consistent prefix matching.
+            // Vite normalization stores replacement without trailing slash but
+            // find with trailing slash (e.g., find="@/", replacement="/workspace/src").
+            if !replacement.ends_with('/') {
+                replacement.push('/');
+            }
+            if let Some(remainder) = normalized_target.strip_prefix(replacement.as_str()) {
+                // find already has trailing slash from Vite normalization —
+                // remainder has no leading slash, so concatenation is clean.
+                let specifier = format!("{}{}", alias.find, remainder);
+                candidates.push(specifier);
+            }
+        }
+
+        // 3. Round-trip verify and pick shortest
+        let mut best: Option<String> = None;
+        for candidate in candidates {
+            let request = crate::types::ResolveRequest {
+                importer_id: importer_id.to_string(),
+                specifier: candidate.clone(),
+                kind: crate::types::ResolveRequestKind::EsmImport,
+                phase: crate::types::ResolvePhase::CodegenBlocker,
+            };
+            if let Some(result) = self.resolve_with_reader(reader, &request) {
+                if normalize_canonical_id(&result.source_id) == normalized_target {
+                    match &best {
+                        Some(current) if current.len() <= candidate.len() => {}
+                        _ => best = Some(candidate),
+                    }
+                }
+            }
+        }
+
+        best
     }
 
     fn resolve_project_references(
@@ -456,6 +599,68 @@ fn apply_tsconfig_target(base_url: &str, target: &str, captured: &str) -> String
         normalize_canonical_id(&replaced)
     } else {
         join_paths(base_url, &replaced)
+    }
+}
+
+/// Reverse a tsconfig path mapping: given a target file path, reconstruct the
+/// import specifier that would match the given pattern → target template.
+fn reverse_tsconfig_path(
+    base_url: &str,
+    pattern: &str,
+    target_template: &str,
+    target_id: &str,
+) -> Option<String> {
+    // Compute the absolute target prefix and suffix from the template
+    let (target_prefix, target_suffix) = if let Some(star) = target_template.find('*') {
+        let prefix_part = &target_template[..star];
+        let suffix_part = &target_template[star + 1..];
+        (
+            if is_absolute_specifier(prefix_part) {
+                normalize_canonical_id(prefix_part)
+            } else {
+                join_paths(base_url, prefix_part)
+            },
+            suffix_part.to_string(),
+        )
+    } else {
+        // No wildcard — exact match only
+        let abs = if is_absolute_specifier(target_template) {
+            normalize_canonical_id(target_template)
+        } else {
+            join_paths(base_url, target_template)
+        };
+        return if normalize_canonical_id(target_id) == abs {
+            // Pattern without wildcard: return the pattern itself
+            Some(pattern.to_string())
+        } else {
+            None
+        };
+    };
+
+    // Check if target_id matches the prefix + ... + suffix shape
+    let normalized_target = normalize_canonical_id(target_id);
+    if !normalized_target.starts_with(&target_prefix) {
+        return None;
+    }
+    if !target_suffix.is_empty() && !normalized_target.ends_with(&target_suffix) {
+        return None;
+    }
+    let captured_end = normalized_target.len().saturating_sub(target_suffix.len());
+    if target_prefix.len() > captured_end {
+        return None;
+    }
+    let captured = &normalized_target[target_prefix.len()..captured_end];
+
+    // Reconstruct specifier from pattern
+    if let Some(star) = pattern.find('*') {
+        Some(format!(
+            "{}{}{}",
+            &pattern[..star],
+            captured,
+            &pattern[star + 1..]
+        ))
+    } else {
+        Some(pattern.to_string())
     }
 }
 

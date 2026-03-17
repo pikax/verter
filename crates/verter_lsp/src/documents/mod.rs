@@ -209,6 +209,12 @@ impl DocumentRegistry {
             std::thread::current().id()
         );
 
+        // Update VFS overlay with latest buffer content.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.host
+            .workspace()
+            .notify_upsert(&canonical_id, source.clone());
+
         // Trigger re-compilation for Vue SFCs
         if file_kind == FileKind::VueSfc {
             let compile_start = std::time::Instant::now();
@@ -310,6 +316,10 @@ impl DocumentRegistry {
 
     /// Handle a document being closed.
     pub fn did_close(&self, uri: &Uri) {
+        // Clear the VFS overlay so resolution falls back to snapshot/disk.
+        let canonical_id = uri_to_canonical_id(uri);
+        self.host.workspace().notify_close(&canonical_id);
+
         self.documents.remove(uri.as_str());
     }
 

@@ -216,3 +216,86 @@ fn set_exact_resolutions() {
     assert!(resolve.is_some());
     assert_eq!(resolve.unwrap().source_id, "d:/project/src/utils.ts");
 }
+
+// ── notify_upsert / notify_close lifecycle ──
+
+/// After notify_close, the VFS must NOT serve stale snapshot content
+/// from a prior upsert. It should fall back to disk.
+#[test]
+fn notify_close_invalidates_snapshot_falls_back_to_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("Comp.vue");
+    std::fs::write(&file_path, "<template>disk v1</template>").unwrap();
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    // 1. Read from disk — populates snapshot cache
+    let content = ws.read_file(&canonical);
+    assert_eq!(content.as_deref(), Some("<template>disk v1</template>"));
+
+    // 2. Simulate editor open with edited content
+    ws.notify_upsert(
+        &canonical,
+        std::sync::Arc::from("<template>edited</template>"),
+    );
+    let content = ws.read_file(&canonical);
+    assert_eq!(
+        content.as_deref(),
+        Some("<template>edited</template>"),
+        "overlay should take priority"
+    );
+
+    // 3. Update disk content (simulates save)
+    std::fs::write(&file_path, "<template>disk v2</template>").unwrap();
+
+    // 4. Close editor buffer — must clear overlay AND invalidate snapshot
+    ws.notify_close(&canonical);
+
+    // 5. Next read must see disk v2, NOT stale snapshot "disk v1"
+    let content = ws.read_file(&canonical);
+    assert_eq!(
+        content.as_deref(),
+        Some("<template>disk v2</template>"),
+        "after close, must read from disk (not stale snapshot)"
+    );
+    assert_ne!(
+        content.as_deref(),
+        Some("<template>disk v1</template>"),
+        "stale snapshot must not be served after close"
+    );
+}
+
+/// After host.remove() → notify_delete(), the file must not be resolvable.
+#[test]
+fn notify_delete_removes_snapshot_and_edges() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("Gone.vue");
+    std::fs::write(&file_path, "<template>exists</template>").unwrap();
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    // 1. Load file (populates snapshot)
+    ws.notify_upsert(
+        &canonical,
+        std::sync::Arc::from("<template>exists</template>"),
+    );
+    assert!(ws.file_exists(&canonical), "file should exist via overlay");
+
+    // 2. Delete from disk
+    std::fs::remove_file(&file_path).unwrap();
+
+    // 3. Notify deletion
+    ws.notify_delete(&canonical);
+
+    // 4. File must no longer exist
+    assert!(
+        !ws.file_exists(&canonical),
+        "deleted file must not exist via stale snapshot"
+    );
+    assert!(
+        ws.read_file(&canonical).is_none(),
+        "deleted file must not be readable"
+    );
+}

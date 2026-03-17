@@ -159,6 +159,11 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.owner_for_file(canonical_id)
     }
 
+    fn preferred_specifier(&self, importer_id: &str, target_id: &str) -> Option<String> {
+        self.engine
+            .preferred_specifier(self, importer_id, target_id)
+    }
+
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
         self.engine.record_parsed_edges(self, canonical_id, edges);
     }
@@ -177,6 +182,26 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         resolutions: Vec<crate::types::ExactResolution>,
     ) -> crate::types::ExactResolutionResult {
         self.engine.set_exact_resolutions(canonical_id, resolutions)
+    }
+
+    fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
+        self.engine
+            .overlay
+            .write()
+            .set(canonical_id.to_string(), source);
+    }
+
+    fn notify_close(&self, canonical_id: &str) {
+        self.engine.overlay.write().clear(canonical_id);
+        // Invalidate snapshot so next read falls through to disk,
+        // picking up any saves made while the overlay was active.
+        self.engine.snapshot.write().remove(canonical_id);
+    }
+
+    fn notify_delete(&self, canonical_id: &str) {
+        self.engine.overlay.write().clear(canonical_id);
+        self.engine.snapshot.write().remove(canonical_id);
+        self.engine.edges.write().remove_file(canonical_id);
     }
 
     fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {

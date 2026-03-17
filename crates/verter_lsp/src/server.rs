@@ -1480,49 +1480,9 @@ impl VerterLanguageServer {
         parent_canonical_id: &str,
         specifier: &str,
     ) -> Option<String> {
-        if let Some(resolved) = self
-            .documents
+        self.documents
             .host()
-            .resolve_import(parent_canonical_id, specifier)
-        {
-            return Some(resolved);
-        }
-
-        {
-            let registry_guard = self.project_registry.read();
-            if let Some(registry) = registry_guard.as_ref() {
-                if let Some(resolved) = registry.resolve_alias(parent_canonical_id, specifier) {
-                    return Some(resolved);
-                }
-            }
-        }
-
-        if specifier.starts_with('.') {
-            let resolved = verter_host::resolve_external(parent_canonical_id, specifier);
-            let candidates = if std::path::Path::new(&resolved).extension().is_some() {
-                vec![resolved.clone()]
-            } else {
-                vec![
-                    format!("{resolved}.ts"),
-                    format!("{resolved}.tsx"),
-                    format!("{resolved}.js"),
-                    format!("{resolved}.vue"),
-                    format!("{resolved}/index.ts"),
-                    format!("{resolved}/index.js"),
-                    format!("{resolved}/index.vue"),
-                ]
-            };
-            for candidate in candidates {
-                if std::path::Path::new(&candidate).exists() {
-                    return Some(candidate);
-                }
-            }
-            if resolved.ends_with(".vue") {
-                return Some(resolved);
-            }
-        }
-
-        None
+            .resolve_import_via_workspace(parent_canonical_id, specifier)
     }
 
     fn component_import_binding_name(
@@ -1745,38 +1705,7 @@ impl VerterLanguageServer {
     }
 
     fn resolve_definition_path(&self, canonical_id: &str, specifier: &str) -> Option<String> {
-        if let Some(registry) = self.project_registry.read().as_ref() {
-            if let Some(resolved) = registry.resolve_alias(canonical_id, specifier) {
-                return Some(resolved);
-            }
-        }
-
-        if specifier.starts_with('.') {
-            let resolved = verter_host::resolve_external(canonical_id, specifier);
-            let candidates = if std::path::Path::new(&resolved).extension().is_some() {
-                vec![resolved.clone()]
-            } else {
-                vec![
-                    format!("{resolved}.ts"),
-                    format!("{resolved}.tsx"),
-                    format!("{resolved}.js"),
-                    format!("{resolved}.vue"),
-                    format!("{resolved}/index.ts"),
-                    format!("{resolved}/index.js"),
-                    format!("{resolved}/index.vue"),
-                ]
-            };
-            for candidate in candidates {
-                if std::path::Path::new(&candidate).exists() {
-                    return Some(candidate);
-                }
-            }
-            if resolved.ends_with(".vue") {
-                return Some(resolved);
-            }
-        }
-
-        None
+        self.resolve_import_specifier(canonical_id, specifier)
     }
 
     fn resolve_precise_export_location(
@@ -2565,12 +2494,7 @@ impl VerterLanguageServer {
         import_source: &str,
     ) -> Option<verter_host::FileAnalysisSnapshot> {
         let canonical_id = uri_to_canonical_id(parent_uri);
-        resolve_component_for(
-            self.documents.host(),
-            &self.project_registry,
-            &canonical_id,
-            import_source,
-        )
+        resolve_component_for(self.documents.host(), &canonical_id, import_source)
     }
 
     /// Resolve a child component with full context for cross-file editing.
@@ -2595,14 +2519,7 @@ impl VerterLanguageServer {
                     let dir = parts[..parts.len().saturating_sub(1)].join("/");
                     resolve_import_path(&dir, import_source)
                 } else {
-                    let registry_guard = self.project_registry.read();
-                    if let Some(ref registry) = *registry_guard {
-                        registry
-                            .resolve_alias(&canonical_id, import_source)
-                            .unwrap_or_else(|| import_source.to_string())
-                    } else {
-                        import_source.to_string()
-                    }
+                    import_source.to_string()
                 }
             });
 
@@ -3264,6 +3181,14 @@ impl VerterLanguageServer {
         };
 
         let blocks = scan_sfc_blocks(&doc.source);
+        // Compute preferred import path (alias-based if available)
+        let canonical_target = crate::documents::uri_to_canonical_id(uri);
+        let canonical_dropped = crate::documents::uri_to_canonical_id_from_str(&params.dropped_uri);
+        let preferred_import_path = self
+            .documents
+            .host()
+            .preferred_specifier(&canonical_target, &canonical_dropped);
+
         let edit = crate::features::document_drop_edit::document_drop_edit(
             &params.dropped_uri,
             &params.position,
@@ -3271,6 +3196,7 @@ impl VerterLanguageServer {
             &blocks,
             &doc.line_index,
             uri,
+            preferred_import_path.as_deref(),
         );
 
         Ok(edit)
@@ -3669,34 +3595,29 @@ impl VerterLanguageServer {
                 if let Some(template) = &analysis.template {
                     for comp in &template.components {
                         if let Some(src) = &comp.import_source {
-                            // Resolve the import source to an absolute path
-                            let resolved = if !src.starts_with('.') {
-                                // Non-relative: use per-project path alias resolution
-                                let registry_guard = self.project_registry.read();
-                                let r = registry_guard
-                                    .as_ref()
-                                    .and_then(|reg| reg.resolve_alias(&normalized_id, src));
-                                tracing::info!(
-                                    "  [{}] component '{}' import='{}' (non-relative) → resolved={:?}",
-                                    normalized_id.rsplit('/').next().unwrap_or("?"), comp.name, src, r
-                                );
-                                r.unwrap_or_else(|| src.to_string())
-                            } else {
-                                // Relative: resolve against importer directory
-                                let importer_dir = normalized_id
-                                    .rfind('/')
-                                    .map(|i| &normalized_id[..i])
-                                    .unwrap_or("");
-                                let r = resolve_import_path(importer_dir, src);
-                                tracing::info!(
-                                    "  [{}] component '{}' import='{}' (relative) → resolved='{}'",
-                                    normalized_id.rsplit('/').next().unwrap_or("?"),
-                                    comp.name,
-                                    src,
-                                    r
-                                );
-                                r
-                            };
+                            // Resolve the import source to an absolute path via VFS
+                            let resolved = self
+                                .documents
+                                .host()
+                                .resolve_import_via_workspace(&normalized_id, src)
+                                .unwrap_or_else(|| {
+                                    if src.starts_with('.') {
+                                        let importer_dir = normalized_id
+                                            .rfind('/')
+                                            .map(|i| &normalized_id[..i])
+                                            .unwrap_or("");
+                                        resolve_import_path(importer_dir, src)
+                                    } else {
+                                        src.to_string()
+                                    }
+                                });
+                            tracing::info!(
+                                "  [{}] component '{}' import='{}' → resolved='{}'",
+                                normalized_id.rsplit('/').next().unwrap_or("?"),
+                                comp.name,
+                                src,
+                                resolved
+                            );
                             let resolved_normalized = resolved.replace('\\', "/");
                             let matches = import_resolved_matches_target(
                                 &resolved_normalized,
@@ -3811,7 +3732,31 @@ impl LanguageServer for VerterLanguageServer {
                 tracing::info!("workspace folder: {}", folder.uri.as_str());
                 roots.push(folder.uri.as_str().to_string());
             }
-            *self.workspace_roots.lock().await = roots;
+            *self.workspace_roots.lock().await = roots.clone();
+
+            // Create VFS workspace early so relative imports resolve before
+            // background_init completes. The project graph starts empty —
+            // Step 1's ownership fix makes relative/node_modules/hash imports
+            // work without project ownership. background_init later calls
+            // set_project_graph() to populate alias resolution.
+            let canonical_roots: Vec<String> = roots
+                .iter()
+                .map(|r| crate::documents::uri_to_canonical_id_from_str(r))
+                .collect();
+            let ws = std::sync::Arc::new(verter_vfs::FilesystemWorkspace::new(
+                verter_vfs::FilesystemOptions {
+                    roots: canonical_roots,
+                    eager_preload: false,
+                },
+            ));
+            ws.set_project_graph(verter_vfs::ProjectGraph::new());
+            let ws_dyn: std::sync::Arc<dyn verter_vfs::WorkspaceAccess> = ws.clone();
+            self.documents.host().set_workspace(ws_dyn);
+            *self.vfs_workspace.write() = Some(ws);
+            tracing::info!(
+                "VFS workspace created early in initialize() with {} roots",
+                roots.len()
+            );
         }
 
         // Parse initialization options (statistics config, lint config, etc.)
@@ -5001,17 +4946,12 @@ impl LanguageServer for VerterLanguageServer {
                     }
                 }
 
-                // Try 3: Path alias resolution (per-project)
+                // Try 3: VFS resolution (path aliases, tsconfig paths, disk probing)
+                if let Some(resolved_path) =
+                    self.resolve_import_specifier(&canonical_id, import_source)
                 {
-                    let registry_guard = self.project_registry.read();
-                    if let Some(ref registry) = *registry_guard {
-                        if let Some(resolved_path) =
-                            registry.resolve_alias(&canonical_id, import_source)
-                        {
-                            if let Some(a) = try_follow_reexport(&resolved_path, component_name) {
-                                return Some(a);
-                            }
-                        }
+                    if let Some(a) = try_follow_reexport(&resolved_path, component_name) {
+                        return Some(a);
                     }
                 }
 
@@ -5429,46 +5369,11 @@ impl LanguageServer for VerterLanguageServer {
             let analysis = self.documents.get_analysis(uri);
             let blocks = scan_sfc_blocks(&doc.source);
             let canonical_id = uri_to_canonical_id(uri);
-            let registry_guard = self.project_registry.read();
             let resolve_path = {
                 let canonical_id = canonical_id.clone();
-                let registry = registry_guard.as_ref();
+                let host = &self.documents.host;
                 move |specifier: &str| -> Option<String> {
-                    // First try tsconfig/vite path aliases
-                    if let Some(reg) = registry {
-                        if let Some(resolved) = reg.resolve_alias(&canonical_id, specifier) {
-                            return Some(resolved);
-                        }
-                    }
-                    // Then try relative import resolution
-                    if specifier.starts_with('.') {
-                        let resolved = verter_host::resolve_external(&canonical_id, specifier);
-                        // Try the resolved path as-is, then with common extensions
-                        let candidates = if std::path::Path::new(&resolved).extension().is_some() {
-                            vec![resolved.clone()]
-                        } else {
-                            vec![
-                                format!("{resolved}.ts"),
-                                format!("{resolved}.tsx"),
-                                format!("{resolved}.js"),
-                                format!("{resolved}.vue"),
-                                format!("{resolved}/index.ts"),
-                                format!("{resolved}/index.js"),
-                                format!("{resolved}/index.vue"),
-                            ]
-                        };
-                        for candidate in candidates {
-                            if std::path::Path::new(&candidate).exists() {
-                                return Some(candidate);
-                            }
-                        }
-                        // For .vue imports with extension, return even if file doesn't
-                        // exist (the host may have it compiled)
-                        if resolved.ends_with(".vue") {
-                            return Some(resolved);
-                        }
-                    }
-                    None
+                    host.resolve_import_via_workspace(&canonical_id, specifier)
                 }
             };
             #[allow(clippy::type_complexity)]

@@ -852,8 +852,7 @@ fn resolve_import_path_relative() {
 
 #[test]
 fn resolve_import_path_alias_returns_raw() {
-    // Non-relative imports (aliases) are returned as-is — they can't be resolved
-    // without a TsConfigPathResolver
+    // Non-relative imports (aliases) are returned as-is — they need VFS resolution
     let result = resolve_import_path("C:/project/src/views", "@/components/Foo.vue");
     assert_eq!(
         result, "@/components/Foo.vue",
@@ -998,7 +997,10 @@ async fn make_definition_test_server(
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
+        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     let (service, socket) = tower_lsp_server::LspService::new(move |client| {
@@ -1022,16 +1024,17 @@ async fn make_definition_test_server(
 
     let workspace_id = workspace.to_string_lossy().replace('\\', "/");
     let server = service.inner();
+    let ide_project = crate::project_resolver::IdeProjectConfig::new(
+        workspace_id.clone(),
+        workspace_id.clone(),
+        Some(format!("{workspace_id}/tsconfig.json")),
+    );
     *server.resolver_snapshot.write() = Some(ResolverSnapshot {
         generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                workspace_id.clone(),
-                workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.json")),
-            ),
-        ]),
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![ide_project.clone()]),
     });
+    // Sync resolver to host's VFS so resolve_import_via_workspace works
+    host.configure_projects(vec![ide_project]);
 
     for (relative_path, language_id, source) in files {
         let canonical_id = format!("{workspace_id}/{relative_path}");
@@ -5735,12 +5738,7 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
         &fallback_linter,
     );
     let fragment_path = format!("{workspace_id}/src/FragmentComp.vue");
-    let fragment_analysis = resolve_component_for(
-        host.as_ref(),
-        project_registry.as_ref(),
-        &app_path,
-        "./FragmentComp.vue",
-    );
+    let fragment_analysis = resolve_component_for(host.as_ref(), &app_path, "./FragmentComp.vue");
 
     assert!(
             diags.iter().any(|diag| {
@@ -6775,7 +6773,7 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
 async fn resync_aliased_imports_resolves_and_syncs_after_registry_built() {
     // Setup: temp dir with workspace/src/App.vue importing @/components/Child.vue
     // Use a non-dot-prefixed directory so tsconfig discovery doesn't skip it
-    // (TsConfigDiscovery skips dot-directories).
+    // (tsconfig discovery skips dot-directories).
     let temp_base = std::env::temp_dir().join("verter_test_resync_aliased");
     let _ = std::fs::remove_dir_all(&temp_base);
     let workspace = temp_base.join("workspace");
@@ -6824,7 +6822,10 @@ import Child from '@/components/Child.vue'
 <template><Child msg="hello" /></template>"#
     );
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
+        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
     let _ = documents.did_open(&TextDocumentItem {
@@ -6840,9 +6841,7 @@ import Child from '@/components/Child.vue'
     let ids_before = collect_imported_vue_priority_ids_from_imports_with_fallback(
         &analysis.imports,
         Some(&app_id),
-        |parent, specifier| {
-            resolve_import_specifier_standalone(&host, &project_registry, parent, specifier)
-        },
+        |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
     );
     assert!(
         ids_before.is_empty(),
@@ -6874,9 +6873,7 @@ import Child from '@/components/Child.vue'
     let ids_after = collect_imported_vue_priority_ids_from_imports_with_fallback(
         &analysis.imports,
         Some(&app_id),
-        |parent, specifier| {
-            resolve_import_specifier_standalone(&host, &project_registry, parent, specifier)
-        },
+        |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
     );
     assert!(
         !ids_after.is_empty(),
@@ -6894,7 +6891,6 @@ import Child from '@/components/Child.vue'
 
     resync_aliased_imports_for_open_files(
         &documents,
-        &project_registry,
         Some(&sync),
         &resolver_snapshot,
         &provider_sync_states,
@@ -7013,7 +7009,6 @@ import Child from '@/components/Child.vue'
 
     resync_aliased_imports_for_open_files(
         &documents,
-        &project_registry,
         Some(&sync),
         &resolver_snapshot,
         &provider_sync_states,
@@ -7083,7 +7078,10 @@ defineProps<{ show: boolean }>()
         .to_string();
     let app_id = format!("{workspace_id}/src/App.vue");
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
+        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
     let _ = documents.did_open(&TextDocumentItem {
@@ -7123,7 +7121,6 @@ import { Overlay } from './components'
 
     resync_aliased_imports_for_open_files(
         &documents,
-        &project_registry,
         Some(&sync),
         &resolver_snapshot,
         &provider_sync_states,
