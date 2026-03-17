@@ -48,7 +48,47 @@ Key constraints at the FFI boundary:
 
 ## API
 
-All exported functions are annotated with `#[napi]` and available as synchronous calls from Node.js.
+### Workspace (async filesystem access)
+
+The `Workspace` class provides async filesystem access through the Rust VFS. All file I/O methods return Promises (run on the libuv thread pool).
+
+```javascript
+const { Workspace, VerterHost } = require("@verter/native");
+
+// Create workspace rooted at project directory
+const ws = new Workspace(["/path/to/project"]);
+
+// Async file access
+const content = await ws.readFile("/path/to/file.vue");
+const exists = await ws.fileExists("/path/to/file.ts");
+const isDirectory = await ws.isDir("/path/to/dir");
+const entries = await ws.readDir("/path/to/dir"); // [{path, isDir}]
+const files = await ws.walk("/path", ["node_modules"], [".vue", ".ts"]);
+
+// Async file writes
+await ws.writeFile("/path/to/file.ts", "export const x = 1;");
+await ws.createDirAll("/path/to/new/dir");
+await ws.deleteFile("/path/to/file.ts");
+await ws.copyFile("/src/a.ts", "/dst/a.ts");
+
+// Context-aware import resolution
+const resolved = await ws.resolveImport("/src/App.vue", "./Child.vue");
+const types = await ws.resolveImport("/src/App.vue", "pkg", "provider", "type");
+
+// Project configuration (replaces auto-discovered graph)
+ws.configureProjects([{
+  root: "/project",
+  workspaceRoot: "/project",
+  compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+}]);
+
+// Create host backed by workspace
+const host = VerterHost.withWorkspace({}, ws);
+```
+
+### Host (synchronous compilation)
+
+All VerterHost methods are synchronous.
 
 ### `compile(input, options?) -> CodegenResult`
 

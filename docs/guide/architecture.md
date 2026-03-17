@@ -17,6 +17,7 @@ graph TB
         LSP["verter-lsp<br/>(Rust LSP binary, stdio)"]
         Native["@verter/native<br/>(NAPI-RS Bindings)"]
         WASM["@verter/wasm<br/>(WASM Bindings)"]
+        VFS["verter_vfs<br/>(Virtual Filesystem)"]
         RustCore["verter_core<br/>(Rust Template Compiler)"]
     end
     subgraph "Language Services"
@@ -42,6 +43,7 @@ graph TB
     LSP --> Shared
     TSPlugin --> Core
     Core --> Types
+    Native --> VFS
     Native --> RustCore
     WASM --> RustCore
     Unplugin --> Native
@@ -75,6 +77,7 @@ Both pipelines share the same Vue SFC input and produce consistent results -- th
 | Directory | Purpose |
 |-----------|---------|
 | `crates/verter_core/` | Rust template compiler |
+| `crates/verter_vfs/` | Virtual filesystem: sole authority for file access and import resolution |
 | `crates/verter_analysis/` | Static analysis: imports, exports, bindings, types |
 | `crates/verter_host/` | In-memory file host: caching, dependencies, multi-file compilation |
 | `crates/verter_diagnostics/` | Diagnostic engine: 22+ lint rules, visitor, DiagnosticSet |
@@ -160,6 +163,97 @@ In addition to the VDOM/Vapor render function backends, the Rust compiler has a 
 - `v-model` becomes the appropriate prop + event pair
 
 The LSP server uses this TSX output for type-checking via TSGO (TypeScript's Go-based type checker), enabling hover types, diagnostics, and completions that reflect the actual template structure.
+
+## Virtual Filesystem (VFS)
+
+All workspace file access and import resolution flows through `verter_vfs`. This crate is the **single authority** — no code outside `NativeFs` touches `std::fs`, and the host never does its own heuristic resolution.
+
+```mermaid
+graph TB
+    subgraph "Consumers"
+        Host["verter_host<br/>(Compilation Host)"]
+        LSP["verter_lsp<br/>(Language Server)"]
+        Unplugin["@verter/unplugin<br/>(Bundler Plugin)"]
+        Meta["@verter/component-meta<br/>(Metadata Extraction)"]
+    end
+
+    subgraph "verter_vfs"
+        WS["WorkspaceAccess Trait"]
+        Engine["Engine<br/>(overlay → snapshot → resolver)"]
+        Resolver["ProjectResolver<br/>(tsconfig, aliases, node_modules)"]
+        Edges["EdgeStore<br/>(forward/reverse deps)"]
+        NativeFs["NativeFs<br/>(sole std::fs boundary)"]
+    end
+
+    Host -->|"resolve_import(ctx)"| WS
+    LSP --> WS
+    Unplugin -->|"async readFile/fileExists/walk"| WS
+    Meta -->|"async readFile/readDir/walk"| WS
+    WS --> Engine
+    Engine --> Resolver
+    Engine --> Edges
+    Engine --> NativeFs
+```
+
+### Context-Aware Resolution
+
+Import resolution is context-sensitive. The same specifier can resolve to different files depending on the resolution context:
+
+| Context | Export Conditions | Legacy Fields |
+|---------|-----------------|---------------|
+| `(CodegenBlocker, EsmImport)` | `["import", "default"]` | `["module", "main"]` |
+| `(CodegenBlocker, TypeImport)` | `["types", "import", "default"]` | `["types", "typings", "main"]` |
+| `(ProviderGraph, *)` | `["types", "import", "default"]` | `["types", "typings", "main"]` |
+| `(*, RequireCall)` | `["require", "default"]` | `["main"]` |
+
+For example, `import { Foo } from 'pkg'` during codegen resolves to `pkg/index.js` (runtime entry), while `import type { Foo } from 'pkg'` resolves to `pkg/index.d.ts` (type entry).
+
+### Workspace API (Node.js)
+
+JS consumers access the filesystem exclusively through the `Workspace` class from `@verter/native`. All methods are **async** (Promise-based, runs on libuv thread pool):
+
+```ts
+import { Workspace, VerterHost } from '@verter/native'
+
+const ws = new Workspace(['/path/to/project'])
+
+// File access — all async
+const content = await ws.readFile('/path/to/file.vue')
+const exists = await ws.fileExists('/path/to/file.ts')
+const entries = await ws.readDir('/path/to/dir')
+const files = await ws.walk('/path', ['node_modules'], ['.vue', '.ts'])
+
+// Resolution
+const resolved = await ws.resolveImport('/src/App.vue', './Child.vue')
+
+// Project configuration
+ws.configureProjects([{
+  root: '/path/to/project',
+  workspaceRoot: '/path/to/project',
+  compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } },
+}])
+
+// Create host backed by workspace
+const host = VerterHost.withWorkspace({}, ws)
+```
+
+No `node:fs` imports are used in any JS package. The `Workspace` object is the sole filesystem authority from JavaScript.
+
+### File Read Priority
+
+```
+1. Overlay   (active editor buffer — set via notifyUpsert)
+2. Snapshot  (cached content — populated on first read)
+3. Disk      (NativeFs — FilesystemWorkspace only)
+```
+
+### Resolution Priority
+
+```
+1. Exact resolutions  (authoritative — injected by bundler/LSP via setImportDependencies)
+2. Project resolver   (tsconfig paths, workspace aliases, node_modules package.json)
+3. None               (no heuristic fallback, no extension guessing)
+```
 
 ## Next Steps
 

@@ -85,6 +85,51 @@ The correct platform-specific binary is pulled in automatically via optional dep
 
 ## API
 
+### `new Workspace(roots: string[])`
+
+Creates a filesystem-backed workspace rooted at the given directories. The workspace is the **sole authority** for file access — no `node:fs` calls are needed.
+
+All file I/O methods are **async** (Promises, runs on libuv thread pool to avoid blocking the event loop):
+
+```typescript
+import { Workspace, VerterHost } from "@verter/native";
+
+const ws = new Workspace(["/path/to/project"]);
+
+// File reads
+const content = await ws.readFile("/src/App.vue");     // string | null
+const exists  = await ws.fileExists("/src/App.vue");   // boolean
+const isDir   = await ws.isDir("/src");                 // boolean
+const real    = await ws.realpath("/src/link.vue");     // string | null
+
+// Directory listing
+const entries = await ws.readDir("/src");               // {path, isDir}[]
+const files   = await ws.walk("/src", ["node_modules", ".git"], [".vue", ".ts"]);
+
+// File writes
+await ws.writeFile("/src/new.ts", "export const x = 1;");
+await ws.createDirAll("/src/new/dir");
+await ws.deleteFile("/src/old.ts");
+await ws.deleteDirAll("/src/old");
+await ws.copyFile("/src/a.ts", "/dst/a.ts");
+
+// Context-aware import resolution
+const resolved = await ws.resolveImport("/src/App.vue", "./Child.vue");
+// phase: "codegen" (default) | "provider"
+// kind:  "esm" (default) | "type" | "require" | "src"
+const types = await ws.resolveImport("/src/App.vue", "pkg", "provider", "type");
+
+// Project configuration
+ws.configureProjects([{
+  root: "/project",
+  workspaceRoot: "/project",
+  compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+}]);
+
+// Create host backed by workspace
+const host = VerterHost.withWorkspace({ devMode: true }, ws);
+```
+
 ### `compile(input, options?): CodegenResult`
 
 Compiles a Vue SFC template to JavaScript. Accepts `string` or `Buffer` input. Despite the NAPI-RS async signature, compilation is CPU-bound and executes synchronously on the Rust side.

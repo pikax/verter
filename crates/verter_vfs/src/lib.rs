@@ -1,11 +1,42 @@
-//! Virtual filesystem layer for Verter.
+//! Virtual filesystem layer for Verter — sole authority for workspace access.
 //!
-//! `verter_vfs` provides a single file-access and resolution layer that
-//! centralizes file reading, import resolution, project ownership, and
-//! dependency tracking. Two workspace modes are supported:
+//! # Architecture
 //!
-//! - **Filesystem**: disk-backed with overlay and snapshot cache (LSP, MCP, bundler)
-//! - **Memory**: fully in-memory, no disk fallback (playground, WASM, tests)
+//! `verter_vfs` is the **single entry point** for all workspace filesystem
+//! access and import resolution. No code outside `NativeFs` touches `std::fs`.
+//! The host, LSP, bundler plugins, and Node.js consumers all go through the
+//! [`WorkspaceAccess`] trait.
+//!
+//! ## Key invariants
+//!
+//! - **`NativeFs`** (`native_fs.rs`) is the sole disk boundary. All `std::fs`
+//!   calls are concentrated here.
+//! - **`WorkspaceAccess`** is the single workspace trait. There is no separate
+//!   `ProjectResolverReader` or `ConfigFileReader`.
+//! - **Context-aware resolution**: every `resolve_import` call carries a
+//!   [`ResolutionContext`] `{ phase, kind }` that determines which package.json
+//!   export conditions and legacy fields are used.
+//! - **No host-side fallback**: the host calls `ws.resolve_import()` and
+//!   accepts the answer. No extension guessing, no basename matching.
+//!
+//! ## Workspace modes
+//!
+//! - **Filesystem** ([`FilesystemWorkspace`]): disk-backed with overlay and
+//!   snapshot cache. Used by LSP, MCP, bundler plugins.
+//! - **Memory** ([`MemoryWorkspace`]): fully in-memory. Used by playground,
+//!   WASM, and tests.
+//!
+//! ## Resolution priority
+//!
+//! 1. Exact resolutions (authoritative, injected by bundler/LSP)
+//! 2. Project resolver (tsconfig paths, workspace aliases, node_modules)
+//! 3. `None` — no heuristic fallback
+//!
+//! ## File read priority (FilesystemWorkspace)
+//!
+//! 1. Overlay (active editor buffer)
+//! 2. Snapshot (cached content)
+//! 3. Disk via `NativeFs`
 
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]

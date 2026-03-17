@@ -5,20 +5,28 @@ use crate::types::{
     ResolutionContext, ResolveResult,
 };
 
-/// Workspace access trait for the compilation host.
+/// Single workspace trait — sole authority for file access and resolution.
 ///
-/// Provides file reads, resolution, AND edge recording.
-/// Lives in verter_vfs — no dependency on verter_host types.
+/// All workspace I/O (reads, writes, walks, resolution) goes through this
+/// trait. There is no separate `ProjectResolverReader` or `ConfigFileReader`.
+/// The resolver, config parser, and host all take `&dyn WorkspaceAccess`.
 ///
-/// This is the read-only view that the host sees. Mutations like
-/// `apply_changes()` and `set_exact_resolutions()` are called directly
-/// on `FilesystemWorkspace` or `MemoryWorkspace` by the consumer (LSP, MCP, unplugin).
+/// # Implementors
+///
+/// - [`FilesystemWorkspace`] — disk-backed with overlay/snapshot cache
+/// - [`MemoryWorkspace`] — fully in-memory (tests, WASM, playground)
+/// - Lightweight adapters (LSP readers) that delegate to a host's workspace
+///
+/// # Minimal implementation
+///
+/// Only [`read_file`], [`file_exists`], and [`realpath`] are required for
+/// a lightweight adapter (e.g., for the project resolver). All other methods
+/// have default implementations.
 ///
 /// # Thread safety
 ///
-/// This trait requires `Send + Sync` because the host may be shared across
-/// threads (e.g., in the LSP server with tokio). Implementations must ensure
-/// interior mutability is thread-safe (e.g., using `parking_lot::RwLock`).
+/// Requires `Send + Sync` — implementations must use interior mutability
+/// (e.g., `parking_lot::RwLock`) for thread-safe state.
 pub trait WorkspaceAccess: Send + Sync {
     // ── File reads ──
 

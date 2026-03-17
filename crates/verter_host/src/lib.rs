@@ -6,8 +6,15 @@
 //! surface consumed by both the Vite bundler plugin (via `verter_napi`)
 //! and the browser playground (via `verter_wasm`).
 //!
+//! ## Resolution
+//!
+//! All import resolution goes through `verter_vfs::WorkspaceAccess`. The host
+//! does NOT perform any heuristic resolution (no extension guessing, no alias
+//! maps, no basename matching). `resolve_via_vfs()` is the sole resolution path.
+//!
 //! ## Dependencies
 //!
+//! - **`verter_vfs`** — sole authority for file access and import resolution
 //! - **`verter_core`** — SFC tokenizer, parser, and template/script/style codegen
 //! - **`verter_analysis`** — static analysis (imports, bindings, macros, style analysis)
 //!

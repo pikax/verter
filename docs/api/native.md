@@ -31,6 +31,50 @@ The correct platform-specific binary is automatically selected at runtime via op
 
 ## API
 
+### `new Workspace(roots)`
+
+Creates a workspace backed by the Rust VFS. The workspace is the **sole authority** for file access — no `fs` module is used in any JS package.
+
+All file I/O methods are **async** (run on the libuv thread pool):
+
+```ts
+import { Workspace, VerterHost } from '@verter/native'
+
+const ws = new Workspace(['/path/to/project'])
+
+// File access
+const content = await ws.readFile('/src/App.vue')       // string | null
+const exists = await ws.fileExists('/src/App.vue')       // boolean
+const entries = await ws.readDir('/src')                  // {path, isDir}[]
+const files = await ws.walk('/src', ['node_modules'], ['.vue', '.ts']) // string[]
+
+// File writes
+await ws.writeFile('/src/new.ts', 'export const x = 1;')
+await ws.deleteFile('/src/old.ts')
+
+// Context-aware import resolution
+const resolved = await ws.resolveImport('/src/App.vue', './Child.vue')
+// phase: "codegen" | "provider"  —  kind: "esm" | "type" | "require" | "src"
+const types = await ws.resolveImport('/src/App.vue', 'pkg', 'provider', 'type')
+
+// Project configuration
+ws.configureProjects([{
+  root: '/project',
+  workspaceRoot: '/project',
+  compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } },
+}])
+```
+
+### `VerterHost.withWorkspace(config, workspace)`
+
+Creates a `VerterHost` backed by a workspace. The workspace handles all file access and import resolution.
+
+```ts
+const ws = new Workspace(['/path/to/project'])
+ws.configureProjects([...]) // configure first
+const host = VerterHost.withWorkspace({ devMode: true }, ws)
+```
+
 ### `processStyle(css, options)`
 
 Process a CSS style block: apply scoping, CSS modules, and `v-bind()` replacement.
