@@ -1671,6 +1671,10 @@ fn extract_slot_fields_from_type(
                         .as_ref()
                         .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
                         .unwrap_or_default();
+                    // Extract return type from function type: `(props: {...}) => ReturnType`
+                    let return_type = prop.type_annotation.as_ref().and_then(|ta| {
+                        extract_slot_return_type_from_fn(&ta.type_annotation, source)
+                    });
                     let (description, tags) =
                         extract_jsdoc_for(comments, prop.span().start, source);
                     key_name.map(|name| AnalyzedSlotField {
@@ -1678,6 +1682,7 @@ fn extract_slot_fields_from_type(
                         is_required: !prop.optional,
                         span: prop.key.span().into(),
                         bindings,
+                        return_type,
                         description,
                         tags,
                     })
@@ -1689,6 +1694,21 @@ fn extract_slot_fields_from_type(
                         _ => None,
                     };
                     let bindings = extract_slot_bindings_from_params(&method.params, source);
+                    // Extract return type from method: `default(props: {...}): ReturnType`
+                    let return_type = method.return_type.as_ref().and_then(|rt| {
+                        let start = rt.type_annotation.span().start as usize;
+                        let end = rt.type_annotation.span().end as usize;
+                        if end <= source.len() {
+                            let text = source[start..end].trim();
+                            if !text.is_empty() {
+                                Some(text.to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
                     let (description, tags) =
                         extract_jsdoc_for(comments, method.span().start, source);
                     key_name.map(|name| AnalyzedSlotField {
@@ -1696,6 +1716,7 @@ fn extract_slot_fields_from_type(
                         is_required: !method.optional,
                         span: method.key.span().into(),
                         bindings,
+                        return_type,
                         description,
                         tags,
                     })
@@ -1711,6 +1732,23 @@ fn extract_slot_fields_from_type(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Extract the return type text from a `TSFunctionType` annotation.
+///
+/// Handles: `(props: { row: MyItem }) => VNode[]` → `"VNode[]"`
+fn extract_slot_return_type_from_fn(ts_type: &TSType<'_>, source: &str) -> Option<String> {
+    if let TSType::TSFunctionType(fn_type) = ts_type {
+        let start = fn_type.return_type.type_annotation.span().start as usize;
+        let end = fn_type.return_type.type_annotation.span().end as usize;
+        if end <= source.len() {
+            let text = source[start..end].trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Extract binding types from a `TSFunctionType` annotation on a property signature.

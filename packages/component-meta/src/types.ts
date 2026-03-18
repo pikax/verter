@@ -110,6 +110,8 @@ export interface SlotMeta {
   isRequired?: boolean;
   /** Whether the `<slot>` element has fallback content. */
   hasFallbackContent?: boolean;
+  /** Return type of the slot function (e.g., `"VNode[]"`, `"any"`). Used for strict slots. */
+  returnType?: string;
   /** JSDoc description from the leading `/** ... *​/` comment. */
   description?: string;
   /** JSDoc tags (e.g. `@deprecated`). */

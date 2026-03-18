@@ -96,6 +96,7 @@ interface RawSlotField {
   name: string;
   isRequired: boolean;
   bindings?: Array<{ name: string; typeAnnotation?: string | null }>;
+  returnType?: string | null;
   description?: string | null;
   tags?: RawJsdocTag[];
 }
@@ -554,11 +555,13 @@ function extractSlots(
           name: t.name,
           ...(t.text != null && { text: t.text }),
         }));
+        const returnType = sf.returnType ?? undefined;
         return {
           name: sf.name,
           isScoped: (sf.bindings ?? []).length > 0,
           bindings,
           ...(sf.isRequired != null && { isRequired: sf.isRequired }),
+          ...(returnType && { returnType }),
           ...(desc && { description: desc }),
           ...(sfTags && sfTags.length > 0 && { tags: sfTags }),
         };

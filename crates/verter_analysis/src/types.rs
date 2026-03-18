@@ -905,6 +905,10 @@ pub struct AnalyzedSlotField {
     /// E.g., `default(props: { item: string })` → `[{name: "item", type_annotation: Some("string")}]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<AnalyzedSlotFieldBinding>,
+    /// Return type text of the slot function (e.g., `"VNode[]"`, `"any"`).
+    /// Used by strict slots to validate slot children types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<String>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

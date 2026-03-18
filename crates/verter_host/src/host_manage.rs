@@ -224,13 +224,14 @@ impl VerterHost {
                         .iter()
                         .map(|p| {
                             let name = p.key_name.clone().unwrap_or_else(|| "unknown".to_string());
-                            let bindings =
-                                extract_slot_bindings_from_type_text(p.type_text.as_deref());
+                            let (bindings, return_type) =
+                                extract_slot_info_from_type_text(p.type_text.as_deref());
                             verter_analysis::AnalyzedSlotField {
                                 name,
                                 is_required: !p.optional,
                                 span: verter_span::Span::default(),
                                 bindings,
+                                return_type,
                                 description: None,
                                 tags: Vec::new(),
                             }
@@ -254,9 +255,75 @@ impl VerterHost {
             });
         }
 
+        // Resolve nested type references for schema expansion (P1 #4).
+        // When resolved props have type_text values that look like type references
+        // (not primitives), try to resolve those from the same import source and
+        // add them to resolved_local_types. This ensures nested refs like
+        // `status: Status` get expanded in the schema registry.
+        let mut extra_resolved_types: Vec<verter_analysis::ResolvedLocalType> = Vec::new();
+        let primitive_names: rustc_hash::FxHashSet<&str> = [
+            "string",
+            "number",
+            "boolean",
+            "symbol",
+            "null",
+            "undefined",
+            "void",
+            "any",
+            "unknown",
+            "never",
+            "object",
+            "bigint",
+        ]
+        .into_iter()
+        .collect();
+        for enrichment in &enrichments {
+            let dep = macro_type_deps
+                .iter()
+                .find(|d| d.type_name == enrichment.type_name);
+            let Some(dep) = dep else { continue };
+
+            // Collect type names from prop type_text that might be resolvable types
+            for field in &enrichment.prop_fields {
+                if let Some(ref type_ann) = field.type_annotation {
+                    let trimmed = type_ann.trim();
+                    // Simple heuristic: single identifier that starts with uppercase
+                    // and isn't already resolved or a primitive
+                    if trimmed
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_uppercase())
+                        && trimmed.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !primitive_names.contains(trimmed)
+                        && !enrichments.iter().any(|e| e.type_name == trimmed)
+                        && !extra_resolved_types.iter().any(|r| r.name == trimmed)
+                    {
+                        if let Ok(Some(resolved)) = self.resolve_external_type_from_loaded_files(
+                            &files,
+                            canonical,
+                            &dep.import_source,
+                            trimmed,
+                            &mut cache,
+                            &mut visiting,
+                            false,
+                            kind,
+                        ) {
+                            let expanded =
+                                resolved_elements_to_expanded_text_via_type_text(&resolved);
+                            extra_resolved_types.push(verter_analysis::ResolvedLocalType {
+                                name: trimmed.to_string(),
+                                expanded,
+                                span: verter_span::Span::default(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         drop(files);
 
-        if enrichments.is_empty() {
+        if enrichments.is_empty() && extra_resolved_types.is_empty() {
             return;
         }
 
@@ -309,6 +376,19 @@ impl VerterHost {
                 target
                     .resolved_local_types
                     .push(enrichment.resolved_local_type);
+            }
+        }
+
+        // Add sibling (nested) resolved types to all macros that had enrichments.
+        if !extra_resolved_types.is_empty() {
+            for m in macros.iter_mut() {
+                if !m.resolved_local_types.is_empty() {
+                    for rlt in &extra_resolved_types {
+                        if !m.resolved_local_types.iter().any(|r| r.name == rlt.name) {
+                            m.resolved_local_types.push(rlt.clone());
+                        }
+                    }
+                }
             }
         }
     }
@@ -1474,24 +1554,43 @@ impl VerterHost {
 /// Extract slot bindings from a type_text that encodes a slot's function signature.
 ///
 /// Handles property signature types like `(props: { row: Item; index: number }) => any`.
-/// Parses the object literal inside the first parameter's type annotation to extract
-/// binding names and types, matching the local `extract_slot_bindings_from_params` behavior.
-fn extract_slot_bindings_from_type_text(
+/// Extract slot bindings and return type from a type_text encoding a slot function signature.
+///
+/// Handles both arrow-style (`(props: { row: Item }) => VNode[]`) and
+/// method-style (`(props: { row: Item }): VNode[]`) signatures.
+/// Returns `(bindings, return_type)`.
+fn extract_slot_info_from_type_text(
     type_text: Option<&str>,
-) -> Vec<verter_analysis::AnalyzedSlotFieldBinding> {
+) -> (
+    Vec<verter_analysis::AnalyzedSlotFieldBinding>,
+    Option<String>,
+) {
     let Some(text) = type_text else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
 
-    // The type_text for a slot prop encodes the function signature, e.g.:
-    //   `(props: { row: Item; index: number }) => any`
-    // We extract bindings from the object literal inside the first parameter.
-    // Use the `resolve_external_type` machinery from verter_core to parse
-    // the inner object type, since it handles complex types correctly.
+    // Extract return type: text after `=>` (arrow) or after closing `):`  (method).
+    let return_type = if let Some(arrow_pos) = text.find("=>") {
+        let ret = text[arrow_pos + 2..].trim();
+        if !ret.is_empty() {
+            Some(ret.to_string())
+        } else {
+            None
+        }
+    } else if let Some(colon_pos) = text.rfind("):") {
+        let ret = text[colon_pos + 2..].trim();
+        if !ret.is_empty() {
+            Some(ret.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    // Find the parameter object type: text between first `{` and matching `}`.
+    // Extract bindings from the parameter object type.
     let Some(obj_start) = text.find('{') else {
-        return Vec::new();
+        return (Vec::new(), return_type);
     };
     let mut depth = 0;
     let mut obj_end = obj_start;
@@ -1509,7 +1608,7 @@ fn extract_slot_bindings_from_type_text(
         }
     }
     if depth != 0 {
-        return Vec::new();
+        return (Vec::new(), return_type);
     }
 
     let obj_text = &text[obj_start..obj_end];
@@ -1523,10 +1622,10 @@ fn extract_slot_bindings_from_type_text(
     );
 
     let Some(resolved) = resolved else {
-        return Vec::new();
+        return (Vec::new(), return_type);
     };
 
-    resolved
+    let bindings = resolved
         .props
         .iter()
         .filter_map(|p| {
@@ -1537,7 +1636,9 @@ fn extract_slot_bindings_from_type_text(
                 span: verter_span::Span::default(),
             })
         })
-        .collect()
+        .collect();
+
+    (bindings, return_type)
 }
 
 /// Convert `ResolvedElements` props to an expanded type text string
@@ -3130,6 +3231,151 @@ defineSlots<Slots>()
             slot_names.contains(&"header"),
             "should have 'header' slot from method signature: {:?}",
             slot_names
+        );
+    }
+
+    /// @ai-generated - nested types from same import source added to resolved_local_types
+    #[test]
+    fn enrich_nested_type_expansion() {
+        let host = make_deep_host();
+        upsert_non_sfc(
+            &host,
+            "/src/types.ts",
+            r#"export type Status = 'active' | 'inactive'
+export interface Props { name: string; status: Status }"#,
+        );
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let dp = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+            .expect("should have DefineProps macro");
+        let rlt_names: Vec<&str> = dp
+            .resolved_local_types
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(
+            rlt_names.contains(&"Props"),
+            "should have 'Props' in resolved_local_types: {:?}",
+            rlt_names
+        );
+        assert!(
+            rlt_names.contains(&"Status"),
+            "should have nested 'Status' in resolved_local_types: {:?}",
+            rlt_names
+        );
+    }
+
+    /// @ai-generated - slot return types are extracted for strict slots support
+    #[test]
+    fn enrich_slot_return_type_property_style() {
+        let host = make_deep_host();
+        upsert_non_sfc(
+            &host,
+            "/src/slots.ts",
+            "export interface Slots { default: (props: { row: string }) => VNode[]; header: (props: {}) => any }",
+        );
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Slots } from './slots'
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let ds = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+            .expect("should have DefineSlots macro");
+
+        let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
+        assert_eq!(
+            default_slot.return_type.as_deref(),
+            Some("VNode[]"),
+            "default slot should have return type VNode[]"
+        );
+
+        let header_slot = ds.slot_fields.iter().find(|s| s.name == "header").unwrap();
+        assert_eq!(
+            header_slot.return_type.as_deref(),
+            Some("any"),
+            "header slot should have return type any"
+        );
+    }
+
+    /// @ai-generated - local defineSlots with return types
+    #[test]
+    fn local_slot_return_type_property_style() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+defineSlots<{
+  default: (props: { item: string }) => VNode[]
+  header: (props: {}) => any
+}>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/Comp.vue").unwrap();
+        let ds = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+            .expect("should have DefineSlots macro");
+
+        let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
+        assert_eq!(
+            default_slot.return_type.as_deref(),
+            Some("VNode[]"),
+            "local default slot should have return type"
+        );
+    }
+
+    /// @ai-generated - local defineSlots with method-style return types
+    #[test]
+    fn local_slot_return_type_method_style() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { item: string }): VNode[]
+}>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/Comp.vue").unwrap();
+        let ds = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+            .expect("should have DefineSlots macro");
+
+        let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
+        assert_eq!(
+            default_slot.return_type.as_deref(),
+            Some("VNode[]"),
+            "method-style slot should have return type"
         );
     }
 

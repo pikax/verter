@@ -245,6 +245,8 @@ export class ComponentMetaChecker {
       }
       // Extract locally-defined interfaces/types from SFC content for
       // schema expansion of local types referenced by runtime-style defineProps.
+      // The Rust analyzer handles type-based macros, but runtime-style props
+      // with PropType<T> references need the JS fallback.
       const sfcContent = this.trackedFiles.get(absPath);
       if (sfcContent) {
         extractLocalInterfaces(sfcContent, typeRegistry);
