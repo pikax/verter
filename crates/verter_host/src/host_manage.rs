@@ -605,6 +605,17 @@ impl VerterHost {
     /// file map, alias map, and parent dependency set.
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Option<FileAnalysisSnapshot> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+
+        // Eviction gate (scheduler path)
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    return None;
+                }
+            }
+        }
+
         let files = read_lock(&self.files);
         let entry = files.get(&canonical)?;
 
@@ -789,6 +800,13 @@ impl VerterHost {
 
         for &id in canonical_ids {
             let canonical = self.resolve_alias_or_canonical(id);
+            // Eviction gate
+            #[cfg(feature = "scheduler")]
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    continue;
+                }
+            }
             if let Some(entry) = files.get(&canonical) {
                 let snapshot = Self::build_snapshot_from_entry(entry);
                 results.push((canonical, snapshot));
@@ -813,6 +831,13 @@ impl VerterHost {
         let mut results = Vec::with_capacity(files.len());
 
         for (canonical, entry) in files.iter() {
+            // Eviction gate
+            #[cfg(feature = "scheduler")]
+            if let Some(cc) = self.compile_cache.get(canonical) {
+                if cc.evicted {
+                    continue;
+                }
+            }
             let snapshot = Self::build_snapshot_from_entry(entry);
             results.push((canonical.clone(), snapshot));
         }
@@ -1195,50 +1220,61 @@ impl VerterHost {
             })
             .collect();
 
-        // Single write lock to avoid TOCTOU race between read-read-write.
-        let (old_deps, new_deps, _dep_resolutions_clone) = {
-            let mut files = write_lock(&self.files);
-            let Some(entry) = files.get_mut(&canonical) else {
-                return;
-            };
-            let old_deps = entry.dependencies.clone();
-            for mut res in resolutions {
-                // Normalize paths so Windows backslashes / drive-letter case
-                // match the canonical IDs used by `upsert()`.
-                if let Some(ref mut id) = res.resolved_canonical_id {
-                    let norm = canonicalize_id(id);
-                    if norm != id.as_str() {
-                        *id = norm.into_owned();
-                    }
+        // Normalize resolutions and derive flat dependency set.
+        let mut new_deps = std::collections::BTreeSet::new();
+        let mut dep_resolutions = rustc_hash::FxHashMap::default();
+        for mut res in resolutions {
+            if let Some(ref mut id) = res.resolved_canonical_id {
+                let norm = canonicalize_id(id);
+                if norm != id.as_str() {
+                    *id = norm.into_owned();
                 }
-                for candidate in &mut res.possible_canonical_ids {
-                    let norm = canonicalize_id(candidate);
-                    if norm != candidate.as_str() {
-                        *candidate = norm.into_owned();
-                    }
-                }
-                // Derive flat dependency set for reverse-dep tracking
-                if let Some(ref canonical_id) = res.resolved_canonical_id {
-                    entry.dependencies.insert(canonical_id.clone());
-                } else {
-                    for candidate in &res.possible_canonical_ids {
-                        entry.dependencies.insert(candidate.clone());
-                    }
-                }
-                // Store structured record for exact resolution lookups
-                entry
-                    .dependency_resolutions
-                    .insert(res.specifier.clone(), res);
             }
-            let new_deps = entry.dependencies.clone();
-            let dep_resolutions_clone = entry.dependency_resolutions.clone();
-            (old_deps, new_deps, dep_resolutions_clone)
-        };
+            for candidate in &mut res.possible_canonical_ids {
+                let norm = canonicalize_id(candidate);
+                if norm != candidate.as_str() {
+                    *candidate = norm.into_owned();
+                }
+            }
+            if let Some(ref canonical_id) = res.resolved_canonical_id {
+                new_deps.insert(canonical_id.clone());
+            } else {
+                for candidate in &res.possible_canonical_ids {
+                    new_deps.insert(candidate.clone());
+                }
+            }
+            dep_resolutions.insert(res.specifier.clone(), res);
+        }
 
+        // Read old deps, write new deps. compile_cache is primary on scheduler path.
         #[cfg(feature = "scheduler")]
-        if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
-            cc.dependencies.clone_from(&new_deps);
-            cc.dependency_resolutions = _dep_resolutions_clone;
+        let old_deps = {
+            let mut cc_ref = self.compile_cache.entry(canonical.clone()).or_default();
+            let cc = cc_ref.value_mut();
+            let old = cc.dependencies.clone();
+            cc.dependencies = new_deps.clone();
+            cc.dependency_resolutions = dep_resolutions.clone();
+            old
+        };
+        #[cfg(not(feature = "scheduler"))]
+        let old_deps;
+
+        // Also write to files (shared by both paths, needed until Phase 3)
+        {
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(&canonical) {
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    old_deps = entry.dependencies.clone();
+                }
+                entry.dependencies = new_deps.clone();
+                entry.dependency_resolutions = dep_resolutions;
+            } else {
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    old_deps = std::collections::BTreeSet::new();
+                }
+            }
         }
 
         self.update_reverse_deps(&canonical, &old_deps, &new_deps);
@@ -1291,6 +1327,13 @@ impl VerterHost {
         };
 
         for (canonical_id, entry) in files.iter() {
+            // Eviction gate
+            #[cfg(feature = "scheduler")]
+            if let Some(cc) = self.compile_cache.get(canonical_id) {
+                if cc.evicted {
+                    continue;
+                }
+            }
             let path: std::sync::Arc<std::path::Path> =
                 std::sync::Arc::from(std::path::Path::new(canonical_id.as_str()));
 
@@ -1344,6 +1387,12 @@ impl VerterHost {
         binding_name: &str,
     ) -> Option<(u32, u32)> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        #[cfg(feature = "scheduler")]
+        if let Some(cc) = self.compile_cache.get(&canonical) {
+            if cc.evicted {
+                return None;
+            }
+        }
         let files = read_lock(&self.files);
         let entry = files.get(&canonical)?;
 
@@ -1418,6 +1467,12 @@ impl VerterHost {
         binding_name: &str,
     ) -> Option<(String, u32, u32)> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        #[cfg(feature = "scheduler")]
+        if let Some(cc) = self.compile_cache.get(&canonical) {
+            if cc.evicted {
+                return None;
+            }
+        }
         let files = read_lock(&self.files);
         let mut visited = rustc_hash::FxHashSet::default();
 
@@ -1553,6 +1608,12 @@ impl VerterHost {
     /// Uses cycle detection to prevent infinite loops in circular re-exports.
     pub fn resolve_exports(&self, canonical_or_alias: &str) -> Vec<ResolvedExport> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        #[cfg(feature = "scheduler")]
+        if let Some(cc) = self.compile_cache.get(&canonical) {
+            if cc.evicted {
+                return Vec::new();
+            }
+        }
         let files = read_lock(&self.files);
         let mut visiting = rustc_hash::FxHashSet::default();
         self.collect_resolved_exports(&files, &canonical, &mut visiting)

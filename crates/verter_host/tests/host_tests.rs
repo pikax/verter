@@ -1292,10 +1292,11 @@ fn source_map_present_when_requested() {
     );
 }
 
-/// @ai-generated - Style overrides persist through source re-upsert
-/// (critical unplugin+Vite interaction)
+/// Style overrides are cleared when whole_hash changes (per plan invalidation matrix).
+/// Any source edit (even template-only) shifts SFC-absolute byte offsets, making cached
+/// synthetic parses and remapped CSS spans stale. The bundler re-applies overrides.
 #[test]
-fn style_override_persists_through_reupsert() {
+fn style_override_cleared_on_source_reupsert() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src1);
@@ -1311,11 +1312,11 @@ fn style_override_persists_through_reupsert() {
     })
     .unwrap();
 
-    // Re-upsert with a template change
+    // Re-upsert with a template change — whole_hash changes, overrides cleared
     let src2 = "<script setup>const n = 1</script><template><section>{{n}}</section></template><style>.a{color:red}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src2);
 
-    // Style override should still be in effect
+    // Style override should be cleared — compiles with raw style (red)
     let style = host
         .get_virtual_file(VirtualQuery {
             raw_id: Some("Comp.vue?vue&type=style&index=0".to_string()),
@@ -1324,10 +1325,10 @@ fn style_override_persists_through_reupsert() {
             compile_profile: profile_dev(),
         })
         .unwrap();
-    assert_eq!(
-        style.code.as_ref(),
-        ".a{color:green}",
-        "style override should persist through re-upsert"
+    assert!(
+        style.code.contains("red"),
+        "override should be cleared after re-upsert (whole_hash changed), got: {}",
+        style.code
     );
 }
 

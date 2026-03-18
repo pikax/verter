@@ -201,16 +201,14 @@ impl VerterHost {
                 .map(|h| h.parse.meta.virtual_nodes())
                 .unwrap_or_default();
 
-            // Invalidation per the matrix.
-            // Note: style/content overrides are NOT cleared on whole_hash change alone.
-            // The bundler re-applies overrides after each upsert cycle. Only clear when
-            // structure changes (block count differs, making override indices invalid).
+            // Invalidation per the plan's matrix (delegated-noodling-knuth.md line 237).
+            // Override caches cleared on whole_hash change — whitespace-only edits shift
+            // SFC-absolute byte offsets, making cached synthetic parses and remapped CSS
+            // spans stale. The bundler re-applies overrides after the next transform().
             if whole_hash_changed {
-                cc.cached_tsc_extract = None;
-            }
-            if changes.changed && changes.slice_changes.structure_changed {
                 cc.content_overrides.clear();
                 cc.style_overrides.clear();
+                cc.cached_tsc_extract = None;
             }
             if changes.changed && changes.semantic_changed {
                 cc.compile_slots.clear();
@@ -859,65 +857,11 @@ impl VerterHost {
                 cc.compile_slots.remove(&profile_hash);
             }
 
-            // Transitional: also update files
+            // Store per-profile layer in files for WASM/legacy readers (does NOT
+            // mutate shared source/meta/style_analyses — profile state stays isolated).
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {
-                    let mut style_updates = Vec::new();
-                    for (&idx, ov) in &by_index {
-                        if idx < entry.style_analyses.len() {
-                            let existing = &entry.style_analyses[idx];
-                            let content_offset = existing.content_offset;
-                            let mut new_analysis = verter_analysis::build_css_style_analysis(
-                                &ov.code,
-                                verter_analysis::VueStyleInput::default(),
-                                existing.scoped,
-                                existing.is_module,
-                                existing.module_name.as_deref(),
-                                content_offset,
-                            );
-                            if let (Some(sm_json), Some(ref mut css)) =
-                                (&ov.source_map, &mut new_analysis.css)
-                            {
-                                let content_start = content_offset as usize;
-                                let original_content = if content_start < source.len() {
-                                    let rest = &source[content_start..];
-                                    if let Some(end) = rest.find("</style") {
-                                        &rest[..end]
-                                    } else {
-                                        rest
-                                    }
-                                } else {
-                                    ""
-                                };
-                                crate::source_map_remap::remap_css_analysis_spans(
-                                    css,
-                                    &ov.code,
-                                    sm_json,
-                                    original_content,
-                                    content_offset,
-                                );
-                            }
-                            new_analysis.v_binds = existing.v_binds.clone();
-                            new_analysis.special_pseudos = existing.special_pseudos.clone();
-                            style_updates.push((idx, new_analysis));
-                        }
-                    }
-                    if !style_updates.is_empty() {
-                        let styles = Arc::make_mut(&mut entry.style_analyses);
-                        for (idx, analysis) in style_updates {
-                            styles[idx] = analysis;
-                        }
-                    }
-                    for &idx in by_index.keys() {
-                        if idx < entry.meta.style_langs.len() {
-                            if let Some(ref lang) = entry.meta.style_langs[idx] {
-                                if lang != "css" {
-                                    entry.meta.style_langs[idx] = Some("css".to_string());
-                                }
-                            }
-                        }
-                    }
                     entry.style_overrides.insert(profile_hash, layer);
                     entry.compile_slots.remove(&profile_hash);
                 }
@@ -1239,27 +1183,11 @@ impl VerterHost {
                 cc.compile_slots.remove(&profile_hash);
             }
 
-            // Transitional: also update files
+            // Store per-profile layer in files for WASM/legacy readers (does NOT
+            // mutate shared source/meta/analysis — profile state stays isolated).
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {
-                    entry.meta = new_snapshot.meta.clone();
-                    entry.slices = new_snapshot.slices.clone();
-                    entry.descriptor = new_snapshot.descriptor.clone();
-                    entry.semantic_hash = new_snapshot.semantic_hash;
-                    entry.whole_hash = new_snapshot.whole_hash;
-                    entry.source = Arc::from(synthetic_source.as_str());
-                    entry.parse_diagnostics = new_snapshot.parse_diagnostics.clone();
-                    entry.script_analysis = new_snapshot.script_analysis.clone();
-                    entry.arc_script_cache =
-                        ScriptAnalysisArcs::from_analysis(&entry.script_analysis);
-                    entry.style_analyses = Arc::new(new_snapshot.style_analyses.clone());
-                    entry.cached_parse = self.compile_cache.get(&canonical).and_then(|cc| {
-                        cc.content_overrides
-                            .get(&profile_hash)
-                            .and_then(|o| o.cached_parse.clone())
-                    });
-                    entry.template_analysis = None;
                     entry.content_overrides.insert(profile_hash, layer);
                     entry.compile_slots.remove(&profile_hash);
                 }

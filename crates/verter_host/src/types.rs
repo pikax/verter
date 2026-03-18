@@ -1157,6 +1157,21 @@ pub(crate) struct CompileCacheEntry {
     pub(crate) evicted: bool,
 }
 
+/// Override-aware file state returned by `effective_file_state()`.
+///
+/// Contains either the raw scheduler data or the content override's synthetic
+/// data, depending on whether a block override exists for the requested profile.
+#[cfg(feature = "scheduler")]
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields read progressively as accessors migrate
+pub(crate) struct EffectiveFileState {
+    pub(crate) source: std::sync::Arc<str>,
+    pub(crate) meta: FileMeta,
+    pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
+    pub(crate) cached_parse: Option<std::sync::Arc<verter_core::parser::types::ParsedSfc>>,
+    pub(crate) whole_hash: Hash16,
+}
+
 /// Block override + cached re-parse from synthetic source.
 ///
 /// When a preprocessor (e.g. Pug → HTML) overrides a block, the host builds a

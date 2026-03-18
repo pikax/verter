@@ -269,6 +269,119 @@ impl VerterHost {
         self.ws().preferred_specifier(importer_id, target_id)
     }
 
+    // ── effective_* helpers: override-aware state for compile-path consumers ──
+
+    /// Override-aware file state for a profile.
+    ///
+    /// When a content override exists for `profile`, returns the override's
+    /// synthetic source, meta, script_analysis, and cached_parse. Otherwise
+    /// returns raw scheduler data. Returns `None` if file not in scheduler.
+    #[cfg(feature = "scheduler")]
+    pub(crate) fn effective_file_state(
+        &self,
+        canonical_id: &str,
+        profile: Option<u64>,
+    ) -> Option<EffectiveFileState> {
+        use crate::host_executor::HostSourceData;
+
+        let snap = self.scheduler.try_get_source(canonical_id)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
+
+        if let Some(profile_hash) = profile {
+            if let Some(cc) = self.compile_cache.get(canonical_id) {
+                if let Some(ovr) = cc.content_overrides.get(&profile_hash) {
+                    return Some(EffectiveFileState {
+                        source: ovr.source.clone(),
+                        meta: ovr.parse.meta.clone(),
+                        script_analysis: ovr.parse.script_analysis.clone(),
+                        cached_parse: ovr.cached_parse.clone(),
+                        whole_hash: ovr.parse.whole_hash,
+                    });
+                }
+            }
+        }
+
+        Some(EffectiveFileState {
+            source: snap.source.clone(),
+            meta: hd.parse.meta.clone(),
+            script_analysis: hd.parse.script_analysis.clone(),
+            cached_parse: hd.cached_parse.clone(),
+            whole_hash: hd.parse.whole_hash,
+        })
+    }
+
+    /// Override-aware style analyses for a profile.
+    ///
+    /// Merges per-index overrides from `StyleOverrideWithAnalysis` with raw
+    /// style analyses from the scheduler. Returns `None` if file not in scheduler.
+    #[cfg(feature = "scheduler")]
+    #[allow(dead_code)] // Used by css_var_flow migration (upcoming)
+    pub(crate) fn effective_style_analyses(
+        &self,
+        canonical_id: &str,
+        profile: Option<u64>,
+    ) -> Option<Vec<verter_analysis::StyleBlockAnalysis>> {
+        use crate::host_executor::HostAnalysisData;
+
+        let analysis_snap = self.scheduler.try_get_analysis(canonical_id)?;
+        let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
+        let raw = &ad.style_analyses;
+
+        if let Some(profile_hash) = profile {
+            if let Some(cc) = self.compile_cache.get(canonical_id) {
+                if let Some(so) = cc.style_overrides.get(&profile_hash) {
+                    let merged: Vec<_> = raw
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, raw_sa)| {
+                            if let Some(Some(override_sa)) = so.analyses.get(idx) {
+                                override_sa.clone()
+                            } else {
+                                raw_sa.clone()
+                            }
+                        })
+                        .collect();
+                    return Some(merged);
+                }
+            }
+        }
+
+        Some(raw.as_ref().clone())
+    }
+
+    /// Override-aware meta for a profile.
+    ///
+    /// Applies `style_langs` overrides from `StyleOverrideWithAnalysis` to the
+    /// raw meta. Returns `None` if file not in scheduler.
+    #[cfg(feature = "scheduler")]
+    pub(crate) fn effective_meta(
+        &self,
+        canonical_id: &str,
+        profile: Option<u64>,
+    ) -> Option<FileMeta> {
+        use crate::host_executor::HostSourceData;
+
+        let snap = self.scheduler.try_get_source(canonical_id)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
+        let mut meta = hd.parse.meta.clone();
+
+        if let Some(profile_hash) = profile {
+            if let Some(cc) = self.compile_cache.get(canonical_id) {
+                if let Some(so) = cc.style_overrides.get(&profile_hash) {
+                    for (idx, lang) in so.lang_overrides.iter().enumerate() {
+                        if let Some(ref l) = lang {
+                            if idx < meta.style_langs.len() {
+                                meta.style_langs[idx] = Some(l.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(meta)
+    }
+
     /// Release all cached data (files, aliases, dependency graph).
     ///
     /// After calling `close()` the host is empty but still usable (you could
