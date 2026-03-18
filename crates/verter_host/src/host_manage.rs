@@ -46,86 +46,161 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Vec<verter_analysis::ResolvedLocalType> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let files = read_lock(&self.files);
-        let Some(entry) = files.get(&canonical) else {
-            return Vec::new();
-        };
 
-        let macro_type_deps = entry.script_analysis.macro_type_deps.clone();
-        if macro_type_deps.is_empty() {
-            return Vec::new();
-        }
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
 
-        let mut result = Vec::new();
-        let alloc = oxc_allocator::Allocator::new();
+            let source_snap = match self.scheduler.try_get_source(&canonical) {
+                Some(s) => s,
+                None => return Vec::new(),
+            };
+            let hd = match source_snap.downcast_data::<HostSourceData>() {
+                Some(d) => d,
+                None => return Vec::new(),
+            };
+            let macro_type_deps = hd.parse.script_analysis.macro_type_deps.clone();
+            if macro_type_deps.is_empty() {
+                return Vec::new();
+            }
+            let dep_resolutions = self
+                .compile_cache
+                .get(&canonical)
+                .map(|cc| cc.dependency_resolutions.clone())
+                .unwrap_or_default();
+            drop(source_snap);
 
-        for dep in macro_type_deps.iter() {
-            // Resolve import source to canonical dep ID
-            let dep_canonical = if dep.import_source.starts_with('.') {
-                crate::id::resolve_external(&canonical, &dep.import_source)
-            } else {
-                // Non-relative imports need dependency_resolutions
-                if let Some(res) = entry.dependency_resolutions.get(&dep.import_source) {
-                    if let Some(ref id) = res.resolved_canonical_id {
-                        id.clone()
+            let mut result = Vec::new();
+            let alloc = oxc_allocator::Allocator::new();
+
+            for dep in macro_type_deps.iter() {
+                let dep_canonical = if dep.import_source.starts_with('.') {
+                    crate::id::resolve_external(&canonical, &dep.import_source)
+                } else {
+                    if let Some(res) = dep_resolutions.get(&dep.import_source) {
+                        if let Some(ref id) = res.resolved_canonical_id {
+                            id.clone()
+                        } else {
+                            continue;
+                        }
                     } else {
                         continue;
                     }
-                } else {
-                    continue;
-                }
-            };
+                };
 
-            // Try to get the dependency source from the host cache
-            let Some(dep_entry) = files.get(&dep_canonical) else {
-                // Try with common extensions for relative imports
-                let mut found_source = None;
-                for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
-                    let with_ext = format!("{}{}", dep_canonical, ext);
-                    if let Some(e) = files.get(&with_ext) {
-                        found_source = Some(e.source.clone());
-                        break;
-                    }
-                }
-                let Some(source) = found_source else {
+                // Try scheduler for source, then extensions, then VFS fallback
+                let dep_source = self
+                    .scheduler
+                    .try_get_source(&dep_canonical)
+                    .map(|s| s.source.clone())
+                    .or_else(|| {
+                        for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
+                            let with_ext = format!("{}{}", dep_canonical, ext);
+                            if let Some(s) = self.scheduler.try_get_source(&with_ext) {
+                                return Some(s.source.clone());
+                            }
+                        }
+                        None
+                    });
+                let Some(dep_source) = dep_source else {
                     continue;
                 };
-                // Resolve and add to result
+
                 if let Some(resolved) =
                     verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
                         &dep.type_name,
-                        &source,
+                        &dep_source,
                         &alloc,
                     )
                 {
-                    let expanded = resolved_elements_to_expanded_text(&resolved, &source);
+                    let expanded = resolved_elements_to_expanded_text(&resolved, &dep_source);
                     result.push(verter_analysis::ResolvedLocalType {
                         name: dep.type_name.clone(),
                         expanded,
                         span: verter_span::Span::default(),
                     });
                 }
-                continue;
-            };
-
-            let dep_source = dep_entry.source.clone();
-            if let Some(resolved) =
-                verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
-                    &dep.type_name,
-                    &dep_source,
-                    &alloc,
-                )
-            {
-                let expanded = resolved_elements_to_expanded_text(&resolved, &dep_source);
-                result.push(verter_analysis::ResolvedLocalType {
-                    name: dep.type_name.clone(),
-                    expanded,
-                    span: verter_span::Span::default(),
-                });
             }
+            result
         }
 
-        result
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let Some(entry) = files.get(&canonical) else {
+                return Vec::new();
+            };
+
+            let macro_type_deps = entry.script_analysis.macro_type_deps.clone();
+            if macro_type_deps.is_empty() {
+                return Vec::new();
+            }
+
+            let mut result = Vec::new();
+            let alloc = oxc_allocator::Allocator::new();
+
+            for dep in macro_type_deps.iter() {
+                let dep_canonical = if dep.import_source.starts_with('.') {
+                    crate::id::resolve_external(&canonical, &dep.import_source)
+                } else {
+                    if let Some(res) = entry.dependency_resolutions.get(&dep.import_source) {
+                        if let Some(ref id) = res.resolved_canonical_id {
+                            id.clone()
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                };
+
+                let Some(dep_entry) = files.get(&dep_canonical) else {
+                    let mut found_source = None;
+                    for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
+                        let with_ext = format!("{}{}", dep_canonical, ext);
+                        if let Some(e) = files.get(&with_ext) {
+                            found_source = Some(e.source.clone());
+                            break;
+                        }
+                    }
+                    let Some(source) = found_source else {
+                        continue;
+                    };
+                    if let Some(resolved) =
+                        verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
+                            &dep.type_name,
+                            &source,
+                            &alloc,
+                        )
+                    {
+                        let expanded = resolved_elements_to_expanded_text(&resolved, &source);
+                        result.push(verter_analysis::ResolvedLocalType {
+                            name: dep.type_name.clone(),
+                            expanded,
+                            span: verter_span::Span::default(),
+                        });
+                    }
+                    continue;
+                };
+
+                let dep_source = dep_entry.source.clone();
+                if let Some(resolved) =
+                    verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
+                        &dep.type_name,
+                        &dep_source,
+                        &alloc,
+                    )
+                {
+                    let expanded = resolved_elements_to_expanded_text(&resolved, &dep_source);
+                    result.push(verter_analysis::ResolvedLocalType {
+                        name: dep.type_name.clone(),
+                        expanded,
+                        span: verter_span::Span::default(),
+                    });
+                }
+            }
+            result
+        }
     }
 
     /// Enrich a snapshot's macros with cross-file type resolution results.
@@ -143,7 +218,6 @@ impl VerterHost {
         let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
             snapshot.macro_type_deps.iter().cloned().collect();
 
-        let files = read_lock(&self.files);
         let mut cache = rustc_hash::FxHashMap::default();
         let mut visiting = rustc_hash::FxHashSet::default();
         let kind = verter_vfs::ResolveRequestKind::TypeImport;
@@ -162,7 +236,6 @@ impl VerterHost {
 
         for dep in &macro_type_deps {
             let resolved = match self.resolve_external_type_from_loaded_files(
-                &files,
                 canonical,
                 &dep.import_source,
                 &dep.type_name,
@@ -170,6 +243,7 @@ impl VerterHost {
                 &mut visiting,
                 false,
                 kind,
+                None,
             ) {
                 Ok(Some(r)) => r,
                 _ => continue,
@@ -315,7 +389,6 @@ impl VerterHost {
                         && !extra_resolved_types.iter().any(|r| r.name == trimmed)
                     {
                         if let Ok(Some(resolved)) = self.resolve_external_type_from_loaded_files(
-                            &files,
                             canonical,
                             &dep.import_source,
                             trimmed,
@@ -323,6 +396,7 @@ impl VerterHost {
                             &mut visiting,
                             false,
                             kind,
+                            None,
                         ) {
                             let expanded =
                                 resolved_elements_to_expanded_text_via_type_text(&resolved);
@@ -336,8 +410,6 @@ impl VerterHost {
                 }
             }
         }
-
-        drop(files);
 
         if enrichments.is_empty() && extra_resolved_types.is_empty() {
             return;
@@ -421,24 +493,12 @@ impl VerterHost {
         bindings: &[verter_analysis::AnalyzedBinding],
     ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
         let ext_map = if !src_blocks.is_empty() {
-            let files = read_lock(&self.files);
             let mut map = rustc_hash::FxHashMap::default();
             for req in external_requests {
-                let dep_id = files
-                    .contains_key(&req.resolved_canonical_id)
-                    .then(|| req.resolved_canonical_id.clone())
-                    .or_else(|| {
-                        self.resolve_loaded_dependency_canonical(
-                            &files,
-                            canonical,
-                            &req.specifier,
-                            verter_vfs::ResolveRequestKind::EsmImport,
-                        )
-                    });
-                if let Some(dep_source) =
-                    dep_id.and_then(|id| files.get(&id).map(|e| e.source.clone()))
-                {
-                    map.insert(req.resolved_canonical_id.clone(), dep_source);
+                let dep_source =
+                    self.resolve_dep_source(canonical, &req.resolved_canonical_id, &req.specifier);
+                if let Some(source) = dep_source {
+                    map.insert(req.resolved_canonical_id.clone(), source);
                 }
             }
             map
@@ -531,38 +591,49 @@ impl VerterHost {
             return;
         }
 
-        let files = read_lock(&self.files);
-        let Some(entry) = files.get(canonical) else {
-            return;
+        #[cfg(feature = "scheduler")]
+        let (source, cached_parse, src_blocks, external_requests) = {
+            use crate::host_executor::HostSourceData;
+            let Some(snap) = self.scheduler.try_get_source(canonical) else {
+                return;
+            };
+            let Some(hd) = snap.downcast_data::<HostSourceData>() else {
+                return;
+            };
+            if hd.file_kind != FileKind::VueSfc {
+                return;
+            }
+            (
+                snap.source.clone(),
+                hd.cached_parse.clone(),
+                hd.parse.src_blocks.clone(),
+                hd.parse.external_requests.clone(),
+            )
         };
-        if entry.file_kind != FileKind::VueSfc {
-            return;
-        }
 
-        let source = entry.source.clone();
-        let cached_parse = entry.cached_parse.clone();
-        let src_blocks = entry.src_blocks.clone();
-        let external_requests = entry.external_requests.clone();
-        drop(files);
+        #[cfg(not(feature = "scheduler"))]
+        let (source, cached_parse, src_blocks, external_requests) = {
+            let files = read_lock(&self.files);
+            let Some(entry) = files.get(canonical) else {
+                return;
+            };
+            if entry.file_kind != FileKind::VueSfc {
+                return;
+            }
+            (
+                entry.source.clone(),
+                entry.cached_parse.clone(),
+                entry.src_blocks.clone(),
+                entry.external_requests.clone(),
+            )
+        };
 
         // Resolve external src blocks (e.g., <template src="./tpl.html">)
         let ext_map = if !src_blocks.is_empty() {
-            let files = read_lock(&self.files);
             let mut map = rustc_hash::FxHashMap::default();
             for req in &external_requests {
-                let dep_id = files
-                    .contains_key(&req.resolved_canonical_id)
-                    .then(|| req.resolved_canonical_id.clone())
-                    .or_else(|| {
-                        self.resolve_loaded_dependency_canonical(
-                            &files,
-                            canonical,
-                            &req.specifier,
-                            verter_vfs::ResolveRequestKind::EsmImport,
-                        )
-                    });
                 if let Some(dep_source) =
-                    dep_id.and_then(|id| files.get(&id).map(|e| e.source.clone()))
+                    self.resolve_dep_source(canonical, &req.resolved_canonical_id, &req.specifier)
                 {
                     map.insert(req.resolved_canonical_id.clone(), dep_source);
                 }
@@ -688,13 +759,21 @@ impl VerterHost {
             let tpl_arc = Arc::new(tpl);
             snapshot.template = Some(Arc::clone(&tpl_arc));
 
-            // Persist on entry for inline templates only. Files with external src
+            // Persist for inline templates only. Files with external src
             // blocks are NOT persisted to avoid stale cache when the external
             // dep changes (reverse-dep invalidation only clears compile_slots).
             if src_blocks.is_empty() {
-                let mut files = write_lock(&self.files);
-                if let Some(entry) = files.get_mut(canonical) {
-                    entry.template_analysis = Some(tpl_arc);
+                #[cfg(feature = "scheduler")]
+                if let Some(mut cc) = self.compile_cache.get_mut(canonical) {
+                    cc.raw_template_analysis = Some(tpl_arc);
+                }
+
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    let mut files = write_lock(&self.files);
+                    if let Some(entry) = files.get_mut(canonical) {
+                        entry.template_analysis = Some(tpl_arc);
+                    }
                 }
             }
         }
@@ -722,93 +801,199 @@ impl VerterHost {
             }
         }
 
-        let files = read_lock(&self.files);
-        let entry = files.get(&canonical)?;
-
-        // If analysis wasn't fully computed during upsert, compute missing parts on demand
-        let scope = self.config.effective_scope();
-        if entry.file_kind == FileKind::VueSfc
-            && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
+        #[cfg(feature = "scheduler")]
         {
-            let source = entry.source.clone();
-            let stored_script = entry.script_analysis.clone();
-            let stored_styles = Arc::clone(&entry.style_analyses);
-            let template = entry.template_analysis.clone();
-            let cached_parse = entry.cached_parse.clone();
-            let export_sigs = entry.export_signatures.clone();
-            drop(files);
+            use crate::host_executor::HostSourceData;
 
-            let mut script_analysis = if !scope.needs_script_analysis() {
-                if let Some(parsed) = cached_parse.as_deref() {
-                    crate::parse::build_script_analysis_from_parsed(parsed, &source)
+            let source_snap = self.scheduler.try_get_source(&canonical)?;
+            let hd = source_snap.downcast_data::<HostSourceData>()?;
+            let file_kind = hd.file_kind;
+            let source = source_snap.source.clone();
+            let cached_parse = hd.cached_parse.clone();
+
+            let scope = self.config.effective_scope();
+            if file_kind == FileKind::VueSfc
+                && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
+            {
+                let stored_script = hd.parse.script_analysis.clone();
+                let stored_styles = self
+                    .scheduler
+                    .try_get_analysis(&canonical)
+                    .and_then(|a| {
+                        a.downcast_data::<crate::host_executor::HostAnalysisData>()
+                            .map(|ad| Arc::clone(&ad.style_analyses))
+                    })
+                    .unwrap_or_else(|| Arc::new(Vec::new()));
+                let template = self
+                    .compile_cache
+                    .get(&canonical)
+                    .and_then(|cc| cc.raw_template_analysis.clone());
+                let export_sigs = self
+                    .scheduler
+                    .try_get_analysis(&canonical)
+                    .and_then(|a| {
+                        a.downcast_data::<crate::host_executor::HostAnalysisData>()
+                            .map(|ad| ad.export_signatures.clone())
+                    })
+                    .unwrap_or_default();
+                drop(source_snap);
+
+                let mut script_analysis = if !scope.needs_script_analysis() {
+                    if let Some(parsed) = cached_parse.as_deref() {
+                        crate::parse::build_script_analysis_from_parsed(parsed, &source)
+                    } else {
+                        crate::parse::build_script_analysis_from_source(&source)
+                    }
                 } else {
-                    crate::parse::build_script_analysis_from_source(&source)
-                }
-            } else {
-                // Script analysis was already computed during upsert
-                stored_script
-            };
-            let style_analyses = if !scope.needs_style_analysis() {
-                if let Some(parsed) = cached_parse.as_deref() {
-                    Arc::new(crate::parse::build_style_analyses_from_parsed(
-                        parsed, &source, &canonical,
-                    ))
+                    stored_script
+                };
+                let style_analyses = if !scope.needs_style_analysis() {
+                    if let Some(parsed) = cached_parse.as_deref() {
+                        Arc::new(crate::parse::build_style_analyses_from_parsed(
+                            parsed, &source, &canonical,
+                        ))
+                    } else {
+                        Arc::new(crate::parse::build_style_analyses_from_source(
+                            &source, &canonical,
+                        ))
+                    }
                 } else {
-                    Arc::new(crate::parse::build_style_analyses_from_source(
-                        &source, &canonical,
-                    ))
+                    stored_styles
+                };
+                if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+                    script_analysis.mark_bindings_used_in_style(&style_analyses);
                 }
-            } else {
-                stored_styles
-            };
-            // Cross-reference: mark script bindings referenced by CSS v-bind()
-            if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
-                script_analysis.mark_bindings_used_in_style(&style_analyses);
+                let mut snapshot = FileAnalysisSnapshot {
+                    imports: script_analysis.imports,
+                    module_references: Arc::new(script_analysis.module_references),
+                    bindings: script_analysis.bindings,
+                    macros: Arc::new(script_analysis.macros),
+                    macro_type_deps: Arc::new(script_analysis.macro_type_deps),
+                    script_flags: script_analysis.flags.bits(),
+                    styles: style_analyses,
+                    template,
+                    vue_api_calls: Arc::new(script_analysis.vue_api_calls),
+                    dom_query_calls: Arc::new(script_analysis.dom_query_calls),
+                    css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
+                    script_binding_occurrences: Arc::new(
+                        script_analysis.script_binding_occurrences,
+                    ),
+                    export_signatures: Arc::new(export_sigs),
+                    options_api: script_analysis.options_api,
+                    store_usages: Arc::new(script_analysis.store_usages),
+                    store_definitions: Arc::new(script_analysis.store_definitions),
+                    is_typescript: script_analysis.is_typescript,
+                };
+                self.resolve_snapshot_imports(&canonical, &mut snapshot);
+                self.enrich_destructured_bindings(&mut snapshot);
+                if scope.needs_template_analysis() {
+                    self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+                }
+                if self.config.deep_macro_resolution_type {
+                    self.enrich_imported_types(&canonical, &mut snapshot);
+                }
+                return Some(snapshot);
             }
-            // On-demand path: build fresh Arcs (not cached, but avoids deep clone)
-            let mut snapshot = FileAnalysisSnapshot {
-                imports: script_analysis.imports,
-                module_references: Arc::new(script_analysis.module_references),
-                bindings: script_analysis.bindings,
-                macros: Arc::new(script_analysis.macros),
-                macro_type_deps: Arc::new(script_analysis.macro_type_deps),
-                script_flags: script_analysis.flags.bits(),
-                styles: style_analyses,
-                template,
-                vue_api_calls: Arc::new(script_analysis.vue_api_calls),
-                dom_query_calls: Arc::new(script_analysis.dom_query_calls),
-                css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
-                script_binding_occurrences: Arc::new(script_analysis.script_binding_occurrences),
-                export_signatures: Arc::new(export_sigs),
-                options_api: script_analysis.options_api,
-                store_usages: Arc::new(script_analysis.store_usages),
-                store_definitions: Arc::new(script_analysis.store_definitions),
-                is_typescript: script_analysis.is_typescript,
-            };
+            drop(source_snap);
+
+            let mut snapshot = self.build_snapshot_from_scheduler(&canonical)?;
             self.resolve_snapshot_imports(&canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
-            if scope.needs_template_analysis() {
+            if self.config.effective_scope().needs_template_analysis() {
                 self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
             }
             if self.config.deep_macro_resolution_type {
                 self.enrich_imported_types(&canonical, &mut snapshot);
             }
-            return Some(snapshot);
+            Some(snapshot)
         }
 
-        // Fast path: Arc::clone for 9 immutable fields, deep clone only imports + bindings
-        let mut snapshot = Self::build_snapshot_from_entry(entry);
-        // Drop the files lock before resolving (resolve_snapshot_imports acquires its own)
-        drop(files);
-        self.resolve_snapshot_imports(&canonical, &mut snapshot);
-        self.enrich_destructured_bindings(&mut snapshot);
-        if self.config.effective_scope().needs_template_analysis() {
-            self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(&canonical)?;
+
+            let scope = self.config.effective_scope();
+            if entry.file_kind == FileKind::VueSfc
+                && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
+            {
+                let source = entry.source.clone();
+                let stored_script = entry.script_analysis.clone();
+                let stored_styles = Arc::clone(&entry.style_analyses);
+                let template = entry.template_analysis.clone();
+                let cached_parse = entry.cached_parse.clone();
+                let export_sigs = entry.export_signatures.clone();
+                drop(files);
+
+                let mut script_analysis = if !scope.needs_script_analysis() {
+                    if let Some(parsed) = cached_parse.as_deref() {
+                        crate::parse::build_script_analysis_from_parsed(parsed, &source)
+                    } else {
+                        crate::parse::build_script_analysis_from_source(&source)
+                    }
+                } else {
+                    stored_script
+                };
+                let style_analyses = if !scope.needs_style_analysis() {
+                    if let Some(parsed) = cached_parse.as_deref() {
+                        Arc::new(crate::parse::build_style_analyses_from_parsed(
+                            parsed, &source, &canonical,
+                        ))
+                    } else {
+                        Arc::new(crate::parse::build_style_analyses_from_source(
+                            &source, &canonical,
+                        ))
+                    }
+                } else {
+                    stored_styles
+                };
+                if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+                    script_analysis.mark_bindings_used_in_style(&style_analyses);
+                }
+                let mut snapshot = FileAnalysisSnapshot {
+                    imports: script_analysis.imports,
+                    module_references: Arc::new(script_analysis.module_references),
+                    bindings: script_analysis.bindings,
+                    macros: Arc::new(script_analysis.macros),
+                    macro_type_deps: Arc::new(script_analysis.macro_type_deps),
+                    script_flags: script_analysis.flags.bits(),
+                    styles: style_analyses,
+                    template,
+                    vue_api_calls: Arc::new(script_analysis.vue_api_calls),
+                    dom_query_calls: Arc::new(script_analysis.dom_query_calls),
+                    css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
+                    script_binding_occurrences: Arc::new(
+                        script_analysis.script_binding_occurrences,
+                    ),
+                    export_signatures: Arc::new(export_sigs),
+                    options_api: script_analysis.options_api,
+                    store_usages: Arc::new(script_analysis.store_usages),
+                    store_definitions: Arc::new(script_analysis.store_definitions),
+                    is_typescript: script_analysis.is_typescript,
+                };
+                self.resolve_snapshot_imports(&canonical, &mut snapshot);
+                self.enrich_destructured_bindings(&mut snapshot);
+                if scope.needs_template_analysis() {
+                    self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+                }
+                if self.config.deep_macro_resolution_type {
+                    self.enrich_imported_types(&canonical, &mut snapshot);
+                }
+                return Some(snapshot);
+            }
+
+            let mut snapshot = Self::build_snapshot_from_entry(entry);
+            drop(files);
+            self.resolve_snapshot_imports(&canonical, &mut snapshot);
+            self.enrich_destructured_bindings(&mut snapshot);
+            if self.config.effective_scope().needs_template_analysis() {
+                self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+            }
+            if self.config.deep_macro_resolution_type {
+                self.enrich_imported_types(&canonical, &mut snapshot);
+            }
+            Some(snapshot)
         }
-        if self.config.deep_macro_resolution_type {
-            self.enrich_imported_types(&canonical, &mut snapshot);
-        }
-        Some(snapshot)
     }
 
     /// Returns the semantic hash for a file by canonical ID or alias.
@@ -901,24 +1086,34 @@ impl VerterHost {
         &self,
         canonical_ids: &[&str],
     ) -> Vec<(String, FileAnalysisSnapshot)> {
-        let files = read_lock(&self.files);
         let mut results = Vec::with_capacity(canonical_ids.len());
 
-        for &id in canonical_ids {
-            let canonical = self.resolve_alias_or_canonical(id);
-            // Eviction gate
-            #[cfg(feature = "scheduler")]
-            if let Some(cc) = self.compile_cache.get(&canonical) {
-                if cc.evicted {
-                    continue;
+        #[cfg(feature = "scheduler")]
+        {
+            for &id in canonical_ids {
+                let canonical = self.resolve_alias_or_canonical(id);
+                if let Some(cc) = self.compile_cache.get(&canonical) {
+                    if cc.evicted {
+                        continue;
+                    }
+                }
+                if let Some(snapshot) = self.build_snapshot_from_scheduler(&canonical) {
+                    results.push((canonical, snapshot));
                 }
             }
-            if let Some(entry) = files.get(&canonical) {
-                let snapshot = Self::build_snapshot_from_entry(entry);
-                results.push((canonical, snapshot));
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            for &id in canonical_ids {
+                let canonical = self.resolve_alias_or_canonical(id);
+                if let Some(entry) = files.get(&canonical) {
+                    let snapshot = Self::build_snapshot_from_entry(entry);
+                    results.push((canonical, snapshot));
+                }
             }
         }
-        drop(files);
 
         // Post-process: resolve imports and enrich bindings for all
         for (canonical, snapshot) in &mut results {
@@ -933,21 +1128,33 @@ impl VerterHost {
     /// Single lock acquisition for the entire file map. Use instead of
     /// `list_files()` + loop when you need analysis for every file.
     pub fn get_analysis_all(&self) -> Vec<(String, FileAnalysisSnapshot)> {
-        let files = read_lock(&self.files);
-        let mut results = Vec::with_capacity(files.len());
-
-        for (canonical, entry) in files.iter() {
-            // Eviction gate
-            #[cfg(feature = "scheduler")]
-            if let Some(cc) = self.compile_cache.get(canonical) {
-                if cc.evicted {
-                    continue;
+        #[cfg(feature = "scheduler")]
+        let mut results = {
+            let ids = self.scheduler.node_ids();
+            let mut results = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(cc) = self.compile_cache.get(&id) {
+                    if cc.evicted {
+                        continue;
+                    }
+                }
+                if let Some(snapshot) = self.build_snapshot_from_scheduler(&id) {
+                    results.push((id, snapshot));
                 }
             }
-            let snapshot = Self::build_snapshot_from_entry(entry);
-            results.push((canonical.clone(), snapshot));
-        }
-        drop(files);
+            results
+        };
+
+        #[cfg(not(feature = "scheduler"))]
+        let mut results = {
+            let files = read_lock(&self.files);
+            let mut results = Vec::with_capacity(files.len());
+            for (canonical, entry) in files.iter() {
+                let snapshot = Self::build_snapshot_from_entry(entry);
+                results.push((canonical.clone(), snapshot));
+            }
+            results
+        };
 
         for (canonical, snapshot) in &mut results {
             self.resolve_snapshot_imports(canonical, snapshot);
@@ -958,6 +1165,7 @@ impl VerterHost {
 
     /// Build a `FileAnalysisSnapshot` from a `FileEntry` using Arc::clone
     /// for immutable fields and deep clone for mutable fields (imports, bindings).
+    #[cfg(not(feature = "scheduler"))]
     fn build_snapshot_from_entry(entry: &crate::FileEntry) -> FileAnalysisSnapshot {
         FileAnalysisSnapshot {
             imports: entry.script_analysis.imports.clone(),
@@ -980,6 +1188,87 @@ impl VerterHost {
             store_usages: Arc::clone(&entry.arc_script_cache.store_usages),
             store_definitions: Arc::clone(&entry.arc_script_cache.store_definitions),
             is_typescript: entry.script_analysis.is_typescript,
+        }
+    }
+
+    /// Build a `FileAnalysisSnapshot` from scheduler snapshots and compile_cache.
+    ///
+    /// Reads `HostAnalysisData` for script analysis, export signatures, styles,
+    /// and pre-computed `AnalysisArcs`. Template analysis comes from compile_cache
+    /// (raw_template_analysis). Uses Arc::clone for all immutable fields.
+    #[cfg(feature = "scheduler")]
+    fn build_snapshot_from_scheduler(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
+        use crate::host_executor::HostAnalysisData;
+
+        let analysis_snap = self.scheduler.try_get_analysis(canonical)?;
+        let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
+
+        let template = self
+            .compile_cache
+            .get(canonical)
+            .and_then(|cc| cc.raw_template_analysis.clone());
+
+        Some(FileAnalysisSnapshot {
+            imports: ad.script_analysis.imports.clone(),
+            bindings: ad.script_analysis.bindings.clone(),
+            module_references: Arc::clone(&ad.arcs.module_references),
+            macros: Arc::clone(&ad.arcs.macros),
+            macro_type_deps: Arc::clone(&ad.arcs.macro_type_deps),
+            script_flags: ad.script_analysis.flags.bits(),
+            styles: Arc::clone(&ad.style_analyses),
+            template,
+            vue_api_calls: Arc::clone(&ad.arcs.vue_api_calls),
+            dom_query_calls: Arc::clone(&ad.arcs.dom_query_calls),
+            css_var_manipulations: Arc::clone(&ad.arcs.css_var_manipulations),
+            script_binding_occurrences: Arc::clone(&ad.arcs.script_binding_occurrences),
+            export_signatures: Arc::new(ad.export_signatures.clone()),
+            options_api: ad.script_analysis.options_api.clone(),
+            store_usages: Arc::clone(&ad.arcs.store_usages),
+            store_definitions: Arc::clone(&ad.arcs.store_definitions),
+            is_typescript: ad.script_analysis.is_typescript,
+        })
+    }
+
+    /// Resolve the source code of a dependency file.
+    ///
+    /// Tries scheduler (native) or files map (WASM) first, falling back to
+    /// VFS resolution + disk read. Used by template analysis and external src
+    /// block resolution.
+    pub(crate) fn resolve_dep_source(
+        &self,
+        owner_canonical: &str,
+        resolved_canonical_id: &str,
+        specifier: &str,
+    ) -> Option<Arc<str>> {
+        #[cfg(feature = "scheduler")]
+        {
+            // Try scheduler first (dep may be loaded)
+            if let Some(snap) = self.scheduler.try_get_source(resolved_canonical_id) {
+                return Some(snap.source.clone());
+            }
+            // Try VFS resolution fallback
+            let dep_id = self.resolve_loaded_dependency_canonical(
+                owner_canonical,
+                specifier,
+                verter_vfs::ResolveRequestKind::EsmImport,
+            );
+            dep_id.and_then(|id| self.scheduler.try_get_source(&id).map(|s| s.source.clone()))
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let dep_id = files
+                .contains_key(resolved_canonical_id)
+                .then(|| resolved_canonical_id.to_string())
+                .or_else(|| {
+                    self.resolve_loaded_dependency_canonical(
+                        owner_canonical,
+                        specifier,
+                        verter_vfs::ResolveRequestKind::EsmImport,
+                    )
+                });
+            dep_id.and_then(|id| files.get(&id).map(|e| e.source.clone()))
         }
     }
 
@@ -1027,8 +1316,6 @@ impl VerterHost {
             })
             .collect();
 
-        let files = read_lock(&self.files);
-
         for binding in &mut snapshot.bindings {
             if binding.reactivity_kind != ReactivityKind::MaybeRef {
                 continue;
@@ -1043,10 +1330,9 @@ impl VerterHost {
                 continue;
             };
 
-            // Resolve the composable's source file
             let import_source = match callee_import_source {
                 Some(src) => src.as_str(),
-                None => continue, // Local function, can't do cross-file
+                None => continue,
             };
 
             let canonical_id = match import_resolved.get(import_source) {
@@ -1054,17 +1340,31 @@ impl VerterHost {
                 None => continue,
             };
 
-            let Some(entry) = files.get(canonical_id) else {
-                continue;
-            };
+            // Look up exported_functions from the dep's analysis
+            #[cfg(feature = "scheduler")]
+            let composable_info = self.scheduler.try_get_analysis(canonical_id).and_then(|a| {
+                a.downcast_data::<crate::host_executor::HostAnalysisData>()
+                    .and_then(|ad| {
+                        ad.script_analysis
+                            .exported_functions
+                            .iter()
+                            .find(|f| f.name == *callee)
+                            .and_then(|f| f.composable.clone())
+                    })
+            });
 
-            // Find the exported function matching the callee name
-            let composable_info = entry
-                .script_analysis
-                .exported_functions
-                .iter()
-                .find(|f| f.name == *callee)
-                .and_then(|f| f.composable.as_ref());
+            #[cfg(not(feature = "scheduler"))]
+            let composable_info = {
+                let files = read_lock(&self.files);
+                files.get(canonical_id).and_then(|entry| {
+                    entry
+                        .script_analysis
+                        .exported_functions
+                        .iter()
+                        .find(|f| f.name == *callee)
+                        .and_then(|f| f.composable.clone())
+                })
+            };
 
             let Some(info) = composable_info else {
                 continue;
@@ -1145,9 +1445,12 @@ impl VerterHost {
             cc.diagnostics_generation += 1;
         }
 
-        let mut files = write_lock(&self.files);
-        if let Some(entry) = files.get_mut(&canonical) {
-            entry.diagnostics_generation += 1;
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(&canonical) {
+                entry.diagnostics_generation += 1;
+            }
         }
     }
 
@@ -1160,9 +1463,12 @@ impl VerterHost {
             cc.compile_slots.clear();
         }
 
-        let mut files = write_lock(&self.files);
-        if let Some(entry) = files.get_mut(&canonical) {
-            entry.compile_slots.clear();
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(&canonical) {
+                entry.compile_slots.clear();
+            }
         }
     }
 
@@ -1180,68 +1486,102 @@ impl VerterHost {
     pub fn remove(&self, canonical_or_alias: &str) -> Option<HostRemoveResult> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        let removed = {
-            let mut files = write_lock(&self.files);
-            files.remove(&canonical)
-        }?;
-
+        #[cfg(feature = "scheduler")]
         {
-            let mut alias_map = write_lock(&self.alias_to_canonical);
-            for alias in &removed.aliases {
-                alias_map.remove(alias);
+            // Read aliases and dependencies from compile_cache before removing.
+            let (aliases, deps) = {
+                let cc = self.compile_cache.get(&canonical)?;
+                (cc.aliases.clone(), cc.dependencies.clone())
+            };
+
+            {
+                let mut alias_map = write_lock(&self.alias_to_canonical);
+                for alias in &aliases {
+                    alias_map.remove(alias);
+                }
             }
+
+            let dependents = {
+                let rev = read_lock(&self.reverse_dependencies);
+                rev.get(&canonical).cloned().unwrap_or_default()
+            };
+
+            {
+                let mut rev = write_lock(&self.reverse_dependencies);
+                for dep in &deps {
+                    if let Some(owners) = rev.get_mut(dep) {
+                        owners.remove(&canonical);
+                        if owners.is_empty() {
+                            rev.remove(dep);
+                        }
+                    }
+                }
+                rev.remove(&canonical);
+            }
+
+            // Invalidate compile_cache slots for dependents.
+            for owner in &dependents {
+                if let Some(mut cc) = self.compile_cache.get_mut(owner) {
+                    cc.compile_slots.clear();
+                }
+            }
+
+            self.ws().notify_delete(&canonical);
+            self.compile_cache.remove(&canonical);
+            self.scheduler.remove(&canonical);
+
+            Some(HostRemoveResult {
+                canonical_id: canonical,
+            })
         }
 
-        // Collect dependents before modifying the reverse_dependencies map.
-        let dependents = {
-            let rev = read_lock(&self.reverse_dependencies);
-            rev.get(&canonical).cloned().unwrap_or_default()
-        };
-
+        #[cfg(not(feature = "scheduler"))]
         {
-            let mut rev = write_lock(&self.reverse_dependencies);
-            for dep in &removed.dependencies {
-                if let Some(owners) = rev.get_mut(dep) {
-                    owners.remove(&canonical);
-                    if owners.is_empty() {
-                        rev.remove(dep);
+            let removed = {
+                let mut files = write_lock(&self.files);
+                files.remove(&canonical)
+            }?;
+
+            {
+                let mut alias_map = write_lock(&self.alias_to_canonical);
+                for alias in &removed.aliases {
+                    alias_map.remove(alias);
+                }
+            }
+
+            let dependents = {
+                let rev = read_lock(&self.reverse_dependencies);
+                rev.get(&canonical).cloned().unwrap_or_default()
+            };
+
+            {
+                let mut rev = write_lock(&self.reverse_dependencies);
+                for dep in &removed.dependencies {
+                    if let Some(owners) = rev.get_mut(dep) {
+                        owners.remove(&canonical);
+                        if owners.is_empty() {
+                            rev.remove(dep);
+                        }
+                    }
+                }
+                rev.remove(&canonical);
+            }
+
+            if !dependents.is_empty() {
+                let mut files = write_lock(&self.files);
+                for owner in &dependents {
+                    if let Some(file) = files.get_mut(owner) {
+                        file.compile_slots.clear();
                     }
                 }
             }
-            rev.remove(&canonical);
+
+            self.ws().notify_delete(&canonical);
+
+            Some(HostRemoveResult {
+                canonical_id: canonical,
+            })
         }
-
-        // Invalidate compile slots of files that depended on the removed file.
-        if !dependents.is_empty() {
-            let mut files = write_lock(&self.files);
-            for owner in &dependents {
-                if let Some(file) = files.get_mut(owner) {
-                    file.compile_slots.clear();
-                }
-            }
-        }
-
-        // Also clear compile_cache slots for dependents
-        #[cfg(feature = "scheduler")]
-        for owner in &dependents {
-            if let Some(mut cc) = self.compile_cache.get_mut(owner) {
-                cc.compile_slots.clear();
-            }
-        }
-
-        // Clean up VFS state (overlay, snapshot, edges) so the file is
-        // no longer resolvable or tracked after deletion.
-        self.ws().notify_delete(&canonical);
-
-        #[cfg(feature = "scheduler")]
-        {
-            self.compile_cache.remove(&canonical);
-            self.scheduler.remove(&canonical);
-        }
-
-        Some(HostRemoveResult {
-            canonical_id: canonical,
-        })
     }
 
     /// Returns the list of virtual node kinds for a file.
@@ -1363,25 +1703,17 @@ impl VerterHost {
             old
         };
         #[cfg(not(feature = "scheduler"))]
-        let old_deps;
-
-        // Also write to files (shared by both paths, needed until Phase 3)
-        {
+        let old_deps = {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
-                #[cfg(not(feature = "scheduler"))]
-                {
-                    old_deps = entry.dependencies.clone();
-                }
+                let old = entry.dependencies.clone();
                 entry.dependencies = new_deps.clone();
                 entry.dependency_resolutions = dep_resolutions;
+                old
             } else {
-                #[cfg(not(feature = "scheduler"))]
-                {
-                    old_deps = std::collections::BTreeSet::new();
-                }
+                std::collections::BTreeSet::new()
             }
-        }
+        };
 
         self.update_reverse_deps(&canonical, &old_deps, &new_deps);
 
@@ -1420,20 +1752,42 @@ impl VerterHost {
         }
     }
 
-    fn raw_template_analysis_for_file(
+    pub(crate) fn raw_template_analysis_for_file(
         &self,
         canonical: &str,
     ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
-        let mut snapshot = {
-            let files = read_lock(&self.files);
-            let entry = files.get(canonical)?;
-            if entry.file_kind != FileKind::VueSfc {
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+            if let Some(cc) = self.compile_cache.get(canonical) {
+                if cc.evicted {
+                    return None;
+                }
+            }
+            let source_snap = self.scheduler.try_get_source(canonical)?;
+            let hd = source_snap.downcast_data::<HostSourceData>()?;
+            if hd.file_kind != FileKind::VueSfc {
                 return None;
             }
-            Self::build_snapshot_from_entry(entry)
-        };
-        self.compute_template_analysis_if_missing(canonical, &mut snapshot);
-        snapshot.template
+            drop(source_snap);
+            let mut snapshot = self.build_snapshot_from_scheduler(canonical)?;
+            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+            snapshot.template
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut snapshot = {
+                let files = read_lock(&self.files);
+                let entry = files.get(canonical)?;
+                if entry.file_kind != FileKind::VueSfc {
+                    return None;
+                }
+                Self::build_snapshot_from_entry(entry)
+            };
+            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+            snapshot.template
+        }
     }
 
     #[cfg(feature = "scheduler")]
@@ -1473,19 +1827,20 @@ impl VerterHost {
         profile: Option<&CompileProfile>,
     ) -> verter_analysis::CssVarFlow {
         let profile_hash = profile.map(compile_profile_hash);
-        let files = read_lock(&self.files);
-        let canonical_ids: Vec<String> = files
-            .keys()
-            .filter(|canonical_id| {
-                #[cfg(feature = "scheduler")]
-                if let Some(cc) = self.compile_cache.get(canonical_id.as_str()) {
-                    return !cc.evicted;
-                }
-                true
-            })
-            .cloned()
+
+        #[cfg(feature = "scheduler")]
+        let canonical_ids: Vec<String> = self
+            .scheduler
+            .node_ids()
+            .into_iter()
+            .filter(|id| self.compile_cache.get(id).map_or(true, |cc| !cc.evicted))
             .collect();
-        drop(files);
+
+        #[cfg(not(feature = "scheduler"))]
+        let canonical_ids: Vec<String> = {
+            let files = read_lock(&self.files);
+            files.keys().cloned().collect()
+        };
 
         let mut flow = verter_analysis::CssVarFlow {
             name: var_name.to_string(),
@@ -1603,20 +1958,54 @@ impl VerterHost {
         binding_name: &str,
     ) -> Option<(u32, u32)> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        #[cfg(feature = "scheduler")]
-        if let Some(cc) = self.compile_cache.get(&canonical) {
-            if cc.evicted {
-                return None;
-            }
-        }
-        let files = read_lock(&self.files);
-        let entry = files.get(&canonical)?;
 
-        // For Vue SFCs, look up script bindings (script-setup auto-exports)
-        if entry.file_kind == FileKind::VueSfc {
-            // Check bindings first (covers refs, functions, etc.)
-            if let Some(binding) = entry
-                .script_analysis
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::{HostAnalysisData, HostSourceData};
+
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    return None;
+                }
+            }
+            let source_snap = self.scheduler.try_get_source(&canonical)?;
+            let hd = source_snap.downcast_data::<HostSourceData>()?;
+            let file_kind = hd.file_kind;
+            drop(source_snap);
+
+            let analysis_snap = self.scheduler.try_get_analysis(&canonical)?;
+            let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
+
+            return Self::find_export_span(
+                file_kind,
+                &ad.script_analysis,
+                &ad.export_signatures,
+                binding_name,
+            );
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(&canonical)?;
+            Self::find_export_span(
+                entry.file_kind,
+                &entry.script_analysis,
+                &entry.export_signatures,
+                binding_name,
+            )
+        }
+    }
+
+    /// Shared logic for finding an export span from analysis data.
+    fn find_export_span(
+        file_kind: FileKind,
+        script_analysis: &verter_analysis::ScriptAnalysisSnapshot,
+        export_signatures: &[verter_analysis::ExportSignature],
+        binding_name: &str,
+    ) -> Option<(u32, u32)> {
+        if file_kind == FileKind::VueSfc {
+            if let Some(binding) = script_analysis
                 .bindings
                 .iter()
                 .find(|b| b.name == binding_name)
@@ -1625,41 +2014,30 @@ impl VerterHost {
                     return Some((binding.span.start, binding.span.end));
                 }
             }
-            // Check macro binding names (defineProps → props, defineEmits → emit, etc.)
-            for mac in &entry.script_analysis.macros {
+            for mac in &script_analysis.macros {
                 if mac.binding_name.as_deref() == Some(binding_name)
                     && (mac.span.start > 0 || mac.span.end > 0)
                 {
                     return Some((mac.span.start, mac.span.end));
                 }
             }
-            // "default" export for .vue files → first script block start
             if binding_name == "default" {
-                // For default imports of .vue files, the component IS the default export.
-                // Point to the <script setup> tag or first binding as a reasonable target.
-                if let Some(first_binding) = entry.script_analysis.bindings.first() {
+                if let Some(first_binding) = script_analysis.bindings.first() {
                     if first_binding.span.start > 0 || first_binding.span.end > 0 {
                         return Some((first_binding.span.start, first_binding.span.end));
                     }
                 }
-                // No bindings — try first macro (e.g., `defineProps<...>()` without assignment)
-                if let Some(first_macro) = entry.script_analysis.macros.first() {
+                if let Some(first_macro) = script_analysis.macros.first() {
                     if first_macro.span.start > 0 || first_macro.span.end > 0 {
                         return Some((first_macro.span.start, first_macro.span.end));
                     }
                 }
-                // Last resort: point to file start
                 return Some((0, 0));
             }
             return None;
         }
 
-        // For .ts/.js files, look up export_signatures
-        if let Some(sig) = entry
-            .export_signatures
-            .iter()
-            .find(|s| s.name == binding_name)
-        {
+        if let Some(sig) = export_signatures.iter().find(|s| s.name == binding_name) {
             if sig.span.start > 0 || sig.span.end > 0 {
                 return Some((sig.span.start, sig.span.end));
             }
@@ -1689,117 +2067,113 @@ impl VerterHost {
                 return None;
             }
         }
-        let files = read_lock(&self.files);
         let mut visited = rustc_hash::FxHashSet::default();
-
-        self.follow_reexport_chain(&files, &canonical, binding_name, &mut visited)
+        self.follow_reexport_chain(&canonical, binding_name, &mut visited)
     }
 
     /// Internal recursive helper for following re-export chains.
     /// Uses a visited set keyed on `(canonical_id, binding_name)` to detect cycles.
     fn follow_reexport_chain(
         &self,
-        files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
         canonical_id: &str,
         binding_name: &str,
         visited: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<(String, u32, u32)> {
-        // Cycle detection: if we've seen this (file, binding) pair before, stop
         if !visited.insert((canonical_id.to_string(), binding_name.to_string())) {
             return None;
         }
 
-        let entry = files.get(canonical_id)?;
-
-        // For Vue SFCs, resolve directly (they don't have re-exports in export_signatures)
-        if entry.file_kind == crate::FileKind::VueSfc {
-            // Check bindings
-            if let Some(binding) = entry
-                .script_analysis
-                .bindings
-                .iter()
-                .find(|b| b.name == binding_name)
-            {
-                if binding.span.start > 0 || binding.span.end > 0 {
-                    return Some((
-                        canonical_id.to_string(),
-                        binding.span.start,
-                        binding.span.end,
-                    ));
-                }
-            }
-            // Check macro bindings
-            for mac in &entry.script_analysis.macros {
-                if mac.binding_name.as_deref() == Some(binding_name)
-                    && (mac.span.start > 0 || mac.span.end > 0)
-                {
-                    return Some((canonical_id.to_string(), mac.span.start, mac.span.end));
-                }
-            }
-            // "default" export → first binding, then first macro, then file start
-            if binding_name == "default" {
-                if let Some(first_binding) = entry.script_analysis.bindings.first() {
-                    if first_binding.span.start > 0 || first_binding.span.end > 0 {
-                        return Some((
-                            canonical_id.to_string(),
-                            first_binding.span.start,
-                            first_binding.span.end,
-                        ));
-                    }
-                }
-                // No bindings — try first macro (e.g., `defineProps<...>()` without assignment)
-                if let Some(first_macro) = entry.script_analysis.macros.first() {
-                    if first_macro.span.start > 0 || first_macro.span.end > 0 {
-                        return Some((
-                            canonical_id.to_string(),
-                            first_macro.span.start,
-                            first_macro.span.end,
-                        ));
-                    }
-                }
-                // Last resort: point to file start (the SFC itself IS the default export)
-                return Some((canonical_id.to_string(), 0, 0));
-            }
-            return None;
-        }
-
-        // For .ts/.js files, look up export_signatures
-        if let Some(sig) = entry
-            .export_signatures
-            .iter()
-            .find(|s| s.name == binding_name)
+        #[cfg(feature = "scheduler")]
         {
-            // If it's a re-export, follow the chain
-            if let (Some(ref source), Some(ref local_name)) =
-                (&sig.reexport_source, &sig.reexport_local)
-            {
-                // Resolve the source module to a canonical ID
-                let resolved_target = {
-                    let ctx = verter_vfs::ResolutionContext {
-                        phase: verter_vfs::ResolvePhase::ProviderGraph,
-                        kind: verter_vfs::ResolveRequestKind::EsmImport,
-                    };
-                    self.resolve_via_vfs(canonical_id, source, ctx)
-                };
-                if let Some(target_canonical) = resolved_target {
-                    return self.follow_reexport_chain(
-                        files,
-                        &target_canonical,
-                        local_name,
-                        visited,
-                    );
-                }
-                // Can't resolve source → stop
-                return None;
+            use crate::host_executor::{HostAnalysisData, HostSourceData};
+
+            let source_snap = self.scheduler.try_get_source(canonical_id)?;
+            let hd = source_snap.downcast_data::<HostSourceData>()?;
+            let file_kind = hd.file_kind;
+            drop(source_snap);
+
+            let analysis_snap = self.scheduler.try_get_analysis(canonical_id)?;
+            let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
+
+            if file_kind == crate::FileKind::VueSfc {
+                return Self::find_export_span(
+                    file_kind,
+                    &ad.script_analysis,
+                    &ad.export_signatures,
+                    binding_name,
+                )
+                .map(|(start, end)| (canonical_id.to_string(), start, end));
             }
 
-            // Local export — return span in this file
-            if sig.span.start > 0 || sig.span.end > 0 {
-                return Some((canonical_id.to_string(), sig.span.start, sig.span.end));
+            if let Some(sig) = ad.export_signatures.iter().find(|s| s.name == binding_name) {
+                if let (Some(ref source), Some(ref local_name)) =
+                    (&sig.reexport_source, &sig.reexport_local)
+                {
+                    let resolved_target = {
+                        let ctx = verter_vfs::ResolutionContext {
+                            phase: verter_vfs::ResolvePhase::ProviderGraph,
+                            kind: verter_vfs::ResolveRequestKind::EsmImport,
+                        };
+                        self.resolve_via_vfs(canonical_id, source, ctx)
+                    };
+                    if let Some(target_canonical) = resolved_target {
+                        return self.follow_reexport_chain(&target_canonical, local_name, visited);
+                    }
+                    return None;
+                }
+
+                if sig.span.start > 0 || sig.span.end > 0 {
+                    return Some((canonical_id.to_string(), sig.span.start, sig.span.end));
+                }
             }
+
+            None
         }
 
-        None
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let (file_kind, export_signatures) = {
+                let files = read_lock(&self.files);
+                let entry = files.get(canonical_id)?;
+                (entry.file_kind, entry.export_signatures.clone())
+            };
+
+            if file_kind == crate::FileKind::VueSfc {
+                let files = read_lock(&self.files);
+                let entry = files.get(canonical_id)?;
+                return Self::find_export_span(
+                    entry.file_kind,
+                    &entry.script_analysis,
+                    &entry.export_signatures,
+                    binding_name,
+                )
+                .map(|(start, end)| (canonical_id.to_string(), start, end));
+            }
+
+            if let Some(sig) = export_signatures.iter().find(|s| s.name == binding_name) {
+                if let (Some(ref source), Some(ref local_name)) =
+                    (&sig.reexport_source, &sig.reexport_local)
+                {
+                    let resolved_target = {
+                        let ctx = verter_vfs::ResolutionContext {
+                            phase: verter_vfs::ResolvePhase::ProviderGraph,
+                            kind: verter_vfs::ResolveRequestKind::EsmImport,
+                        };
+                        self.resolve_via_vfs(canonical_id, source, ctx)
+                    };
+                    if let Some(target_canonical) = resolved_target {
+                        return self.follow_reexport_chain(&target_canonical, local_name, visited);
+                    }
+                    return None;
+                }
+
+                if sig.span.start > 0 || sig.span.end > 0 {
+                    return Some((canonical_id.to_string(), sig.span.start, sig.span.end));
+                }
+            }
+
+            None
+        }
     }
 
     /// Resolve an import specifier to its canonical ID using the host's file map,
@@ -1837,32 +2211,65 @@ impl VerterHost {
                 return Vec::new();
             }
         }
-        let files = read_lock(&self.files);
         let mut visiting = rustc_hash::FxHashSet::default();
-        self.collect_resolved_exports(&files, &canonical, &mut visiting)
+        self.collect_resolved_exports(&canonical, &mut visiting)
     }
 
     /// Recursively collect resolved exports from a file, following re-export chains.
     fn collect_resolved_exports(
         &self,
-        files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
         canonical_id: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Vec<ResolvedExport> {
-        // Cycle detection
         if !visiting.insert(canonical_id.to_string()) {
             return Vec::new();
         }
 
-        let Some(entry) = files.get(canonical_id) else {
-            visiting.remove(canonical_id);
-            return Vec::new();
+        #[cfg(feature = "scheduler")]
+        let (file_kind, export_signatures) = {
+            use crate::host_executor::{HostAnalysisData, HostSourceData};
+
+            let source_snap = match self.scheduler.try_get_source(canonical_id) {
+                Some(s) => s,
+                None => {
+                    visiting.remove(canonical_id);
+                    return Vec::new();
+                }
+            };
+            let hd = match source_snap.downcast_data::<HostSourceData>() {
+                Some(d) => d,
+                None => {
+                    visiting.remove(canonical_id);
+                    return Vec::new();
+                }
+            };
+            let file_kind = hd.file_kind;
+            drop(source_snap);
+
+            let sigs = self
+                .scheduler
+                .try_get_analysis(canonical_id)
+                .and_then(|a| {
+                    a.downcast_data::<HostAnalysisData>()
+                        .map(|ad| ad.export_signatures.clone())
+                })
+                .unwrap_or_default();
+            (file_kind, sigs)
+        };
+
+        #[cfg(not(feature = "scheduler"))]
+        let (file_kind, export_signatures) = {
+            let files = read_lock(&self.files);
+            let Some(entry) = files.get(canonical_id) else {
+                visiting.remove(canonical_id);
+                return Vec::new();
+            };
+            (entry.file_kind, entry.export_signatures.clone())
         };
 
         let mut results = Vec::new();
 
-        // For Vue SFCs, export "default" pointing to the first binding
-        if entry.file_kind == crate::FileKind::VueSfc {
+        if file_kind == crate::FileKind::VueSfc {
             results.push(ResolvedExport {
                 name: "default".to_string(),
                 is_type: false,
@@ -1873,10 +2280,8 @@ impl VerterHost {
             return results;
         }
 
-        // For .ts/.js files, iterate export_signatures
-        for sig in &entry.export_signatures {
+        for sig in &export_signatures {
             if sig.name == "*" {
-                // Wildcard re-export: export * from './module'
                 if let Some(ref source) = sig.reexport_source {
                     let resolved_target = {
                         let ctx = verter_vfs::ResolutionContext {
@@ -1886,9 +2291,8 @@ impl VerterHost {
                         self.resolve_via_vfs(canonical_id, source, ctx)
                     };
                     if let Some(target) = resolved_target {
-                        let nested = self.collect_resolved_exports(files, &target, visiting);
+                        let nested = self.collect_resolved_exports(&target, visiting);
                         for mut export in nested {
-                            // Trace the source through to the ultimate origin
                             if export.source_canonical_id.is_none() {
                                 export.source_canonical_id = Some(target.clone());
                             }
@@ -1902,7 +2306,6 @@ impl VerterHost {
             if let (Some(ref source), Some(ref local_name)) =
                 (&sig.reexport_source, &sig.reexport_local)
             {
-                // Named re-export: follow chain to find ultimate source
                 let resolved_target = {
                     let ctx = verter_vfs::ResolutionContext {
                         phase: verter_vfs::ResolvePhase::ProviderGraph,
@@ -1911,7 +2314,7 @@ impl VerterHost {
                     self.resolve_via_vfs(canonical_id, source, ctx)
                 };
                 if let Some(target) = resolved_target {
-                    let resolved = self.resolve_single_export(files, &target, local_name, visiting);
+                    let resolved = self.resolve_single_export(&target, local_name, visiting);
                     let (src_id, src_name) = match resolved {
                         Some((cid, n)) => (Some(cid), n),
                         None => (Some(target.clone()), local_name.clone()),
@@ -1923,7 +2326,6 @@ impl VerterHost {
                         source_name: src_name,
                     });
                 } else {
-                    // Can't resolve target — include as unresolved re-export
                     results.push(ResolvedExport {
                         name: sig.name.clone(),
                         is_type: sig.is_type,
@@ -1932,7 +2334,6 @@ impl VerterHost {
                     });
                 }
             } else {
-                // Local export
                 results.push(ResolvedExport {
                     name: sig.name.clone(),
                     is_type: sig.is_type,
@@ -1950,23 +2351,42 @@ impl VerterHost {
     /// Returns (ultimate_canonical_id, ultimate_name) or None if unresolvable.
     fn resolve_single_export(
         &self,
-        files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
         canonical_id: &str,
         name: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<(String, String)> {
-        let entry = files.get(canonical_id)?;
+        #[cfg(feature = "scheduler")]
+        let (file_kind, export_signatures) = {
+            use crate::host_executor::{HostAnalysisData, HostSourceData};
+            let source_snap = self.scheduler.try_get_source(canonical_id)?;
+            let hd = source_snap.downcast_data::<HostSourceData>()?;
+            let fk = hd.file_kind;
+            drop(source_snap);
+            let sigs = self
+                .scheduler
+                .try_get_analysis(canonical_id)
+                .and_then(|a| {
+                    a.downcast_data::<HostAnalysisData>()
+                        .map(|ad| ad.export_signatures.clone())
+                })
+                .unwrap_or_default();
+            (fk, sigs)
+        };
 
-        // Vue SFCs — always resolve here
-        if entry.file_kind == crate::FileKind::VueSfc {
+        #[cfg(not(feature = "scheduler"))]
+        let (file_kind, export_signatures) = {
+            let files = read_lock(&self.files);
+            let entry = files.get(canonical_id)?;
+            (entry.file_kind, entry.export_signatures.clone())
+        };
+
+        if file_kind == crate::FileKind::VueSfc {
             return Some((canonical_id.to_string(), name.to_string()));
         }
 
-        // Look up in export_signatures
-        let sig = entry.export_signatures.iter().find(|s| s.name == name)?;
+        let sig = export_signatures.iter().find(|s| s.name == name)?;
 
         if let (Some(ref source), Some(ref local)) = (&sig.reexport_source, &sig.reexport_local) {
-            // Another re-export — follow if no cycle
             if visiting.contains(canonical_id) {
                 return Some((canonical_id.to_string(), name.to_string()));
             }
@@ -1981,13 +2401,12 @@ impl VerterHost {
             visiting.remove(canonical_id);
 
             if let Some(target_id) = target {
-                self.resolve_single_export(files, &target_id, local, visiting)
+                self.resolve_single_export(&target_id, local, visiting)
                     .or(Some((target_id, local.clone())))
             } else {
                 Some((canonical_id.to_string(), name.to_string()))
             }
         } else {
-            // Local — found the ultimate source
             Some((canonical_id.to_string(), name.to_string()))
         }
     }
@@ -2174,6 +2593,7 @@ const msg = ref('hello')
         .unwrap();
     }
 
+    #[cfg(not(feature = "scheduler"))]
     fn mutate_lazy_analysis_source(host: &VerterHost) {
         let mut files = crate::shared::write_lock(&host.files);
         let entry = files.get_mut("App.vue").expect("App.vue should exist");
@@ -2186,6 +2606,7 @@ const msg = ref('hello')
         entry.source = Arc::from(broken);
     }
 
+    #[cfg(not(feature = "scheduler"))]
     fn clear_cached_parse(host: &VerterHost) {
         let mut files = crate::shared::write_lock(&host.files);
         let entry = files.get_mut("App.vue").expect("App.vue should exist");
@@ -2397,6 +2818,12 @@ const msg = ref('hello')
     fn get_analysis_uses_cached_parse_for_lazy_analysis() {
         let host = make_lazy_host();
         upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
+
+        // On the scheduler path, source is immutable in the scheduler snapshot,
+        // so mutating host.files has no effect. The scheduler path reads from
+        // HostSourceData.cached_parse directly. We just verify get_analysis()
+        // returns correct lazy-recomputed data with AnalysisLevel::None.
+        #[cfg(not(feature = "scheduler"))]
         mutate_lazy_analysis_source(&host);
 
         let analysis = host.get_analysis("App.vue").unwrap();
@@ -2431,6 +2858,11 @@ const msg = ref('hello')
     fn get_analysis_falls_back_when_cached_parse_missing() {
         let host = make_lazy_host();
         upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
+
+        // On the scheduler path, cached_parse is immutable in HostSourceData
+        // and always present for Vue SFCs. The scheduler path handles both
+        // cached_parse present and absent cases. We just verify correctness.
+        #[cfg(not(feature = "scheduler"))]
         clear_cached_parse(&host);
 
         let analysis = host.get_analysis("App.vue").unwrap();
@@ -3050,7 +3482,25 @@ const bar = 1
         );
 
         // Verify stored data is not mutated by checking that the
-        // internal FileEntry's imports still have None
+        // internal stored imports still have None
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+            let source_snap = host
+                .scheduler
+                .try_get_source("/project/Parent.vue")
+                .expect("scheduler should have Parent.vue");
+            let hd = source_snap
+                .downcast_data::<HostSourceData>()
+                .expect("source data should be HostSourceData");
+            assert!(
+                hd.parse.script_analysis.imports[0]
+                    .resolved_canonical_id
+                    .is_none(),
+                "stored import should NOT be mutated by get_analysis enrichment"
+            );
+        }
+        #[cfg(not(feature = "scheduler"))]
         {
             let files = crate::shared::read_lock(&host.files);
             let entry = files.get("/project/Parent.vue").unwrap();

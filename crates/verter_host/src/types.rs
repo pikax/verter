@@ -1,5 +1,6 @@
 #[cfg(feature = "host_metrics")]
 use std::collections::BTreeMap;
+#[cfg(any(not(feature = "scheduler"), test))]
 use std::collections::BTreeSet;
 #[cfg(feature = "host_metrics")]
 use std::collections::HashMap;
@@ -930,6 +931,7 @@ pub(crate) struct CompileSlot {
     pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
+    #[cfg_attr(feature = "scheduler", allow(dead_code))]
     pub(crate) last_access_tick: u64,
     /// Combined TSX output for LSP type checking. Not a virtual file.
     pub(crate) tsx: Option<CachedTsx>,
@@ -975,6 +977,8 @@ pub(crate) struct CompileInput {
 ///
 /// Built once during upsert and shared across all `get_analysis()` calls.
 /// These fields are never mutated after construction, so Arc sharing is safe.
+/// On the scheduler path, `AnalysisArcs` in `HostAnalysisData` serves this role.
+#[cfg(any(not(feature = "scheduler"), test))]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScriptAnalysisArcs {
     pub(crate) module_references: Arc<Vec<verter_analysis::AnalyzedModuleReference>>,
@@ -989,6 +993,7 @@ pub(crate) struct ScriptAnalysisArcs {
     pub(crate) store_definitions: Arc<Vec<verter_analysis::types::StoreDefinition>>,
 }
 
+#[cfg(not(feature = "scheduler"))]
 impl ScriptAnalysisArcs {
     /// Build Arc-wrapped caches from a script analysis snapshot.
     pub(crate) fn from_analysis(sa: &verter_analysis::ScriptAnalysisSnapshot) -> Self {
@@ -1022,6 +1027,7 @@ pub struct DependencyResolution {
     pub possible_canonical_ids: Vec<String>,
 }
 
+#[cfg(any(not(feature = "scheduler"), test))]
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
     // ── Identity ──────────────────────────────────────────────────────
@@ -1101,8 +1107,8 @@ impl FileMeta {
     }
 }
 
+#[cfg(any(not(feature = "scheduler"), test))]
 impl FileEntry {
-    #[cfg_attr(feature = "scheduler", allow(dead_code))]
     pub(crate) fn all_virtual_nodes(&self) -> Vec<VirtualNodeKind> {
         self.meta.virtual_nodes()
     }

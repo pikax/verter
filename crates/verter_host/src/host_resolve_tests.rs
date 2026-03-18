@@ -3,6 +3,7 @@ use std::sync::Arc;
 use verter_span::Span;
 use verter_vfs::WorkspaceAccess;
 
+#[cfg(not(feature = "scheduler"))]
 use crate::shared::read_lock;
 use crate::{
     BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileKind,
@@ -53,6 +54,26 @@ fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::Diagnosti
         canonical_id: Some(canonical_id.to_string()),
         node_kind: Some(VirtualNodeKind::Main),
         compile_profile: profile(),
+    }) {
+        Err(HostError::CompileError { diagnostics }) => diagnostics,
+        Err(other) => panic!("expected compile error, got {other:?}"),
+        Ok(result) => panic!(
+            "expected compile error, got successful response {}",
+            result.id
+        ),
+    }
+}
+
+fn compile_main_error_with_profile(
+    host: &VerterHost,
+    canonical_id: &str,
+    compile_profile: &CompileProfile,
+) -> crate::DiagnosticsSnapshot {
+    match host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(canonical_id.to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: compile_profile.clone(),
     }) {
         Err(HostError::CompileError { diagnostics }) => diagnostics,
         Err(other) => panic!("expected compile error, got {other:?}"),
@@ -135,6 +156,19 @@ fn assert_missing_src_compile_error(
         "missing external source span should point at the owning tag"
     );
 
+    #[cfg(feature = "scheduler")]
+    {
+        let compile_slots_empty = host
+            .compile_cache
+            .get(canonical_id)
+            .map(|cc| cc.compile_slots.is_empty())
+            .unwrap_or(true);
+        assert!(
+            compile_slots_empty,
+            "failed compile must not leave cached outputs behind"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get(canonical_id).unwrap();
@@ -247,6 +281,19 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
         "macro type dep span should point at the owning import"
     );
 
+    #[cfg(feature = "scheduler")]
+    {
+        let compile_slots_empty = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .map(|cc| cc.compile_slots.is_empty())
+            .unwrap_or(true);
+        assert!(
+            compile_slots_empty,
+            "failed macro type dep compile must not cache outputs"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/src/Comp.vue").unwrap();
@@ -509,6 +556,55 @@ fn public_api_with_profile_uses_override_script_state() {
 // ── TSC extract cache tests ──────────────────────────────────────────────
 
 #[test]
+fn public_api_with_profile_uses_override_script_state_for_imported_macro_type_dep() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Types.vue",
+        "<script setup lang=\"ts\">\nexport interface Props { raw: string }\n</script>\n<template><div/></template>",
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { Props } from './Types.vue'\ndefineProps<Props>()\n</script>\n<template><div/></template>",
+    );
+
+    let profile = CompileProfile::default();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "/src/Types.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Script,
+                index: 0,
+                code: Arc::from("export type Props = string"),
+                source_map: None,
+            }],
+        })
+        .expect("dependency script override should succeed");
+
+    let raw = public_api_code(&host, "/src/Comp.vue");
+    let overridden = compile_main_error_with_profile(&host, "/src/Comp.vue", &profile);
+    let invalid = find_diag(&overridden, "XInvalidMacroType");
+
+    assert!(
+        raw.contains("new(props?: import(\"vue\").PublicProps & Props)"),
+        "raw public api should still resolve successfully against the dependency's raw script state: {raw}"
+    );
+    assert!(
+        !raw.contains("overrideProp"),
+        "raw public api must not be polluted by dependency override state: {raw}"
+    );
+    assert!(
+        invalid.message.contains(
+            "defineProps() type argument 'Props' must resolve to an object-like props type."
+        ),
+        "profile-aware compile should resolve imported types through the dependency override: {:?}",
+        overridden.diagnostics
+    );
+}
+
+#[test]
 fn public_api_cache_populated_on_first_call() {
     let host = strict_host();
     upsert_vue(
@@ -525,12 +621,26 @@ defineProps<{ msg: string }>()
     assert!(api.is_some(), "should produce public API output");
 
     // Verify cache is populated
-    let files = read_lock(&host.files);
-    let entry = files.get("/test/Cached.vue").expect("entry exists");
-    assert!(
-        entry.cached_tsc_extract.is_some(),
-        "cached_tsc_extract should be populated after first get_public_api call"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/test/Cached.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.cached_tsc_extract.is_some(),
+            "cached_tsc_extract should be populated after first get_public_api call"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/test/Cached.vue").expect("entry exists");
+        assert!(
+            entry.cached_tsc_extract.is_some(),
+            "cached_tsc_extract should be populated after first get_public_api call"
+        );
+    }
 }
 
 #[test]
@@ -568,6 +678,15 @@ defineProps<{ a: string }>()
 
     // Populate cache
     let _api = host.get_public_api("/test/Clear.vue");
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/test/Clear.vue")
+            .expect("compile_cache entry exists");
+        assert!(cc.cached_tsc_extract.is_some(), "cache should be populated");
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/Clear.vue").expect("entry");
@@ -588,6 +707,18 @@ defineProps<{ b: number }>()
     );
 
     // Cache should be cleared
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/test/Clear.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.cached_tsc_extract.is_none(),
+            "cached_tsc_extract should be cleared after source change"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/Clear.vue").expect("entry");
@@ -612,6 +743,18 @@ defineProps<{ msg: string }>()
 
     // Populate cache
     let _api = host.get_public_api("/test/TplChange.vue");
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/test/TplChange.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.cached_tsc_extract.is_some(),
+            "cache should be populated after first get_public_api call"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/TplChange.vue").expect("entry");
@@ -632,6 +775,18 @@ defineProps<{ msg: string }>()
     );
 
     // Cache should be cleared because root_element_tag is template-derived
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/test/TplChange.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.cached_tsc_extract.is_none(),
+            "cached_tsc_extract should be cleared after template change"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/TplChange.vue").expect("entry");
@@ -698,6 +853,18 @@ defineProps<{ x: T }>()
 
     // Populate cache
     let _api = host.get_public_api("/test/DescChange.vue");
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/test/DescChange.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.cached_tsc_extract.is_some(),
+            "cache should be populated after first get_public_api call"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/DescChange.vue").expect("entry");
@@ -718,6 +885,18 @@ defineProps<{ x: T }>()
     );
 
     // Cache should be cleared because generic_params is descriptor-derived
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/test/DescChange.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.cached_tsc_extract.is_none(),
+            "cached_tsc_extract should be cleared after descriptor change (generic attr)"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/DescChange.vue").expect("entry");
@@ -1078,12 +1257,26 @@ fn exact_resolution_invalidates_on_dep_change() {
     );
 
     // Compile slots should be cleared
-    let files = read_lock(&host.files);
-    let entry = files.get("/src/Comp.vue").expect("entry exists");
-    assert!(
-        entry.compile_slots.is_empty(),
-        "compile slots should be cleared after dep change"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile slots should be cleared after dep change"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/src/Comp.vue").expect("entry exists");
+        assert!(
+            entry.compile_slots.is_empty(),
+            "compile slots should be cleared after dep change"
+        );
+    }
 }
 
 /// Barrel chain ending at a `.vue` SFC resolves the exported type.
@@ -1937,14 +2130,11 @@ fn workspace_resolution_used_for_aliased_imports() {
     // because no set_import_dependencies was called. Phase 3 (project_resolver)
     // will also miss because configure_projects was not called. But the workspace
     // has the @/ alias configured, so workspace-backed resolution should find it.
-    let files = read_lock(&host.files);
     let result = host.resolve_loaded_dependency_canonical(
-        &files,
         "/project/src/Comp.vue",
         "@/utils",
         verter_vfs::ResolveRequestKind::EsmImport,
     );
-    drop(files);
 
     // This SHOULD resolve to /project/src/utils.ts via the workspace's project resolver.
     assert_eq!(
@@ -1987,14 +2177,11 @@ fn workspace_resolution_does_not_override_exact_resolution() {
         }],
     );
 
-    let files = read_lock(&host.files);
     let result = host.resolve_loaded_dependency_canonical(
-        &files,
         "/src/Comp.vue",
         "./dep",
         verter_vfs::ResolveRequestKind::EsmImport,
     );
-    drop(files);
 
     // Phase 1 exact resolution should take priority
     assert_eq!(

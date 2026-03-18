@@ -2530,7 +2530,6 @@ impl VerterLanguageServer {
             if !self.documents.host().ensure_loaded(&child_canonical_id) {
                 return None;
             }
-            self.documents.host().ensure_loaded(&child_canonical_id);
             let profile = self.documents.tsx_profile.read().clone();
             let _ = self
                 .documents

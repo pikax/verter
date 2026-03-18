@@ -126,16 +126,45 @@ fn analysis_level_essential_runs_script_not_style() {
     let src = "<script setup>\nimport { ref } from 'vue'\nconst n = ref(1)\n</script>\n<template><div>{{n}}</div></template>\n<style scoped>.a { color: red }</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
-    let files = read_lock(&host.files);
-    let entry = files.get("Comp.vue").unwrap();
-    assert!(
-        !entry.script_analysis.imports.is_empty(),
-        "script analysis should be populated at AnalysisLevel::Essential"
-    );
-    assert!(
-        entry.style_analyses.is_empty(),
-        "style analyses should not be populated at AnalysisLevel::Essential"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        use crate::host_executor::{HostAnalysisData, HostSourceData};
+        let source_snap = host
+            .scheduler
+            .try_get_source("Comp.vue")
+            .expect("scheduler should have Comp.vue");
+        let hd = source_snap
+            .downcast_data::<HostSourceData>()
+            .expect("source data should be HostSourceData");
+        assert!(
+            !hd.parse.script_analysis.imports.is_empty(),
+            "script analysis should be populated at AnalysisLevel::Essential"
+        );
+        let empty_styles: Vec<verter_analysis::StyleBlockAnalysis> = Vec::new();
+        let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
+        let style_analyses = analysis_snap
+            .as_ref()
+            .and_then(|a| a.downcast_data::<HostAnalysisData>())
+            .map(|ad| ad.style_analyses.as_ref())
+            .unwrap_or(&empty_styles);
+        assert!(
+            style_analyses.is_empty(),
+            "style analyses should not be populated at AnalysisLevel::Essential"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("Comp.vue").unwrap();
+        assert!(
+            !entry.script_analysis.imports.is_empty(),
+            "script analysis should be populated at AnalysisLevel::Essential"
+        );
+        assert!(
+            entry.style_analyses.is_empty(),
+            "style analyses should not be populated at AnalysisLevel::Essential"
+        );
+    }
 }
 
 /// @ai-generated - AnalysisLevel::None skips all analysis during upsert
@@ -148,16 +177,45 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
     let src = "<script setup>\nimport { ref } from 'vue'\nconst n = ref(1)\n</script>\n<template><div>{{n}}</div></template>\n<style scoped>.a { color: red }</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
-    let files = read_lock(&host.files);
-    let entry = files.get("Comp.vue").unwrap();
-    assert!(
-        entry.script_analysis.imports.is_empty(),
-        "script analysis should not be populated at AnalysisLevel::None"
-    );
-    assert!(
-        entry.style_analyses.is_empty(),
-        "style analyses should not be populated at AnalysisLevel::None"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        use crate::host_executor::{HostAnalysisData, HostSourceData};
+        let source_snap = host
+            .scheduler
+            .try_get_source("Comp.vue")
+            .expect("scheduler should have Comp.vue");
+        let hd = source_snap
+            .downcast_data::<HostSourceData>()
+            .expect("source data should be HostSourceData");
+        assert!(
+            hd.parse.script_analysis.imports.is_empty(),
+            "script analysis should not be populated at AnalysisLevel::None"
+        );
+        let empty_styles: Vec<verter_analysis::StyleBlockAnalysis> = Vec::new();
+        let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
+        let style_analyses = analysis_snap
+            .as_ref()
+            .and_then(|a| a.downcast_data::<HostAnalysisData>())
+            .map(|ad| ad.style_analyses.as_ref())
+            .unwrap_or(&empty_styles);
+        assert!(
+            style_analyses.is_empty(),
+            "style analyses should not be populated at AnalysisLevel::None"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("Comp.vue").unwrap();
+        assert!(
+            entry.script_analysis.imports.is_empty(),
+            "script analysis should not be populated at AnalysisLevel::None"
+        );
+        assert!(
+            entry.style_analyses.is_empty(),
+            "style analyses should not be populated at AnalysisLevel::None"
+        );
+    }
 }
 
 /// @ai-generated - build_upsert_result: first insert returns all nodes as changed
@@ -571,12 +629,26 @@ fn custom_resolve_extensions_config() {
         })
         .unwrap();
 
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        comp.compile_slots.is_empty(),
-        "custom resolve_extensions should still match .ts"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "custom resolve_extensions should still match .ts"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "custom resolve_extensions should still match .ts"
+        );
+    }
 }
 
 /// @ai-generated - File kind change from VueSfc to NonSfc produces correct node list
@@ -616,20 +688,42 @@ fn generation_counter_increments_on_upsert() {
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src1);
 
-    let gen1 = {
-        let files = read_lock(&host.files);
-        files.get("Comp.vue").unwrap().generation
-    };
-    assert_eq!(gen1, 1);
+    #[cfg(feature = "scheduler")]
+    {
+        let gen1 = host
+            .compile_cache
+            .get("Comp.vue")
+            .expect("compile_cache entry should exist")
+            .generation;
+        assert_eq!(gen1, 1);
 
-    let src2 = "<script setup>const n = 2</script><template><div>{{n}}</div></template>";
-    let _ = upsert_vue(&host, "Comp.vue", src2);
+        let src2 = "<script setup>const n = 2</script><template><div>{{n}}</div></template>";
+        let _ = upsert_vue(&host, "Comp.vue", src2);
 
-    let gen2 = {
-        let files = read_lock(&host.files);
-        files.get("Comp.vue").unwrap().generation
-    };
-    assert_eq!(gen2, 2);
+        let gen2 = host
+            .compile_cache
+            .get("Comp.vue")
+            .expect("compile_cache entry should exist")
+            .generation;
+        assert_eq!(gen2, 2);
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let gen1 = {
+            let files = read_lock(&host.files);
+            files.get("Comp.vue").unwrap().generation
+        };
+        assert_eq!(gen1, 1);
+
+        let src2 = "<script setup>const n = 2</script><template><div>{{n}}</div></template>";
+        let _ = upsert_vue(&host, "Comp.vue", src2);
+
+        let gen2 = {
+            let files = read_lock(&host.files);
+            files.get("Comp.vue").unwrap().generation
+        };
+        assert_eq!(gen2, 2);
+    }
 }
 
 /// @ai-generated - import_resolves_to_dep: non-relative in dependency set
@@ -926,13 +1020,28 @@ fn relative_imports_auto_register_deps() {
     );
 
     // Check that ./types was resolved and added to dependencies
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        comp.dependencies.contains("/src/types"),
-        "relative import should auto-register as dependency, got: {:?}",
-        comp.dependencies
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry should exist");
+        assert!(
+            cc.dependencies.contains("/src/types"),
+            "relative import should auto-register as dependency, got: {:?}",
+            cc.dependencies
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.dependencies.contains("/src/types"),
+            "relative import should auto-register as dependency, got: {:?}",
+            comp.dependencies
+        );
+    }
 }
 
 /// @ai-generated - set_import_dependencies adds to reverse dep graph
@@ -1019,12 +1128,26 @@ fn set_import_dependencies_subsequent_upsert_invalidates() {
         .unwrap();
 
     // Comp.vue should be invalidated because it has a runtime import from this dep
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        comp.compile_slots.is_empty(),
-        "compile slots should be cleared when runtime dep changes"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile slots should be cleared when runtime dep changes"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "compile slots should be cleared when runtime dep changes"
+        );
+    }
 }
 
 #[test]
@@ -1057,12 +1180,26 @@ fn invalidate_dependents_of_works_when_dependency_was_never_loaded() {
 
     host.invalidate_dependents_of("/src/tempUtil.ts");
 
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        comp.compile_slots.is_empty(),
-        "compile slots should be cleared even when the deleted dependency was never loaded"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile slots should be cleared even when the deleted dependency was never loaded"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "compile slots should be cleared even when the deleted dependency was never loaded"
+        );
+    }
 }
 
 /// @ai-generated - Dep file with no export signatures → full invalidation (Tier 1 fallback)
@@ -1108,12 +1245,26 @@ fn smart_invalidation_no_signatures_full_invalidation() {
         .unwrap();
 
     // Comp.vue should be invalidated (full invalidation since no export signatures)
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        comp.compile_slots.is_empty(),
-        "compile slots should be cleared for Tier 1 fallback"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile slots should be cleared for Tier 1 fallback"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "compile slots should be cleared for Tier 1 fallback"
+        );
+    }
 }
 
 /// @ai-generated - Dep file unchanged export → SFC NOT invalidated
@@ -1162,13 +1313,27 @@ fn smart_invalidation_unchanged_export_no_invalidation() {
     .unwrap();
 
     // Comp.vue should still have a cache hit (MyType didn't change)
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
     // Compile slots should NOT be empty — the smart invalidation should have skipped it
-    assert!(
-        !comp.compile_slots.is_empty(),
-        "compile slots should not be cleared when only unused exports changed"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            !cc.compile_slots.is_empty(),
+            "compile slots should not be cleared when only unused exports changed"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            !comp.compile_slots.is_empty(),
+            "compile slots should not be cleared when only unused exports changed"
+        );
+    }
 }
 
 /// @ai-generated - strip_configured_extension: empty extensions → None
@@ -1254,12 +1419,26 @@ fn tier3_comment_added_no_invalidation() {
         })
         .unwrap();
 
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        !comp.compile_slots.is_empty(),
-        "compile slots should NOT be cleared when only comments changed (Tier 3 saves)"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            !cc.compile_slots.is_empty(),
+            "compile slots should NOT be cleared when only comments changed (Tier 3 saves)"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            !comp.compile_slots.is_empty(),
+            "compile slots should NOT be cleared when only comments changed (Tier 3 saves)"
+        );
+    }
 }
 
 /// @ai-generated - Tier 3: property added to dep type → invalidation
@@ -1304,12 +1483,26 @@ fn tier3_property_added_invalidates() {
         .unwrap();
 
     // Tier 3: resolved type shape changed → invalidation
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        comp.compile_slots.is_empty(),
-        "compile slots should be cleared when resolved type shape changed (prop added)"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile slots should be cleared when resolved type shape changed (prop added)"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "compile slots should be cleared when resolved type shape changed (prop added)"
+        );
+    }
 }
 
 /// @ai-generated - Tier 3: property type changed → invalidation
@@ -1353,12 +1546,26 @@ fn tier3_property_type_changed_invalidates() {
         })
         .unwrap();
 
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        comp.compile_slots.is_empty(),
-        "compile slots should be cleared when prop type changed"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile slots should be cleared when prop type changed"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "compile slots should be cleared when prop type changed"
+        );
+    }
 }
 
 /// @ai-generated - Tier 3: resolved_type_hashes are stored for future comparisons
@@ -1403,13 +1610,27 @@ fn tier3_stores_resolved_type_hashes() {
         .unwrap();
 
     // Check that resolved_type_hashes were stored
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
     let key = ("/src/types.ts".to_string(), "MyType".to_string());
-    assert!(
-        comp.resolved_type_hashes.contains_key(&key),
-        "resolved_type_hashes should store hash for (dep_id, type_name)"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.resolved_type_hashes.contains_key(&key),
+            "resolved_type_hashes should store hash for (dep_id, type_name)"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.resolved_type_hashes.contains_key(&key),
+            "resolved_type_hashes should store hash for (dep_id, type_name)"
+        );
+    }
 }
 
 /// @ai-generated - Tier 3: unrelated type changed in same file → NO invalidation
@@ -1458,12 +1679,26 @@ fn tier3_unrelated_type_change_no_invalidation() {
 
     // MyType unchanged → Tier 2 already skips (export hash matches)
     // Tier 3 not even needed here since Tier 2 already handles it
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        !comp.compile_slots.is_empty(),
-        "compile slots should NOT be cleared when only unrelated types changed"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            !cc.compile_slots.is_empty(),
+            "compile slots should NOT be cleared when only unrelated types changed"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            !comp.compile_slots.is_empty(),
+            "compile slots should NOT be cleared when only unrelated types changed"
+        );
+    }
 }
 
 /// @ai-generated - Tier 3: whitespace-only change to dep type → NO invalidation
@@ -1511,12 +1746,26 @@ fn tier3_whitespace_only_change_no_invalidation() {
         .unwrap();
 
     // Tier 3: resolved type shape is identical → no invalidation
-    let files = read_lock(&host.files);
-    let comp = files.get("/src/Comp.vue").unwrap();
-    assert!(
-        !comp.compile_slots.is_empty(),
-        "compile slots should NOT be cleared when resolved type shape is unchanged (Tier 3)"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/Comp.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            !cc.compile_slots.is_empty(),
+            "compile slots should NOT be cleared when resolved type shape is unchanged (Tier 3)"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            !comp.compile_slots.is_empty(),
+            "compile slots should NOT be cleared when resolved type shape is unchanged (Tier 3)"
+        );
+    }
 }
 
 /// @ai-generated - update_alias_map: removes old aliases, adds new ones
@@ -2103,18 +2352,42 @@ fn close_clears_all_caches() {
     upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
 
     // Verify the host has data
-    assert!(
-        !read_lock(&host.files).is_empty(),
-        "host should have files before close"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        assert!(
+            !host.scheduler.node_ids().is_empty(),
+            "host should have files before close"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        assert!(
+            !read_lock(&host.files).is_empty(),
+            "host should have files before close"
+        );
+    }
 
     // Close and verify everything is cleared
     host.close();
 
-    assert!(
-        read_lock(&host.files).is_empty(),
-        "files should be empty after close"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        assert!(
+            host.scheduler.node_ids().is_empty(),
+            "scheduler nodes should be empty after close"
+        );
+        assert!(
+            host.compile_cache.is_empty(),
+            "compile_cache should be empty after close"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        assert!(
+            read_lock(&host.files).is_empty(),
+            "files should be empty after close"
+        );
+    }
     assert!(
         read_lock(&host.alias_to_canonical).is_empty(),
         "alias_to_canonical should be empty after close"
@@ -2141,14 +2414,28 @@ fn close_allows_reuse() {
         "test2.vue",
         "<template><span>world</span></template>",
     );
-    assert!(
-        read_lock(&host.files).contains_key("test2.vue"),
-        "host should accept new files after close"
-    );
-    assert!(
-        !read_lock(&host.files).contains_key("test.vue"),
-        "previously closed files should not reappear"
-    );
+    #[cfg(feature = "scheduler")]
+    {
+        assert!(
+            host.scheduler.try_get_source("test2.vue").is_some(),
+            "host should accept new files after close"
+        );
+        assert!(
+            host.scheduler.try_get_source("test.vue").is_none(),
+            "previously closed files should not reappear"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        assert!(
+            read_lock(&host.files).contains_key("test2.vue"),
+            "host should accept new files after close"
+        );
+        assert!(
+            !read_lock(&host.files).contains_key("test.vue"),
+            "previously closed files should not reappear"
+        );
+    }
 }
 
 // ── Project resolver tests ───────────────────────────────────────
@@ -3520,19 +3807,130 @@ mod phase2a_upsert_tests {
     }
 
     #[test]
-    fn test_ensure_loaded_after_evict() {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(
-            &host,
-            "/src/App.vue",
-            "<template><div>hello</div></template>",
+    fn test_ensure_loaded_cold_load_creates_compile_cache_without_extra_generation() {
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from("<template><div>hello</div></template>"),
+        );
+        let host = VerterHost::new(HostConfig::default(), ws);
+
+        assert!(
+            host.compile_cache.get("/src/App.vue").is_none(),
+            "cold file should start without compile_cache state"
+        );
+
+        let loaded = host.ensure_loaded("/src/App.vue");
+        assert!(
+            loaded,
+            "ensure_loaded should succeed for a cold workspace file"
+        );
+
+        let snap = host
+            .scheduler_source("/src/App.vue")
+            .expect("scheduler should have the loaded source");
+        assert_eq!(
+            snap.generation, 1,
+            "cold ensure_loaded should not re-submit identical source and bump generation twice"
+        );
+
+        let cc = host
+            .compile_cache
+            .get("/src/App.vue")
+            .expect("ensure_loaded should materialize compile_cache state");
+        assert!(
+            !cc.evicted,
+            "cold ensure_loaded should leave the entry visible"
+        );
+        assert_eq!(
+            cc.generation, snap.generation,
+            "compile_cache generation should track the committed scheduler generation"
+        );
+    }
+
+    #[test]
+    fn test_upsert_fast_path_materializes_compile_cache_after_scheduler_only_load() {
+        use verter_scheduler::job::CompletionState;
+
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        let src = "<template><div>hello</div></template>";
+        ws.inject_file("/src/App.vue".to_string(), Arc::from(src));
+        let host = VerterHost::new(HostConfig::default(), ws);
+
+        let handle = host
+            .scheduler()
+            .submit_request(verter_scheduler::scheduler::Request {
+                file_id: "/src/App.vue".to_string(),
+                target: verter_scheduler::stage::TargetStage::Analysis,
+                priority: verter_scheduler::stage::Priority::Interactive,
+                source: None,
+            });
+
+        assert!(
+            matches!(handle.wait(), CompletionState::Ready(_)),
+            "scheduler-only cold load should succeed"
+        );
+        assert!(
+            host.compile_cache.get("/src/App.vue").is_none(),
+            "scheduler-only load should not implicitly create compile_cache state"
+        );
+
+        let result = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/src/App.vue".to_string()),
+                input_id: "/src/App.vue".to_string(),
+                source: Arc::from(src),
+                file_kind: FileKind::VueSfc,
+                aliases: Vec::new(),
+            })
+            .expect("byte-identical upsert should succeed");
+        assert!(
+            !result.changed,
+            "byte-identical upsert after scheduler-only load should remain a no-op"
+        );
+
+        let snap = host
+            .scheduler_source("/src/App.vue")
+            .expect("scheduler source should still exist");
+        let cc = host
+            .compile_cache
+            .get("/src/App.vue")
+            .expect("byte-identical upsert should still materialize compile_cache state");
+        assert_eq!(
+            cc.generation, snap.generation,
+            "fast-path upsert should align compile_cache generation with the scheduler"
+        );
+    }
+
+    #[test]
+    fn test_ensure_loaded_after_evict_reloads_workspace_source() {
+        let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+            verter_vfs::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+        let v1 = "<template><div>v1</div></template>";
+        let v2 = "<template><div>v2</div></template>";
+
+        ws.inject_file("/src/App.vue".to_string(), Arc::from(v1));
+        assert!(host.ensure_loaded("/src/App.vue"));
+        assert!(
+            host.get_source("/src/App.vue").unwrap().contains("v1"),
+            "initial load should reflect workspace v1"
         );
 
         host.evict("/src/App.vue");
+        ws.inject_file("/src/App.vue".to_string(), Arc::from(v2));
 
-        // ensure_loaded should see the evicted flag and re-integrate
         let loaded = host.ensure_loaded("/src/App.vue");
         assert!(loaded, "ensure_loaded should succeed after evict");
+        assert!(
+            host.get_source("/src/App.vue").unwrap().contains("v2"),
+            "ensure_loaded after evict must reload the latest workspace content"
+        );
 
         let cc = host.compile_cache.get("/src/App.vue").unwrap();
         assert!(!cc.evicted, "ensure_loaded should clear evicted flag");
@@ -3578,7 +3976,6 @@ mod phase2a_upsert_tests {
         );
         assert!(crate::shared::read_lock(&host.alias_to_canonical).is_empty());
         assert!(crate::shared::read_lock(&host.reverse_dependencies).is_empty());
-        assert!(crate::shared::read_lock(&host.files).is_empty());
     }
 
     #[test]

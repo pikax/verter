@@ -72,29 +72,56 @@ impl VerterHost {
     ///
     /// Returns `CrossFileResult` with per-file const prop sets and diagnostics.
     pub fn compute_cross_file_optimizations(&self) -> CrossFileResult {
-        let files = read_lock(&self.files);
-
         // Step 1: Build reverse render tree.
         // For each child canonical ID, collect all parent usages.
         let mut child_usages: FxHashMap<String, Vec<RenderTreeEdge>> = FxHashMap::default();
         let mut diagnostics = Vec::new();
 
-        for (parent_id, entry) in files.iter() {
-            let tpl = match &entry.template_analysis {
-                Some(t) => t,
-                None => continue,
-            };
+        // Collect (parent_id, template_analysis) pairs from the appropriate source.
+        #[cfg(feature = "scheduler")]
+        let parent_templates: Vec<(
+            String,
+            std::sync::Arc<verter_analysis::template::TemplateAnalysisSnapshot>,
+        )> = {
+            self.scheduler
+                .node_ids()
+                .into_iter()
+                .filter(|id| self.compile_cache.get(id).map_or(true, |cc| !cc.evicted))
+                .filter_map(|id| {
+                    // Use raw_template_analysis_for_file which lazily computes
+                    // template analysis if not already cached.
+                    let tpl = self.raw_template_analysis_for_file(&id);
+                    tpl.map(|t| (id, t))
+                })
+                .collect()
+        };
 
+        #[cfg(not(feature = "scheduler"))]
+        let parent_templates: Vec<(
+            String,
+            std::sync::Arc<verter_analysis::template::TemplateAnalysisSnapshot>,
+        )> = {
+            let files = read_lock(&self.files);
+            files
+                .iter()
+                .filter_map(|(id, entry)| {
+                    entry
+                        .template_analysis
+                        .as_ref()
+                        .map(|t| (id.clone(), std::sync::Arc::clone(t)))
+                })
+                .collect()
+        };
+
+        for (parent_id, tpl) in &parent_templates {
             for component in &tpl.components {
-                // Skip dynamic components — can't resolve at build time.
                 if component.is_dynamic {
                     continue;
                 }
 
-                // Resolve component to canonical ID.
                 let child_canonical = match &component.import_source {
                     Some(source) => self.resolve_via_vfs(
-                        &entry.canonical_id,
+                        parent_id,
                         source,
                         verter_vfs::ResolutionContext {
                             phase: verter_vfs::ResolvePhase::CodegenBlocker,
@@ -106,7 +133,7 @@ impl VerterHost {
 
                 let child_id = match child_canonical {
                     Some(id) => id,
-                    None => continue, // Skip unresolved components
+                    None => continue,
                 };
 
                 let prop_constness: Vec<(String, PropValueConstness)> = component
@@ -186,8 +213,6 @@ impl VerterHost {
                 const_prop_overrides.insert(child_id.clone(), const_props);
             }
         }
-
-        drop(files);
 
         // Step 4: Diff against previous overrides to find changed files.
         let prev_overrides = read_lock(&self.last_const_prop_overrides);

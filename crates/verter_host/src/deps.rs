@@ -12,7 +12,9 @@ use verter_analysis::project_resolver::{
 };
 
 use crate::id;
-use crate::shared::{read_lock, write_lock};
+use crate::shared::read_lock;
+#[cfg(not(feature = "scheduler"))]
+use crate::shared::write_lock;
 use crate::types::*;
 use crate::upsert::compute_changed_exports;
 
@@ -48,20 +50,49 @@ pub(crate) fn strip_configured_extension<'a>(
     None
 }
 
-/// Check if an import source from `file` resolves to `dependency_id`.
+/// Lightweight view of a dependent file's data needed for invalidation.
+///
+/// On the scheduler path, populated from `HostAnalysisData` + `CompileCacheEntry`.
+/// On the WASM path, populated from `FileEntry`. Avoids passing `&FileEntry` into
+/// invalidation logic, enabling the `files` map to be gated to WASM-only.
+pub(crate) struct DependentView {
+    pub(crate) canonical_id: String,
+    pub(crate) dependency_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
+    pub(crate) dependencies: BTreeSet<String>,
+    pub(crate) script_lang: Option<String>,
+    pub(crate) macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
+    pub(crate) imports: Vec<verter_analysis::AnalyzedImport>,
+    pub(crate) resolved_type_hashes: rustc_hash::FxHashMap<(String, String), Hash16>,
+}
+
+impl DependentView {
+    #[cfg(any(not(feature = "scheduler"), test))]
+    pub(crate) fn from_file_entry(entry: &FileEntry) -> Self {
+        Self {
+            canonical_id: entry.canonical_id.clone(),
+            dependency_resolutions: entry.dependency_resolutions.clone(),
+            dependencies: entry.dependencies.clone(),
+            script_lang: entry.meta.script_lang.clone(),
+            macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
+            imports: entry.script_analysis.imports.clone(),
+            resolved_type_hashes: entry.resolved_type_hashes.clone(),
+        }
+    }
+}
+
+/// Check if an import source from `view` resolves to `dependency_id`.
 /// Handles both relative paths (resolved via resolve_external) and
 /// non-relative paths (matched via the file's registered dependencies).
 ///
 /// Checks structured `dependency_resolutions` first for exact matches,
 /// then falls back to heuristic resolution.
-pub(crate) fn import_resolves_to_dep(
-    file: &FileEntry,
+fn import_resolves_to_dep_view(
+    view: &DependentView,
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
 ) -> bool {
-    // Check structured resolution records first (exact match).
-    if let Some(resolution) = file.dependency_resolutions.get(import_source) {
+    if let Some(resolution) = view.dependency_resolutions.get(import_source) {
         if let Some(ref resolved_id) = resolution.resolved_canonical_id {
             return resolved_id == dependency_id;
         }
@@ -75,26 +106,34 @@ pub(crate) fn import_resolves_to_dep(
     }
 
     if import_source.starts_with('.') {
-        let resolved = id::resolve_external(&file.canonical_id, import_source);
+        let resolved = id::resolve_external(&view.canonical_id, import_source);
         if resolved == dependency_id {
             return true;
         }
-        // Handle extensionless imports: `import './types'` resolves to `/src/types`,
-        // but dep canonical_id might be `/src/types.ts`. Use the SFC's script lang
-        // to prioritise matching extensions.
         if let Some(stem) = strip_configured_extension(
             dependency_id,
             resolve_extensions,
-            file.meta.script_lang.as_deref(),
+            view.script_lang.as_deref(),
         ) {
             return resolved == stem;
         }
         false
     } else {
-        // Non-relative import: it resolves to this dep if the dep is in the file's
-        // dependency set (registered via set_import_dependencies or auto-discovered)
-        file.dependencies.contains(dependency_id)
+        view.dependencies.contains(dependency_id)
     }
+}
+
+/// Check if an import source from `file` resolves to `dependency_id`.
+/// Legacy wrapper that delegates to `import_resolves_to_dep_view`.
+#[cfg(any(not(feature = "scheduler"), test))]
+pub(crate) fn import_resolves_to_dep(
+    file: &FileEntry,
+    import_source: &str,
+    dependency_id: &str,
+    resolve_extensions: &[String],
+) -> bool {
+    let view = DependentView::from_file_entry(file);
+    import_resolves_to_dep_view(&view, import_source, dependency_id, resolve_extensions)
 }
 
 /// A lightweight reader backed by a set of known file IDs.
@@ -120,26 +159,22 @@ impl verter_vfs::WorkspaceAccess for FileIdSetReader<'_> {
     }
 }
 
-/// Like [`import_resolves_to_dep`], but also consults the project resolver
-/// for aliased specifiers that heuristic matching cannot handle.
-pub(crate) fn import_resolves_to_dep_with_resolver(
-    file: &FileEntry,
+fn import_resolves_to_dep_with_resolver_view(
+    view: &DependentView,
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
     resolver: Option<&NativeProjectResolver>,
     file_ids: &rustc_hash::FxHashSet<String>,
 ) -> bool {
-    // Try heuristic first (fast path)
-    if import_resolves_to_dep(file, import_source, dependency_id, resolve_extensions) {
+    if import_resolves_to_dep_view(view, import_source, dependency_id, resolve_extensions) {
         return true;
     }
 
-    // If heuristic missed, try the project resolver
     if let Some(resolver) = resolver {
         let reader = FileIdSetReader { ids: file_ids };
         let request = ResolveRequest {
-            importer_id: file.canonical_id.clone(),
+            importer_id: view.canonical_id.clone(),
             specifier: import_source.to_string(),
             kind: ResolveRequestKind::EsmImport,
             phase: ResolvePhase::CodegenBlocker,
@@ -152,15 +187,40 @@ pub(crate) fn import_resolves_to_dep_with_resolver(
     false
 }
 
+/// Like [`import_resolves_to_dep`], but also consults the project resolver
+/// for aliased specifiers that heuristic matching cannot handle.
+#[cfg(not(feature = "scheduler"))]
+pub(crate) fn import_resolves_to_dep_with_resolver(
+    file: &FileEntry,
+    import_source: &str,
+    dependency_id: &str,
+    resolve_extensions: &[String],
+    resolver: Option<&NativeProjectResolver>,
+    file_ids: &rustc_hash::FxHashSet<String>,
+) -> bool {
+    let view = DependentView::from_file_entry(file);
+    import_resolves_to_dep_with_resolver_view(
+        &view,
+        import_source,
+        dependency_id,
+        resolve_extensions,
+        resolver,
+        file_ids,
+    )
+}
+
 /// Determine whether a dependent SFC should be invalidated given
 /// which exports changed in a dependency.
 ///
 /// When `dep_source` is available, Tier 3 resolution is attempted: the type
 /// is resolved from the dep file and hashed. If the resolved shape is unchanged,
 /// invalidation is skipped even though the export text changed.
+///
+/// Returns `(should_invalidate, updated_resolved_type_hashes)`. The caller must
+/// write back the updated hashes to the appropriate store (FileEntry or CompileCacheEntry).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn should_invalidate_dependent(
-    file: &mut FileEntry,
+pub(crate) fn should_invalidate_dependent_view(
+    view: &mut DependentView,
     dependency_id: &str,
     changed_exports: &BTreeSet<String>,
     no_signatures: bool,
@@ -169,24 +229,20 @@ pub(crate) fn should_invalidate_dependent(
     resolver: Option<&NativeProjectResolver>,
     file_ids: &rustc_hash::FxHashSet<String>,
 ) -> bool {
-    // If no export signatures available (Tier 1 fallback), always invalidate
     if no_signatures {
         return true;
     }
 
-    // If no exports changed, no invalidation needed
     if changed_exports.is_empty() {
         return false;
     }
 
-    // Check if the dependent has macro type deps on this dependency
-    let macro_type_deps: Vec<&verter_analysis::MacroTypeDep> = file
-        .script_analysis
+    let macro_type_deps: Vec<&verter_analysis::MacroTypeDep> = view
         .macro_type_deps
         .iter()
         .filter(|dep| {
-            import_resolves_to_dep_with_resolver(
-                file,
+            import_resolves_to_dep_with_resolver_view(
+                view,
                 &dep.import_source,
                 dependency_id,
                 resolve_extensions,
@@ -197,7 +253,6 @@ pub(crate) fn should_invalidate_dependent(
         .collect();
 
     if !macro_type_deps.is_empty() {
-        // Collect type names that Tier 2 considers changed
         let tier2_changed: Vec<&str> = macro_type_deps
             .iter()
             .filter(|dep| changed_exports.contains(&dep.type_name))
@@ -205,11 +260,9 @@ pub(crate) fn should_invalidate_dependent(
             .collect();
 
         if tier2_changed.is_empty() {
-            // Tier 2: no macro-consumed types in changed exports
             return false;
         }
 
-        // Tier 3: try cross-file type resolution if dep source is available
         if let Some(dep_src) = dep_source {
             let alloc = oxc_allocator::Allocator::new();
             let mut any_shape_changed = false;
@@ -227,19 +280,16 @@ pub(crate) fn should_invalidate_dependent(
                         dep_src.as_bytes(),
                     );
 
-                    if let Some(old_hash) = file.resolved_type_hashes.get(&key) {
+                    if let Some(old_hash) = view.resolved_type_hashes.get(&key) {
                         if *old_hash == new_hash {
-                            // Tier 3: resolved shape unchanged — skip this type
-                            file.resolved_type_hashes.insert(key, new_hash);
+                            view.resolved_type_hashes.insert(key, new_hash);
                             continue;
                         }
                     }
 
-                    // Shape changed (or first time seeing this type)
-                    file.resolved_type_hashes.insert(key, new_hash);
+                    view.resolved_type_hashes.insert(key, new_hash);
                     any_shape_changed = true;
                 } else {
-                    // Can't resolve type — fall back to Tier 2 (assume changed)
                     any_shape_changed = true;
                 }
             }
@@ -247,15 +297,13 @@ pub(crate) fn should_invalidate_dependent(
             return any_shape_changed;
         }
 
-        // No dep source available — Tier 2: invalidate
         return true;
     }
 
-    // Check if the dependent has any runtime (non-type-only) imports from this dep
-    let has_runtime_import = file.script_analysis.imports.iter().any(|imp| {
+    let has_runtime_import = view.imports.iter().any(|imp| {
         !imp.is_type_only
-            && import_resolves_to_dep_with_resolver(
-                file,
+            && import_resolves_to_dep_with_resolver_view(
+                view,
                 &imp.source,
                 dependency_id,
                 resolve_extensions,
@@ -265,17 +313,13 @@ pub(crate) fn should_invalidate_dependent(
     });
 
     if has_runtime_import {
-        // Runtime imports: conservatively invalidate on any export change
         return true;
     }
 
-    // If the file has this dependency registered but no matching imports in analysis
-    // (e.g., src block dependency, or external deps without script imports),
-    // conservatively invalidate.
-    if file.dependencies.contains(dependency_id)
-        && file.script_analysis.imports.iter().all(|imp| {
-            !import_resolves_to_dep_with_resolver(
-                file,
+    if view.dependencies.contains(dependency_id)
+        && view.imports.iter().all(|imp| {
+            !import_resolves_to_dep_with_resolver_view(
+                view,
                 &imp.source,
                 dependency_id,
                 resolve_extensions,
@@ -287,8 +331,36 @@ pub(crate) fn should_invalidate_dependent(
         return true;
     }
 
-    // Type-only imports not used by macros: no invalidation needed
     false
+}
+
+/// Legacy wrapper for should_invalidate_dependent_view using FileEntry.
+#[cfg(not(feature = "scheduler"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn should_invalidate_dependent(
+    file: &mut FileEntry,
+    dependency_id: &str,
+    changed_exports: &BTreeSet<String>,
+    no_signatures: bool,
+    dep_source: Option<&str>,
+    resolve_extensions: &[String],
+    resolver: Option<&NativeProjectResolver>,
+    file_ids: &rustc_hash::FxHashSet<String>,
+) -> bool {
+    let mut view = DependentView::from_file_entry(file);
+    let result = should_invalidate_dependent_view(
+        &mut view,
+        dependency_id,
+        changed_exports,
+        no_signatures,
+        dep_source,
+        resolve_extensions,
+        resolver,
+        file_ids,
+    );
+    // Write back updated type hashes
+    file.resolved_type_hashes = view.resolved_type_hashes;
+    result
 }
 
 /// Smart invalidation using a pre-computed set of owner canonical IDs.
@@ -296,6 +368,7 @@ pub(crate) fn should_invalidate_dependent(
 /// Used by the native (non-WASM) path where reverse deps are read from the
 /// workspace's authoritative EdgeStore instead of the host's legacy
 /// `reverse_dependencies` map.
+#[cfg(not(feature = "scheduler"))]
 pub(crate) fn smart_invalidate_dependents_with_owners(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     owners: BTreeSet<String>,
@@ -337,6 +410,102 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
     }
 }
 
+/// Scheduler-backed smart invalidation. Reads analysis from scheduler snapshots
+/// and dependency metadata from compile_cache. Clears compile_cache slots directly.
+#[cfg(feature = "scheduler")]
+pub(crate) fn smart_invalidate_dependents_via_scheduler(
+    scheduler: &verter_scheduler::scheduler::Scheduler,
+    compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,
+    owners: BTreeSet<String>,
+    project_resolver: &crate::shared::Shared<Option<NativeProjectResolver>>,
+    config: &HostConfig,
+    dependency_id: &str,
+    old_export_signatures: &[verter_analysis::ExportSignature],
+    new_export_signatures: &[verter_analysis::ExportSignature],
+) {
+    if owners.is_empty() {
+        return;
+    }
+
+    let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
+    let no_signatures = old_export_signatures.is_empty() && new_export_signatures.is_empty();
+    let resolver = read_lock(project_resolver);
+
+    let dep_source = scheduler
+        .try_get_source(dependency_id)
+        .map(|s| s.source.clone());
+
+    let file_ids: rustc_hash::FxHashSet<String> = if resolver.is_some() {
+        scheduler.node_ids().into_iter().collect()
+    } else {
+        rustc_hash::FxHashSet::default()
+    };
+
+    for owner in owners {
+        let Some(mut view) = build_dependent_view(scheduler, compile_cache, &owner) else {
+            continue;
+        };
+        let should_clear = should_invalidate_dependent_view(
+            &mut view,
+            dependency_id,
+            &changed_exports,
+            no_signatures,
+            dep_source.as_deref(),
+            &config.resolve_extensions,
+            resolver.as_ref(),
+            &file_ids,
+        );
+        if let Some(mut cc) = compile_cache.get_mut(&owner) {
+            if should_clear {
+                cc.compile_slots.clear();
+            }
+            cc.resolved_type_hashes = view.resolved_type_hashes;
+        }
+    }
+}
+
+/// Build a `DependentView` from scheduler analysis + compile_cache metadata.
+#[cfg(feature = "scheduler")]
+fn build_dependent_view(
+    scheduler: &verter_scheduler::scheduler::Scheduler,
+    compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,
+    canonical_id: &str,
+) -> Option<DependentView> {
+    use crate::host_executor::{HostAnalysisData, HostSourceData};
+
+    let source_snap = scheduler.try_get_source(canonical_id)?;
+    let hd = source_snap.downcast_data::<HostSourceData>()?;
+    let script_lang = hd.parse.meta.script_lang.clone();
+    drop(source_snap);
+
+    let analysis_snap = scheduler.try_get_analysis(canonical_id)?;
+    let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
+    let macro_type_deps = ad.script_analysis.macro_type_deps.clone();
+    let imports = ad.script_analysis.imports.clone();
+    drop(analysis_snap);
+
+    let (dependency_resolutions, dependencies, resolved_type_hashes) =
+        if let Some(cc) = compile_cache.get(canonical_id) {
+            (
+                cc.dependency_resolutions.clone(),
+                cc.dependencies.clone(),
+                cc.resolved_type_hashes.clone(),
+            )
+        } else {
+            Default::default()
+        };
+
+    Some(DependentView {
+        canonical_id: canonical_id.to_string(),
+        dependency_resolutions,
+        dependencies,
+        script_lang,
+        macro_type_deps,
+        imports,
+        resolved_type_hashes,
+    })
+}
+
 /// Smart invalidation: when a dependency changes, only invalidate dependent
 /// SFCs whose macro-consumed types were actually affected.
 ///
@@ -344,6 +513,7 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
 /// - Tier 1: No export signatures → full invalidation
 /// - Tier 2: Export-level hashing → invalidate only if macro-consumed exports changed
 /// - Tier 3: Cross-file type resolution → invalidate only if resolved type shape changed
+#[cfg(not(feature = "scheduler"))]
 pub(crate) fn smart_invalidate_dependents(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     reverse_dependencies: &crate::shared::Shared<rustc_hash::FxHashMap<String, BTreeSet<String>>>,

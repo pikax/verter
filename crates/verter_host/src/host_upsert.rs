@@ -15,12 +15,15 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::cache::{invalidate_nodes, sorted_nodes};
+#[cfg(not(feature = "scheduler"))]
+use crate::cache::invalidate_nodes;
+use crate::cache::sorted_nodes;
 use crate::hash::{compile_profile_hash, content_override_hash, style_override_hash};
 use crate::id::{canonicalize_id, render_ids};
 #[cfg(not(feature = "scheduler"))]
 use crate::parse::parse_non_sfc_snapshot;
 use crate::parse::parse_vue_snapshot;
+#[cfg(not(feature = "scheduler"))]
 use crate::shared::write_lock;
 use crate::types::*;
 #[cfg(not(feature = "scheduler"))]
@@ -150,16 +153,19 @@ impl VerterHost {
         // ── Fast path: byte-identical source ──
         let old_whole_hash = old_host_data.map(|h| h.parse.whole_hash);
         if !changes.changed && old_whole_hash == Some(parse.whole_hash) {
-            // Aliases may have been updated; also clear evicted flag (ensure_loaded path)
-            let old_aliases = self
-                .compile_cache
-                .get(&canonical_id)
-                .map(|cc| cc.aliases.clone())
-                .unwrap_or_default();
-            if let Some(mut cc) = self.compile_cache.get_mut(&canonical_id) {
+            let (old_aliases, old_deps) = {
+                let mut cc_ref = self.compile_cache.entry(canonical_id.clone()).or_default();
+                let cc = cc_ref.value_mut();
+                let old_aliases = cc.aliases.clone();
+                let old_deps = cc.dependencies.clone();
                 cc.evicted = false;
-            }
+                cc.aliases = alias_set.clone();
+                cc.dependencies = new_deps.clone();
+                cc.generation = new_source_snap.generation;
+                (old_aliases, old_deps)
+            };
             self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
+            self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
             self.ws().notify_upsert(&canonical_id, req.source.clone());
             return Ok(HostUpdateResult {
                 canonical_id,
@@ -245,19 +251,6 @@ impl VerterHost {
         };
         let new_export_signatures = parse.export_signatures.clone();
 
-        // ── Transitional: also populate legacy files map ──
-        // This keeps all un-migrated accessors working during Phase 2.
-        self.populate_files_from_scheduler(
-            &canonical_id,
-            &req,
-            &new_source_snap,
-            new_host_data,
-            &changes,
-            &alias_set,
-            &new_deps,
-            &new_export_signatures,
-        );
-
         // ── Post-commit housekeeping ──
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
         self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
@@ -281,116 +274,6 @@ impl VerterHost {
                 .unwrap_or_default(),
             parse_duration_ms,
         )
-    }
-
-    /// Transitional: populate legacy `files` map from scheduler snapshot.
-    /// Removed in Phase 3 when `files` is gated to WASM.
-    #[cfg(feature = "scheduler")]
-    fn populate_files_from_scheduler(
-        &self,
-        canonical_id: &str,
-        req: &UpsertRequest,
-        source_snap: &std::sync::Arc<verter_scheduler::node::SourceSnapshot>,
-        host_data: &crate::host_executor::HostSourceData,
-        changes: &crate::upsert::UpsertChangeResult,
-        alias_set: &BTreeSet<String>,
-        new_deps: &BTreeSet<String>,
-        new_export_signatures: &[verter_analysis::ExportSignature],
-    ) {
-        let parse = &host_data.parse;
-        let mut files = write_lock(&self.files);
-        let entry = files
-            .entry(canonical_id.to_string())
-            .or_insert_with(|| FileEntry {
-                canonical_id: canonical_id.to_string(),
-                file_kind: req.file_kind,
-                source: Arc::<str>::from(""),
-                whole_hash: [0; 16],
-                semantic_hash: [0; 16],
-                slices: SliceHashes::default(),
-                descriptor: DescriptorMin::default(),
-                meta: FileMeta::default(),
-                aliases: BTreeSet::new(),
-                dependencies: BTreeSet::new(),
-                dependency_resolutions: FxHashMap::default(),
-                external_requests: Vec::new(),
-                src_blocks: Vec::new(),
-                parse_diagnostics: DiagnosticsSnapshot::default(),
-                script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
-                export_signatures: Vec::new(),
-                style_analyses: Arc::new(Vec::new()),
-                template_analysis: None,
-                arc_script_cache: ScriptAnalysisArcs::default(),
-                resolved_type_hashes: FxHashMap::default(),
-                style_overrides: FxHashMap::default(),
-                content_overrides: FxHashMap::default(),
-                compile_slots: FxHashMap::default(),
-                latest_diagnostics: FxHashMap::default(),
-                diagnostics_generation: 0,
-                generation: 0,
-                cached_parse: None,
-                cached_tsc_extract: None,
-            });
-
-        entry.file_kind = req.file_kind;
-        entry.source = source_snap.source.clone();
-        entry.whole_hash = parse.whole_hash;
-        entry.semantic_hash = parse.semantic_hash;
-        entry.slices = parse.slices.clone();
-        entry.descriptor = parse.descriptor.clone();
-        entry.meta = parse.meta.clone();
-        entry.external_requests = parse.external_requests.clone();
-        entry.src_blocks = parse.src_blocks.clone();
-        entry.parse_diagnostics = parse.parse_diagnostics.clone();
-        entry.script_analysis = parse.script_analysis.clone();
-        entry.arc_script_cache = ScriptAnalysisArcs::from_analysis(&entry.script_analysis);
-        entry.export_signatures = new_export_signatures.to_vec();
-        entry.style_analyses = Arc::new(parse.style_analyses.clone());
-        entry.cached_parse = host_data.cached_parse.clone();
-
-        if changes.changed
-            && (changes.slice_changes.script_changed
-                || changes.slice_changes.structure_changed
-                || changes.slice_changes.template_changed
-                || changes.slice_changes.descriptor_changed)
-        {
-            entry.cached_tsc_extract = None;
-        }
-        entry.generation = entry.generation.saturating_add(1);
-        entry.aliases = alias_set.clone();
-        entry.dependencies = new_deps.clone();
-        entry.dependency_resolutions.clear();
-
-        if changes.changed && changes.semantic_changed {
-            entry.latest_diagnostics.clear();
-            entry.diagnostics_generation += 1;
-            if changes.slice_changes.template_changed
-                || changes.slice_changes.script_changed
-                || changes.slice_changes.structure_changed
-            {
-                entry.template_analysis = None;
-            }
-            if changes.slice_changes.script_changed
-                || changes.slice_changes.structure_changed
-                || changes.slice_changes.descriptor_changed
-            {
-                entry.compile_slots.clear();
-            } else if changes.slice_changes.template_changed {
-                invalidate_nodes(
-                    &mut entry.compile_slots,
-                    &[VirtualNodeKind::Main, VirtualNodeKind::Template],
-                );
-            } else {
-                let mut nodes = Vec::new();
-                for idx in &changes.slice_changes.style_indices_changed {
-                    nodes.push(VirtualNodeKind::Style { index: *idx });
-                }
-                for idx in &changes.slice_changes.custom_indices_changed {
-                    nodes.push(VirtualNodeKind::Custom { index: *idx });
-                }
-                invalidate_nodes(&mut entry.compile_slots, &nodes);
-            }
-        }
     }
 
     /// Sync parsed edges to VFS (extracted from upsert for reuse).
@@ -857,8 +740,8 @@ impl VerterHost {
                 cc.compile_slots.remove(&profile_hash);
             }
 
-            // Store per-profile layer in files for WASM/legacy readers (does NOT
-            // mutate shared source/meta/style_analyses — profile state stays isolated).
+            // Store per-profile layer in files for WASM readers.
+            #[cfg(not(feature = "scheduler"))]
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {
@@ -1183,8 +1066,8 @@ impl VerterHost {
                 cc.compile_slots.remove(&profile_hash);
             }
 
-            // Store per-profile layer in files for WASM/legacy readers (does NOT
-            // mutate shared source/meta/analysis — profile state stays isolated).
+            // Store per-profile layer in files for WASM readers.
+            #[cfg(not(feature = "scheduler"))]
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {

@@ -21,7 +21,7 @@ pub(crate) struct UpsertChangeResult {
 /// Compare old file entry state against a new parse snapshot to determine what changed.
 /// Consolidates all change detection logic into a single function.
 /// Used by the legacy (non-scheduler) upsert path, WASM, and unit tests.
-#[cfg_attr(feature = "scheduler", allow(dead_code))]
+#[cfg(any(not(feature = "scheduler"), test))]
 pub(crate) fn compute_upsert_changes(
     old_entry: Option<&FileEntry>,
     new: &ParseSnapshot,

@@ -2,7 +2,11 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{CompileSlot, FileEntry, SliceChanges, VirtualNodeKind};
+#[cfg(any(not(feature = "scheduler"), test))]
+use crate::types::CompileSlot;
+#[cfg(any(not(feature = "scheduler"), test))]
+use crate::types::FileEntry;
+use crate::types::{SliceChanges, VirtualNodeKind};
 
 pub(crate) fn node_sort_key(node: &VirtualNodeKind) -> (u8, usize) {
     match node {
@@ -79,6 +83,7 @@ pub(crate) fn compute_changed_removed_nodes(
 /// template/main code after a template-only edit could silently produce
 /// wrong output. Callers relying on `DevServeLastKnownGood` will get an
 /// error instead of stale content for these nodes.
+#[cfg(any(not(feature = "scheduler"), test))]
 pub(crate) fn invalidate_nodes(
     slots: &mut rustc_hash::FxHashMap<u64, CompileSlot>,
     nodes: &[VirtualNodeKind],
@@ -93,6 +98,7 @@ pub(crate) fn invalidate_nodes(
     }
 }
 
+#[cfg(any(not(feature = "scheduler"), test))]
 pub(crate) fn enforce_profile_cap(entry: &mut FileEntry, max_profiles: usize) {
     if entry.compile_slots.len() <= max_profiles {
         return;

@@ -21,10 +21,12 @@ use verter_core::compile::{
     compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
 
+#[cfg(not(feature = "scheduler"))]
 use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
+#[cfg(not(feature = "scheduler"))]
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
@@ -62,7 +64,6 @@ impl VerterHost {
 
     pub(crate) fn resolve_loaded_dependency_canonical(
         &self,
-        _files: &FxHashMap<String, FileEntry>,
         owner_canonical: &str,
         import_source: &str,
         kind: verter_vfs::ResolveRequestKind,
@@ -82,7 +83,6 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_external_type_from_loaded_files(
         &self,
-        files: &FxHashMap<String, FileEntry>,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -90,9 +90,10 @@ impl VerterHost {
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         required_root_dep: bool,
         kind: verter_vfs::ResolveRequestKind,
+        profile_hash: Option<u64>,
     ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, ()> {
         let Some(dep_canonical) =
-            self.resolve_loaded_dependency_canonical(files, owner_canonical, import_source, kind)
+            self.resolve_loaded_dependency_canonical(owner_canonical, import_source, kind)
         else {
             return if required_root_dep { Err(()) } else { Ok(None) };
         };
@@ -104,45 +105,18 @@ impl VerterHost {
             return Ok(None);
         }
 
-        // Try host file cache first, then workspace-read fallback.
-        let effective_source: String = if let Some(dep_entry) = files.get(&dep_canonical) {
-            // For Vue SFC files, extract only <script>/<script setup> content.
-            if dep_entry.file_kind == FileKind::VueSfc {
-                match extract_vue_script_content(dep_entry) {
-                    Some(s) => s,
-                    None => {
-                        visiting.remove(&cache_key);
+        let effective_source: String =
+            match self.read_dep_source_for_type_resolution(&dep_canonical, profile_hash) {
+                Some(s) => s,
+                None => {
+                    visiting.remove(&cache_key);
+                    if dep_canonical.ends_with(".vue") {
                         cache.insert(cache_key, None);
                         return Ok(None);
                     }
-                }
-            } else {
-                dep_entry.source.to_string()
-            }
-        } else {
-            // Workspace-read fallback: read from disk via VFS when not in host cache.
-            let ws = self.ws();
-            match ws.read_file(&dep_canonical) {
-                Some(source) => {
-                    if dep_canonical.ends_with(".vue") {
-                        match extract_script_from_raw_source(&source) {
-                            Some(s) => s,
-                            None => {
-                                visiting.remove(&cache_key);
-                                cache.insert(cache_key, None);
-                                return Ok(None);
-                            }
-                        }
-                    } else {
-                        source.to_string()
-                    }
-                }
-                None => {
-                    visiting.remove(&cache_key);
                     return if required_root_dep { Err(()) } else { Ok(None) };
                 }
-            }
-        };
+            };
 
         let import_alloc = oxc_allocator::Allocator::new();
         let extracted = verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
@@ -159,7 +133,6 @@ impl VerterHost {
             .find(|b| b.local_name == type_name);
         if let Some(target) = direct_reexport {
             if let Some(resolved) = self.resolve_external_type_from_loaded_files(
-                files,
                 &dep_canonical,
                 &target.source,
                 &target.imported_name,
@@ -167,6 +140,7 @@ impl VerterHost {
                 visiting,
                 false,
                 kind,
+                profile_hash,
             )? {
                 visiting.remove(&cache_key);
                 cache.insert(cache_key, Some(resolved.clone()));
@@ -177,7 +151,6 @@ impl VerterHost {
         let mut companion_types = rustc_hash::FxHashMap::default();
         for binding in &extracted.bindings {
             if let Some(resolved) = self.resolve_external_type_from_loaded_files(
-                files,
                 &dep_canonical,
                 &binding.source,
                 &binding.imported_name,
@@ -185,6 +158,7 @@ impl VerterHost {
                 visiting,
                 false,
                 kind,
+                profile_hash,
             )? {
                 companion_types
                     .entry(binding.local_name.clone())
@@ -206,7 +180,6 @@ impl VerterHost {
         if resolved.is_none() {
             for source in &extracted.wildcard_reexport_sources {
                 if let Some(found) = self.resolve_external_type_from_loaded_files(
-                    files,
                     &dep_canonical,
                     source,
                     type_name,
@@ -214,6 +187,7 @@ impl VerterHost {
                     visiting,
                     false,
                     kind,
+                    profile_hash,
                 )? {
                     resolved = Some(found);
                     break;
@@ -226,13 +200,58 @@ impl VerterHost {
         Ok(resolved)
     }
 
+    /// Read the effective source for a dependency file for type resolution.
+    ///
+    /// On the scheduler path, tries the scheduler's source snapshot first.
+    /// On the WASM path, tries `self.files` first.
+    /// Both fall back to reading from the VFS workspace.
+    /// For Vue SFCs, extracts only `<script>` / `<script setup>` content.
+    fn read_dep_source_for_type_resolution(
+        &self,
+        dep_canonical: &str,
+        profile_hash: Option<u64>,
+    ) -> Option<String> {
+        // Try in-memory source first (scheduler or files map).
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(efs) = self.effective_file_state(dep_canonical, profile_hash) {
+                let source = efs.source.as_ref();
+                if dep_canonical.ends_with(".vue") {
+                    return extract_script_from_raw_source(source);
+                } else {
+                    return Some(source.to_string());
+                }
+            }
+        }
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = crate::shared::read_lock(&self.files);
+            if let Some(dep_entry) = files.get(dep_canonical) {
+                if dep_entry.file_kind == FileKind::VueSfc {
+                    return extract_vue_script_content_from_entry(dep_entry);
+                } else {
+                    return Some(dep_entry.source.to_string());
+                }
+            }
+        }
+
+        // Workspace-read fallback: read from disk via VFS.
+        let ws = self.ws();
+        let source = ws.read_file(dep_canonical)?;
+        if dep_canonical.ends_with(".vue") {
+            extract_script_from_raw_source(&source)
+        } else {
+            Some(source.to_string())
+        }
+    }
+
     fn collect_external_types_from_loaded_files(
         &self,
         owner_canonical: &str,
         macro_type_deps: &[verter_analysis::MacroTypeDep],
         script_imports: &[verter_analysis::AnalyzedImport],
+        profile_hash: Option<u64>,
     ) -> (Option<ResolvedExternalTypes>, Vec<HostDiagnostic>) {
-        let files = read_lock(&self.files);
         let mut resolved = rustc_hash::FxHashMap::default();
         let mut missing = Vec::new();
         let mut cache = rustc_hash::FxHashMap::default();
@@ -240,7 +259,6 @@ impl VerterHost {
 
         for dep in macro_type_deps {
             match self.resolve_external_type_from_loaded_files(
-                &files,
                 owner_canonical,
                 &dep.import_source,
                 &dep.type_name,
@@ -248,6 +266,7 @@ impl VerterHost {
                 &mut visiting,
                 true,
                 verter_vfs::ResolveRequestKind::EsmImport,
+                profile_hash,
             ) {
                 Ok(Some(elements)) => {
                     resolved.insert(dep.type_name.clone(), elements);
@@ -804,8 +823,37 @@ impl VerterHost {
             }
         }
 
-        // Write per-profile state to files (profile-keyed, no shared field mutation).
-        // This keeps cross_file and other readers working during transition.
+        // Commit to scheduler artifact snapshot (scheduler path only).
+        #[cfg(feature = "scheduler")]
+        {
+            // Persist raw template analysis to compile_cache for profileless consumers
+            // (e.g. cross_file, get_analysis). Only for non-override compiles.
+            if compiled_template_analysis.is_some()
+                && compile_input.content_override_layer.is_none()
+            {
+                if let Some(mut cc) = self.compile_cache.get_mut(&canonical_id) {
+                    cc.raw_template_analysis = compiled_template_analysis.clone().map(Arc::new);
+                }
+            }
+
+            if let Some(ref snap) = sched_snapshot_at_start {
+                self.scheduler.commit_artifact(
+                    &canonical_id,
+                    profile_hash,
+                    verter_scheduler::node::ArtifactSnapshot {
+                        generation: snap.generation,
+                        profile_hash,
+                        data: Arc::new(crate::host_executor::HostArtifactData {
+                            outputs: compiled_outputs.clone(),
+                            diagnostics: diagnostics.clone(),
+                        }),
+                    },
+                );
+            }
+        }
+
+        // Write per-profile state to files (WASM path only).
+        #[cfg(not(feature = "scheduler"))]
         {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical_id) {
@@ -814,13 +862,7 @@ impl VerterHost {
                 } else {
                     Some(compiled_outputs.clone())
                 };
-                // Keep FileEntry::template_analysis raw/profileless on the
-                // scheduler path. Override-specific template analysis stays on
-                // the per-profile compile slot only.
-                if compiled_template_analysis.is_some()
-                    && (cfg!(not(feature = "scheduler"))
-                        || compile_input.content_override_layer.is_none())
-                {
+                if compiled_template_analysis.is_some() {
                     entry.template_analysis = compiled_template_analysis.clone().map(Arc::new);
                 }
                 entry.compile_slots.insert(
@@ -842,35 +884,6 @@ impl VerterHost {
                     .insert(profile_hash, diagnostics.clone());
                 entry.diagnostics_generation += 1;
                 enforce_profile_cap(entry, self.config.max_profiles_per_file.max(1));
-
-                // Commit to scheduler artifact snapshot.
-                #[cfg(feature = "scheduler")]
-                {
-                    if let Some(ref snap) = sched_snapshot_at_start {
-                        if snap.whole_hash == entry.whole_hash {
-                            let gen = snap.generation;
-                            drop(files);
-                            self.scheduler.commit_artifact(
-                                &canonical_id,
-                                profile_hash,
-                                verter_scheduler::node::ArtifactSnapshot {
-                                    generation: gen,
-                                    profile_hash,
-                                    data: Arc::new(crate::host_executor::HostArtifactData {
-                                        outputs: compiled_outputs.clone(),
-                                        diagnostics: diagnostics.clone(),
-                                    }),
-                                },
-                            );
-                        } else {
-                            drop(files);
-                        }
-                    } else {
-                        drop(files);
-                    }
-                }
-                #[cfg(not(feature = "scheduler"))]
-                drop(files);
             }
         }
 
@@ -905,16 +918,36 @@ impl VerterHost {
     pub fn get_ide(&self, canonical_id: &str, profile: &CompileProfile) -> Option<IdeResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
-        let files = read_lock(&self.files);
-        let entry = files.get(&canonical)?;
-        let slot = entry.compile_slots.get(&profile_hash)?;
-        let tsx = slot.tsx.as_ref()?;
-        Some(IdeResponse {
-            code: tsx.code.clone(),
-            source_map: tsx.source_map.clone(),
-            is_jsx: tsx.is_jsx,
-            destructured_block: tsx.destructured_block.clone(),
-        })
+
+        #[cfg(feature = "scheduler")]
+        {
+            let cc = self.compile_cache.get(&canonical)?;
+            if cc.evicted {
+                return None;
+            }
+            let slot = cc.compile_slots.get(&profile_hash)?;
+            let tsx = slot.tsx.as_ref()?;
+            return Some(IdeResponse {
+                code: tsx.code.clone(),
+                source_map: tsx.source_map.clone(),
+                is_jsx: tsx.is_jsx,
+                destructured_block: tsx.destructured_block.clone(),
+            });
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(&canonical)?;
+            let slot = entry.compile_slots.get(&profile_hash)?;
+            let tsx = slot.tsx.as_ref()?;
+            Some(IdeResponse {
+                code: tsx.code.clone(),
+                source_map: tsx.source_map.clone(),
+                is_jsx: tsx.is_jsx,
+                destructured_block: tsx.destructured_block.clone(),
+            })
+        }
     }
 
     /// Generate public API output for a Vue SFC — minimal TypeScript declarations.
@@ -1008,6 +1041,7 @@ impl VerterHost {
             &canonical,
             &macro_type_deps,
             &script_imports,
+            profile_hash,
         );
         let tsc_mode = match mode {
             PublicApiMode::Public => verter_core::tsc::TscMode::Public,
@@ -1025,24 +1059,17 @@ impl VerterHost {
             },
         ) {
             let arc = Arc::new(fresh);
-            // Store in compile_cache
             #[cfg(feature = "scheduler")]
             {
                 if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
                     cc.cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
                 }
             }
-            // Keep the legacy FileEntry cache raw/profileless on the scheduler path.
-            let mut files = write_lock(&self.files);
-            if let Some(entry) = files.get_mut(&canonical) {
-                #[cfg(feature = "scheduler")]
-                {
-                    if profile_hash.is_none() {
-                        entry.cached_tsc_extract = Some(Arc::clone(&arc));
-                    }
-                }
-                #[cfg(not(feature = "scheduler"))]
-                {
+
+            #[cfg(not(feature = "scheduler"))]
+            {
+                let mut files = write_lock(&self.files);
+                if let Some(entry) = files.get_mut(&canonical) {
                     entry.cached_tsc_extract = Some(Arc::clone(&arc));
                 }
             }
@@ -1095,16 +1122,17 @@ impl VerterHost {
     ) {
         #[cfg(feature = "scheduler")]
         if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
-            cc.latest_diagnostics
-                .insert(profile_hash, diagnostics.clone());
+            cc.latest_diagnostics.insert(profile_hash, diagnostics);
             cc.diagnostics_generation += 1;
         }
 
-        // Per-profile write to files (keyed by profile_hash, no shared field mutation)
-        let mut files = write_lock(&self.files);
-        if let Some(entry) = files.get_mut(canonical_id) {
-            entry.latest_diagnostics.insert(profile_hash, diagnostics);
-            entry.diagnostics_generation += 1;
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(canonical_id) {
+                entry.latest_diagnostics.insert(profile_hash, diagnostics);
+                entry.diagnostics_generation += 1;
+            }
         }
     }
 
@@ -1127,25 +1155,14 @@ impl VerterHost {
         let mut merged_source = snapshot.source.to_string();
         if !snapshot.src_blocks.is_empty() {
             let ext_sources = {
-                let files = read_lock(&self.files);
                 let mut map = FxHashMap::default();
                 for req in &snapshot.external_requests {
-                    let resolved_dep_id = files
-                        .contains_key(&req.resolved_canonical_id)
-                        .then(|| req.resolved_canonical_id.clone())
-                        .or_else(|| {
-                            self.resolve_loaded_dependency_canonical(
-                                &files,
-                                &snapshot.canonical_id,
-                                &req.specifier,
-                                verter_vfs::ResolveRequestKind::EsmImport,
-                            )
-                        });
-                    if let Some(dep_entry) = resolved_dep_id
-                        .as_deref()
-                        .and_then(|canonical_id| files.get(canonical_id))
-                    {
-                        map.insert(req.resolved_canonical_id.clone(), dep_entry.source.clone());
+                    if let Some(dep_source) = self.resolve_dep_source(
+                        &snapshot.canonical_id,
+                        &req.resolved_canonical_id,
+                        &req.specifier,
+                    ) {
+                        map.insert(req.resolved_canonical_id.clone(), dep_source);
                     }
                 }
                 map
@@ -1202,12 +1219,14 @@ impl VerterHost {
         };
 
         let mut unresolved_macro_type_diags = Vec::new();
+        let profile_hash = compile_profile_hash(profile);
 
         let (external_types, missing_macro_type_diags) = self
             .collect_external_types_from_loaded_files(
                 &snapshot.canonical_id,
                 &snapshot.macro_type_deps,
                 &snapshot.script_imports,
+                Some(profile_hash),
             );
         unresolved_macro_type_diags.extend(missing_macro_type_diags);
 
@@ -1496,7 +1515,8 @@ fn extract_script_from_raw_source(source: &str) -> Option<String> {
 /// Extract concatenated script content from a Vue SFC FileEntry.
 /// Uses `cached_parse` (populated during upsert) to locate `<script>` and
 /// `<script setup>` content spans, then slices the original source.
-fn extract_vue_script_content(entry: &FileEntry) -> Option<String> {
+#[cfg(not(feature = "scheduler"))]
+fn extract_vue_script_content_from_entry(entry: &FileEntry) -> Option<String> {
     let source = entry.source.as_ref();
     let parsed = entry
         .cached_parse

@@ -105,6 +105,7 @@ pub struct VerterHost {
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
     /// lock and always read through the latest workspace after `set_workspace()`.
     pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_vfs::WorkspaceAccess>>>,
+    #[cfg(not(feature = "scheduler"))]
     pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
@@ -161,6 +162,7 @@ impl VerterHost {
         Self {
             config,
             workspace: workspace_lock,
+            #[cfg(not(feature = "scheduler"))]
             files: default_shared(FxHashMap::default()),
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
@@ -310,6 +312,59 @@ impl VerterHost {
         })
     }
 
+    /// Materialize native-side lifecycle state from the current scheduler snapshot.
+    ///
+    /// This is the scheduler-backed replacement for the old `files`-map ingress:
+    /// it updates `compile_cache` identity/dependency state without re-submitting
+    /// source back into the scheduler.
+    #[cfg(feature = "scheduler")]
+    pub(crate) fn integrate_scheduler_snapshot(&self, canonical_id: &str) -> bool {
+        use crate::host_executor::HostSourceData;
+
+        let snap = match self.scheduler.try_get_source(canonical_id) {
+            Some(s) => s,
+            None => return false,
+        };
+        let Some(hd) = snap.downcast_data::<HostSourceData>() else {
+            return false;
+        };
+
+        let aliases = std::iter::once(canonical_id.to_string()).collect::<BTreeSet<_>>();
+        let deps: BTreeSet<String> = hd
+            .parse
+            .external_requests
+            .iter()
+            .map(|r| r.resolved_canonical_id.clone())
+            .chain(
+                hd.parse
+                    .script_analysis
+                    .imports
+                    .iter()
+                    .filter(|imp| imp.source.starts_with('.'))
+                    .map(|imp| crate::id::resolve_external(canonical_id, &imp.source)),
+            )
+            .collect();
+
+        let (old_aliases, old_deps) = {
+            let mut cc_ref = self
+                .compile_cache
+                .entry(canonical_id.to_string())
+                .or_default();
+            let cc = cc_ref.value_mut();
+            let old_aliases = cc.aliases.clone();
+            let old_deps = cc.dependencies.clone();
+            cc.aliases = aliases.clone();
+            cc.dependencies = deps.clone();
+            cc.generation = snap.generation;
+            cc.evicted = false;
+            (old_aliases, old_deps)
+        };
+
+        self.update_alias_map(canonical_id, &old_aliases, &aliases);
+        self.update_reverse_deps(canonical_id, &old_deps, &deps);
+        true
+    }
+
     /// Override-aware style analyses for a profile.
     ///
     /// Merges per-index overrides from `StyleOverrideWithAnalysis` with raw
@@ -397,11 +452,12 @@ impl VerterHost {
             let ws = self.ws();
             #[cfg(feature = "scheduler")]
             {
-                for id in self.scheduler.node_ids() {
-                    ws.notify_delete(&id);
+                let ids = self.scheduler.node_ids();
+                for id in &ids {
+                    ws.notify_delete(id);
                 }
-                for id in self.scheduler.node_ids() {
-                    self.scheduler.close_file(&id);
+                for id in &ids {
+                    self.scheduler.close_file(id);
                 }
             }
             #[cfg(not(feature = "scheduler"))]
@@ -413,6 +469,7 @@ impl VerterHost {
             }
         }
 
+        #[cfg(not(feature = "scheduler"))]
         write_lock(&self.files).clear();
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
@@ -629,6 +686,8 @@ impl VerterHost {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn evict(&self, canonical_id: &str) {
         self.ws().notify_close(canonical_id);
+
+        #[cfg(not(feature = "scheduler"))]
         write_lock(&self.files).remove(canonical_id);
 
         #[cfg(feature = "scheduler")]
@@ -649,11 +708,8 @@ impl VerterHost {
     /// The scheduler is the sole ingress authority: this method submits a
     /// `source: None` request to the scheduler (which loads content via the
     /// workspace-backed SourceLoader), waits for Analysis to commit, then
-    /// populates the host's `files` map from the scheduler snapshot so
-    /// `compile_entry()` can read it.
-    ///
-    /// If the file is already in the host's `files` map with a generation
-    /// matching the scheduler, returns `true` immediately (fast path).
+    /// materializes native-side lifecycle state from the committed scheduler
+    /// snapshots without re-submitting the source.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
         // Fast path: already in host and not evicted
@@ -676,6 +732,18 @@ impl VerterHost {
         {
             use verter_scheduler::job::CompletionState;
 
+            let reload_from_workspace = self
+                .compile_cache
+                .get(canonical_id)
+                .map(|cc| cc.evicted)
+                .unwrap_or(false);
+
+            if reload_from_workspace {
+                // Evicted files must force the scheduler off any stale committed
+                // snapshot before we request a disk-backed reload.
+                self.scheduler.close_file(canonical_id);
+            }
+
             // Submit to scheduler — it loads via WorkspaceSourceLoader
             let handle = self
                 .scheduler
@@ -692,24 +760,7 @@ impl VerterHost {
                 _ => return false,
             }
 
-            // If the scheduler has the source, populate via upsert which handles
-            // both compile_cache and files map
-            if let Some(snap) = self.scheduler.try_get_source(canonical_id) {
-                return self
-                    .upsert(UpsertRequest {
-                        canonical_id: Some(canonical_id.to_string()),
-                        input_id: canonical_id.to_string(),
-                        source: snap.source.clone(),
-                        file_kind: if canonical_id.ends_with(".vue") {
-                            FileKind::VueSfc
-                        } else {
-                            FileKind::NonSfc
-                        },
-                        aliases: Vec::new(),
-                    })
-                    .is_ok();
-            }
-            false
+            self.integrate_scheduler_snapshot(canonical_id)
         }
 
         #[cfg(not(feature = "scheduler"))]
@@ -835,9 +886,24 @@ impl VerterHost {
                 }
             }
 
+            #[cfg(feature = "scheduler")]
+            {
+                deps::smart_invalidate_dependents_via_scheduler(
+                    &self.scheduler,
+                    &self.compile_cache,
+                    owners,
+                    &self.project_resolver,
+                    &self.config,
+                    dependency_id,
+                    old_export_signatures,
+                    new_export_signatures,
+                );
+            }
+
+            #[cfg(not(feature = "scheduler"))]
             deps::smart_invalidate_dependents_with_owners(
                 &self.files,
-                owners.clone(),
+                owners,
                 &self.project_resolver,
                 &self.config,
                 dependency_id,
@@ -845,37 +911,23 @@ impl VerterHost {
                 new_export_signatures,
             );
 
-            // Mirror: also clear compile_cache slots for affected owners.
-            // The deps function cleared files.compile_slots; we do the same for compile_cache.
-            #[cfg(feature = "scheduler")]
-            {
-                let files = shared::read_lock(&self.files);
-                for owner in &owners {
-                    // Only clear compile_cache if files had its slots cleared
-                    // (i.e., the owner was invalidated by the deps function).
-                    if let Some(file) = files.get(owner) {
-                        if file.compile_slots.is_empty() {
-                            if let Some(mut cc) = self.compile_cache.get_mut(owner) {
-                                cc.compile_slots.clear();
-                            }
-                        }
-                    }
-                }
-            }
             return;
         }
 
         // WASM fallback: use legacy reverse_dependencies map.
-        #[allow(unreachable_code)]
-        deps::smart_invalidate_dependents(
-            &self.files,
-            &self.reverse_dependencies,
-            &self.project_resolver,
-            &self.config,
-            dependency_id,
-            old_export_signatures,
-            new_export_signatures,
-        );
+        #[cfg(not(feature = "scheduler"))]
+        {
+            #[allow(unreachable_code)]
+            deps::smart_invalidate_dependents(
+                &self.files,
+                &self.reverse_dependencies,
+                &self.project_resolver,
+                &self.config,
+                dependency_id,
+                old_export_signatures,
+                new_export_signatures,
+            );
+        }
     }
 }
 
