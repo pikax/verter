@@ -296,16 +296,38 @@ impl VerterHost {
         let parsed = parse_raw_id(raw_id)?;
         let canonical = self.resolve_alias_or_canonical(&parsed.canonical_id);
         let (exists, bundler_id, lsp_id) = {
-            let files = read_lock(&self.files);
-            match files.get(&canonical) {
-                Some(f) => {
-                    let (b, l) = render_ids(&canonical, &parsed.node_kind, &f.meta);
-                    (true, b, l)
+            #[cfg(feature = "scheduler")]
+            {
+                use crate::host_executor::HostSourceData;
+                let meta = self.scheduler.try_get_source(&canonical).and_then(|s| {
+                    s.downcast_data::<HostSourceData>()
+                        .map(|h| h.parse.meta.clone())
+                });
+                match meta {
+                    Some(m) => {
+                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &m);
+                        (true, b, l)
+                    }
+                    None => {
+                        let default_meta = FileMeta::default();
+                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &default_meta);
+                        (false, b, l)
+                    }
                 }
-                None => {
-                    let default_meta = FileMeta::default();
-                    let (b, l) = render_ids(&canonical, &parsed.node_kind, &default_meta);
-                    (false, b, l)
+            }
+            #[cfg(not(feature = "scheduler"))]
+            {
+                let files = read_lock(&self.files);
+                match files.get(&canonical) {
+                    Some(f) => {
+                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &f.meta);
+                        (true, b, l)
+                    }
+                    None => {
+                        let default_meta = FileMeta::default();
+                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &default_meta);
+                        (false, b, l)
+                    }
                 }
             }
         };
@@ -335,32 +357,60 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
 
-        // Check cache under read lock
+        // Check cache
         {
-            let files = read_lock(&self.files);
-            let entry = files
-                .get(&canonical)
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
+            #[cfg(feature = "scheduler")]
+            {
+                use crate::host_executor::HostSourceData;
+                let snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
+                    HostError::MissingSource {
+                        canonical_id: canonical.clone(),
+                    }
                 })?;
-
-            // Non-SFC files (.ts/.js) are tracked for dependency/type resolution
-            // only. Compiling them as Vue SFCs is always wrong — their source
-            // contains TypeScript generics (e.g. `<HTMLElement>`) that the Vue
-            // parser would misinterpret as tags.
-            if entry.file_kind == FileKind::NonSfc {
-                return Ok(());
-            }
-
-            let soh = entry
-                .style_overrides
-                .get(&profile_hash)
-                .map(|o| o.hash)
-                .unwrap_or(0);
-
-            if let Some(slot) = entry.compile_slots.get(&profile_hash) {
-                if slot.semantic_hash == entry.semantic_hash && slot.style_override_hash == soh {
+                let hd = snap.downcast_data::<HostSourceData>().ok_or_else(|| {
+                    HostError::MissingSource {
+                        canonical_id: canonical.clone(),
+                    }
+                })?;
+                if hd.file_kind == FileKind::NonSfc {
                     return Ok(());
+                }
+                if let Some(cc) = self.compile_cache.get(&canonical) {
+                    let soh = cc
+                        .style_overrides
+                        .get(&profile_hash)
+                        .map(|o| o.hash)
+                        .unwrap_or(0);
+                    if let Some(slot) = cc.compile_slots.get(&profile_hash) {
+                        if slot.semantic_hash == hd.parse.semantic_hash
+                            && slot.style_override_hash == soh
+                        {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "scheduler"))]
+            {
+                let files = read_lock(&self.files);
+                let entry = files
+                    .get(&canonical)
+                    .ok_or_else(|| HostError::MissingSource {
+                        canonical_id: canonical.clone(),
+                    })?;
+                if entry.file_kind == FileKind::NonSfc {
+                    return Ok(());
+                }
+                let soh = entry
+                    .style_overrides
+                    .get(&profile_hash)
+                    .map(|o| o.hash)
+                    .unwrap_or(0);
+                if let Some(slot) = entry.compile_slots.get(&profile_hash) {
+                    if slot.semantic_hash == entry.semantic_hash && slot.style_override_hash == soh
+                    {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -421,6 +471,10 @@ impl VerterHost {
             /// semantic_hash that was current when we decided to compile.
             semantic_hash: Hash16,
         }
+
+        // Capture scheduler source state at compile START for artifact commit.
+        #[cfg(feature = "scheduler")]
+        let sched_snapshot_at_start = self.scheduler.try_get_source(&canonical_id);
 
         let cache_miss = {
             let files = read_lock(&self.files);
@@ -603,6 +657,63 @@ impl VerterHost {
                     .insert(profile_hash, diagnostics.clone());
                 entry.diagnostics_generation += 1;
                 enforce_profile_cap(entry, self.config.max_profiles_per_file.max(1));
+
+                // Mirror to compile_cache + commit scheduler artifact.
+                #[cfg(feature = "scheduler")]
+                {
+                    if let Some(mut cc) = self.compile_cache.get_mut(&canonical_id) {
+                        let slot_ref = entry.compile_slots.get(&profile_hash);
+                        cc.compile_slots.insert(
+                            profile_hash,
+                            CompileSlot {
+                                semantic_hash: captured_semantic_hash,
+                                style_override_hash,
+                                content_override_hash,
+                                outputs: compiled_outputs.clone(),
+                                diagnostics: diagnostics.clone(),
+                                last_good_outputs: if stale {
+                                    fallback_last_good.clone()
+                                } else {
+                                    Some(compiled_outputs.clone())
+                                },
+                                last_access_tick: last_tick,
+                                tsx: slot_ref.and_then(|s| s.tsx.clone()),
+                                template_analysis: slot_ref
+                                    .and_then(|s| s.template_analysis.clone()),
+                            },
+                        );
+                        cc.latest_diagnostics
+                            .insert(profile_hash, diagnostics.clone());
+                        cc.diagnostics_generation += 1;
+                    }
+
+                    let should_commit = sched_snapshot_at_start
+                        .as_ref()
+                        .map(|snap| snap.whole_hash == entry.whole_hash)
+                        .unwrap_or(false);
+                    if should_commit {
+                        let gen = sched_snapshot_at_start.as_ref().unwrap().generation;
+                        let sched_outputs = compiled_outputs.clone();
+                        let sched_diags = diagnostics.clone();
+                        drop(files);
+                        self.scheduler.commit_artifact(
+                            &canonical_id,
+                            profile_hash,
+                            verter_scheduler::node::ArtifactSnapshot {
+                                generation: gen,
+                                profile_hash,
+                                data: Arc::new(crate::host_executor::HostArtifactData {
+                                    outputs: sched_outputs,
+                                    diagnostics: sched_diags,
+                                }),
+                            },
+                        );
+                    } else {
+                        drop(files);
+                    }
+                }
+                #[cfg(not(feature = "scheduler"))]
+                drop(files);
             }
         }
 
@@ -626,12 +737,7 @@ impl VerterHost {
 
     /// List all virtual node kinds for a file (Main, Script, Template, Style, Custom).
     pub fn list_virtual_files(&self, canonical_id: &str) -> Vec<VirtualNodeKind> {
-        let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let files = read_lock(&self.files);
-        files
-            .get(&canonical)
-            .map(|f| f.all_virtual_nodes())
-            .unwrap_or_default()
+        self.list_virtual_nodes(canonical_id)
     }
 
     /// Retrieve the combined TSX output for LSP type checking.
@@ -677,6 +783,29 @@ impl VerterHost {
         mode: PublicApiMode,
     ) -> Option<TscResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
+
+        #[cfg(feature = "scheduler")]
+        let (source, file_kind, macro_type_deps, script_imports, cached_extract) = {
+            use crate::host_executor::HostSourceData;
+            let snap = self.scheduler.try_get_source(&canonical)?;
+            let hd = snap.downcast_data::<HostSourceData>()?;
+            if hd.file_kind != FileKind::VueSfc {
+                return None;
+            }
+            let cached = self
+                .compile_cache
+                .get(&canonical)
+                .and_then(|cc| cc.cached_tsc_extract.as_ref().map(|(_, e)| Arc::clone(e)));
+            (
+                snap.source.clone(),
+                hd.file_kind,
+                hd.parse.script_analysis.macro_type_deps.clone(),
+                hd.parse.script_analysis.imports.clone(),
+                cached,
+            )
+        };
+
+        #[cfg(not(feature = "scheduler"))]
         let (source, file_kind, macro_type_deps, script_imports, cached_extract) = {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;
@@ -719,7 +848,23 @@ impl VerterHost {
             },
         ) {
             let arc = Arc::new(fresh);
-            // Store in cache under write lock
+            // Store in compile_cache
+            #[cfg(feature = "scheduler")]
+            {
+                use crate::host_executor::HostSourceData;
+                if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+                    let wh = self
+                        .scheduler
+                        .try_get_source(&canonical)
+                        .and_then(|s| {
+                            s.downcast_data::<HostSourceData>()
+                                .map(|h| h.parse.whole_hash)
+                        })
+                        .unwrap_or([0; 16]);
+                    cc.cached_tsc_extract = Some((wh, Arc::clone(&arc)));
+                }
+            }
+            // Also store in files
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
                 entry.cached_tsc_extract = Some(Arc::clone(&arc));
@@ -771,6 +916,13 @@ impl VerterHost {
         profile_hash: u64,
         diagnostics: DiagnosticsSnapshot,
     ) {
+        #[cfg(feature = "scheduler")]
+        if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
+            cc.latest_diagnostics
+                .insert(profile_hash, diagnostics.clone());
+            cc.diagnostics_generation += 1;
+        }
+
         let mut files = write_lock(&self.files);
         if let Some(entry) = files.get_mut(canonical_id) {
             entry.latest_diagnostics.insert(profile_hash, diagnostics);

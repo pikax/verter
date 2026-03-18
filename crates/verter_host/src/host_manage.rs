@@ -16,8 +16,24 @@ impl VerterHost {
     /// Returns `None` when the file does not exist in the host.
     pub fn get_source(&self, canonical_or_alias: &str) -> Option<std::sync::Arc<str>> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let files = read_lock(&self.files);
-        files.get(&canonical).map(|entry| entry.source.clone())
+
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    return None;
+                }
+            }
+            self.scheduler
+                .try_get_source(&canonical)
+                .map(|s| s.source.clone())
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            files.get(&canonical).map(|entry| entry.source.clone())
+        }
     }
 
     /// Resolve imported type definitions for a file's macro type dependencies.
@@ -243,7 +259,7 @@ impl VerterHost {
 
             enrichments.push(Enrichment {
                 type_name: dep.type_name.clone(),
-                macro_kind: dep.macro_kind.clone(),
+                macro_kind: dep.macro_kind,
                 prop_fields,
                 emit_fields,
                 slot_fields,
@@ -684,8 +700,25 @@ impl VerterHost {
     /// changes (script, template, scoped styles). Returns `None` for missing files.
     pub fn get_semantic_hash(&self, canonical_or_alias: &str) -> Option<Hash16> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let files = read_lock(&self.files);
-        files.get(&canonical).map(|entry| entry.semantic_hash)
+
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    return None;
+                }
+            }
+            let snap = self.scheduler.try_get_source(&canonical)?;
+            let hd = snap.downcast_data::<HostSourceData>()?;
+            Some(hd.parse.semantic_hash)
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            files.get(&canonical).map(|entry| entry.semantic_hash)
+        }
     }
 
     /// Returns the compile-blocking dependencies for a Vue SFC.
@@ -697,16 +730,47 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Option<CompileBlockersSnapshot> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let files = read_lock(&self.files);
-        let entry = files.get(&canonical)?;
-        if entry.file_kind != FileKind::VueSfc {
-            return None;
+
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::{HostAnalysisData, HostSourceData};
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    return None;
+                }
+            }
+            let snap = self.scheduler.try_get_source(&canonical)?;
+            let hd = snap.downcast_data::<HostSourceData>()?;
+            if hd.file_kind != FileKind::VueSfc {
+                return None;
+            }
+            // Use pre-built AnalysisArcs for cheap pointer clone instead of Vec clone
+            let macro_type_deps = self
+                .scheduler
+                .try_get_analysis(&canonical)
+                .and_then(|a| {
+                    a.downcast_data::<HostAnalysisData>()
+                        .map(|ad| Arc::clone(&ad.arcs.macro_type_deps))
+                })
+                .unwrap_or_else(|| Arc::new(hd.parse.script_analysis.macro_type_deps.clone()));
+            Some(CompileBlockersSnapshot {
+                external_source_requests: hd.parse.external_requests.clone(),
+                macro_type_deps,
+            })
         }
 
-        Some(CompileBlockersSnapshot {
-            external_source_requests: entry.external_requests.clone(),
-            macro_type_deps: Arc::clone(&entry.arc_script_cache.macro_type_deps),
-        })
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(&canonical)?;
+            if entry.file_kind != FileKind::VueSfc {
+                return None;
+            }
+            Some(CompileBlockersSnapshot {
+                external_source_requests: entry.external_requests.clone(),
+                macro_type_deps: Arc::clone(&entry.arc_script_cache.macro_type_deps),
+            })
+        }
     }
 
     /// Returns analysis snapshots for multiple files in a single lock acquisition.
@@ -900,9 +964,22 @@ impl VerterHost {
     ) -> Option<DiagnosticsSnapshot> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let profile_hash = compile_profile_hash(profile);
-        let files = read_lock(&self.files);
-        let entry = files.get(&canonical)?;
-        entry.latest_diagnostics.get(&profile_hash).cloned()
+
+        #[cfg(feature = "scheduler")]
+        {
+            let cc = self.compile_cache.get(&canonical)?;
+            if cc.evicted {
+                return None;
+            }
+            cc.latest_diagnostics.get(&profile_hash).cloned()
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(&canonical)?;
+            entry.latest_diagnostics.get(&profile_hash).cloned()
+        }
     }
 
     /// Returns the monotonic diagnostics generation counter for a file.
@@ -910,30 +987,48 @@ impl VerterHost {
     /// cache to detect host-driven recompiles without a document version change.
     pub fn get_diagnostics_generation(&self, canonical_or_alias: &str) -> Option<u64> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let files = read_lock(&self.files);
-        files.get(&canonical).map(|e| e.diagnostics_generation)
+
+        #[cfg(feature = "scheduler")]
+        {
+            let cc = self.compile_cache.get(&canonical)?;
+            if cc.evicted {
+                return None;
+            }
+            Some(cc.diagnostics_generation)
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            files.get(&canonical).map(|e| e.diagnostics_generation)
+        }
     }
 
     /// Bump the diagnostics generation counter for a file without changing
-    /// its diagnostics. This causes the LSP diagnostic cache to treat the
-    /// next `compute_verter_diagnostics_for` call as a cache miss, forcing
-    /// a fresh recomputation. Used after hydrating compile blockers (e.g.,
-    /// macro type deps) where the source hasn't changed but stale error
-    /// diagnostics need to be cleared.
+    /// its diagnostics.
     pub fn bump_diagnostics_generation(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+
+        #[cfg(feature = "scheduler")]
+        if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+            cc.diagnostics_generation += 1;
+        }
+
         let mut files = write_lock(&self.files);
         if let Some(entry) = files.get_mut(&canonical) {
             entry.diagnostics_generation += 1;
         }
     }
 
-    /// Clear all compile slots for a specific file so `ensure_compiled` will
-    /// recompile it on the next call. Use this after loading new dependencies
-    /// (e.g., macro type deps via hydration) that affect the compilation
-    /// output even though the source itself hasn't changed.
+    /// Clear all compile slots for a specific file.
     pub fn invalidate_compile_slots(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+
+        #[cfg(feature = "scheduler")]
+        if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+            cc.compile_slots.clear();
+        }
+
         let mut files = write_lock(&self.files);
         if let Some(entry) = files.get_mut(&canonical) {
             entry.compile_slots.clear();
@@ -988,16 +1083,30 @@ impl VerterHost {
         // Invalidate compile slots of files that depended on the removed file.
         if !dependents.is_empty() {
             let mut files = write_lock(&self.files);
-            for owner in dependents {
-                if let Some(file) = files.get_mut(&owner) {
+            for owner in &dependents {
+                if let Some(file) = files.get_mut(owner) {
                     file.compile_slots.clear();
                 }
+            }
+        }
+
+        // Also clear compile_cache slots for dependents
+        #[cfg(feature = "scheduler")]
+        for owner in &dependents {
+            if let Some(mut cc) = self.compile_cache.get_mut(owner) {
+                cc.compile_slots.clear();
             }
         }
 
         // Clean up VFS state (overlay, snapshot, edges) so the file is
         // no longer resolvable or tracked after deletion.
         self.ws().notify_delete(&canonical);
+
+        #[cfg(feature = "scheduler")]
+        {
+            self.compile_cache.remove(&canonical);
+            self.scheduler.remove(&canonical);
+        }
 
         Some(HostRemoveResult {
             canonical_id: canonical,
@@ -1008,11 +1117,31 @@ impl VerterHost {
     /// Returns an empty vec if the file doesn't exist.
     pub fn list_virtual_nodes(&self, canonical_or_alias: &str) -> Vec<VirtualNodeKind> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let files = read_lock(&self.files);
-        files
-            .get(&canonical)
-            .map(|e| e.all_virtual_nodes())
-            .unwrap_or_default()
+
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    return Vec::new();
+                }
+            }
+            if let Some(snap) = self.scheduler.try_get_source(&canonical) {
+                if let Some(hd) = snap.downcast_data::<HostSourceData>() {
+                    return hd.parse.meta.virtual_nodes();
+                }
+            }
+            Vec::new()
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            files
+                .get(&canonical)
+                .map(|e| e.all_virtual_nodes())
+                .unwrap_or_default()
+        }
     }
 
     /// Provide caller-resolved import dependency resolution records.
@@ -1067,7 +1196,7 @@ impl VerterHost {
             .collect();
 
         // Single write lock to avoid TOCTOU race between read-read-write.
-        let (old_deps, new_deps) = {
+        let (old_deps, new_deps, _dep_resolutions_clone) = {
             let mut files = write_lock(&self.files);
             let Some(entry) = files.get_mut(&canonical) else {
                 return;
@@ -1102,8 +1231,15 @@ impl VerterHost {
                     .insert(res.specifier.clone(), res);
             }
             let new_deps = entry.dependencies.clone();
-            (old_deps, new_deps)
+            let dep_resolutions_clone = entry.dependency_resolutions.clone();
+            (old_deps, new_deps, dep_resolutions_clone)
         };
+
+        #[cfg(feature = "scheduler")]
+        if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+            cc.dependencies.clone_from(&new_deps);
+            cc.dependency_resolutions = _dep_resolutions_clone;
+        }
 
         self.update_reverse_deps(&canonical, &old_deps, &new_deps);
 
@@ -1113,11 +1249,33 @@ impl VerterHost {
 
     /// Returns all known canonical file IDs and their file kinds.
     pub fn list_files(&self) -> Vec<(String, FileKind)> {
-        let files = read_lock(&self.files);
-        files
-            .iter()
-            .map(|(id, entry)| (id.clone(), entry.file_kind))
-            .collect()
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+            self.scheduler
+                .node_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    if let Some(cc) = self.compile_cache.get(&id) {
+                        if cc.evicted {
+                            return None;
+                        }
+                    }
+                    let snap = self.scheduler.try_get_source(&id)?;
+                    let hd = snap.downcast_data::<HostSourceData>()?;
+                    Some((id, hd.file_kind))
+                })
+                .collect()
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            files
+                .iter()
+                .map(|(id, entry)| (id.clone(), entry.file_kind))
+                .collect()
+        }
     }
 
     /// Returns cross-component CSS variable flow for a given variable name.
