@@ -3512,6 +3512,7 @@ name = "verter_host"
 version = "0.0.1-beta.1"
 dependencies = [
  "criterion",
+ "dashmap 6.1.0",
  "oxc_allocator",
  "oxc_span",
  "parking_lot",
@@ -3523,6 +3524,7 @@ dependencies = [
  "thiserror 2.0.18",
  "verter_analysis",
  "verter_core",
+ "verter_scheduler",
  "verter_span",
  "verter_vfs",
  "web-time",
@@ -3558,6 +3560,7 @@ dependencies = [
  "verter_diagnostics",
  "verter_host",
  "verter_mcp",
+ "verter_scheduler",
  "verter_span",
  "verter_vfs",
 ]
@@ -3600,8 +3603,22 @@ dependencies = [
  "verter_diagnostics",
  "verter_ffi",
  "verter_host",
+ "verter_scheduler",
  "verter_span",
  "verter_vfs",
+]
+
+[[package]]
+name = "verter_scheduler"
+version = "0.0.1-beta.1"
+dependencies = [
+ "arc-swap",
+ "crossbeam-channel",
+ "dashmap 6.1.0",
+ "parking_lot",
+ "rayon",
+ "rustc-hash 2.1.1",
+ "verter_span",
 ]
 
 [[package]]

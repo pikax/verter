@@ -202,3 +202,81 @@ pub trait WorkspaceAccess: Send + Sync {
         false
     }
 }
+
+// ── Scheduler-oriented traits ──
+
+/// Read-only file loading interface for the scheduler's I/O pool.
+///
+/// Implementations check overlay first, then fall back to disk (or memory).
+/// All methods are sync — they run on the scheduler's bounded I/O pool,
+/// isolated from the CPU pool.
+///
+/// Unlike [`WorkspaceAccess`], this trait has no resolution, edge recording,
+/// or mutation methods. It is the minimal interface needed for the scheduler's
+/// Source stage to load file content.
+pub trait SourceLoader: Send + Sync {
+    /// Load file content by canonical ID. Returns `None` if the file doesn't exist.
+    fn load(&self, canonical_id: &str) -> Option<Arc<str>>;
+
+    /// Check whether a file exists.
+    fn exists(&self, canonical_id: &str) -> bool;
+
+    /// Classify a file by extension.
+    fn classify(&self, canonical_id: &str) -> FileKind;
+
+    /// Resolve symlinks to real path.
+    fn realpath(&self, canonical_id: &str) -> Option<String>;
+}
+
+/// Read-only snapshot of project resolution state.
+///
+/// Provides import resolution and project ownership queries without
+/// mutation capabilities. The scheduler holds this via `ArcSwap` so it
+/// can be atomically replaced when project configuration changes.
+///
+/// Implementors: [`ProjectResolver`](crate::resolver::ProjectResolver),
+/// `EmptyResolverSnapshot` (for standalone/test hosts).
+pub trait ResolverSnapshot: Send + Sync {
+    /// Resolve an import specifier in context.
+    fn resolve_import(
+        &self,
+        importer: &str,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> Option<ResolveResult>;
+
+    /// Compute the preferred alias-based specifier for auto-imports.
+    fn preferred_specifier(&self, importer: &str, target: &str) -> Option<String>;
+
+    /// Find the owning project for a file.
+    fn owner_for_file(&self, id: &str) -> Option<ProjectOwnership>;
+
+    /// Monotonic generation counter. Bumped when project configuration changes.
+    fn generation(&self) -> u64;
+}
+
+/// Empty resolver that resolves nothing. Used by standalone hosts and tests.
+pub struct EmptyResolverSnapshot;
+
+impl ResolverSnapshot for EmptyResolverSnapshot {
+    fn resolve_import(
+        &self,
+        _importer: &str,
+        _specifier: &str,
+        _ctx: ResolutionContext,
+    ) -> Option<ResolveResult> {
+        None
+    }
+
+    fn preferred_specifier(&self, _importer: &str, _target: &str) -> Option<String> {
+        None
+    }
+
+    fn owner_for_file(&self, _id: &str) -> Option<ProjectOwnership> {
+        None
+    }
+
+    fn generation(&self) -> u64 {
+        0
+    }
+}

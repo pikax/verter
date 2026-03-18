@@ -620,6 +620,9 @@ pub fn host_error_to_string(err: &host::HostError) -> String {
                 .join("; ");
             format!("HostError::CompileError: {}", summary)
         }
+        // Catch-all for scheduler-related errors (feature-gated in verter_host).
+        #[allow(unreachable_patterns)]
+        other => format!("HostError: {}", other),
     }
 }
 

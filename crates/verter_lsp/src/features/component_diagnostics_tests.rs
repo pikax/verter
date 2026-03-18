@@ -1003,6 +1003,7 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
                     bindings: vec![],
                     description: None,
                     tags: vec![],
+                    return_type: None,
                 })
                 .collect(),
             default_keys: vec![],

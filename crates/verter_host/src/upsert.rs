@@ -20,6 +20,8 @@ pub(crate) struct UpsertChangeResult {
 
 /// Compare old file entry state against a new parse snapshot to determine what changed.
 /// Consolidates all change detection logic into a single function.
+/// Used by the legacy (non-scheduler) upsert path, WASM, and unit tests.
+#[cfg_attr(feature = "scheduler", allow(dead_code))]
 pub(crate) fn compute_upsert_changes(
     old_entry: Option<&FileEntry>,
     new: &ParseSnapshot,
@@ -32,8 +34,52 @@ pub(crate) fn compute_upsert_changes(
         };
     };
 
+    compute_upsert_changes_core(
+        old.whole_hash,
+        old.semantic_hash,
+        &old.slices,
+        &old.descriptor,
+        new,
+    )
+}
+
+/// Compare two ParseSnapshots to determine what changed (scheduler-backed path).
+///
+/// Takes the old parse snapshot directly rather than a FileEntry. Used by
+/// the scheduler-backed upsert where old state comes from the scheduler's
+/// committed HostSourceData, not from the files map.
+#[cfg(feature = "scheduler")]
+pub(crate) fn compute_upsert_changes_from_parse(
+    old: Option<&ParseSnapshot>,
+    new: &ParseSnapshot,
+) -> UpsertChangeResult {
+    let Some(old) = old else {
+        return UpsertChangeResult {
+            slice_changes: SliceChanges::default(),
+            changed: true,
+            semantic_changed: true,
+        };
+    };
+
+    compute_upsert_changes_core(
+        old.whole_hash,
+        old.semantic_hash,
+        &old.slices,
+        &old.descriptor,
+        new,
+    )
+}
+
+/// Core change detection comparing old hashes/slices against new parse snapshot.
+fn compute_upsert_changes_core(
+    old_whole_hash: Hash16,
+    old_semantic_hash: Hash16,
+    old_slices: &SliceHashes,
+    old_descriptor: &DescriptorMin,
+    new: &ParseSnapshot,
+) -> UpsertChangeResult {
     // Quick check: if the whole source is byte-identical, nothing changed.
-    if old.whole_hash == new.whole_hash {
+    if old_whole_hash == new.whole_hash {
         return UpsertChangeResult {
             slice_changes: SliceChanges::default(),
             changed: false,
@@ -42,8 +88,8 @@ pub(crate) fn compute_upsert_changes(
     }
 
     // Whole hash differs. Check semantic hash + descriptor for meaningful change.
-    let semantic_hash_same = old.semantic_hash == new.semantic_hash;
-    let descriptor_same = old.descriptor == new.descriptor;
+    let semantic_hash_same = old_semantic_hash == new.semantic_hash;
+    let descriptor_same = *old_descriptor == new.descriptor;
 
     // If only whitespace changed (semantic hash and descriptor identical), skip invalidation.
     if semantic_hash_same && descriptor_same {
@@ -56,14 +102,14 @@ pub(crate) fn compute_upsert_changes(
 
     // Real change detected. Compute granular slice-level diffs.
     let slice_changes = SliceChanges {
-        script_changed: old.slices.script != new.slices.script,
-        template_changed: old.slices.template != new.slices.template,
-        style_indices_changed: diff_indices(&old.slices.styles, &new.slices.styles),
-        custom_indices_changed: diff_indices(&old.slices.custom, &new.slices.custom),
-        structure_changed: old.descriptor.script_count != new.descriptor.script_count
-            || old.descriptor.template_count != new.descriptor.template_count
-            || old.descriptor.style_count != new.descriptor.style_count
-            || old.descriptor.custom_count != new.descriptor.custom_count,
+        script_changed: old_slices.script != new.slices.script,
+        template_changed: old_slices.template != new.slices.template,
+        style_indices_changed: diff_indices(&old_slices.styles, &new.slices.styles),
+        custom_indices_changed: diff_indices(&old_slices.custom, &new.slices.custom),
+        structure_changed: old_descriptor.script_count != new.descriptor.script_count
+            || old_descriptor.template_count != new.descriptor.template_count
+            || old_descriptor.style_count != new.descriptor.style_count
+            || old_descriptor.custom_count != new.descriptor.custom_count,
         descriptor_changed: !descriptor_same,
     };
 

@@ -395,6 +395,12 @@ pub struct HostUpdateResult {
 }
 
 impl HostUpdateResult {
+    /// Construct a no-op result for superseded upserts (scheduler mode).
+    #[cfg(feature = "scheduler")]
+    pub fn noop() -> Self {
+        Self::no_change(String::new())
+    }
+
     /// Construct a "nothing changed" result with all-empty change lists.
     pub fn no_change(canonical_id: String) -> Self {
         Self {
@@ -751,6 +757,18 @@ pub enum HostError {
     /// Compilation failed. Contains the error diagnostics.
     #[error("compile error")]
     CompileError { diagnostics: DiagnosticsSnapshot },
+    /// A scheduler error occurred.
+    #[cfg(feature = "scheduler")]
+    #[error("scheduler error: {0}")]
+    Scheduler(#[from] verter_scheduler::job::SchedulerError),
+    /// The request was superseded by a newer version of the file.
+    #[cfg(feature = "scheduler")]
+    #[error("request superseded by newer generation")]
+    Superseded,
+    /// The scheduler was shut down.
+    #[cfg(feature = "scheduler")]
+    #[error("scheduler shut down")]
+    Shutdown,
 }
 
 #[derive(Debug, Clone)]
@@ -1078,9 +1096,96 @@ impl FileMeta {
 }
 
 impl FileEntry {
+    #[cfg_attr(feature = "scheduler", allow(dead_code))]
     pub(crate) fn all_virtual_nodes(&self) -> Vec<VirtualNodeKind> {
         self.meta.virtual_nodes()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CompileCacheEntry — scheduler-backed compile state (native only)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Per-file compile cache entry for the scheduler-backed host.
+///
+/// Three conceptual subdomains — kept in one struct for DashMap efficiency:
+///
+/// **ProfileState**: per-profile override + compile outputs
+/// - `content_overrides`, `style_overrides`, `compile_slots`, `latest_diagnostics`
+///
+/// **DerivedRawState**: source-hash-keyed caches
+/// - `cached_tsc_extract`, `raw_template_analysis`
+///
+/// **DependencyState**: resolution metadata + invalidation hashes
+/// - `dependency_resolutions`, `dependencies`, `resolved_type_hashes`, `aliases`
+#[cfg(feature = "scheduler")]
+#[derive(Debug, Default)]
+#[allow(dead_code)] // Fields used progressively during Phase 2 migration
+pub(crate) struct CompileCacheEntry {
+    // ── ProfileState: per-profile override + compile outputs ──
+    pub(crate) content_overrides: FxHashMap<u64, ContentOverrideWithParse>,
+    pub(crate) style_overrides: FxHashMap<u64, StyleOverrideWithAnalysis>,
+    pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
+    pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
+    pub(crate) diagnostics_generation: u64,
+
+    // ── DerivedRawState: source-hash-keyed caches ──
+    /// Cached TSC extract keyed by whole_hash. On read: stored hash must match
+    /// effective_file_state().whole_hash. Cleared on upsert when whole_hash changes.
+    pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
+
+    /// Raw template analysis (source-derived, profileless).
+    /// Computed by compute_template_analysis_if_missing() from raw scheduler data.
+    /// Always raw — never from overrides.
+    ///
+    /// EXTERNAL SRC RULE: When src_blocks is non-empty, raw_template_analysis is NOT cached
+    /// (set to None after read). This mirrors current FileEntry behavior because editing
+    /// an external <template src>/<script src> dep only triggers smart_invalidate_dependents
+    /// (which clears compile_slots), not raw_template_analysis.
+    pub(crate) raw_template_analysis:
+        Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>>,
+
+    // ── DependencyState: resolution metadata + invalidation hashes ──
+    pub(crate) dependency_resolutions: FxHashMap<String, DependencyResolution>,
+    pub(crate) dependencies: std::collections::BTreeSet<String>,
+    pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
+    pub(crate) aliases: std::collections::BTreeSet<String>,
+    pub(crate) generation: u64,
+
+    /// Eviction flag — when true, the file is invisible to host accessors
+    /// but deps/aliases are preserved for old-state diffing during reload.
+    pub(crate) evicted: bool,
+}
+
+/// Block override + cached re-parse from synthetic source.
+///
+/// When a preprocessor (e.g. Pug → HTML) overrides a block, the host builds a
+/// synthetic SFC source, re-parses it, and stores the result here. The scheduler's
+/// raw source/analysis are never modified by overrides.
+#[cfg(feature = "scheduler")]
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Used in Phase 2a: apply_block_overrides
+pub(crate) struct ContentOverrideWithParse {
+    pub(crate) layer: ContentOverrideLayer,
+    pub(crate) parse: ParseSnapshot,
+    pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub(crate) source: Arc<str>,
+}
+
+/// Style override + remapped CSS analyses + lang overrides.
+///
+/// When a style preprocessor (e.g. SCSS → CSS) runs, the compiled CSS and its
+/// remapped CSS analysis (with SFC-absolute spans) are stored here per-profile.
+#[cfg(feature = "scheduler")]
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Used in Phase 2a: apply_style_overrides
+pub(crate) struct StyleOverrideWithAnalysis {
+    pub(crate) layer: StyleOverrideLayer,
+    /// Per-index: Some(remapped CSS analysis) for overridden blocks, None for raw.
+    pub(crate) analyses: Vec<Option<verter_analysis::StyleBlockAnalysis>>,
+    /// Per-index: Some("css") for overridden blocks, None for raw.
+    pub(crate) lang_overrides: Vec<Option<String>>,
+    pub(crate) hash: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

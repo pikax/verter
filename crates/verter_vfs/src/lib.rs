@@ -80,7 +80,7 @@ pub use resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
     ProjectResolver, WorkspaceAlias,
 };
-pub use traits::WorkspaceAccess;
+pub use traits::{EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess};
 pub use types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
     ProjectOwnership, ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase,

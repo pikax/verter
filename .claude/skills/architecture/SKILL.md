@@ -582,7 +582,14 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_analysis/src/style.rs` | CSS scanner, selector parser, specificity computation |
 | `crates/verter_analysis/src/selector_match.rs` | Three-valued CSS selector matching against template elements |
 | `crates/verter_analysis/src/template.rs` | Template element analysis, component usage, dynamic class extraction |
+| `crates/verter_scheduler/src/scheduler.rs` | Scheduler: DashMap of FileNodes, driver loop, stage dispatch |
+| `crates/verter_scheduler/src/node.rs` | FileNode: ArcSwap snapshots, generation counter, pending requests |
+| `crates/verter_scheduler/src/executor.rs` | StageExecutor trait: host plugs in parse/analysis/compile |
+| `crates/verter_scheduler/src/edges.rs` | EdgeManager: ReverseIndex + BlockerRegistry (DashMap-sharded) |
+| `crates/verter_scheduler/src/queue.rs` | JobIndex: priority queue with aging, dedup, cancel |
 | `crates/verter_host/src/lib.rs` | Host entry: compile, cache, upsert, dependency tracking |
+| `crates/verter_host/src/host_executor.rs` | HostStageExecutor: real parse pipeline for scheduler |
+| `crates/verter_host/src/scheduler_shim.rs` | SchedulerBackedWorkspace: migration shim |
 | `crates/verter_ffi/src/lib.rs` | FFI types shared between NAPI and WASM |
 | `packages/unplugin/src/index.ts` | Unplugin factory: `buildStart` (preCompile), `transform`, `load` hooks |
 | `packages/unplugin/src/core/types.ts` | `VerterPluginOptions`, `HmrStrategy` |
@@ -595,3 +602,4 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_lsp/src/tsserver/mod.rs` | `find_tsserver()`, `find_node()`, `detect_ts_major_version()` |
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`: JSON transport, position conversion |
 | `crates/verter_lsp/src/tsserver/resilient.rs` | `ResilientTsserverProvider`: crash detection + auto-restart |
+| `crates/verter_lsp/src/scheduler_integration.rs` | LSP scheduler helpers: priority mapping, submit/read |

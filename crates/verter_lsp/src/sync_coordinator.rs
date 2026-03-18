@@ -165,13 +165,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             .insert(canonical_id.to_string());
         return;
     };
-    let reader = crate::compile_blockers::HostFsProjectResolverReader::new(deps.documents.host());
-    crate::compile_blockers::hydrate_vue_compile_blockers(
-        deps.documents.host(),
-        &snapshot.resolver,
-        &reader,
-        canonical_id,
-    );
+    deps.documents.host().ensure_loaded(canonical_id);
     // Sync IDE (TSX) output to type provider
     let profile = deps.documents.tsx_profile.read().clone();
     let _ =

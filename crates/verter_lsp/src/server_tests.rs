@@ -6139,9 +6139,9 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         generation: 1,
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
     };
-    let reader = crate::compile_blockers::HostFsProjectResolverReader::new(documents.host());
+    let ws = documents.host().workspace();
     let external_resolved = snapshot.resolver.resolve_with_reader(
-        &reader,
+        ws.as_ref(),
         &crate::project_resolver::ResolveRequest {
             importer_id: app_id.clone(),
             specifier: "@/partials/panel.html".to_string(),
@@ -6150,7 +6150,7 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         },
     );
     let type_resolved = snapshot.resolver.resolve_with_reader(
-        &reader,
+        ws.as_ref(),
         &crate::project_resolver::ResolveRequest {
             importer_id: app_id.clone(),
             specifier: "@/types".to_string(),
@@ -6181,13 +6181,13 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         type_resolved
     );
     assert!(
-        reader.read_file(&external_resolved.source_id).is_some(),
-        "reader should load external src text from {:?}",
+        ws.read_file(&external_resolved.source_id).is_some(),
+        "workspace should load external src text from {:?}",
         external_resolved
     );
     assert!(
-        reader.read_file(&type_resolved.source_id).is_some(),
-        "reader should load macro type text from {:?}",
+        ws.read_file(&type_resolved.source_id).is_some(),
+        "workspace should load macro type text from {:?}",
         type_resolved
     );
     let provider = Arc::new(MockTypeProvider::new());

@@ -1828,18 +1828,15 @@ fn apply_block_overrides_template() {
     let result = result.unwrap();
     assert!(result.changed, "should report changed");
 
-    // Verify the source was updated — the template should now contain native HTML
+    // With scheduler as sole parser, get_source() returns the RAW source
+    // (before block overrides). The synthetic source is per-profile in compile_cache.
     let source = host.get_source("test.vue");
     assert!(source.is_some(), "source should exist");
     let source = source.unwrap();
     assert!(
-        source.contains("<div>hello</div>"),
-        "synthetic source should contain preprocessed HTML, got: {}",
+        source.contains("lang=\"pug\""),
+        "get_source should return raw source (with pug lang), got: {}",
         source
-    );
-    assert!(
-        !source.contains("lang=\"pug\""),
-        "synthetic source should NOT contain lang=\"pug\""
     );
 
     // Verify the file can be compiled (get_virtual_file succeeds)
@@ -1851,7 +1848,8 @@ fn apply_block_overrides_template() {
     });
     assert!(
         vf.is_ok(),
-        "should be able to compile template after block override"
+        "should be able to compile template after block override: {:?}",
+        vf.err()
     );
 }
 
@@ -2866,4 +2864,694 @@ fn smart_invalidation_reads_workspace_reverse_deps() {
         !other_rev.contains(&"/src/App.vue".to_string()),
         "unrelated files should not appear in reverse deps"
     );
+}
+
+// ── Scheduler integration tests ──
+
+#[cfg(feature = "scheduler")]
+mod scheduler_tests {
+    use super::*;
+    use crate::host_executor::HostSourceData;
+
+    /// Submit to the scheduler and wait for completion (blocks until the
+    /// driver thread processes Source→Analysis).
+    fn sched_submit_wait(host: &VerterHost, id: &str, src: &str) {
+        let handle = host
+            .scheduler()
+            .submit_request(verter_scheduler::scheduler::Request {
+                file_id: id.to_string(),
+                target: verter_scheduler::stage::TargetStage::Analysis,
+                priority: verter_scheduler::stage::Priority::Interactive,
+                source: Some(Arc::from(src)),
+            });
+        handle.wait();
+    }
+
+    #[test]
+    fn scheduler_populated_on_upsert() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = r#"<script setup lang="ts">
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#;
+
+        upsert_vue(&host, "/src/App.vue", src);
+        sched_submit_wait(&host, "/src/App.vue", src);
+
+        let snap = host.scheduler_source("/src/App.vue");
+        assert!(snap.is_some(), "scheduler should have source after upsert");
+        let snap = snap.unwrap();
+        assert_eq!(&*snap.source, src);
+        assert_ne!(snap.whole_hash, [0; 16], "whole_hash should be computed");
+    }
+
+    #[test]
+    fn scheduler_source_has_parse_data() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<script setup>\nconst x = 1\n</script>\n<template><div/></template>";
+        upsert_vue(&host, "/src/App.vue", src);
+        sched_submit_wait(&host, "/src/App.vue", src);
+
+        let snap = host.scheduler_source("/src/App.vue").unwrap();
+        let host_data = snap.downcast_data::<HostSourceData>();
+        assert!(
+            host_data.is_some(),
+            "source snapshot should contain HostSourceData"
+        );
+        let host_data = host_data.unwrap();
+        assert!(
+            !host_data.parse.script_analysis.bindings.is_empty(),
+            "parse snapshot should have bindings for 'const x = 1'"
+        );
+    }
+
+    #[test]
+    fn scheduler_analysis_populated_on_upsert() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<script setup>\nconst x = 1\n</script>\n<template><div/></template>";
+        upsert_vue(&host, "/src/App.vue", src);
+        sched_submit_wait(&host, "/src/App.vue", src);
+
+        let snap = host.scheduler_analysis("/src/App.vue");
+        assert!(
+            snap.is_some(),
+            "scheduler should have analysis after upsert"
+        );
+    }
+
+    #[test]
+    fn scheduler_source_updates_on_re_upsert() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        let src1 = "<template><div>v1</div></template>";
+        upsert_vue(&host, "/src/App.vue", src1);
+        sched_submit_wait(&host, "/src/App.vue", src1);
+        let snap1 = host.scheduler_source("/src/App.vue").unwrap();
+        assert!(snap1.source.contains("v1"));
+
+        let src2 = "<template><div>v2</div></template>";
+        upsert_vue(&host, "/src/App.vue", src2);
+        sched_submit_wait(&host, "/src/App.vue", src2);
+        let snap2 = host.scheduler_source("/src/App.vue").unwrap();
+        assert!(snap2.source.contains("v2"));
+        assert!(
+            !snap2.source.contains("v1"),
+            "old content should be replaced"
+        );
+    }
+
+    #[test]
+    fn scheduler_non_sfc_upsert() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "export interface Props { count: number }";
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+        sched_submit_wait(&host, "/src/types.ts", src);
+
+        let snap = host.scheduler_source("/src/types.ts");
+        assert!(snap.is_some(), "non-SFC files should be in scheduler");
+    }
+
+    #[test]
+    fn scheduler_accessor_returns_scheduler() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let sched = host.scheduler();
+        assert!(
+            !sched.has_node("/nonexistent"),
+            "empty scheduler should have no nodes"
+        );
+    }
+
+    #[test]
+    fn scheduler_analysis_has_real_data() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<script setup>\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>\n<template><div>{{ x }}</div></template>";
+        upsert_vue(&host, "/src/App.vue", src);
+        sched_submit_wait(&host, "/src/App.vue", src);
+
+        // Typed accessor should return real script analysis
+        let analysis = host.scheduler_script_analysis("/src/App.vue");
+        assert!(analysis.is_some(), "scheduler should have script analysis");
+        let analysis = analysis.unwrap();
+        assert!(
+            !analysis.imports.is_empty(),
+            "should have imports (import {{ ref }} from 'vue')"
+        );
+        assert!(
+            analysis.imports[0].source == "vue",
+            "first import should be from 'vue'"
+        );
+
+        // Export signatures accessor
+        let sigs = host.scheduler_export_signatures("/src/App.vue");
+        assert!(sigs.is_some(), "scheduler should have export signatures");
+    }
+
+    #[test]
+    fn scheduler_artifact_has_real_compile_output() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>";
+        upsert_vue(&host, "/src/App.vue", src);
+        // Wait for the scheduler driver to process the upsert so the node
+        // exists with the correct generation before we compile.
+        sched_submit_wait(&host, "/src/App.vue", src);
+
+        // Compile a virtual file — this populates the scheduler artifact.
+        let profile = profile_dev();
+        let profile_hash = crate::hash::compile_profile_hash(&profile);
+        let _ = host.get_virtual_file(crate::VirtualQuery {
+            canonical_id: Some("/src/App.vue".to_string()),
+            raw_id: None,
+            node_kind: Some(crate::VirtualNodeKind::Main),
+            compile_profile: profile,
+        });
+
+        // The scheduler should now have artifact data with compiled outputs.
+        let outputs = host.scheduler_artifact_outputs("/src/App.vue", profile_hash);
+        assert!(
+            outputs.is_some(),
+            "scheduler should have artifact outputs after compile"
+        );
+        let outputs = outputs.unwrap();
+        assert!(
+            outputs.contains_key(&crate::VirtualNodeKind::Main),
+            "outputs should contain Main virtual node"
+        );
+
+        // Diagnostics should also be available.
+        let diags = host.scheduler_artifact_diagnostics("/src/App.vue", profile_hash);
+        assert!(
+            diags.is_some(),
+            "scheduler should have artifact diagnostics"
+        );
+    }
+
+    #[test]
+    fn scheduler_shutdown_on_host_drop() {
+        // Verify the driver thread exits cleanly when the host is dropped.
+        // This tests the Weak lifecycle fix — the driver holds Weak<Scheduler>,
+        // so dropping the host (which drops its Arc) allows Drop to run.
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<template><div>hello</div></template>";
+        upsert_vue(&host, "/src/App.vue", src);
+        sched_submit_wait(&host, "/src/App.vue", src);
+        drop(host);
+        // If the driver thread leaked, this test would hang or the process
+        // would not exit cleanly.
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn immediate_reupsert_then_compile_never_publishes_artifact_for_the_wrong_generation() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        // With scheduler as sole parser, upsert waits for scheduler to commit.
+        // After upsert returns, scheduler always has the latest version.
+        let v1 = "<template><div>v1</div></template>";
+        let v2 = "<template><div>v2</div></template>";
+
+        upsert_vue(&host, "/src/App.vue", v1);
+
+        upsert_vue(&host, "/src/App.vue", v2);
+
+        let profile = profile_dev();
+        let profile_hash = crate::hash::compile_profile_hash(&profile);
+        let response = host
+            .get_virtual_file(crate::VirtualQuery {
+                canonical_id: Some("/src/App.vue".to_string()),
+                raw_id: None,
+                node_kind: Some(crate::VirtualNodeKind::Main),
+                compile_profile: profile,
+            })
+            .unwrap();
+
+        // Host compile should succeed with v2 content
+        assert!(response.code.contains("v2"), "host compile should use v2");
+
+        // Scheduler must also have v2 — no split-brain possible with scheduler as sole parser
+        let source = host.scheduler_source("/src/App.vue").unwrap();
+        assert!(
+            source.source.contains("v2"),
+            "scheduler must have v2 after upsert returns"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn same_semantic_hash_different_whole_hash_is_handled_by_upsert_fast_path() {
+        use verter_analysis::AnalysisScope;
+
+        // When two sources have the same semantic hash but different whole hash
+        // (e.g., inter-block whitespace changes), the host's upsert fast-path
+        // returns early without updating the entry.
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        let v1 = "<script setup>\nconst x = 1\n</script>\n<template><div>same</div></template>";
+        let v2 = "<script setup>\nconst x = 1\n</script>\n\n\n<template><div>same</div></template>";
+
+        let (p1, _) = crate::parse::parse_vue_snapshot("/src/App.vue", v1, AnalysisScope::LSP);
+        let (p2, _) = crate::parse::parse_vue_snapshot("/src/App.vue", v2, AnalysisScope::LSP);
+        assert_eq!(
+            p1.semantic_hash, p2.semantic_hash,
+            "precondition: semantic hashes must match"
+        );
+        assert_ne!(
+            p1.whole_hash, p2.whole_hash,
+            "precondition: whole hashes must differ"
+        );
+
+        upsert_vue(&host, "/src/App.vue", v1);
+
+        // v2 upsert is a no-op (same semantic hash → fast path returns changed=false)
+        let result = upsert_vue(&host, "/src/App.vue", v2);
+        assert!(
+            !result.changed,
+            "upsert should be a no-op for same-semantic-hash sources"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 1 — Structural types: HostSourceData, HostAnalysisData, CompileCacheEntry
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "scheduler")]
+mod phase1_structural_tests {
+    use super::*;
+    use crate::host_executor::{AnalysisArcs, HostAnalysisData, HostSourceData};
+    use crate::types::CompileCacheEntry;
+
+    #[test]
+    fn test_source_data_has_cached_parse() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<template><div>hello</div></template>",
+        );
+
+        // Drive the scheduler so it commits SourceSnapshot
+        host.scheduler().drive_all();
+
+        let snap = host
+            .scheduler_source("/src/App.vue")
+            .expect("source should exist");
+        let hd = snap
+            .downcast_data::<HostSourceData>()
+            .expect("should be HostSourceData");
+        assert!(
+            hd.cached_parse.is_some(),
+            "Vue SFC should have cached_parse"
+        );
+    }
+
+    #[test]
+    fn test_source_data_non_sfc_no_cached_parse() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export interface Foo { bar: string }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+        host.scheduler().drive_all();
+
+        let snap = host
+            .scheduler_source("/src/types.ts")
+            .expect("source should exist");
+        let hd = snap
+            .downcast_data::<HostSourceData>()
+            .expect("should be HostSourceData");
+        assert!(
+            hd.cached_parse.is_none(),
+            "Non-SFC should NOT have cached_parse"
+        );
+    }
+
+    #[test]
+    fn test_source_data_has_file_kind() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(&host, "/src/App.vue", "<template><div/></template>");
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export type A = string"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+        host.scheduler().drive_all();
+
+        let vue_snap = host.scheduler_source("/src/App.vue").unwrap();
+        let vue_hd = vue_snap.downcast_data::<HostSourceData>().unwrap();
+        assert_eq!(vue_hd.file_kind, FileKind::VueSfc);
+
+        let ts_snap = host.scheduler_source("/src/types.ts").unwrap();
+        let ts_hd = ts_snap.downcast_data::<HostSourceData>().unwrap();
+        assert_eq!(ts_hd.file_kind, FileKind::NonSfc);
+    }
+
+    #[test]
+    fn test_source_data_has_parse_duration() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<template><div>hello</div></template>",
+        );
+        host.scheduler().drive_all();
+
+        let snap = host.scheduler_source("/src/App.vue").unwrap();
+        let hd = snap.downcast_data::<HostSourceData>().unwrap();
+        assert!(
+            hd.parse_duration_ms >= 0.0,
+            "parse_duration_ms should be non-negative"
+        );
+    }
+
+    #[test]
+    fn test_analysis_data_has_arcs() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<template><div>hello</div></template>\n<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst count = ref(0)\n</script>",
+        );
+        host.scheduler().drive_all();
+
+        let snap = host
+            .scheduler_analysis("/src/App.vue")
+            .expect("analysis should exist");
+        let hd = snap
+            .downcast_data::<HostAnalysisData>()
+            .expect("should be HostAnalysisData");
+
+        // Verify arcs are populated
+        assert!(
+            !hd.arcs.module_references.is_empty(),
+            "should have module references for 'vue' import"
+        );
+
+        // Verify Arc sharing: clone and check pointer equality
+        let arcs_clone = hd.arcs.clone();
+        assert!(
+            Arc::ptr_eq(&hd.arcs.module_references, &arcs_clone.module_references),
+            "Arc::clone should be pointer-eq (no deep copy)"
+        );
+        assert!(
+            Arc::ptr_eq(&hd.arcs.macros, &arcs_clone.macros),
+            "macros Arc should be pointer-eq"
+        );
+    }
+
+    #[test]
+    fn test_compile_cache_entry_default() {
+        let cc = CompileCacheEntry::default();
+        assert!(cc.content_overrides.is_empty());
+        assert!(cc.style_overrides.is_empty());
+        assert!(cc.compile_slots.is_empty());
+        assert!(cc.latest_diagnostics.is_empty());
+        assert_eq!(cc.diagnostics_generation, 0);
+        assert!(cc.cached_tsc_extract.is_none());
+        assert!(cc.raw_template_analysis.is_none());
+        assert!(cc.dependency_resolutions.is_empty());
+        assert!(cc.dependencies.is_empty());
+        assert!(cc.resolved_type_hashes.is_empty());
+        assert!(cc.aliases.is_empty());
+        assert_eq!(cc.generation, 0);
+        assert!(!cc.evicted, "new entry should not be evicted");
+    }
+
+    #[test]
+    fn test_analysis_arcs_from_analysis() {
+        // Build a ScriptAnalysisSnapshot with some data
+        let sa = verter_analysis::ScriptAnalysisSnapshot {
+            module_references: vec![verter_analysis::AnalyzedModuleReference {
+                syntax: verter_analysis::types::ModuleReferenceSyntax::StaticImport,
+                semantics: verter_analysis::types::ModuleReferenceSemantics::Import,
+                is_type_only: false,
+                span: verter_span::Span::new(0, 30),
+                expr_span: verter_span::Span::new(20, 25),
+                raw_text: "'vue'".to_string(),
+                literal_specifier: Some("vue".to_string()),
+                finite_specifiers: vec![],
+                static_prefix: None,
+                analyzability: verter_analysis::types::ModuleReferenceAnalyzability::Exact,
+            }],
+            ..Default::default()
+        };
+
+        let arcs = AnalysisArcs::from_analysis(&sa);
+        assert_eq!(arcs.module_references.len(), 1);
+        assert_eq!(
+            arcs.module_references[0].literal_specifier.as_deref(),
+            Some("vue")
+        );
+        assert!(arcs.macros.is_empty());
+        assert!(arcs.macro_type_deps.is_empty());
+    }
+
+    #[test]
+    fn test_compile_cache_on_host() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        // compile_cache should be accessible and empty
+        assert!(
+            host.compile_cache.is_empty(),
+            "compile_cache should start empty"
+        );
+
+        // Insert and verify
+        host.compile_cache
+            .insert("/src/App.vue".to_string(), CompileCacheEntry::default());
+        assert_eq!(host.compile_cache.len(), 1);
+
+        // Verify it's accessible
+        let entry = host.compile_cache.get("/src/App.vue");
+        assert!(entry.is_some());
+        assert!(!entry.unwrap().evicted);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 2A — Upsert populates compile_cache, scheduler is sole parser
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "scheduler")]
+mod phase2a_upsert_tests {
+    use super::*;
+    use crate::host_executor::HostSourceData;
+    use crate::types::CompileCacheEntry;
+
+    #[test]
+    fn test_upsert_single_parse() {
+        // Verify scheduler is sole parser — scheduler has committed data after upsert
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<template><div>hello</div></template>";
+        upsert_vue(&host, "/src/App.vue", src);
+
+        // Scheduler must have the source
+        let snap = host
+            .scheduler_source("/src/App.vue")
+            .expect("scheduler must have source");
+        assert_eq!(snap.source.as_ref(), src);
+
+        // HostSourceData must be populated
+        let hd = snap.downcast_data::<HostSourceData>().unwrap();
+        assert!(hd.cached_parse.is_some());
+        assert_eq!(hd.file_kind, FileKind::VueSfc);
+    }
+
+    #[test]
+    fn test_upsert_populates_compile_cache() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<template><div>hello</div></template>",
+        );
+
+        // compile_cache must have an entry
+        let cc = host.compile_cache.get("/src/App.vue");
+        assert!(cc.is_some(), "compile_cache should have entry after upsert");
+        let cc = cc.unwrap();
+        assert!(!cc.evicted);
+        assert_eq!(cc.generation, 1);
+        assert!(cc.aliases.contains("/src/App.vue"));
+    }
+
+    #[test]
+    fn test_upsert_invalidation_on_semantic_change() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(&host, "/src/App.vue", "<template><div>v1</div></template>");
+
+        // Manually add a compile slot to verify it gets cleared
+        {
+            let mut cc = host.compile_cache.get_mut("/src/App.vue").unwrap();
+            cc.compile_slots.insert(
+                42,
+                CompileSlot {
+                    semantic_hash: [0; 16],
+                    style_override_hash: 0,
+                    content_override_hash: 0,
+                    outputs: Default::default(),
+                    diagnostics: Default::default(),
+                    last_good_outputs: None,
+                    last_access_tick: 0,
+                    tsx: None,
+                    template_analysis: None,
+                },
+            );
+        }
+
+        // Semantic change
+        upsert_vue(&host, "/src/App.vue", "<template><div>v2</div></template>");
+
+        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile_slots should be cleared on semantic change"
+        );
+        assert_eq!(cc.generation, 2);
+    }
+
+    #[test]
+    fn test_whitespace_only_change_preserves_overrides() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let v1 = "<template><div>hello</div></template>";
+        let v2 = "<template><div>hello</div></template>  \n"; // trailing whitespace
+
+        upsert_vue(&host, "/src/App.vue", v1);
+
+        // Manually add content override
+        {
+            let mut cc = host.compile_cache.get_mut("/src/App.vue").unwrap();
+            cc.content_overrides.insert(
+                42,
+                crate::types::ContentOverrideWithParse {
+                    layer: ContentOverrideLayer {
+                        hash: 123,
+                        template: None,
+                        script: None,
+                    },
+                    parse: crate::parse::parse_non_sfc_snapshot("/src/App.vue", ""),
+                    cached_parse: None,
+                    source: Arc::from(""),
+                },
+            );
+        }
+
+        upsert_vue(&host, "/src/App.vue", v2);
+
+        // Overrides should persist (no structure change, only whitespace)
+        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        assert!(
+            !cc.content_overrides.is_empty(),
+            "content_overrides should persist through non-structural changes"
+        );
+    }
+
+    #[test]
+    fn test_upsert_fast_path_no_change() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<template><div>hello</div></template>";
+
+        let r1 = upsert_vue(&host, "/src/App.vue", src);
+        assert!(r1.changed);
+
+        // Same content again — fast path
+        let r2 = upsert_vue(&host, "/src/App.vue", src);
+        assert!(!r2.changed, "identical content should trigger fast path");
+    }
+
+    #[test]
+    fn test_upsert_compile_cache_deps_populated() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src =
+            "<script setup>\nimport Foo from './Foo.vue'\n</script>\n<template><Foo/></template>";
+        upsert_vue(&host, "/src/App.vue", src);
+
+        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        assert!(
+            !cc.dependencies.is_empty(),
+            "dependencies should be populated from parse"
+        );
+    }
+
+    #[test]
+    fn test_evict_is_cheap_flag_flip() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<template><div>hello</div></template>",
+        );
+
+        // Verify entry exists and is not evicted
+        assert!(!host.compile_cache.get("/src/App.vue").unwrap().evicted);
+
+        // Evict
+        host.evict("/src/App.vue");
+
+        // Entry still exists but is evicted
+        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        assert!(cc.evicted, "evict should set evicted flag");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "profile state should be cleared"
+        );
+        // But deps/aliases are preserved for reload diffing
+        assert!(
+            !cc.aliases.is_empty(),
+            "aliases should be preserved for reload"
+        );
+    }
+
+    #[test]
+    fn test_ensure_loaded_after_evict() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<template><div>hello</div></template>",
+        );
+
+        host.evict("/src/App.vue");
+
+        // ensure_loaded should see the evicted flag and re-integrate
+        let loaded = host.ensure_loaded("/src/App.vue");
+        assert!(loaded, "ensure_loaded should succeed after evict");
+
+        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        assert!(!cc.evicted, "ensure_loaded should clear evicted flag");
+    }
+
+    #[test]
+    fn test_close_full_cleanup() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(&host, "/src/A.vue", "<template><div>a</div></template>");
+        upsert_vue(&host, "/src/B.vue", "<template><div>b</div></template>");
+
+        assert_eq!(host.compile_cache.len(), 2);
+
+        host.close();
+
+        assert!(
+            host.compile_cache.is_empty(),
+            "compile_cache should be empty after close"
+        );
+        assert!(crate::shared::read_lock(&host.alias_to_canonical).is_empty());
+        assert!(crate::shared::read_lock(&host.reverse_dependencies).is_empty());
+        assert!(crate::shared::read_lock(&host.files).is_empty());
+    }
 }

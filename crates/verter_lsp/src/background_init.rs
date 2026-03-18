@@ -661,21 +661,12 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             }
         }
 
-        // Load from disk if not in host
-        let loaded = crate::compile_blockers::ensure_source_loaded_into_host(host, import_id);
-        if !loaded {
+        // Load dependency into host (also feeds the scheduler via upsert).
+        // The scheduler's extract_deps + auto-ingress handles recursive
+        // dependency walking, replacing the old hydrate_cached flow.
+        if !host.ensure_loaded(import_id) {
             continue;
         }
-
-        // Hydrate compile blockers with the now-available resolver
-        crate::compile_blockers::hydrate_cached(
-            &crate::compile_blockers::HydrationCache::default(),
-            host,
-            &snapshot.resolver,
-            &crate::compile_blockers::HostFsProjectResolverReader::new(host),
-            import_id,
-            snapshot.generation,
-        );
 
         // Compile to generate public API
         let profile = documents.tsx_profile.read().clone();
@@ -795,7 +786,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 // Load the barrel into the host and scan its module references
                 // for .vue import specifiers. This avoids the chicken-and-egg problem
                 // where get_export_span_follow_reexports needs Vue files already loaded.
-                crate::compile_blockers::ensure_source_loaded_into_host(host, &resolved);
+                host.ensure_loaded(&resolved);
 
                 if let Some(barrel_analysis) = host.get_analysis(&resolved) {
                     for module_ref in barrel_analysis.module_references.iter() {
@@ -828,18 +819,9 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 }
             }
 
-            let loaded = crate::compile_blockers::ensure_source_loaded_into_host(host, vue_id);
-            if !loaded {
+            if !host.ensure_loaded(vue_id) {
                 continue;
             }
-            crate::compile_blockers::hydrate_cached(
-                &crate::compile_blockers::HydrationCache::default(),
-                host,
-                &snapshot.resolver,
-                &crate::compile_blockers::HostFsProjectResolverReader::new(host),
-                vue_id,
-                snapshot.generation,
-            );
             let profile = documents.tsx_profile.read().clone();
             if host.ensure_compiled(vue_id, &profile).is_err() {
                 continue;
@@ -995,13 +977,9 @@ pub(super) async fn sync_pending_vue_provider_file(
     canonical_id: &str,
     is_tsgo: bool,
 ) -> bool {
-    let reader = crate::compile_blockers::HostFsProjectResolverReader::new(documents.host());
-    crate::compile_blockers::hydrate_vue_compile_blockers(
-        documents.host(),
-        &snapshot.resolver,
-        &reader,
-        canonical_id,
-    );
+    // Ensure the file and its deps are loaded. The scheduler's extract_deps
+    // + auto-ingress handles recursive dependency walking.
+    documents.host().ensure_loaded(canonical_id);
     // Hydration may load new dependencies (macro type deps, external templates)
     // that affect the compilation output. Invalidate compile slots so
     // ensure_compiled recompiles, and bump diagnostics_generation so the LSP

@@ -94,6 +94,18 @@ Both pipelines share the same Vue SFC input and produce consistent results -- th
 | `packages/component-meta/` | `@verter/component-meta` -- Component metadata extraction + Type IR |
 | `packages/vue-vscode/` | VS Code extension |
 
+## Async File Scheduler
+
+The `verter_scheduler` crate provides per-file async staging with a priority queue. Files progress independently through **Source → Analysis → Artifact** stages. Cross-file blocking (macro type deps, external `src` attributes) is declarative — the scheduler manages wakeups via its `BlockerRegistry`.
+
+Key concepts:
+- **FileNode**: per-file state with ArcSwap snapshots and an atomic generation counter
+- **Priority tiers**: Critical (hover/completion) > Interactive (did_open) > Background (workspace scan) > Maintenance
+- **Generation fencing**: stale snapshots are invisible — `current_analysis()` returns `None` if the generation doesn't match
+- **StageExecutor trait**: the host plugs in real parse/compile logic; the scheduler provides coordination
+
+The scheduler is integrated into `VerterHost` via the `scheduler` feature flag. During `upsert()`, the host populates both its legacy `files` map and the scheduler's FileNode snapshots in parallel.
+
 ## Rust Compilation Pipeline
 
 The Rust compiler uses an AST-based pipeline with five phases. The `compile()` function in `verter_core` orchestrates the entire flow:

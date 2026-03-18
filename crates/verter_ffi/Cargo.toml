@@ -9,6 +9,10 @@ authors.workspace = true
 description = "FFI types for Verter — shared serializable structs for NAPI/WASM boundaries"
 publish = false
 
+[features]
+default = []
+scheduler = ["verter_host/scheduler"]
+
 [dependencies]
 verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }

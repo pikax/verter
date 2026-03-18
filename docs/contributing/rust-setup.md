@@ -28,6 +28,7 @@ All Rust crates are in the `crates/` directory:
 | `verter_core` | Template compiler -- tokenizer, parser, AST, script processing, template codegen (VDOM + Vapor), TSX generation, CSS processing |
 | `verter_analysis` | Static analysis -- imports, exports, bindings, type resolution, CSS selector parsing, template element analysis |
 | `verter_host` | File host -- in-memory caching, dependency tracking, multi-file compilation |
+| `verter_scheduler` | Async file scheduler -- per-file Source→Analysis→Artifact stages, priority queue, blocker registry |
 | `verter_diagnostics` | Diagnostic engine -- Vue SFC lint rules, rule trait, visitor, diagnostic set |
 | `verter_actions` | Code actions engine -- quick fixes, refactoring (depends on `verter_diagnostics` + `verter_analysis`) |
 | `verter_lsp` | LSP server binary -- stdio transport, feature handlers, document synchronization, TypeProvider integration (TSGO + tsserver) |
@@ -43,9 +44,11 @@ verter_core (no deps on other verter crates)
     |
     +-- verter_analysis (depends on verter_core)
     |       |
-    |       +-- verter_host (depends on verter_core + verter_analysis)
+    |       +-- verter_host (depends on verter_core + verter_analysis + verter_scheduler[optional])
     |       |       |
-    |       |       +-- verter_lsp (depends on verter_host + verter_diagnostics + verter_actions)
+    |       |       +-- verter_lsp (depends on verter_host + verter_scheduler + verter_diagnostics + verter_actions)
+    |
+    +-- verter_scheduler (depends on verter_span only — domain-agnostic)
     |       |
     |       +-- verter_diagnostics (depends on verter_analysis)
     |       |

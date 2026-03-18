@@ -236,11 +236,11 @@ impl<'a> LspProjectResolverReader<'a> {
 
 impl verter_vfs::WorkspaceAccess for LspProjectResolverReader<'_> {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
-        crate::compile_blockers::ensure_source_loaded_into_host(
-            self.documents.host(),
-            canonical_id,
-        );
-        self.documents.host().get_source(canonical_id)
+        // Try host cache first (already-upserted files), then workspace (disk).
+        self.documents
+            .host()
+            .get_source(canonical_id)
+            .or_else(|| self.documents.host().workspace().read_file(canonical_id))
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
@@ -250,7 +250,7 @@ impl verter_vfs::WorkspaceAccess for LspProjectResolverReader<'_> {
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         if self.documents.host().get_source(canonical_id).is_some() {
-            return Some(crate::compile_blockers::normalize_fs_path(canonical_id));
+            return Some(canonical_id.replace('\\', "/"));
         }
         self.documents.host().workspace().realpath(canonical_id)
     }
@@ -495,9 +495,7 @@ pub(crate) fn resolve_component_for(
     let read_component_analysis = |canonical_id: &str| {
         let mut analysis = host.get_analysis(canonical_id);
 
-        if analysis.is_none()
-            && crate::compile_blockers::ensure_source_loaded_into_host(host, canonical_id)
-        {
+        if analysis.is_none() && host.ensure_loaded(canonical_id) {
             analysis = host.get_analysis(canonical_id);
         }
 

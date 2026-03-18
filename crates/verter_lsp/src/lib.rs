@@ -1,6 +1,5 @@
 pub mod analysis;
 pub mod capabilities;
-pub mod compile_blockers;
 pub mod config;
 pub mod css;
 pub mod documents;
@@ -8,6 +7,7 @@ pub mod extension_provider;
 pub mod features;
 pub mod project_resolver;
 pub mod provider_sync;
+pub mod scheduler_integration;
 pub mod server;
 pub mod statistics;
 pub mod sync_coordinator;

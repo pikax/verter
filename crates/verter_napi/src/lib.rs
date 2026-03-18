@@ -76,6 +76,8 @@ fn host_error(err: host::HostError) -> Error {
         | host::HostError::MissingSource { .. }
         | host::HostError::MissingVirtualNode { .. } => Status::InvalidArg,
         host::HostError::CompileError { .. } => Status::GenericFailure,
+        #[allow(unreachable_patterns)]
+        _ => Status::GenericFailure,
     };
     Error::new(status, host_error_to_string(&err))
 }

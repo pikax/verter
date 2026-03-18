@@ -12,6 +12,8 @@ The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template 
 verter-vscode (VS Code extension)
 ├── verter-lsp (Rust LSP binary, stdio)
 │   ├── verter_host (file host + compilation)
+│   │   └── verter_scheduler (async per-file staging, feature-gated)
+│   ├── verter_scheduler (priority queue, completion handles)
 │   ├── verter_diagnostics (lint rules + DiagnosticSet)
 │   ├── verter_actions (quick fixes + refactoring)
 │   └── TypeProvider (optional: TSGO or tsserver, for TS type checking)
@@ -41,6 +43,7 @@ crates/
   verter_core/       # Core template compiler (Rust)
   verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
   verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
+  verter_scheduler/  # Async per-file scheduler: Source→Analysis→Artifact stages, priority queue, blocker registry
   verter_diagnostics/ # Vue SFC diagnostic engine: ~186 lint rules, rule trait, visitor, DiagnosticSet (depends only on verter_analysis)
   verter_actions/    # Code actions engine: quick fixes, refactoring (depends on verter_diagnostics + verter_analysis)
   verter_lsp/        # Rust LSP server binary (stdio, launched by VS Code extension)
@@ -65,6 +68,27 @@ packages/
 scripts/
   check-versions.mjs # Version check + publish order for CI
 ```
+
+### Async File Scheduler (`verter_scheduler`)
+
+The scheduler provides per-file async staging with priority queuing. Files progress independently through **Source → Analysis → Artifact** stages. Cross-file blocking (macro type deps, external `src`) is declarative — the scheduler manages wakeups.
+
+**Key types** (`crates/verter_scheduler/src/`):
+- `FileNode` (`node.rs`) — per-file: ArcSwap snapshots, AtomicU64 generation, pending requests
+- `Scheduler` (`scheduler.rs`) — DashMap of FileNodes, JobIndex, SubmissionInbox, driver thread
+- `CompletionHandle<T>` (`job.rs`) — request-scoped, resolves to Ready/Failed/Superseded/Shutdown
+- `StageExecutor` (`executor.rs`) — trait for plugging host parse/analysis/compile logic
+- `Priority` (`stage.rs`) — 4 tiers: Critical > Interactive > Background > Maintenance
+- `EdgeManager` (`edges.rs`) — ReverseIndex + BlockerRegistry (both DashMap-sharded)
+- `OverlayMap` (`overlay.rs`) — concurrent editor buffer storage (DashMap)
+- `SourceLoader` (`source_loader.rs`) — MemorySourceLoader (tests/WASM) + DiskSourceLoader (native)
+- `IoPool` (`pool.rs`) — bounded I/O thread pool, separate from rayon CPU pool
+
+**Snapshot model**: All stage outputs are immutable `Arc`-wrapped. Replacement is atomic via ArcSwap. Generation fencing ensures coherence: `source.gen == analysis.gen == artifact.gen == node.gen`. Stale snapshots (gen mismatch) return `None` from `current_*()` methods.
+
+**Host integration** (feature-gated `scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `upsert()`, the host populates both the legacy `files: Shared<FxHashMap>` and the scheduler in parallel. The `HostStageExecutor` calls real `parse_vue_snapshot`/`parse_non_sfc_snapshot` for the Source stage. Host-specific data is stored in snapshots via the `SnapshotData` trait (opaque `Arc<dyn Any>`), avoiding circular dependencies between scheduler and host.
+
+**LSP integration**: `scheduler_integration.rs` maps LSP operations to priority tiers (Critical for hover/completion, Interactive for did_open/change, Background for workspace scan). `compile_blockers.rs` is deprecated — the scheduler's blocker model replaces imperative hydration.
 
 ### Two Template Codegen Paths (CRITICAL)
 

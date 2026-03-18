@@ -10,8 +10,9 @@ description = "In-memory file host for Verter — caching, dependency tracking, 
 publish = false
 
 [features]
-default = []
+default = ["scheduler"]
 host_metrics = []
+scheduler = ["verter_scheduler", "dashmap"]
 
 [dependencies]
 verter_core = { path = "../verter_core" }
@@ -28,7 +29,9 @@ thiserror = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 parking_lot = "0.12"
+dashmap = { version = "6", optional = true }
 verter_vfs = { path = "../verter_vfs" }
+verter_scheduler = { path = "../verter_scheduler", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

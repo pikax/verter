@@ -53,11 +53,15 @@ mod compile;
 pub mod cross_file;
 mod deps;
 mod hash;
+#[cfg(feature = "scheduler")]
+pub mod host_executor;
 mod host_manage;
 mod host_resolve;
 mod host_upsert;
 mod id;
 mod parse;
+#[cfg(feature = "scheduler")]
+pub mod scheduler_shim;
 mod shared;
 pub(crate) mod source_map_remap;
 pub mod template_convert;
@@ -98,8 +102,9 @@ use std::sync::Arc;
 pub struct VerterHost {
     pub(crate) config: HostConfig,
     /// VFS workspace providing file reads, import resolution, and edge recording.
-    /// Wrapped in RwLock so the workspace can be swapped (e.g., LSP wiring).
-    pub(crate) workspace: parking_lot::RwLock<Arc<dyn verter_vfs::WorkspaceAccess>>,
+    /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
+    /// lock and always read through the latest workspace after `set_workspace()`.
+    pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_vfs::WorkspaceAccess>>>,
     pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
@@ -111,6 +116,17 @@ pub struct VerterHost {
     pub(crate) project_resolver: Shared<Option<NativeProjectResolver>>,
     #[cfg(feature = "host_metrics")]
     pub(crate) metrics: HostMetrics,
+    /// Scheduler for async per-file staging.
+    ///
+    /// The scheduler coordinates Source→Analysis→Artifact progression
+    /// with generation tracking, priority queuing, and blocker management.
+    /// It is the sole parser — upsert() delegates to the scheduler.
+    #[cfg(feature = "scheduler")]
+    pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
+    /// Per-file compile cache: overrides, compile slots, diagnostics, deps.
+    /// Scheduler owns raw source + analysis; this cache owns per-profile state.
+    #[cfg(feature = "scheduler")]
+    pub(crate) compile_cache: dashmap::DashMap<String, CompileCacheEntry>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -129,9 +145,22 @@ impl VerterHost {
     /// through the [`WorkspaceAccess`](verter_vfs::WorkspaceAccess) trait.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(config: HostConfig, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) -> Self {
+        let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
+
+        #[cfg(feature = "scheduler")]
+        let scheduler = {
+            let executor = Arc::new(host_executor::HostStageExecutor::new(config.clone()));
+            let loader = Arc::new(WorkspaceSourceLoader(Arc::clone(&workspace_lock)));
+            verter_scheduler::scheduler::Scheduler::with_executor(
+                verter_scheduler::scheduler::SchedulerConfig::default(),
+                loader,
+                executor,
+            )
+        };
+
         Self {
             config,
-            workspace: parking_lot::RwLock::new(workspace),
+            workspace: workspace_lock,
             files: default_shared(FxHashMap::default()),
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
@@ -140,6 +169,10 @@ impl VerterHost {
             project_resolver: default_shared(None),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
+            #[cfg(feature = "scheduler")]
+            scheduler,
+            #[cfg(feature = "scheduler")]
+            compile_cache: dashmap::DashMap::new(),
         }
     }
 
@@ -151,7 +184,7 @@ impl VerterHost {
         ));
         Self {
             config,
-            workspace: parking_lot::RwLock::new(ws),
+            workspace: Arc::new(parking_lot::RwLock::new(ws)),
             files: default_shared(FxHashMap::default()),
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
@@ -188,6 +221,9 @@ impl VerterHost {
     }
 
     /// Swap the workspace backing this host.
+    ///
+    /// The scheduler's SourceLoader shares the same `Arc<RwLock>`, so it
+    /// automatically reads through the new workspace after this call.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) {
         *self.workspace.write() = workspace;
     }
@@ -240,11 +276,42 @@ impl VerterHost {
     /// to free the backing memory so that NAPI-RS-backed hosts don't keep the
     /// Node.js process alive waiting for GC finalisation.
     pub fn close(&self) {
+        // Notify the workspace for each tracked file so overlays AND edge store
+        // are cleared before scheduler nodes are removed. Use notify_delete (not
+        // notify_close) to clear the VFS edge store entries.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ws = self.ws();
+            #[cfg(feature = "scheduler")]
+            {
+                for id in self.scheduler.node_ids() {
+                    ws.notify_delete(&id);
+                }
+                for id in self.scheduler.node_ids() {
+                    self.scheduler.close_file(&id);
+                }
+            }
+            #[cfg(not(feature = "scheduler"))]
+            {
+                let files = read_lock(&self.files);
+                for canonical_id in files.keys() {
+                    ws.notify_close(canonical_id);
+                }
+            }
+        }
+
         write_lock(&self.files).clear();
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
         *write_lock(&self.project_resolver) = None;
+
+        #[cfg(feature = "scheduler")]
+        {
+            self.compile_cache.clear();
+            self.scheduler.reset();
+            self.scheduler.restart_driver();
+        }
     }
 
     /// Configure project-scoped path alias resolution.
@@ -337,6 +404,219 @@ impl VerterHost {
             compile_time_us_total,
             compile_time_us_total_by_profile,
             compile_count_by_profile,
+        }
+    }
+
+    /// Get the scheduler's source snapshot for a file (scheduler feature only).
+    ///
+    /// Returns `None` if the file hasn't been upserted or the snapshot is stale.
+    /// This is a lock-free ArcSwap read — no contention with upsert/compile.
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler_source(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<verter_scheduler::node::SourceSnapshot>> {
+        self.scheduler.try_get_source(canonical_id)
+    }
+
+    /// Get the scheduler's analysis snapshot for a file (scheduler feature only).
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler_analysis(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<verter_scheduler::node::AnalysisSnapshot>> {
+        self.scheduler.try_get_analysis(canonical_id)
+    }
+
+    /// Get export signatures from the scheduler's analysis snapshot.
+    ///
+    /// This is the lock-free read path — returns data from the scheduler's
+    /// ArcSwap snapshots without touching the `files` RwLock.
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler_export_signatures(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Vec<verter_analysis::ExportSignature>> {
+        let snap = self.scheduler.try_get_analysis(canonical_id)?;
+        let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
+        Some(data.export_signatures.clone())
+    }
+
+    /// Get script analysis from the scheduler's analysis snapshot.
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler_script_analysis(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_analysis::ScriptAnalysisSnapshot> {
+        let snap = self.scheduler.try_get_analysis(canonical_id)?;
+        let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
+        Some(data.script_analysis.clone())
+    }
+
+    /// Get compiled virtual files from the scheduler's artifact snapshot.
+    ///
+    /// Returns the compile output for a specific profile if available.
+    #[cfg(feature = "scheduler")]
+    #[allow(dead_code)] // Tested via scheduler_tests; LSP will call once migrated
+    pub(crate) fn scheduler_artifact_outputs(
+        &self,
+        canonical_id: &str,
+        profile_hash: u64,
+    ) -> Option<rustc_hash::FxHashMap<crate::types::VirtualNodeKind, crate::types::CachedVirtualFile>>
+    {
+        let snap = self
+            .scheduler
+            .try_get_artifact(canonical_id, profile_hash)?;
+        let data = snap.downcast_data::<host_executor::HostArtifactData>()?;
+        Some(data.outputs.clone())
+    }
+
+    /// Get artifact diagnostics from the scheduler's artifact snapshot.
+    #[cfg(feature = "scheduler")]
+    #[allow(dead_code)] // Tested via scheduler_tests; LSP will call once migrated
+    pub(crate) fn scheduler_artifact_diagnostics(
+        &self,
+        canonical_id: &str,
+        profile_hash: u64,
+    ) -> Option<DiagnosticsSnapshot> {
+        let snap = self
+            .scheduler
+            .try_get_artifact(canonical_id, profile_hash)?;
+        let data = snap.downcast_data::<host_executor::HostArtifactData>()?;
+        Some(data.diagnostics.clone())
+    }
+
+    /// Get style analyses from the scheduler's analysis snapshot.
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler_style_analyses(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<Vec<verter_analysis::StyleBlockAnalysis>>> {
+        let snap = self.scheduler.try_get_analysis(canonical_id)?;
+        let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
+        Some(Arc::clone(&data.style_analyses))
+    }
+
+    /// Get the scheduler instance (scheduler feature only).
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler(&self) -> &Arc<verter_scheduler::scheduler::Scheduler> {
+        &self.scheduler
+    }
+
+    /// Evict a file's cached entry so the next access reloads from disk.
+    ///
+    /// Used by `did_close` to discard the editor-buffer version. Unlike
+    /// `remove()`, this does NOT clean up aliases, reverse deps, or VFS
+    /// state — the file still exists on disk, it just needs a fresh parse.
+    ///
+    /// On the scheduler path, sets `evicted = true` and clears profile state
+    /// (compile_slots, overrides, diagnostics) but preserves deps/aliases for
+    /// old-state diffing during reload. The eviction gate makes the file
+    /// invisible to host accessors until `ensure_loaded()` re-integrates.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn evict(&self, canonical_id: &str) {
+        self.ws().notify_close(canonical_id);
+        write_lock(&self.files).remove(canonical_id);
+
+        #[cfg(feature = "scheduler")]
+        if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
+            cc.evicted = true;
+            // Clear profile state but preserve deps/aliases for reload diffing
+            cc.content_overrides.clear();
+            cc.style_overrides.clear();
+            cc.compile_slots.clear();
+            cc.latest_diagnostics.clear();
+            cc.cached_tsc_extract = None;
+            cc.raw_template_analysis = None;
+        }
+    }
+
+    /// Ensure a file is loaded into the host.
+    ///
+    /// The scheduler is the sole ingress authority: this method submits a
+    /// `source: None` request to the scheduler (which loads content via the
+    /// workspace-backed SourceLoader), waits for Analysis to commit, then
+    /// populates the host's `files` map from the scheduler snapshot so
+    /// `compile_entry()` can read it.
+    ///
+    /// If the file is already in the host's `files` map with a generation
+    /// matching the scheduler, returns `true` immediately (fast path).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
+        // Fast path: already in host and not evicted
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(cc) = self.compile_cache.get(canonical_id) {
+                if !cc.evicted {
+                    return true;
+                }
+            }
+        }
+        #[cfg(not(feature = "scheduler"))]
+        {
+            if self.get_source(canonical_id).is_some() {
+                return true;
+            }
+        }
+
+        #[cfg(feature = "scheduler")]
+        {
+            use verter_scheduler::job::CompletionState;
+
+            // Submit to scheduler — it loads via WorkspaceSourceLoader
+            let handle = self
+                .scheduler
+                .submit_request(verter_scheduler::scheduler::Request {
+                    file_id: canonical_id.to_string(),
+                    target: verter_scheduler::stage::TargetStage::Analysis,
+                    priority: verter_scheduler::stage::Priority::Interactive,
+                    source: None,
+                });
+
+            // Wait for the scheduler to reach Analysis
+            match handle.wait() {
+                CompletionState::Ready(_) => {}
+                _ => return false,
+            }
+
+            // If the scheduler has the source, populate via upsert which handles
+            // both compile_cache and files map
+            if let Some(snap) = self.scheduler.try_get_source(canonical_id) {
+                return self
+                    .upsert(UpsertRequest {
+                        canonical_id: Some(canonical_id.to_string()),
+                        input_id: canonical_id.to_string(),
+                        source: snap.source.clone(),
+                        file_kind: if canonical_id.ends_with(".vue") {
+                            FileKind::VueSfc
+                        } else {
+                            FileKind::NonSfc
+                        },
+                        aliases: Vec::new(),
+                    })
+                    .is_ok();
+            }
+            false
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let Some(source) = self.ws().read_file(canonical_id) else {
+                return false;
+            };
+            let file_kind = if canonical_id.ends_with(".vue") {
+                FileKind::VueSfc
+            } else {
+                FileKind::NonSfc
+            };
+            self.upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.to_string()),
+                input_id: canonical_id.to_string(),
+                source,
+                file_kind,
+                aliases: Vec::new(),
+            })
+            .is_ok()
         }
     }
 
@@ -444,13 +724,31 @@ impl VerterHost {
 
             deps::smart_invalidate_dependents_with_owners(
                 &self.files,
-                owners,
+                owners.clone(),
                 &self.project_resolver,
                 &self.config,
                 dependency_id,
                 old_export_signatures,
                 new_export_signatures,
             );
+
+            // Mirror: also clear compile_cache slots for affected owners.
+            // The deps function cleared files.compile_slots; we do the same for compile_cache.
+            #[cfg(feature = "scheduler")]
+            {
+                let files = shared::read_lock(&self.files);
+                for owner in &owners {
+                    // Only clear compile_cache if files had its slots cleared
+                    // (i.e., the owner was invalidated by the deps function).
+                    if let Some(file) = files.get(owner) {
+                        if file.compile_slots.is_empty() {
+                            if let Some(mut cc) = self.compile_cache.get_mut(owner) {
+                                cc.compile_slots.clear();
+                            }
+                        }
+                    }
+                }
+            }
             return;
         }
 
@@ -465,6 +763,36 @@ impl VerterHost {
             old_export_signatures,
             new_export_signatures,
         );
+    }
+}
+
+/// SourceLoader that delegates to the host's current workspace.
+///
+/// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
+/// so it always reads through the latest workspace, even after
+/// `set_workspace()` swaps it.
+#[cfg(feature = "scheduler")]
+struct WorkspaceSourceLoader(Arc<parking_lot::RwLock<Arc<dyn verter_vfs::WorkspaceAccess>>>);
+
+#[cfg(feature = "scheduler")]
+impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
+    fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.0.read().read_file(canonical_id)
+    }
+
+    fn exists(&self, canonical_id: &str) -> bool {
+        self.0.read().file_exists(canonical_id)
+    }
+
+    fn classify(&self, canonical_id: &str) -> verter_scheduler::source_loader::FileKind {
+        match self.0.read().classify_file(canonical_id) {
+            verter_vfs::FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
+            verter_vfs::FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
+        }
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.0.read().realpath(canonical_id)
     }
 }
 

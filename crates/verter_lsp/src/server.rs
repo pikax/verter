@@ -246,7 +246,6 @@ pub struct VerterLanguageServer {
     mru_canonical_ids: parking_lot::Mutex<Vec<String>>,
     /// Shared hydration cache: prevents re-hydrating compile blockers when
     /// the file's semantic hash hasn't changed since the last hydration.
-    hydration_cache: Arc<crate::compile_blockers::HydrationCache>,
     /// VFS filesystem workspace, built during background_init() after workspace
     /// roots and project configuration are known. `None` until initialization
     /// completes. Provides disk-backed file reads, project ownership, and import
@@ -328,7 +327,6 @@ impl VerterLanguageServer {
             mcp_port: config.mcp_port,
             type_provider_none_reason: config.type_provider_none_reason,
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
-            hydration_cache: Arc::new(crate::compile_blockers::HydrationCache::new()),
             vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
@@ -475,7 +473,7 @@ impl VerterLanguageServer {
             .timer("ide_sync", Some(uri.as_str().to_string()));
         if let Some(sync) = &self.project_sync {
             if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
-                self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+                self.documents.host().ensure_loaded(&canonical_id);
             }
             if let Some(ide) = self.documents.get_ide(uri) {
                 let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
@@ -516,7 +514,7 @@ impl VerterLanguageServer {
                 Some(id) => id,
                 None => return,
             };
-            self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+            self.documents.host().ensure_loaded(&canonical_id);
             if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
                 if let Some(snapshot) = self.resolver_snapshot() {
                     configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false)
@@ -900,26 +898,9 @@ impl VerterLanguageServer {
             return;
         };
 
-        // Hydrate compile blockers
-        if let Some(snapshot) = self.resolver_snapshot() {
-            // Full hydration with resolver
-            let reader =
-                crate::compile_blockers::HostFsProjectResolverReader::new(self.documents.host());
-            crate::compile_blockers::hydrate_cached(
-                &self.hydration_cache,
-                self.documents.host(),
-                &snapshot.resolver,
-                &reader,
-                &canonical_id,
-                snapshot.generation,
-            );
-        } else {
-            // Pre-snapshot: resolve relative blockers only
-            crate::compile_blockers::hydrate_vue_compile_blockers_pre_snapshot(
-                self.documents.host(),
-                &canonical_id,
-            );
-        }
+        // Ensure file and its deps are loaded. The scheduler's extract_deps
+        // + auto-ingress handles recursive dependency walking.
+        self.documents.host().ensure_loaded(&canonical_id);
 
         // Recompile + refresh mapper (in case blocker hydration changed TSX)
         self.documents.recompile_and_refresh_mapper(uri);
@@ -1152,7 +1133,7 @@ impl VerterLanguageServer {
             }
 
             // Load barrel into host and scan its module references for Vue specifiers
-            crate::compile_blockers::ensure_source_loaded_into_host(host, &resolved);
+            host.ensure_loaded(&resolved);
 
             if let Some(barrel_analysis) = host.get_analysis(&resolved) {
                 for module_ref in barrel_analysis.module_references.iter() {
@@ -1290,7 +1271,9 @@ impl VerterLanguageServer {
             tracing::info!("ide_context: no canonical_id for {}", uri.as_str());
             return None;
         }
-        self.hydrate_vue_compile_blockers_for_canonical_id(canonical_id.as_deref()?);
+        self.documents
+            .host()
+            .ensure_loaded(canonical_id.as_deref()?);
         let Some(ide) = self.documents.get_ide(uri) else {
             tracing::info!(
                 "ide_context: no IDE output for {} (canonical={})",
@@ -1310,22 +1293,6 @@ impl VerterLanguageServer {
 
     fn resolver_snapshot(&self) -> Option<ResolverSnapshot> {
         self.resolver_snapshot.read().clone()
-    }
-
-    fn hydrate_vue_compile_blockers_for_canonical_id(&self, canonical_id: &str) {
-        let Some(snapshot) = self.resolver_snapshot() else {
-            return;
-        };
-        let reader =
-            crate::compile_blockers::HostFsProjectResolverReader::new(self.documents.host());
-        crate::compile_blockers::hydrate_cached(
-            &self.hydration_cache,
-            self.documents.host(),
-            &snapshot.resolver,
-            &reader,
-            canonical_id,
-            snapshot.generation,
-        );
     }
 
     /// Generate a provisional IDE file path (.tsx or .jsx) without resolver.
@@ -2535,10 +2502,7 @@ impl VerterLanguageServer {
                     .get_analysis(&child_canonical_id)
                     .is_none()
                 {
-                    let _ = crate::compile_blockers::ensure_source_loaded_into_host(
-                        self.documents.host(),
-                        &child_canonical_id,
-                    );
+                    self.documents.host().ensure_loaded(&child_canonical_id);
                 }
                 if let Some((resolved_id, _, _)) = self
                     .documents
@@ -2563,13 +2527,10 @@ impl VerterLanguageServer {
                 .get_analysis(&child_canonical_id)
                 .is_none()
         {
-            if !crate::compile_blockers::ensure_source_loaded_into_host(
-                self.documents.host(),
-                &child_canonical_id,
-            ) {
+            if !self.documents.host().ensure_loaded(&child_canonical_id) {
                 return None;
             }
-            self.hydrate_vue_compile_blockers_for_canonical_id(&child_canonical_id);
+            self.documents.host().ensure_loaded(&child_canonical_id);
             let profile = self.documents.tsx_profile.read().clone();
             let _ = self
                 .documents
@@ -2978,18 +2939,11 @@ impl VerterLanguageServer {
         if self.resolver_snapshot().is_none() {
             let compiled = block_in_place_if_available(|| {
                 self.documents.host.remove(canonical_id);
-                self.hydration_cache.remove(canonical_id);
-                if !crate::compile_blockers::ensure_source_loaded_into_host(
-                    &self.documents.host,
-                    canonical_id,
-                ) {
+                if !self.documents.host.ensure_loaded(canonical_id) {
                     return false;
                 }
 
-                crate::compile_blockers::hydrate_vue_compile_blockers_pre_snapshot(
-                    self.documents.host(),
-                    canonical_id,
-                );
+                self.documents.host().ensure_loaded(canonical_id);
 
                 let profile = self.documents.tsx_profile.read().clone();
                 self.documents
@@ -3031,16 +2985,12 @@ impl VerterLanguageServer {
         // to prevent tokio worker thread exhaustion during background sync.
         let compile_result = block_in_place_if_available(|| {
             self.documents.host.remove(canonical_id);
-            self.hydration_cache.remove(canonical_id);
-            if !crate::compile_blockers::ensure_source_loaded_into_host(
-                &self.documents.host,
-                canonical_id,
-            ) {
+            if !self.documents.host.ensure_loaded(canonical_id) {
                 tracing::debug!("resync_background: can't read {canonical_id}");
                 return None;
             }
 
-            self.hydrate_vue_compile_blockers_for_canonical_id(canonical_id);
+            self.documents.host().ensure_loaded(canonical_id);
 
             // Compile
             let profile = self.documents.tsx_profile.read().clone();
@@ -3140,7 +3090,7 @@ impl VerterLanguageServer {
         };
 
         if let Some(canonical_id) = self.documents.get_canonical_id(&parsed_uri) {
-            self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+            self.documents.host().ensure_loaded(&canonical_id);
         }
         let tsx = self.documents.get_ide(&parsed_uri);
 
@@ -3218,7 +3168,7 @@ impl VerterLanguageServer {
         };
 
         if let Some(canonical_id) = self.documents.get_canonical_id(&parsed_uri) {
-            self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+            self.documents.host().ensure_loaded(&canonical_id);
         }
         let response = self.documents.get_virtual_files(&parsed_uri);
         tracing::info!("getVirtualFiles EXIT {uri}");
@@ -4309,8 +4259,22 @@ impl LanguageServer for VerterLanguageServer {
                 }
             }
         }
+        // Capture canonical_id before did_close clears document state.
+        let canonical_id = self.documents.get_canonical_id(uri);
+
+        // Clear the VFS overlay FIRST so the workspace falls back to disk.
+        // This must happen before scheduler.close_file() because close_file
+        // enqueues a background Source reload that reads via WorkspaceSourceLoader.
         self.documents.did_close(uri);
         self.cached_verter_diags.remove(uri.as_str());
+
+        // Evict the host's FileEntry so ensure_loaded / get_source don't
+        // serve stale editor-buffer content. Then tell the scheduler to reload
+        // from disk.
+        if let Some(ref canonical_id) = canonical_id {
+            self.documents.host().evict(canonical_id);
+            self.documents.host().scheduler().close_file(canonical_id);
+        }
     }
 
     async fn did_save(&self, _params: DidSaveTextDocumentParams) {
@@ -4523,10 +4487,7 @@ impl LanguageServer for VerterLanguageServer {
             };
             let canonical_id = uri_to_canonical_id(&uri);
             // Load the file through ingress so it's indexed without needing to open in editor
-            crate::compile_blockers::ensure_source_loaded_into_host(
-                self.documents.host(),
-                &canonical_id,
-            );
+            self.documents.host().ensure_loaded(&canonical_id);
             // Compile and sync to type provider for cross-file type resolution
             self.resync_background_vue_file(&canonical_id).await;
             tracing::debug!("did_create_files: indexed {}", file.uri);
@@ -4884,10 +4845,7 @@ impl LanguageServer for VerterLanguageServer {
                         }
                         // Ensure the barrel file is loaded so we can inspect its exports
                         if self.documents.host().get_analysis(resolved).is_none() {
-                            let _ = crate::compile_blockers::ensure_source_loaded_into_host(
-                                self.documents.host(),
-                                resolved,
-                            );
+                            self.documents.host().ensure_loaded(resolved);
                         }
                         // For non-.vue files (barrel/index), follow re-export chains if we know the component name
                         if let Some(name) = comp_name {
@@ -4899,11 +4857,7 @@ impl LanguageServer for VerterLanguageServer {
                                 if terminal_id.ends_with(".vue") {
                                     // Ensure the terminal .vue file is compiled
                                     if self.documents.host().get_analysis(&terminal_id).is_none() {
-                                        let _ =
-                                            crate::compile_blockers::ensure_source_loaded_into_host(
-                                                self.documents.host(),
-                                                &terminal_id,
-                                            );
+                                        self.documents.host().ensure_loaded(&terminal_id);
                                     }
                                     return self.documents.host().get_analysis(&terminal_id);
                                 }

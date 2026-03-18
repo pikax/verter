@@ -357,7 +357,7 @@ async fn scanner_loop(
         let profile = config.tsx_profile.clone();
 
         let compile_ok = tokio::task::spawn_blocking(move || {
-            if !crate::compile_blockers::ensure_source_loaded_into_host(&host, &path_clone) {
+            if !&host.ensure_loaded(&path_clone) {
                 return false;
             }
             host.ensure_compiled(&path_clone, &profile).is_ok()
@@ -522,7 +522,7 @@ async fn sync_non_vue_file_to_provider(
     let host_clone = Arc::clone(host);
     let id_clone = canonical_id.to_string();
     let load_result = tokio::task::spawn_blocking(move || {
-        crate::compile_blockers::ensure_source_loaded_into_host(&host_clone, &id_clone);
+        host_clone.ensure_loaded(&id_clone);
         host_clone.get_source(&id_clone)
     })
     .await
@@ -549,10 +549,10 @@ async fn sync_non_vue_file_to_provider(
             .map(|result| result.module_references)
             .unwrap_or_default();
 
-        let reader = crate::compile_blockers::HostFsProjectResolverReader::new(&host_clone);
+        let ws = host_clone.workspace();
         crate::server::prepare_non_vue_provider_sync(
             Some(&snap_clone),
-            &reader,
+            ws.as_ref(),
             &id_clone,
             &source_clone,
             &module_references,
@@ -696,13 +696,7 @@ async fn sync_file_to_provider(
     let Some(snapshot) = resolver_snapshot.read().clone() else {
         return;
     };
-    let reader = crate::compile_blockers::HostFsProjectResolverReader::new(host);
-    crate::compile_blockers::hydrate_vue_compile_blockers(
-        host,
-        &snapshot.resolver,
-        &reader,
-        canonical_id,
-    );
+    host.ensure_loaded(canonical_id);
     let _ = host.ensure_compiled(canonical_id, profile);
     let ide = host.get_ide(canonical_id, profile);
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
