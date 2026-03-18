@@ -601,6 +601,8 @@ impl VerterHost {
                         content_override_layer,
                         macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
                         script_imports: efs.script_analysis.imports.clone(),
+                        script_macros: efs.script_analysis.macros.clone(),
+                        script_bindings: efs.script_analysis.bindings.clone(),
                         cached_parse: efs.cached_parse,
                         style_v_bind_vars: style_analyses
                             .iter()
@@ -687,6 +689,8 @@ impl VerterHost {
                         content_override_layer: entry.content_overrides.get(&profile_hash).cloned(),
                         macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
                         script_imports: entry.script_analysis.imports.clone(),
+                        script_macros: entry.script_analysis.macros.clone(),
+                        script_bindings: entry.script_analysis.bindings.clone(),
                         cached_parse: entry.cached_parse.clone(),
                         style_v_bind_vars: entry
                             .style_analyses
@@ -810,10 +814,13 @@ impl VerterHost {
                 } else {
                     Some(compiled_outputs.clone())
                 };
-                // template_analysis on FileEntry is per-file (not per-profile),
-                // populated from the latest compile. This is acceptable because
-                // template analysis doesn't vary by profile.
-                if compiled_template_analysis.is_some() {
+                // Keep FileEntry::template_analysis raw/profileless on the
+                // scheduler path. Override-specific template analysis stays on
+                // the per-profile compile slot only.
+                if compiled_template_analysis.is_some()
+                    && (cfg!(not(feature = "scheduler"))
+                        || compile_input.content_override_layer.is_none())
+                {
                     entry.template_analysis = compiled_template_analysis.clone().map(Arc::new);
                 }
                 entry.compile_slots.insert(
@@ -919,7 +926,7 @@ impl VerterHost {
     ///
     /// Returns `None` if the file is not in the host or not a Vue SFC.
     pub fn get_public_api(&self, canonical_id: &str) -> Option<TscResponse> {
-        self.get_public_api_with_mode(canonical_id, PublicApiMode::Public)
+        self.get_public_api_with_mode(canonical_id, PublicApiMode::Public, None)
     }
 
     /// Generate public API output for a Vue SFC using the requested surface mode.
@@ -927,12 +934,17 @@ impl VerterHost {
     /// `PublicApiMode::Public` matches the default application-facing instance shape.
     /// `PublicApiMode::Testing` exposes internal `<script setup>` bindings in a
     /// Vue Test Utils-like debug surface.
+    ///
+    /// When `profile` is provided, script/content overrides for that compile
+    /// profile are reflected in the generated API surface.
     pub fn get_public_api_with_mode(
         &self,
         canonical_id: &str,
         mode: PublicApiMode,
+        profile: Option<&CompileProfile>,
     ) -> Option<TscResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let profile_hash = profile.map(compile_profile_hash);
 
         #[cfg(feature = "scheduler")]
         if let Some(cc) = self.compile_cache.get(&canonical) {
@@ -942,23 +954,31 @@ impl VerterHost {
         }
 
         #[cfg(feature = "scheduler")]
-        let (source, file_kind, macro_type_deps, script_imports, cached_extract) = {
-            use crate::host_executor::HostSourceData;
-            let snap = self.scheduler.try_get_source(&canonical)?;
-            let hd = snap.downcast_data::<HostSourceData>()?;
-            if hd.file_kind != FileKind::VueSfc {
+        let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
+            let efs = self.effective_file_state(&canonical, profile_hash)?;
+            let file_kind = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|hd| hd.file_kind)
+            })?;
+            if file_kind != FileKind::VueSfc {
                 return None;
             }
-            let cached = self
-                .compile_cache
-                .get(&canonical)
-                .and_then(|cc| cc.cached_tsc_extract.as_ref().map(|(_, e)| Arc::clone(e)));
+            let cached = self.compile_cache.get(&canonical).and_then(|cc| {
+                cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
+                    if *hash == efs.whole_hash {
+                        Some(Arc::clone(extract))
+                    } else {
+                        None
+                    }
+                })
+            });
             (
-                snap.source.clone(),
-                hd.file_kind,
-                hd.parse.script_analysis.macro_type_deps.clone(),
-                hd.parse.script_analysis.imports.clone(),
+                efs.source,
+                file_kind,
+                efs.script_analysis.macro_type_deps.clone(),
+                efs.script_analysis.imports.clone(),
                 cached,
+                efs.whole_hash,
             )
         };
 
@@ -1008,23 +1028,23 @@ impl VerterHost {
             // Store in compile_cache
             #[cfg(feature = "scheduler")]
             {
-                use crate::host_executor::HostSourceData;
                 if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
-                    let wh = self
-                        .scheduler
-                        .try_get_source(&canonical)
-                        .and_then(|s| {
-                            s.downcast_data::<HostSourceData>()
-                                .map(|h| h.parse.whole_hash)
-                        })
-                        .unwrap_or([0; 16]);
-                    cc.cached_tsc_extract = Some((wh, Arc::clone(&arc)));
+                    cc.cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
                 }
             }
-            // Also store in files
+            // Keep the legacy FileEntry cache raw/profileless on the scheduler path.
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
-                entry.cached_tsc_extract = Some(Arc::clone(&arc));
+                #[cfg(feature = "scheduler")]
+                {
+                    if profile_hash.is_none() {
+                        entry.cached_tsc_extract = Some(Arc::clone(&arc));
+                    }
+                }
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    entry.cached_tsc_extract = Some(Arc::clone(&arc));
+                }
             }
             arc
         } else {
@@ -1384,68 +1404,11 @@ impl VerterHost {
         // Convert raw template data into analysis types when available
         let template_analysis = compiled.template_data.as_ref().map(|raw| {
             // Build script import pairs for component → source resolution
-            let script_imports: Vec<(String, String)> = snapshot
-                .macro_type_deps
-                .iter()
-                .map(|dep| (dep.type_name.clone(), dep.import_source.clone()))
-                .collect::<Vec<_>>();
-            // Also collect script imports from the file's analysis if available
-            let files = read_lock(&self.files);
-            let (all_imports, binding_class_unions, props_binding_name) = if let Some(entry) =
-                files.get(&snapshot.canonical_id)
-            {
-                let imports: Vec<(String, String)> = entry
-                    .script_analysis
-                    .imports
-                    .iter()
-                    .flat_map(|imp| {
-                        imp.bindings
-                            .iter()
-                            .map(|b| (b.name.clone(), imp.source.clone()))
-                    })
-                    .chain(script_imports)
-                    .collect();
-
-                // Build string literal union map from props + local bindings
-                let mut unions: Vec<(String, Vec<String>)> = Vec::new();
-
-                // Props from defineProps macro
-                let define_props = entry
-                    .script_analysis
-                    .macros
-                    .iter()
-                    .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps);
-                if let Some(dp) = define_props {
-                    for field in &dp.prop_fields {
-                        if let Some(type_ann) = &field.type_annotation {
-                            let classes = verter_analysis::parse_string_literal_union(type_ann);
-                            if !classes.is_empty() {
-                                unions.push((field.name.clone(), classes));
-                            }
-                        }
-                    }
-                }
-
-                // Local bindings with string literal union types
-                for binding in &entry.script_analysis.bindings {
-                    if let Some(type_ann) = &binding.type_annotation {
-                        let effective_type =
-                            verter_analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
-                        let classes = verter_analysis::parse_string_literal_union(effective_type);
-                        if !classes.is_empty() {
-                            unions.push((binding.name.clone(), classes));
-                        }
-                    }
-                }
-
-                // Extract props binding name (e.g., "props" from `const props = defineProps()`)
-                let props_name = define_props.and_then(|dp| dp.binding_name.clone());
-
-                (imports, unions, props_name)
-            } else {
-                (script_imports, Vec::new(), None)
-            };
-            drop(files);
+            let (all_imports, binding_class_unions, props_binding_name) = template_converter_inputs(
+                &snapshot.script_imports,
+                &snapshot.script_macros,
+                &snapshot.script_bindings,
+            );
             crate::template_convert::convert_raw_to_analysis(
                 raw,
                 &all_imports,
@@ -1456,6 +1419,55 @@ impl VerterHost {
 
         Ok((outputs, compile_diags, cached_tsx, template_analysis))
     }
+}
+
+pub(crate) fn template_converter_inputs(
+    imports: &[verter_analysis::AnalyzedImport],
+    macros: &[verter_analysis::AnalyzedMacro],
+    bindings: &[verter_analysis::AnalyzedBinding],
+) -> (
+    Vec<(String, String)>,
+    Vec<(String, Vec<String>)>,
+    Option<String>,
+) {
+    let all_imports: Vec<(String, String)> = imports
+        .iter()
+        .flat_map(|imp| {
+            imp.bindings
+                .iter()
+                .map(|binding| (binding.name.clone(), imp.source.clone()))
+        })
+        .collect();
+
+    let mut unions = Vec::new();
+    let define_props = macros
+        .iter()
+        .find(|mac| mac.kind == verter_analysis::AnalyzedMacroKind::DefineProps);
+    if let Some(dp) = define_props {
+        for field in &dp.prop_fields {
+            if let Some(type_ann) = &field.type_annotation {
+                let classes = verter_analysis::parse_string_literal_union(type_ann);
+                if !classes.is_empty() {
+                    unions.push((field.name.clone(), classes));
+                }
+            }
+        }
+    }
+
+    for binding in bindings {
+        if let Some(type_ann) = &binding.type_annotation {
+            let effective_type =
+                verter_analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
+            let classes = verter_analysis::parse_string_literal_union(effective_type);
+            if !classes.is_empty() {
+                unions.push((binding.name.clone(), classes));
+            }
+        }
+    }
+
+    let props_binding_name = define_props.and_then(|dp| dp.binding_name.clone());
+
+    (all_imports, unions, props_binding_name)
 }
 
 /// Extract concatenated script content from raw Vue SFC source text.

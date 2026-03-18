@@ -3085,7 +3085,6 @@ const count = ref(0)
         upsert_vue(&host, "/src/App.vue", v2);
 
         let profile = profile_dev();
-        let profile_hash = crate::hash::compile_profile_hash(&profile);
         let response = host
             .get_virtual_file(crate::VirtualQuery {
                 canonical_id: Some("/src/App.vue".to_string()),
@@ -3355,7 +3354,6 @@ mod phase1_structural_tests {
 mod phase2a_upsert_tests {
     use super::*;
     use crate::host_executor::HostSourceData;
-    use crate::types::CompileCacheEntry;
 
     #[test]
     fn test_upsert_single_parse() {
@@ -3538,6 +3536,30 @@ mod phase2a_upsert_tests {
 
         let cc = host.compile_cache.get("/src/App.vue").unwrap();
         assert!(!cc.evicted, "ensure_loaded should clear evicted flag");
+    }
+
+    #[test]
+    fn test_resolve_import_returns_none_for_evicted_parent() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_vue(&host, "/src/Child.vue", "<template><div/></template>");
+        upsert_vue(
+            &host,
+            "/src/App.vue",
+            "<script setup>\nimport Child from './Child.vue'\n</script>\n<template><Child/></template>",
+        );
+
+        assert_eq!(
+            host.resolve_import("/src/App.vue", "./Child.vue")
+                .as_deref(),
+            Some("/src/Child.vue")
+        );
+
+        host.evict("/src/App.vue");
+
+        assert!(
+            host.resolve_import("/src/App.vue", "./Child.vue").is_none(),
+            "evicted files should be invisible to resolve_import"
+        );
     }
 
     #[test]

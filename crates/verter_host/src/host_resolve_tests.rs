@@ -5,8 +5,9 @@ use verter_vfs::WorkspaceAccess;
 
 use crate::shared::read_lock;
 use crate::{
-    CompileErrorPolicy, CompileProfile, FileKind, HostConfig, HostDiagnostic, HostError,
-    HostSeverity, PublicApiMode, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileKind,
+    HostConfig, HostDiagnostic, HostError, HostSeverity, PreprocessorBlockType, PublicApiMode,
+    UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 use verter_core::compile::CompileTarget;
 
@@ -70,7 +71,19 @@ fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
 }
 
 fn public_api_code_with_mode(host: &VerterHost, canonical_id: &str, mode: PublicApiMode) -> String {
-    host.get_public_api_with_mode(canonical_id, mode)
+    host.get_public_api_with_mode(canonical_id, mode, None)
+        .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
+        .code
+        .to_string()
+}
+
+fn public_api_code_with_profile(
+    host: &VerterHost,
+    canonical_id: &str,
+    mode: PublicApiMode,
+    profile: &CompileProfile,
+) -> String {
+    host.get_public_api_with_mode(canonical_id, mode, Some(profile))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -448,6 +461,48 @@ fn testing_public_api_ignores_define_expose_narrowing() {
     assert!(
         !testing.contains("defineExpose({ foo }) as"),
         "testing mode should not narrow the debug instance to defineExpose: {testing}"
+    );
+}
+
+#[test]
+fn public_api_with_profile_uses_override_script_state() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\ndefineProps<{ raw: string }>()\n</script>\n<template><div/></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    let profile = CompileProfile::default();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "/src/Comp.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Script,
+                index: 0,
+                code: Arc::from("defineProps<{ overrideProp: number }>()"),
+                source_map: None,
+            }],
+        })
+        .expect("script override should succeed");
+
+    let raw = public_api_code(&host, "/src/Comp.vue");
+    let overridden =
+        public_api_code_with_profile(&host, "/src/Comp.vue", PublicApiMode::Public, &profile);
+
+    assert!(
+        raw.contains("raw?: string") || raw.contains("raw: string"),
+        "raw public api should still reflect the raw script: {raw}"
+    );
+    assert!(
+        !raw.contains("overrideProp"),
+        "raw public api must not be polluted by override script state: {raw}"
+    );
+    assert!(
+        overridden.contains("overrideProp?: number") || overridden.contains("overrideProp: number"),
+        "profile-aware public api should use the override script state: {overridden}"
+    );
+    assert!(
+        !overridden.contains("raw?: string") && !overridden.contains("raw: string"),
+        "override profile should not keep raw-only props in the public api: {overridden}"
     );
 }
 

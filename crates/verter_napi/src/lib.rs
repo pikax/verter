@@ -1638,7 +1638,8 @@ impl NapiVerterHost {
             }
         };
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner.get_public_api_with_mode(&canonical_id, mode)
+            self.inner
+                .get_public_api_with_mode(&canonical_id, mode, None)
         }))?;
         Ok(result.map(|r| NapiTscResponse {
             code: r.code.to_string(),

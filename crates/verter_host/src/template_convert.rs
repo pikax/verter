@@ -278,6 +278,18 @@ pub fn convert_raw_to_analysis(
                     modifier_spans: d.modifier_spans.clone(),
                 })
                 .collect();
+            let bind_class_expressions: Vec<&str> = e
+                .directives
+                .iter()
+                .filter(|d| d.name == "bind" && d.argument.as_deref() == Some("class"))
+                .filter_map(|d| d.expression.as_deref())
+                .collect();
+            let bind_style_expressions: Vec<&str> = e
+                .directives
+                .iter()
+                .filter(|d| d.name == "bind" && d.argument.as_deref() == Some("style"))
+                .filter_map(|d| d.expression.as_deref())
+                .collect();
 
             let v_for = e.v_for_idx.map(|idx| {
                 let vf = &raw.v_for_directives[idx];
@@ -309,23 +321,24 @@ pub fn convert_raw_to_analysis(
                 .iter()
                 .filter(|a| a.is_dynamic && a.name == "class")
                 .filter_map(|a| a.value.as_deref())
+                .chain(bind_class_expressions.iter().copied())
                 .flat_map(verter_analysis::extract_dynamic_class_names)
                 .collect();
 
             // If no class names from object/array/ternary, try resolving
             // bare identifier bindings via string literal union types.
             if dynamic_classes.is_empty() {
-                for attr in &e.attributes {
-                    if attr.is_dynamic && attr.name == "class" {
-                        if let Some(expr) = attr.value.as_deref() {
-                            if let Some(classes) = resolve_classes_from_binding(
-                                expr,
-                                binding_class_unions,
-                                props_binding_name,
-                            ) {
-                                dynamic_classes.extend_from_slice(classes);
-                            }
-                        }
+                for expr in e
+                    .attributes
+                    .iter()
+                    .filter(|a| a.is_dynamic && a.name == "class")
+                    .filter_map(|a| a.value.as_deref())
+                    .chain(bind_class_expressions.iter().copied())
+                {
+                    if let Some(classes) =
+                        resolve_classes_from_binding(expr, binding_class_unions, props_binding_name)
+                    {
+                        dynamic_classes.extend_from_slice(classes);
                     }
                 }
             }
@@ -336,6 +349,7 @@ pub fn convert_raw_to_analysis(
                 .iter()
                 .filter(|a| a.is_dynamic && a.name == "style")
                 .filter_map(|a| a.value.as_deref())
+                .chain(bind_style_expressions.iter().copied())
                 .flat_map(verter_analysis::template::extract_dynamic_style_vars)
                 .collect();
 
@@ -978,6 +992,115 @@ mod tests {
             result.elements[0].dynamic_classes,
             vec!["primary", "secondary"],
             "bare identifier :class should resolve to string literal union values"
+        );
+    }
+
+    #[test]
+    fn element_class_bind_directive_resolved_from_union() {
+        let raw = RawTemplateData {
+            elements: vec![RawElementData {
+                tag: "div".to_string(),
+                is_component: false,
+                is_self_closing: false,
+                has_v_if: false,
+                has_v_else: false,
+                has_v_else_if: false,
+                v_if_condition: None,
+                has_v_show: false,
+                has_v_html: false,
+                has_v_text: false,
+                has_text_content: false,
+                has_bare_text: false,
+                has_element_children: false,
+                nesting_depth: 0,
+                parent_tag: None,
+                parent_index: None,
+                span: Span::new(0, 50),
+                tag_span_end: 30,
+                content_end: 45,
+                attributes: vec![],
+                directives: vec![RawDirectiveData {
+                    name: "bind".to_string(),
+                    raw_name: ":".to_string(),
+                    argument: Some("class".to_string()),
+                    modifiers: vec![],
+                    expression: Some("variant".to_string()),
+                    span: Span::new(5, 20),
+                    name_end: 6,
+                    arg_span: Some(Span::new(6, 11)),
+                    expression_span: Some(Span::new(12, 19)),
+                    modifier_spans: vec![],
+                }],
+                v_for_idx: None,
+                v_model_idx: None,
+                text_children: vec![],
+            }],
+            ..Default::default()
+        };
+
+        let unions = vec![(
+            "variant".to_string(),
+            vec!["primary".to_string(), "secondary".to_string()],
+        )];
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+
+        assert_eq!(
+            result.elements[0].dynamic_classes,
+            vec!["primary", "secondary"],
+            "bind directive :class should resolve to string literal union values"
+        );
+    }
+
+    #[test]
+    fn element_style_bind_directive_extracts_css_vars() {
+        let raw = RawTemplateData {
+            elements: vec![RawElementData {
+                tag: "div".to_string(),
+                is_component: false,
+                is_self_closing: false,
+                has_v_if: false,
+                has_v_else: false,
+                has_v_else_if: false,
+                v_if_condition: None,
+                has_v_show: false,
+                has_v_html: false,
+                has_v_text: false,
+                has_text_content: false,
+                has_bare_text: false,
+                has_element_children: false,
+                nesting_depth: 0,
+                parent_tag: None,
+                parent_index: None,
+                span: Span::new(0, 60),
+                tag_span_end: 30,
+                content_end: 55,
+                attributes: vec![],
+                directives: vec![RawDirectiveData {
+                    name: "bind".to_string(),
+                    raw_name: ":".to_string(),
+                    argument: Some("style".to_string()),
+                    modifiers: vec![],
+                    expression: Some("{ '--theme-color': color }".to_string()),
+                    span: Span::new(5, 35),
+                    name_end: 6,
+                    arg_span: Some(Span::new(6, 11)),
+                    expression_span: Some(Span::new(12, 34)),
+                    modifier_spans: vec![],
+                }],
+                v_for_idx: None,
+                v_model_idx: None,
+                text_children: vec![],
+            }],
+            ..Default::default()
+        };
+
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+
+        assert_eq!(result.css_var_names, vec!["--theme-color"]);
+        assert_eq!(result.elements[0].dynamic_style_vars.len(), 1);
+        assert_eq!(
+            result.elements[0].dynamic_style_vars[0].name,
+            "--theme-color"
         );
     }
 

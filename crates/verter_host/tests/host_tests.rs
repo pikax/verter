@@ -3162,7 +3162,7 @@ fn css_var_flow_across_files() {
         aliases: Vec::new(),
     });
 
-    let flow = host.css_var_flow("--theme-color");
+    let flow = host.css_var_flow("--theme-color", None);
     assert_eq!(flow.name, "--theme-color");
     assert_eq!(
         flow.style_definitions.len(),
@@ -3170,4 +3170,89 @@ fn css_var_flow_across_files() {
         "should have 1 style definition"
     );
     assert_eq!(flow.style_var_usages.len(), 1, "should have 1 var() usage");
+}
+
+#[test]
+fn css_var_flow_with_template_override_profile() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/A.vue",
+        "<script setup>\nconst color = 'red'\n</script>\n<template><div>A</div></template>",
+    );
+
+    let profile = CompileProfile::default();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "/src/A.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Template,
+                index: 0,
+                code: Arc::from("<div :style=\"{ '--theme-color': color }\">A</div>"),
+                source_map: None,
+            }],
+        })
+        .expect("template override should succeed");
+
+    let raw_flow = host.css_var_flow("--theme-color", None);
+    let override_flow = host.css_var_flow("--theme-color", Some(&profile));
+
+    assert_eq!(
+        raw_flow.template_definitions.len(),
+        0,
+        "raw/profileless css_var_flow must stay raw"
+    );
+    assert_eq!(
+        override_flow.template_definitions.len(),
+        1,
+        "profile-aware css_var_flow should use override template analysis"
+    );
+}
+
+#[test]
+fn override_compile_slot_does_not_poison_raw_css_var_flow() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/A.vue",
+        "<script setup>\nconst color = 'red'\n</script>\n<template><div>A</div></template>",
+    );
+
+    let profile = CompileProfile::default();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "/src/A.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Template,
+                index: 0,
+                code: Arc::from("<div :style=\"{ '--theme-color': color }\">A</div>"),
+                source_map: None,
+            }],
+        })
+        .expect("template override should succeed");
+
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/A.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })
+        .expect("override profile should compile");
+
+    let raw_flow = host.css_var_flow("--theme-color", None);
+    let override_flow = host.css_var_flow("--theme-color", Some(&profile));
+
+    assert_eq!(
+        raw_flow.template_definitions.len(),
+        0,
+        "compiling an override profile must not populate raw template analysis"
+    );
+    assert_eq!(
+        override_flow.template_definitions.len(),
+        1,
+        "override profile should still expose the template css var definition"
+    );
 }

@@ -409,6 +409,112 @@ impl VerterHost {
         }
     }
 
+    fn build_template_analysis(
+        &self,
+        canonical: &str,
+        source: &Arc<str>,
+        cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        src_blocks: &[crate::SrcBlockInfo],
+        external_requests: &[crate::ExternalSourceRequest],
+        imports: &[verter_analysis::AnalyzedImport],
+        macros: &[verter_analysis::AnalyzedMacro],
+        bindings: &[verter_analysis::AnalyzedBinding],
+    ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
+        let ext_map = if !src_blocks.is_empty() {
+            let files = read_lock(&self.files);
+            let mut map = rustc_hash::FxHashMap::default();
+            for req in external_requests {
+                let dep_id = files
+                    .contains_key(&req.resolved_canonical_id)
+                    .then(|| req.resolved_canonical_id.clone())
+                    .or_else(|| {
+                        self.resolve_loaded_dependency_canonical(
+                            &files,
+                            canonical,
+                            &req.specifier,
+                            verter_vfs::ResolveRequestKind::EsmImport,
+                        )
+                    });
+                if let Some(dep_source) =
+                    dep_id.and_then(|id| files.get(&id).map(|e| e.source.clone()))
+                {
+                    map.insert(req.resolved_canonical_id.clone(), dep_source);
+                }
+            }
+            map
+        } else {
+            rustc_hash::FxHashMap::default()
+        };
+
+        for req in external_requests {
+            if !ext_map.contains_key(&req.resolved_canonical_id) {
+                return None;
+            }
+        }
+
+        let merged_source = if !src_blocks.is_empty() {
+            std::borrow::Cow::Owned(crate::compile::merge_external_sources(
+                source, src_blocks, &ext_map,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(source.as_ref())
+        };
+
+        let parsed = if src_blocks.is_empty() {
+            cached_parse
+                .as_deref()
+                .map(std::borrow::Cow::Borrowed)
+                .unwrap_or_else(|| {
+                    std::borrow::Cow::Owned(verter_core::compile::parse_sfc(
+                        &merged_source,
+                        None,
+                        None,
+                    ))
+                })
+        } else {
+            std::borrow::Cow::Owned(verter_core::compile::parse_sfc(&merged_source, None, None))
+        };
+
+        let alloc = oxc_allocator::Allocator::new();
+        let options = verter_core::compile::CodegenOptions {
+            target: verter_core::compile::CompileTarget::META,
+            filename: Some(canonical.to_string()),
+            ..verter_core::compile::CodegenOptions::default()
+        };
+        let verter_opts = verter_core::compile::VerterCompileOptions {
+            extract_template_data: true,
+            ..verter_core::compile::VerterCompileOptions::default()
+        };
+        let compiled = verter_core::compile::compile_from_parsed(
+            &merged_source,
+            &parsed,
+            &options,
+            &verter_opts,
+            &alloc,
+        );
+
+        let has_structural_errors = compiled.errors.iter().any(|d| {
+            matches!(
+                d.severity,
+                verter_core::compile::CompileDiagnosticSeverity::Error
+            ) && !d.code.starts_with("XInvalidMacroType")
+                && !d.code.starts_with("XMissingMacroType")
+        });
+        if has_structural_errors {
+            return None;
+        }
+
+        let raw = compiled.template_data?;
+        let (imports, unions, props_name) =
+            crate::host_resolve::template_converter_inputs(imports, macros, bindings);
+        Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
+            &raw,
+            &imports,
+            &unions,
+            props_name.as_deref(),
+        )))
+    }
+
     /// Lazily compute template analysis for a VueSfc file that hasn't been compiled.
     ///
     /// Uses `CompileTarget::META` (= SCRIPT + TEMPLATE_DATA) via the core
@@ -1314,31 +1420,97 @@ impl VerterHost {
         }
     }
 
+    fn raw_template_analysis_for_file(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
+        let mut snapshot = {
+            let files = read_lock(&self.files);
+            let entry = files.get(canonical)?;
+            if entry.file_kind != FileKind::VueSfc {
+                return None;
+            }
+            Self::build_snapshot_from_entry(entry)
+        };
+        self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+        snapshot.template
+    }
+
+    #[cfg(feature = "scheduler")]
+    fn compute_override_template_analysis(
+        &self,
+        canonical: &str,
+        profile_hash: u64,
+    ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
+        let override_with_parse = {
+            let cc = self.compile_cache.get(canonical)?;
+            cc.content_overrides.get(&profile_hash)?.clone()
+        };
+
+        self.build_template_analysis(
+            canonical,
+            &override_with_parse.source,
+            override_with_parse.cached_parse.clone(),
+            &override_with_parse.parse.src_blocks,
+            &override_with_parse.parse.external_requests,
+            &override_with_parse.parse.script_analysis.imports,
+            &override_with_parse.parse.script_analysis.macros,
+            &override_with_parse.parse.script_analysis.bindings,
+        )
+    }
+
     /// Returns cross-component CSS variable flow for a given variable name.
     ///
     /// Scans all files in the host to find where the variable is defined (in `<style>`),
     /// referenced via `var()` (in `<style>`), set via `:style` bindings (in `<template>`),
     /// and manipulated via DOM APIs (in `<script>`).
-    pub fn css_var_flow(&self, var_name: &str) -> verter_analysis::CssVarFlow {
+    ///
+    /// When `profile` is provided, override-aware style/template/script state is
+    /// used for that compile profile. `None` keeps the read profileless/raw.
+    pub fn css_var_flow(
+        &self,
+        var_name: &str,
+        profile: Option<&CompileProfile>,
+    ) -> verter_analysis::CssVarFlow {
+        let profile_hash = profile.map(compile_profile_hash);
         let files = read_lock(&self.files);
+        let canonical_ids: Vec<String> = files
+            .keys()
+            .filter(|canonical_id| {
+                #[cfg(feature = "scheduler")]
+                if let Some(cc) = self.compile_cache.get(canonical_id.as_str()) {
+                    return !cc.evicted;
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        drop(files);
+
         let mut flow = verter_analysis::CssVarFlow {
             name: var_name.to_string(),
             ..Default::default()
         };
 
-        for (canonical_id, entry) in files.iter() {
-            // Eviction gate
-            #[cfg(feature = "scheduler")]
-            if let Some(cc) = self.compile_cache.get(canonical_id) {
-                if cc.evicted {
-                    continue;
-                }
-            }
+        for canonical_id in canonical_ids {
             let path: std::sync::Arc<std::path::Path> =
                 std::sync::Arc::from(std::path::Path::new(canonical_id.as_str()));
 
+            #[cfg(feature = "scheduler")]
+            let style_analyses = self
+                .effective_style_analyses(&canonical_id, profile_hash)
+                .unwrap_or_default();
+            #[cfg(not(feature = "scheduler"))]
+            let style_analyses = {
+                let files = read_lock(&self.files);
+                files
+                    .get(&canonical_id)
+                    .map(|entry| entry.style_analyses.as_ref().clone())
+                    .unwrap_or_default()
+            };
+
             // Check style blocks for definitions and var() references
-            for style in entry.style_analyses.iter() {
+            for style in &style_analyses {
                 if let Some(ref css) = style.css {
                     let has_def = css.custom_properties.iter().any(|p| p.name == var_name);
                     if has_def {
@@ -1353,19 +1525,63 @@ impl VerterHost {
             }
 
             // Check template for :style CSS variable bindings
-            if let Some(ref tmpl) = entry.template_analysis {
+            #[cfg(feature = "scheduler")]
+            let template_analysis = if let Some(profile_hash) = profile_hash {
+                self.compile_cache
+                    .get(&canonical_id)
+                    .and_then(|cc| {
+                        if cc.content_overrides.contains_key(&profile_hash) {
+                            cc.compile_slots
+                                .get(&profile_hash)
+                                .and_then(|slot| slot.template_analysis.clone())
+                                .map(Arc::new)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        self.compute_override_template_analysis(&canonical_id, profile_hash)
+                    })
+                    .or_else(|| self.raw_template_analysis_for_file(&canonical_id))
+            } else {
+                self.raw_template_analysis_for_file(&canonical_id)
+            };
+            #[cfg(not(feature = "scheduler"))]
+            let template_analysis = self.raw_template_analysis_for_file(&canonical_id);
+
+            if let Some(ref tmpl) = template_analysis {
                 if tmpl.css_var_names.iter().any(|n| n == var_name) {
                     flow.template_definitions.push(std::sync::Arc::clone(&path));
                 }
             }
 
             // Check script for DOM API CSS variable manipulations
-            if entry
-                .script_analysis
-                .css_var_manipulations
-                .iter()
-                .any(|m| m.var_name == var_name)
-            {
+            #[cfg(feature = "scheduler")]
+            let script_has_manipulation = self
+                .effective_file_state(&canonical_id, profile_hash)
+                .map(|efs| {
+                    efs.script_analysis
+                        .css_var_manipulations
+                        .iter()
+                        .any(|m| m.var_name == var_name)
+                })
+                .unwrap_or(false);
+            #[cfg(not(feature = "scheduler"))]
+            let script_has_manipulation = {
+                let files = read_lock(&self.files);
+                files
+                    .get(&canonical_id)
+                    .map(|entry| {
+                        entry
+                            .script_analysis
+                            .css_var_manipulations
+                            .iter()
+                            .any(|m| m.var_name == var_name)
+                    })
+                    .unwrap_or(false)
+            };
+
+            if script_has_manipulation {
                 flow.script_manipulations.push(std::sync::Arc::clone(&path));
             }
         }
@@ -1592,11 +1808,18 @@ impl VerterHost {
     /// Returns `None` if the import cannot be resolved to a known file
     /// (e.g., bare specifiers like `vue` or unregistered files).
     pub fn resolve_import(&self, parent_canonical_id: &str, import_source: &str) -> Option<String> {
+        let canonical_parent = self.resolve_alias_or_canonical(parent_canonical_id);
+        #[cfg(feature = "scheduler")]
+        if let Some(cc) = self.compile_cache.get(&canonical_parent) {
+            if cc.evicted {
+                return None;
+            }
+        }
         let ctx = verter_vfs::ResolutionContext {
             phase: verter_vfs::ResolvePhase::CodegenBlocker,
             kind: verter_vfs::ResolveRequestKind::EsmImport,
         };
-        self.resolve_via_vfs(parent_canonical_id, import_source, ctx)
+        self.resolve_via_vfs(&canonical_parent, import_source, ctx)
     }
 
     /// Returns all exports of a file, following re-export chains to their ultimate source.
@@ -1918,7 +2141,6 @@ fn resolved_elements_to_expanded_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::*;
     use std::sync::Arc;
 
     const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
@@ -1970,6 +2192,64 @@ const msg = ref('hello')
         entry.cached_parse = None;
     }
 
+    #[test]
+    fn raw_template_analysis_extracts_css_var_names() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/src/A.vue",
+            "<script setup>\nconst color = 'red'\n</script>\n<template><div :style=\"{ '--theme-color': color }\">A</div></template>",
+        );
+
+        let template = host
+            .raw_template_analysis_for_file("/src/A.vue")
+            .expect("raw template analysis should be computed");
+        assert!(
+            template
+                .css_var_names
+                .iter()
+                .any(|name| name == "--theme-color"),
+            "raw template analysis should include CSS vars from :style bindings"
+        );
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn override_template_analysis_helper_uses_content_override() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/src/A.vue",
+            "<script setup>\nconst color = 'red'\n</script>\n<template><div>A</div></template>",
+        );
+
+        let profile = CompileProfile::default();
+        let profile_hash = crate::hash::compile_profile_hash(&profile);
+        let _ = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: "/src/A.vue".to_string(),
+                compile_profile: profile.clone(),
+                overrides: vec![BlockOverrideEntry {
+                    block_type: PreprocessorBlockType::Template,
+                    index: 0,
+                    code: Arc::from("<div :style=\"{ '--theme-color': color }\">A</div>"),
+                    source_map: None,
+                }],
+            })
+            .expect("template override should succeed");
+
+        let template = host
+            .compute_override_template_analysis("/src/A.vue", profile_hash)
+            .expect("override template analysis should be computed");
+        assert!(
+            template
+                .css_var_names
+                .iter()
+                .any(|name| name == "--theme-color"),
+            "override template analysis should reflect the overridden template"
+        );
+    }
+
     /// @ai-generated - get_analysis populates resolved_canonical_id for relative imports
     #[test]
     fn get_analysis_resolves_relative_import() {
@@ -2014,7 +2294,6 @@ const msg = ref('hello')
         );
         // Configure workspace resolver with alias
         {
-            use verter_vfs::WorkspaceAccess;
             host.workspace().configure_resolver(vec![
                 verter_analysis::project_resolver::IdeProjectConfig {
                     root: "/project".to_string(),
