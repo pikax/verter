@@ -112,6 +112,15 @@ pub struct HostConfig {
     /// - [`AnalysisScope::LSP`](verter_analysis::AnalysisScope::LSP) — full for IDE features
     /// - [`AnalysisScope::LINTER`](verter_analysis::AnalysisScope::LINTER) — for lint rules
     pub analysis_scope: Option<verter_analysis::AnalysisScope>,
+
+    /// When `true`, `get_analysis()` enriches the snapshot with imported type
+    /// information by resolving `macro_type_deps` through the workspace (VFS
+    /// aliases, re-exports). Populates `prop_fields`/`emit_fields`/`slot_fields`
+    /// on target macros and adds resolved types to `resolved_local_types`.
+    ///
+    /// Designed for component-meta consumers that need full cross-file type
+    /// resolution without a TypeScript Program. Defaults to `false`.
+    pub deep_macro_resolution_type: bool,
 }
 
 impl Default for HostConfig {
@@ -136,6 +145,7 @@ impl Default for HostConfig {
             ],
             analysis_level: AnalysisLevel::Full,
             analysis_scope: None,
+            deep_macro_resolution_type: false,
         }
     }
 }

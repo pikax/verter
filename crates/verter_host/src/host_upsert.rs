@@ -223,6 +223,13 @@ impl VerterHost {
             if changes.changed && changes.semantic_changed {
                 entry.latest_diagnostics.clear();
                 entry.diagnostics_generation += 1;
+                // Clear lazily-computed template analysis when content changes
+                if changes.slice_changes.template_changed
+                    || changes.slice_changes.script_changed
+                    || changes.slice_changes.structure_changed
+                {
+                    entry.template_analysis = None;
+                }
                 if changes.slice_changes.script_changed
                     || changes.slice_changes.structure_changed
                     || changes.slice_changes.descriptor_changed
@@ -651,6 +658,8 @@ impl VerterHost {
         entry.arc_script_cache = ScriptAnalysisArcs::from_analysis(&entry.script_analysis);
         entry.style_analyses = Arc::new(new_snapshot.style_analyses);
         entry.cached_parse = Some(Arc::new(new_parsed));
+        // Clear lazily-computed template analysis — block overrides rebuild source/parse.
+        entry.template_analysis = None;
 
         // Store content override layer
         entry.content_overrides.insert(

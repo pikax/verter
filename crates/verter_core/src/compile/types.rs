@@ -34,6 +34,10 @@ bitflags::bitflags! {
         const IDE      = Self::TSX.bits();
         /// MCP analysis preset: script (for bindings) + template data extraction.
         const ANALYSIS = Self::SCRIPT.bits() | Self::TEMPLATE_DATA.bits();
+        /// Component metadata preset: script bindings + template data extraction.
+        /// Used by `get_analysis()` to lazily populate template data for metadata
+        /// consumers without triggering the full compile pipeline.
+        const META     = Self::SCRIPT.bits() | Self::TEMPLATE_DATA.bits();
     }
 }
 

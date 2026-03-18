@@ -116,6 +116,9 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
             return Err(FfiConversionError::InvalidAnalysisLevel(level));
         };
     }
+    if let Some(deep) = input.deep_macro_resolution_type {
+        out.deep_macro_resolution_type = deep;
+    }
     Ok(out)
 }
 

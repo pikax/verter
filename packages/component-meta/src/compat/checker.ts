@@ -10,9 +10,9 @@
  */
 
 import { resolve, dirname } from "node:path";
+import { createRequire } from "node:module";
 import { createNapiAdapter } from "../host-adapter.js";
 import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
-import { parseType } from "../resolver.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
@@ -38,6 +38,15 @@ export interface CheckerWorkspace {
       };
     }>,
   ): void;
+}
+
+/**
+ * Create a workspace from @verter/native for the given root directory.
+ */
+function createWorkspace(rootDir: string): CheckerWorkspace {
+  const _require = typeof require === "function" ? require : createRequire(import.meta.url);
+  const native = _require("@verter/native");
+  return new native.Workspace([normalizePath(rootDir)]);
 }
 
 /**
@@ -209,12 +218,16 @@ export class ComponentMetaChecker {
   async getComponentMeta(filePath: string, _exportName?: string): Promise<VolarComponentMeta> {
     const absPath = resolve(this.projectRoot, filePath);
     await this.ensureFile(absPath);
+    // getAnalysis now enriches macros with cross-file type resolution
+    // (prop_fields, emit_fields, slot_fields, resolved_local_types)
+    // when deepMacroResolutionType is enabled on the host config.
     const rawSnapshot = this.adapter.getAnalysis(absPath);
-    // Ensure dependency .ts files are in the host for cross-file type resolution
-    await this.ensureTypeDependencies(absPath, rawSnapshot);
-    // Build type registry and enrich with resolved imported types
     const typeRegistry = rawSnapshot ? buildTypeRegistry(rawSnapshot) : undefined;
     if (typeRegistry) {
+      // Safety net: enrich typeRegistry with resolved imported types from the host.
+      // No-op when Rust enrichment already populated resolved_local_types (which
+      // buildTypeRegistry picks up), but catches edge cases where enrichment
+      // fails or the host was configured without deepMacroResolutionType.
       const importedJson = this.adapter.resolveImportedTypes?.(absPath);
       if (importedJson) {
         try {
@@ -230,8 +243,8 @@ export class ComponentMetaChecker {
           // Ignore parse errors
         }
       }
-      // Extract locally-defined interfaces/types from SFC content
-      // for runtime-style defineProps that reference local types
+      // Extract locally-defined interfaces/types from SFC content for
+      // schema expansion of local types referenced by runtime-style defineProps.
       const sfcContent = this.trackedFiles.get(absPath);
       if (sfcContent) {
         extractLocalInterfaces(sfcContent, typeRegistry);
@@ -246,37 +259,6 @@ export class ComponentMetaChecker {
         slots: [],
         exposed: [],
       };
-    }
-    // Fill in props from resolved imported types when extraction couldn't resolve them
-    if (meta.props.length === 0 && typeRegistry && typeRegistry.size > 0) {
-      const snapshot = rawSnapshot as {
-        macros?: Array<{ typeReferences?: string[]; propFields?: unknown[] }>;
-      } | null;
-      const unresolvedRefs =
-        snapshot?.macros
-          ?.filter((m) => (!m.propFields || m.propFields.length === 0) && m.typeReferences?.length)
-          ?.flatMap((m) => m.typeReferences ?? []) ?? [];
-      for (const ref of unresolvedRefs) {
-        const expanded = typeRegistry.get(ref);
-        if (!expanded) continue;
-        // Parse "{ label: string; size?: number }" into props
-        const parsed = parseType(expanded);
-        if (parsed.kind === "object") {
-          for (const prop of parsed.properties) {
-            meta.props.push({
-              name: prop.name,
-              type: prop.type,
-              required: !prop.optional,
-              hasDefault: false,
-              rawType: expanded.includes(prop.name)
-                ? prop.type.kind === "unknown"
-                  ? prop.type.rawType
-                  : undefined
-                : undefined,
-            });
-          }
-        }
-      }
     }
     return mapComponentMeta(meta, this.options, typeRegistry);
   }
@@ -350,67 +332,25 @@ export class ComponentMetaChecker {
       }
     }
   }
-
-  /**
-   * Ensure dependency `.ts` files for cross-file type resolution are in the host.
-   */
-  private async ensureTypeDependencies(absPath: string, rawSnapshot: unknown): Promise<void> {
-    const snapshot = rawSnapshot as { macroTypeDeps?: Array<{ importSource: string }> } | null;
-    if (!snapshot?.macroTypeDeps) return;
-    for (const dep of snapshot.macroTypeDeps) {
-      if (!dep.importSource.startsWith(".")) continue;
-      const resolved = await this.resolveDepPath(absPath, dep.importSource);
-      if (resolved && !this.trackedFiles.has(resolved)) {
-        const content = await readFileSafe(resolved, this.workspace);
-        if (content !== null) {
-          this.trackedFiles.set(resolved, content);
-          this.adapter.upsert({ inputId: resolved, source: content, fileKind: "non_sfc" });
-        }
-      }
-    }
-  }
-
-  /**
-   * Resolve a relative import specifier to an absolute file path,
-   * trying common TypeScript extensions.
-   */
-  private async resolveDepPath(fromPath: string, specifier: string): Promise<string | null> {
-    const base = resolve(dirname(fromPath), specifier);
-    for (const ext of [".ts", ".tsx", "/index.ts", ".d.ts"]) {
-      const candidate = base + ext;
-      if (await fileExistsSafe(candidate, this.workspace)) return candidate;
-    }
-    // Try exact path (might already have extension)
-    if (await fileExistsSafe(base, this.workspace)) return base;
-    return null;
-  }
 }
 
 /**
  * Extract locally-defined interface/type declarations from SFC content
  * and add them to the type registry.
  *
- * Handles simple interface definitions like:
- * ```ts
- * interface Foo { name: string; age: number }
- * ```
- *
  * Does NOT overwrite existing registry entries.
  */
 function extractLocalInterfaces(sfcContent: string, registry: Map<string, string>): void {
-  // Extract script content (both <script setup> and <script>)
   const scriptBlocks = sfcContent.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g);
   for (const match of scriptBlocks) {
     const script = match[1];
-    // Match interface declarations: interface Name { ... }
-    // Use a balanced brace matching approach
+    // Match interface declarations
     const interfacePattern = /\binterface\s+(\w+)(?:\s+extends\s+[^{]+)?\s*\{/g;
     let ifMatch;
     while ((ifMatch = interfacePattern.exec(script)) !== null) {
       const name = ifMatch[1];
       if (registry.has(name)) continue;
-      // Find the matching closing brace
-      const startIdx = ifMatch.index + ifMatch[0].length - 1; // position of opening {
+      const startIdx = ifMatch.index + ifMatch[0].length - 1;
       let depth = 1;
       let i = startIdx + 1;
       while (i < script.length && depth > 0) {
@@ -419,18 +359,15 @@ function extractLocalInterfaces(sfcContent: string, registry: Map<string, string
         i++;
       }
       if (depth === 0) {
-        const body = script.slice(startIdx, i); // includes { and }
-        registry.set(name, body);
+        registry.set(name, script.slice(startIdx, i));
       }
     }
-
-    // Match type alias declarations: type Name = ...
+    // Match type alias declarations
     const typePattern = /\btype\s+(\w+)(?:<[^>]*>)?\s*=\s*/g;
     let typeMatch;
     while ((typeMatch = typePattern.exec(script)) !== null) {
       const name = typeMatch[1];
       if (registry.has(name)) continue;
-      // Extract the type value until the next unbalanced semicolon or newline
       const startIdx = typeMatch.index + typeMatch[0].length;
       let depth = 0;
       let i = startIdx;
@@ -648,17 +585,19 @@ async function resolveIncludePatterns(
 /**
  * Create a Volar-compatible checker from an inline tsconfig JSON object.
  *
+ * Creates a workspace internally from `@verter/native`.
+ *
  * @param projectRoot Root directory for the project
  * @param configJson  tsconfig-like configuration object
  * @param options     Checker options
  */
 export async function createCheckerByJson(
-  workspace: CheckerWorkspace,
   projectRoot: string,
   configJson: object,
   options?: MetaCheckerOptions,
 ): Promise<ComponentMetaChecker> {
   const absRoot = resolve(projectRoot);
+  const workspace = createWorkspace(absRoot);
   const adapter = createNapiAdapter(workspace);
   const config = configJson as Record<string, unknown>;
 

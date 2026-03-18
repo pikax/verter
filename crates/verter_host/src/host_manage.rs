@@ -112,12 +112,398 @@ impl VerterHost {
         result
     }
 
+    /// Enrich a snapshot's macros with cross-file type resolution results.
+    ///
+    /// For each `MacroTypeDep`, resolves the imported type through the workspace
+    /// (VFS aliases, re-exports, disk reads) and populates the target macro's
+    /// `prop_fields`/`emit_fields`/`slot_fields` and `resolved_local_types`.
+    ///
+    /// Called from `get_analysis()` when `deep_macro_resolution_type` is enabled.
+    fn enrich_imported_types(&self, canonical: &str, snapshot: &mut FileAnalysisSnapshot) {
+        if snapshot.macro_type_deps.is_empty() {
+            return;
+        }
+
+        let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
+            snapshot.macro_type_deps.iter().cloned().collect();
+
+        let files = read_lock(&self.files);
+        let mut cache = rustc_hash::FxHashMap::default();
+        let mut visiting = rustc_hash::FxHashSet::default();
+        let kind = verter_vfs::ResolveRequestKind::TypeImport;
+
+        // Collect enrichments first, then apply (avoid borrow issues with Arc::make_mut).
+        struct Enrichment {
+            type_name: String,
+            macro_kind: verter_analysis::AnalyzedMacroKind,
+            prop_fields: Vec<verter_analysis::AnalyzedPropField>,
+            emit_fields: Vec<verter_analysis::AnalyzedEmitField>,
+            slot_fields: Vec<verter_analysis::AnalyzedSlotField>,
+            resolved_local_type: verter_analysis::ResolvedLocalType,
+        }
+
+        let mut enrichments = Vec::new();
+
+        for dep in &macro_type_deps {
+            let resolved = match self.resolve_external_type_from_loaded_files(
+                &files,
+                canonical,
+                &dep.import_source,
+                &dep.type_name,
+                &mut cache,
+                &mut visiting,
+                false,
+                kind,
+            ) {
+                Ok(Some(r)) => r,
+                _ => continue,
+            };
+
+            // Build expanded type text from resolved props using type_text.
+            let expanded = resolved_elements_to_expanded_text_via_type_text(&resolved);
+
+            // Convert resolved elements to analysis fields based on macro kind.
+            let mut prop_fields = Vec::new();
+            let mut emit_fields = Vec::new();
+            let mut slot_fields = Vec::new();
+
+            match dep.macro_kind {
+                verter_analysis::AnalyzedMacroKind::DefineProps
+                | verter_analysis::AnalyzedMacroKind::WithDefaults
+                | verter_analysis::AnalyzedMacroKind::DefineModel => {
+                    prop_fields = resolved
+                        .props
+                        .iter()
+                        .map(|p| verter_analysis::AnalyzedPropField {
+                            name: p.key_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                            is_optional: p.optional,
+                            span: verter_span::Span::default(),
+                            type_annotation: p.type_text.clone(),
+                            description: None,
+                            tags: Vec::new(),
+                            resolution_source: verter_analysis::TypeResolutionSource::Rust,
+                            resolution_error: None,
+                        })
+                        .collect();
+                }
+                verter_analysis::AnalyzedMacroKind::DefineEmits => {
+                    emit_fields = resolved
+                        .emits
+                        .iter()
+                        .map(|e| {
+                            // Wrap call-signature payloads in brackets to match
+                            // the local extractor format: `[id: number]`
+                            let payload_type = match &e.signature {
+                                verter_core::utils::oxc::vue::resolve_type::ResolvedEmitSignature::Call { params_text } => {
+                                    if params_text.is_empty() {
+                                        None
+                                    } else {
+                                        Some(format!("[{}]", params_text))
+                                    }
+                                }
+                                verter_core::utils::oxc::vue::resolve_type::ResolvedEmitSignature::Tuple { tuple_text } => {
+                                    Some(tuple_text.clone())
+                                }
+                            };
+                            verter_analysis::AnalyzedEmitField {
+                                name: e.name.clone(),
+                                span: verter_span::Span::default(),
+                                payload_type,
+                                description: None,
+                                tags: Vec::new(),
+                            }
+                        })
+                        .collect();
+                }
+                verter_analysis::AnalyzedMacroKind::DefineSlots => {
+                    // Slots from resolved elements: each prop is a slot name.
+                    // Slot bindings come from the prop's type_text which encodes
+                    // the function parameter type (e.g., `(props: { row: Item }) => any`).
+                    slot_fields = resolved
+                        .props
+                        .iter()
+                        .map(|p| {
+                            let name = p.key_name.clone().unwrap_or_else(|| "unknown".to_string());
+                            let bindings =
+                                extract_slot_bindings_from_type_text(p.type_text.as_deref());
+                            verter_analysis::AnalyzedSlotField {
+                                name,
+                                is_required: !p.optional,
+                                span: verter_span::Span::default(),
+                                bindings,
+                                description: None,
+                                tags: Vec::new(),
+                            }
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+
+            enrichments.push(Enrichment {
+                type_name: dep.type_name.clone(),
+                macro_kind: dep.macro_kind.clone(),
+                prop_fields,
+                emit_fields,
+                slot_fields,
+                resolved_local_type: verter_analysis::ResolvedLocalType {
+                    name: dep.type_name.clone(),
+                    expanded,
+                    span: verter_span::Span::default(),
+                },
+            });
+        }
+
+        drop(files);
+
+        if enrichments.is_empty() {
+            return;
+        }
+
+        // Apply enrichments to snapshot macros.
+        let macros = Arc::make_mut(&mut snapshot.macros);
+
+        for enrichment in enrichments {
+            // Find target macro matching BOTH kind and type_references.
+            let target = macros.iter_mut().find(|m| {
+                m.kind == enrichment.macro_kind && m.type_references.contains(&enrichment.type_name)
+            });
+            let Some(target) = target else { continue };
+
+            // MERGE fields into target (not replace). This handles intersection
+            // types like `defineProps<Foo & Bar>()` where each dep contributes
+            // different props to the same macro.
+            match enrichment.macro_kind {
+                verter_analysis::AnalyzedMacroKind::DefineProps
+                | verter_analysis::AnalyzedMacroKind::WithDefaults
+                | verter_analysis::AnalyzedMacroKind::DefineModel => {
+                    for field in enrichment.prop_fields {
+                        if !target.prop_fields.iter().any(|f| f.name == field.name) {
+                            target.prop_fields.push(field);
+                        }
+                    }
+                }
+                verter_analysis::AnalyzedMacroKind::DefineEmits => {
+                    for field in enrichment.emit_fields {
+                        if !target.emit_fields.iter().any(|f| f.name == field.name) {
+                            target.emit_fields.push(field);
+                        }
+                    }
+                }
+                verter_analysis::AnalyzedMacroKind::DefineSlots => {
+                    for field in enrichment.slot_fields {
+                        if !target.slot_fields.iter().any(|f| f.name == field.name) {
+                            target.slot_fields.push(field);
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // Add to resolved_local_types (dedup by name).
+            if !target
+                .resolved_local_types
+                .iter()
+                .any(|r| r.name == enrichment.resolved_local_type.name)
+            {
+                target
+                    .resolved_local_types
+                    .push(enrichment.resolved_local_type);
+            }
+        }
+    }
+
+    /// Lazily compute template analysis for a VueSfc file that hasn't been compiled.
+    ///
+    /// Uses `CompileTarget::META` (= SCRIPT + TEMPLATE_DATA) via the core
+    /// `compile_from_parsed()` — bypassing the host `compile_entry()` which fails
+    /// on unresolved macro type deps. External-src blocks are merged using the
+    /// same `merge_external_sources()` helper. Results are persisted on the entry
+    /// for inline-template files to avoid recomputation.
+    fn compute_template_analysis_if_missing(
+        &self,
+        canonical: &str,
+        snapshot: &mut FileAnalysisSnapshot,
+    ) {
+        if snapshot.template.is_some() {
+            return;
+        }
+
+        let files = read_lock(&self.files);
+        let Some(entry) = files.get(canonical) else {
+            return;
+        };
+        if entry.file_kind != FileKind::VueSfc {
+            return;
+        }
+
+        let source = entry.source.clone();
+        let cached_parse = entry.cached_parse.clone();
+        let src_blocks = entry.src_blocks.clone();
+        let external_requests = entry.external_requests.clone();
+        drop(files);
+
+        // Resolve external src blocks (e.g., <template src="./tpl.html">)
+        let ext_map = if !src_blocks.is_empty() {
+            let files = read_lock(&self.files);
+            let mut map = rustc_hash::FxHashMap::default();
+            for req in &external_requests {
+                let dep_id = files
+                    .contains_key(&req.resolved_canonical_id)
+                    .then(|| req.resolved_canonical_id.clone())
+                    .or_else(|| {
+                        self.resolve_loaded_dependency_canonical(
+                            &files,
+                            canonical,
+                            &req.specifier,
+                            verter_vfs::ResolveRequestKind::EsmImport,
+                        )
+                    });
+                if let Some(dep_source) =
+                    dep_id.and_then(|id| files.get(&id).map(|e| e.source.clone()))
+                {
+                    map.insert(req.resolved_canonical_id.clone(), dep_source);
+                }
+            }
+            map
+        } else {
+            rustc_hash::FxHashMap::default()
+        };
+
+        // Abort if any external src blocks are unresolved (same guard as compile_entry)
+        for req in &external_requests {
+            if !ext_map.contains_key(&req.resolved_canonical_id) {
+                return;
+            }
+        }
+
+        let merged_source = if !src_blocks.is_empty() {
+            std::borrow::Cow::Owned(crate::compile::merge_external_sources(
+                &source,
+                &src_blocks,
+                &ext_map,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(source.as_ref())
+        };
+
+        // Parse SFC (reuse cached parse when no external src)
+        let parsed = if src_blocks.is_empty() {
+            cached_parse
+                .as_deref()
+                .map(std::borrow::Cow::Borrowed)
+                .unwrap_or_else(|| {
+                    std::borrow::Cow::Owned(verter_core::compile::parse_sfc(
+                        &merged_source,
+                        None,
+                        None,
+                    ))
+                })
+        } else {
+            std::borrow::Cow::Owned(verter_core::compile::parse_sfc(&merged_source, None, None))
+        };
+
+        // Compile with META target — script codegen + template data, no JS/TSX output
+        let alloc = oxc_allocator::Allocator::new();
+        let options = verter_core::compile::CodegenOptions {
+            target: verter_core::compile::CompileTarget::META,
+            filename: Some(canonical.to_string()),
+            ..verter_core::compile::CodegenOptions::default()
+        };
+        let verter_opts = verter_core::compile::VerterCompileOptions {
+            extract_template_data: true,
+            ..verter_core::compile::VerterCompileOptions::default()
+        };
+        let compiled = verter_core::compile::compile_from_parsed(
+            &merged_source,
+            &parsed,
+            &options,
+            &verter_opts,
+            &alloc,
+        );
+
+        // Bail on structural compile errors that would invalidate template data.
+        // Skip type-resolution errors (XInvalidMacroType, XMissingMacroType) since
+        // template slot extraction doesn't depend on type resolution.
+        let has_structural_errors = compiled.errors.iter().any(|d| {
+            matches!(
+                d.severity,
+                verter_core::compile::CompileDiagnosticSeverity::Error
+            ) && !d.code.starts_with("XInvalidMacroType")
+                && !d.code.starts_with("XMissingMacroType")
+        });
+        if has_structural_errors {
+            return;
+        }
+
+        // Convert RawTemplateData → TemplateAnalysisSnapshot using existing converter
+        if let Some(raw) = compiled.template_data {
+            // Build converter inputs from snapshot (already computed, not stale entry)
+            let imports: Vec<(String, String)> = snapshot
+                .imports
+                .iter()
+                .flat_map(|imp| {
+                    imp.bindings
+                        .iter()
+                        .map(|b| (b.name.clone(), imp.source.clone()))
+                })
+                .collect();
+
+            // Build binding_class_unions + props_binding_name from snapshot
+            let mut unions: Vec<(String, Vec<String>)> = Vec::new();
+            let define_props = snapshot
+                .macros
+                .iter()
+                .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps);
+            if let Some(dp) = define_props {
+                for field in &dp.prop_fields {
+                    if let Some(type_ann) = &field.type_annotation {
+                        let classes = verter_analysis::parse_string_literal_union(type_ann);
+                        if !classes.is_empty() {
+                            unions.push((field.name.clone(), classes));
+                        }
+                    }
+                }
+            }
+            for binding in &snapshot.bindings {
+                if let Some(type_ann) = &binding.type_annotation {
+                    let effective =
+                        verter_analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
+                    let classes = verter_analysis::parse_string_literal_union(effective);
+                    if !classes.is_empty() {
+                        unions.push((binding.name.clone(), classes));
+                    }
+                }
+            }
+            let props_name = define_props.and_then(|dp| dp.binding_name.clone());
+
+            let tpl = crate::template_convert::convert_raw_to_analysis(
+                &raw,
+                &imports,
+                &unions,
+                props_name.as_deref(),
+            );
+            let tpl_arc = Arc::new(tpl);
+            snapshot.template = Some(Arc::clone(&tpl_arc));
+
+            // Persist on entry for inline templates only. Files with external src
+            // blocks are NOT persisted to avoid stale cache when the external
+            // dep changes (reverse-dep invalidation only clears compile_slots).
+            if src_blocks.is_empty() {
+                let mut files = write_lock(&self.files);
+                if let Some(entry) = files.get_mut(canonical) {
+                    entry.template_analysis = Some(tpl_arc);
+                }
+            }
+        }
+    }
+
     /// Returns a serializable snapshot of the file's static analysis data.
     /// Returns `None` if the file doesn't exist.
     /// When `eager_analysis` is false, computes analysis on demand from stored source.
     ///
-    /// Template analysis is included when it has been computed during a prior
-    /// compilation (requires template scope flags and a `get_virtual_file()` call).
+    /// Template analysis is lazily computed via `CompileTarget::META` when the scope
+    /// includes template analysis and no prior compilation has populated it.
     ///
     /// Import `resolved_canonical_id` fields are populated lazily using the host's
     /// file map, alias map, and parent dependency set.
@@ -188,6 +574,12 @@ impl VerterHost {
             };
             self.resolve_snapshot_imports(&canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
+            if scope.needs_template_analysis() {
+                self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+            }
+            if self.config.deep_macro_resolution_type {
+                self.enrich_imported_types(&canonical, &mut snapshot);
+            }
             return Some(snapshot);
         }
 
@@ -197,6 +589,12 @@ impl VerterHost {
         drop(files);
         self.resolve_snapshot_imports(&canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
+        if self.config.effective_scope().needs_template_analysis() {
+            self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+        }
+        if self.config.deep_macro_resolution_type {
+            self.enrich_imported_types(&canonical, &mut snapshot);
+        }
         Some(snapshot)
     }
 
@@ -1071,6 +1469,93 @@ impl VerterHost {
             Some((canonical_id.to_string(), name.to_string()))
         }
     }
+}
+
+/// Extract slot bindings from a type_text that encodes a slot's function signature.
+///
+/// Handles property signature types like `(props: { row: Item; index: number }) => any`.
+/// Parses the object literal inside the first parameter's type annotation to extract
+/// binding names and types, matching the local `extract_slot_bindings_from_params` behavior.
+fn extract_slot_bindings_from_type_text(
+    type_text: Option<&str>,
+) -> Vec<verter_analysis::AnalyzedSlotFieldBinding> {
+    let Some(text) = type_text else {
+        return Vec::new();
+    };
+
+    // The type_text for a slot prop encodes the function signature, e.g.:
+    //   `(props: { row: Item; index: number }) => any`
+    // We extract bindings from the object literal inside the first parameter.
+    // Use the `resolve_external_type` machinery from verter_core to parse
+    // the inner object type, since it handles complex types correctly.
+
+    // Find the parameter object type: text between first `{` and matching `}`.
+    let Some(obj_start) = text.find('{') else {
+        return Vec::new();
+    };
+    let mut depth = 0;
+    let mut obj_end = obj_start;
+    for (i, ch) in text[obj_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    obj_end = obj_start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Vec::new();
+    }
+
+    let obj_text = &text[obj_start..obj_end];
+
+    // Parse the object literal as a type using verter_core's resolver.
+    let alloc = oxc_allocator::Allocator::new();
+    let resolved = verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
+        "_Bindings",
+        &format!("export interface _Bindings {obj_text}"),
+        &alloc,
+    );
+
+    let Some(resolved) = resolved else {
+        return Vec::new();
+    };
+
+    resolved
+        .props
+        .iter()
+        .filter_map(|p| {
+            let name = p.key_name.as_ref()?.clone();
+            Some(verter_analysis::AnalyzedSlotFieldBinding {
+                name,
+                type_annotation: p.type_text.clone(),
+                span: verter_span::Span::default(),
+            })
+        })
+        .collect()
+}
+
+/// Convert `ResolvedElements` props to an expanded type text string
+/// using pre-resolved `type_text` (set by `finalize_external_resolution`).
+///
+/// Preferred over `resolved_elements_to_expanded_text` for cross-file types
+/// where spans may reference different source files.
+fn resolved_elements_to_expanded_text_via_type_text(
+    resolved: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
+) -> String {
+    let mut parts = Vec::new();
+    for prop in &resolved.props {
+        let name = prop.key_name.as_deref().unwrap_or("unknown");
+        let opt = if prop.optional { "?" } else { "" };
+        let ty = prop.type_text.as_deref().unwrap_or("unknown");
+        parts.push(format!("{}{}: {}", name, opt, ty));
+    }
+    format!("{{ {} }}", parts.join("; "))
 }
 
 /// Convert `ResolvedElements` props to an expanded type text string.
@@ -2409,6 +2894,351 @@ defineProps<{ count: number }>()
         assert!(
             types.is_empty(),
             "should return empty when no imported types"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // enrich_imported_types tests
+    // ═══════════════════════════════════════════════════════════
+
+    fn make_deep_host() -> VerterHost {
+        VerterHost::new_standalone(HostConfig {
+            deep_macro_resolution_type: true,
+            ..HostConfig::default()
+        })
+    }
+
+    fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    /// @ai-generated - enrich_imported_types populates prop_fields from imported interface
+    #[test]
+    fn enrich_basic_imported_interface() {
+        let host = make_deep_host();
+        upsert_non_sfc(
+            &host,
+            "/src/types.ts",
+            "export interface Props { label: string }",
+        );
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let dp = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+            .expect("should have DefineProps macro");
+        assert!(
+            !dp.prop_fields.is_empty(),
+            "prop_fields should be populated by enrichment"
+        );
+        assert_eq!(dp.prop_fields[0].name, "label");
+        assert!(
+            dp.resolved_local_types.iter().any(|r| r.name == "Props"),
+            "resolved_local_types should include 'Props'"
+        );
+    }
+
+    /// @ai-generated - enrichment is skipped when deep_macro_resolution_type is false
+    #[test]
+    fn enrich_skips_when_disabled() {
+        let host = make_host(); // default config, deep_macro_resolution_type = false
+        upsert_non_sfc(
+            &host,
+            "/src/types.ts",
+            "export interface Props { label: string }",
+        );
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let dp = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+            .expect("should have DefineProps macro");
+        assert!(
+            dp.prop_fields.is_empty(),
+            "prop_fields should be empty when enrichment is disabled"
+        );
+    }
+
+    /// @ai-generated - intersection types merge props from all deps
+    #[test]
+    fn enrich_intersection_merges_all_deps() {
+        let host = make_deep_host();
+        upsert_non_sfc(&host, "/src/a.ts", "export interface A { x: string }");
+        upsert_non_sfc(&host, "/src/b.ts", "export interface B { y: number }");
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { A } from './a'
+import type { B } from './b'
+defineProps<A & B>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let dp = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+            .expect("should have DefineProps macro");
+        let names: Vec<&str> = dp.prop_fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"x"), "should have 'x' from A: {:?}", names);
+        assert!(names.contains(&"y"), "should have 'y' from B: {:?}", names);
+    }
+
+    /// @ai-generated - call-signature emit payloads are wrapped in brackets
+    #[test]
+    fn enrich_emit_call_signature_wraps_brackets() {
+        let host = make_deep_host();
+        upsert_non_sfc(
+            &host,
+            "/src/events.ts",
+            "export interface Events { (e: 'change', id: number): void }",
+        );
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let de = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineEmits)
+            .expect("should have DefineEmits macro");
+        assert!(!de.emit_fields.is_empty(), "should have emit fields");
+        let change = de.emit_fields.iter().find(|e| e.name == "change");
+        assert!(change.is_some(), "should have 'change' emit");
+        let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
+        assert!(
+            payload.starts_with('[') && payload.ends_with(']'),
+            "call-signature payload should be wrapped in brackets, got: {payload}"
+        );
+    }
+
+    /// @ai-generated - imported defineSlots extracts bindings from type_text
+    #[test]
+    fn enrich_slot_bindings_from_imported_type() {
+        let host = make_deep_host();
+        upsert_non_sfc(
+            &host,
+            "/src/slots.ts",
+            "export interface Slots { default: (props: { row: string; index: number }) => any }",
+        );
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Slots } from './slots'
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let ds = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+            .expect("should have DefineSlots macro");
+        assert!(!ds.slot_fields.is_empty(), "should have slot fields");
+        let default_slot = ds.slot_fields.iter().find(|s| s.name == "default");
+        assert!(default_slot.is_some(), "should have 'default' slot");
+        let bindings = &default_slot.unwrap().bindings;
+        assert!(
+            !bindings.is_empty(),
+            "slot should have bindings from the imported type"
+        );
+        let binding_names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            binding_names.contains(&"row"),
+            "should have 'row' binding: {:?}",
+            binding_names
+        );
+        assert!(
+            binding_names.contains(&"index"),
+            "should have 'index' binding: {:?}",
+            binding_names
+        );
+    }
+
+    /// @ai-generated - method-style slot signatures (call signatures) are also captured
+    #[test]
+    fn enrich_slot_method_style() {
+        let host = make_deep_host();
+        upsert_non_sfc(
+            &host,
+            "/src/slots.ts",
+            "export interface Slots { default(props: { item: string }): any; header(props: { title: string }): any }",
+        );
+        upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Slots } from './slots'
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/src/Comp.vue").unwrap();
+        let ds = analysis
+            .macros
+            .iter()
+            .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+            .expect("should have DefineSlots macro");
+        let slot_names: Vec<&str> = ds.slot_fields.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            slot_names.contains(&"default"),
+            "should have 'default' slot from method signature: {:?}",
+            slot_names
+        );
+        assert!(
+            slot_names.contains(&"header"),
+            "should have 'header' slot from method signature: {:?}",
+            slot_names
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Template slots via lazy analysis (compute_template_analysis_if_missing)
+    // ═══════════════════════════════════════════════════════════
+
+    /// @ai-generated - template slots detected via lazy META compilation
+    #[test]
+    fn template_slots_via_analysis_only() {
+        let host = make_host(); // analysis_level: Full → scope includes template
+        upsert_vue(
+            &host,
+            "/Comp.vue",
+            "<script setup>\n</script>\n<template><div><slot /></div></template>",
+        );
+
+        let analysis = host.get_analysis("/Comp.vue").unwrap();
+        let tpl = analysis
+            .template
+            .expect("template analysis should be populated");
+        assert_eq!(tpl.defined_slots.len(), 1);
+        assert_eq!(tpl.defined_slots[0].name, "default");
+    }
+
+    /// @ai-generated - named slots detected via lazy META compilation
+    #[test]
+    fn template_slots_named() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/Comp.vue",
+            r#"<template><slot name="header" /><slot /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/Comp.vue").unwrap();
+        let tpl = analysis
+            .template
+            .expect("template analysis should be populated");
+        assert_eq!(tpl.defined_slots.len(), 2);
+        assert!(tpl.defined_slots.iter().any(|s| s.name == "header"));
+        assert!(tpl.defined_slots.iter().any(|s| s.name == "default"));
+    }
+
+    /// @ai-generated - template analysis not computed when scope doesn't include template
+    #[test]
+    fn template_slots_not_computed_on_lazy_host() {
+        let host = make_lazy_host(); // analysis_level: None → scope excludes template
+        upsert_vue(
+            &host,
+            "/Comp.vue",
+            "<script setup>\n</script>\n<template><div><slot /></div></template>",
+        );
+
+        let analysis = host.get_analysis("/Comp.vue").unwrap();
+        assert!(
+            analysis.template.is_none(),
+            "template should not be computed when scope excludes it"
+        );
+    }
+
+    /// @ai-generated - persisted template analysis reused on second call
+    #[test]
+    fn template_slots_persisted_across_calls() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/Comp.vue",
+            "<script setup>\n</script>\n<template><div><slot /></div></template>",
+        );
+
+        let a1 = host.get_analysis("/Comp.vue").unwrap();
+        assert!(a1.template.is_some(), "first call should compute template");
+
+        let a2 = host.get_analysis("/Comp.vue").unwrap();
+        assert!(
+            a2.template.is_some(),
+            "second call should reuse persisted template"
+        );
+        assert_eq!(
+            a2.template.unwrap().defined_slots.len(),
+            1,
+            "persisted template should have the slot"
+        );
+    }
+
+    /// @ai-generated - template slots computed even when type deps are unresolved
+    #[test]
+    fn template_slots_with_unresolved_type_deps() {
+        let host = make_deep_host();
+        // Don't upsert ./types.ts — the dep is unresolved
+        upsert_vue(
+            &host,
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Foo } from './types'
+defineProps<Foo>()
+</script>
+<template><slot /></template>"#,
+        );
+
+        let analysis = host.get_analysis("/Comp.vue").unwrap();
+        let tpl = analysis
+            .template
+            .expect("template should be computed even with unresolved type deps");
+        assert_eq!(
+            tpl.defined_slots.len(),
+            1,
+            "should detect the <slot> despite unresolved type dep"
         );
     }
 }

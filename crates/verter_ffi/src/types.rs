@@ -33,6 +33,7 @@ pub struct FfiHostConfig {
     pub max_profiles_per_file: Option<u32>,
     pub resolve_extensions: Option<Vec<String>>,
     pub analysis_level: Option<String>,
+    pub deep_macro_resolution_type: Option<bool>,
 }
 
 /// Per-compilation variant options.

@@ -60,11 +60,12 @@ impl VerterHost {
         candidates
     }
 
-    fn resolve_loaded_dependency_canonical(
+    pub(crate) fn resolve_loaded_dependency_canonical(
         &self,
         _files: &FxHashMap<String, FileEntry>,
         owner_canonical: &str,
         import_source: &str,
+        kind: verter_vfs::ResolveRequestKind,
     ) -> Option<String> {
         self.ws()
             .resolve_import(
@@ -72,14 +73,14 @@ impl VerterHost {
                 import_source,
                 verter_vfs::ResolutionContext {
                     phase: verter_vfs::ResolvePhase::CodegenBlocker,
-                    kind: verter_vfs::ResolveRequestKind::EsmImport,
+                    kind,
                 },
             )
             .map(|r| r.source_id)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn resolve_external_type_from_loaded_files(
+    pub(crate) fn resolve_external_type_from_loaded_files(
         &self,
         files: &FxHashMap<String, FileEntry>,
         owner_canonical: &str,
@@ -88,9 +89,10 @@ impl VerterHost {
         cache: &mut ExternalTypeCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         required_root_dep: bool,
+        kind: verter_vfs::ResolveRequestKind,
     ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, ()> {
         let Some(dep_canonical) =
-            self.resolve_loaded_dependency_canonical(files, owner_canonical, import_source)
+            self.resolve_loaded_dependency_canonical(files, owner_canonical, import_source, kind)
         else {
             return if required_root_dep { Err(()) } else { Ok(None) };
         };
@@ -102,24 +104,44 @@ impl VerterHost {
             return Ok(None);
         }
 
-        let Some(dep_entry) = files.get(&dep_canonical) else {
-            visiting.remove(&cache_key);
-            return if required_root_dep { Err(()) } else { Ok(None) };
-        };
-
-        // For Vue SFC files, extract only <script>/<script setup> content.
-        // The full SFC source contains <template>/<style> that OXC can't parse.
-        let effective_source: String = if dep_entry.file_kind == FileKind::VueSfc {
-            match extract_vue_script_content(dep_entry) {
-                Some(s) => s,
-                None => {
-                    visiting.remove(&cache_key);
-                    cache.insert(cache_key, None);
-                    return Ok(None);
+        // Try host file cache first, then workspace-read fallback.
+        let effective_source: String = if let Some(dep_entry) = files.get(&dep_canonical) {
+            // For Vue SFC files, extract only <script>/<script setup> content.
+            if dep_entry.file_kind == FileKind::VueSfc {
+                match extract_vue_script_content(dep_entry) {
+                    Some(s) => s,
+                    None => {
+                        visiting.remove(&cache_key);
+                        cache.insert(cache_key, None);
+                        return Ok(None);
+                    }
                 }
+            } else {
+                dep_entry.source.to_string()
             }
         } else {
-            dep_entry.source.to_string()
+            // Workspace-read fallback: read from disk via VFS when not in host cache.
+            let ws = self.ws();
+            match ws.read_file(&dep_canonical) {
+                Some(source) => {
+                    if dep_canonical.ends_with(".vue") {
+                        match extract_script_from_raw_source(&source) {
+                            Some(s) => s,
+                            None => {
+                                visiting.remove(&cache_key);
+                                cache.insert(cache_key, None);
+                                return Ok(None);
+                            }
+                        }
+                    } else {
+                        source.to_string()
+                    }
+                }
+                None => {
+                    visiting.remove(&cache_key);
+                    return if required_root_dep { Err(()) } else { Ok(None) };
+                }
+            }
         };
 
         let import_alloc = oxc_allocator::Allocator::new();
@@ -127,6 +149,31 @@ impl VerterHost {
             &effective_source,
             &import_alloc,
         );
+
+        // Optimization: if the target type is directly re-exported from this file,
+        // follow the re-export chain immediately instead of resolving ALL bindings.
+        // This avoids O(N) workspace reads for barrel files with many re-exports.
+        let direct_reexport = extracted
+            .bindings
+            .iter()
+            .find(|b| b.local_name == type_name);
+        if let Some(target) = direct_reexport {
+            if let Some(resolved) = self.resolve_external_type_from_loaded_files(
+                files,
+                &dep_canonical,
+                &target.source,
+                &target.imported_name,
+                cache,
+                visiting,
+                false,
+                kind,
+            )? {
+                visiting.remove(&cache_key);
+                cache.insert(cache_key, Some(resolved.clone()));
+                return Ok(Some(resolved));
+            }
+        }
+
         let mut companion_types = rustc_hash::FxHashMap::default();
         for binding in &extracted.bindings {
             if let Some(resolved) = self.resolve_external_type_from_loaded_files(
@@ -137,6 +184,7 @@ impl VerterHost {
                 cache,
                 visiting,
                 false,
+                kind,
             )? {
                 companion_types
                     .entry(binding.local_name.clone())
@@ -165,6 +213,7 @@ impl VerterHost {
                     cache,
                     visiting,
                     false,
+                    kind,
                 )? {
                     resolved = Some(found);
                     break;
@@ -198,6 +247,7 @@ impl VerterHost {
                 &mut cache,
                 &mut visiting,
                 true,
+                verter_vfs::ResolveRequestKind::EsmImport,
             ) {
                 Ok(Some(elements)) => {
                     resolved.insert(dep.type_name.clone(), elements);
@@ -758,6 +808,7 @@ impl VerterHost {
                                 &files,
                                 &snapshot.canonical_id,
                                 &req.specifier,
+                                verter_vfs::ResolveRequestKind::EsmImport,
                             )
                         });
                     if let Some(dep_entry) = resolved_dep_id
@@ -1094,6 +1145,29 @@ impl VerterHost {
         });
 
         Ok((outputs, compile_diags, cached_tsx, template_analysis))
+    }
+}
+
+/// Extract concatenated script content from raw Vue SFC source text.
+/// Used as workspace-read fallback when the file is not in the host cache.
+fn extract_script_from_raw_source(source: &str) -> Option<String> {
+    let parsed = verter_core::compile::parse_sfc(source, None, None);
+    let mut combined = String::new();
+    for script in [parsed.script_setup(), parsed.script()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(span) = script.content {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&source[span.start as usize..span.end as usize]);
+        }
+    }
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined)
     }
 }
 

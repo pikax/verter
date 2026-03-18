@@ -2969,9 +2969,10 @@ import Other from './Other.vue'
     );
 }
 
-/// @ai-generated - get_analysis returns template: None before any compilation
+/// @ai-generated - get_analysis lazily computes template when scope includes template
 #[test]
 fn template_analysis_none_before_compile() {
+    // With Full scope (default), template analysis is lazily computed in get_analysis().
     let host = VerterHost::new_standalone(HostConfig::default());
 
     let sfc = r#"<script setup lang="ts">
@@ -2983,11 +2984,22 @@ const msg = "hello"
 
     upsert_vue(&host, "Comp.vue", sfc);
 
-    // Don't trigger compilation — just get analysis
     let analysis = host.get_analysis("Comp.vue").unwrap();
     assert!(
-        analysis.template.is_none(),
-        "template analysis should be None before compilation"
+        analysis.template.is_some(),
+        "template analysis should be lazily computed for Full scope"
+    );
+
+    // With None scope, template analysis is NOT computed
+    let lazy_host = VerterHost::new_standalone(HostConfig {
+        analysis_level: AnalysisLevel::None,
+        ..HostConfig::default()
+    });
+    upsert_vue(&lazy_host, "Comp.vue", sfc);
+    let lazy_analysis = lazy_host.get_analysis("Comp.vue").unwrap();
+    assert!(
+        lazy_analysis.template.is_none(),
+        "template should be None when scope excludes template"
     );
 }
 

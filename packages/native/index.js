@@ -120,7 +120,7 @@ function toBuffer(v) {
   return typeof v === "string" ? Buffer.from(v) : v;
 }
 
-const { processStyle: _processStyle, compileBatch, VerterHost } = nativeBinding;
+const { processStyle: _processStyle, compileBatch, VerterHost, Workspace } = nativeBinding;
 
 function processStyle(css, options) {
   return _processStyle(toBuffer(css), options);
@@ -150,3 +150,4 @@ VerterHost.prototype.applyBlockOverrides = function (request) {
 module.exports.processStyle = processStyle;
 module.exports.compileBatch = compileBatch;
 module.exports.VerterHost = VerterHost;
+module.exports.Workspace = Workspace;

@@ -183,6 +183,10 @@ pub struct ResolvedProp {
     /// Set for property signatures with explicit type annotations; `None` for
     /// method signatures and companion-script props.
     pub type_span: Option<Span>,
+    /// Pre-resolved type annotation text for cross-file types.
+    /// Set by `finalize_external_resolution` when spans reference an external
+    /// source file. Consumers prefer this over extracting from `type_span`.
+    pub type_text: Option<String>,
     /// Whether this span points into the current SFC source and can be used
     /// directly for local source maps.
     pub map_local: bool,
@@ -347,13 +351,15 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     pub source: &'ctx [u8],
     /// Local type alias declarations: (name_span, type_node)
     pub type_aliases: Vec<(Span, &'ctx TSType<'a>)>,
-    /// Local interface declarations: (name_span, interface_body_members, extends_type_names)
+    /// Local interface declarations: (name_span, interface_body_members, extends_type_names, heritage_refs)
     /// The extends_type_names are extracted from heritage clauses as String names,
-    /// since we need to look them up recursively.
+    /// since we need to look them up recursively. Heritage refs are preserved for
+    /// utility types like `Pick<T, K>` that need type argument resolution.
     pub interfaces: Vec<(
         Span,
         &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>,
         Vec<String>,
+        &'ctx [TSInterfaceHeritage<'a>],
     )>,
     /// Generic type parameters with constraints: (name_span, constraint_type)
     pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
@@ -391,11 +397,15 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
     pub fn find_interface(
         &self,
         name: &[u8],
-    ) -> Option<(&'ctx oxc_allocator::Vec<'a, TSSignature<'a>>, &[String])> {
+    ) -> Option<(
+        &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>,
+        &[String],
+        &'ctx [TSInterfaceHeritage<'a>],
+    )> {
         self.interfaces
             .iter()
-            .find(|(span, _, _)| &self.source[span.start as usize..span.end as usize] == name)
-            .map(|(_, members, extends)| (*members, extends.as_slice()))
+            .find(|(span, _, _, _)| &self.source[span.start as usize..span.end as usize] == name)
+            .map(|(_, members, extends, heritage)| (*members, extends.as_slice(), *heritage))
     }
 
     /// Look up a type parameter constraint by comparing spans against source bytes
@@ -431,7 +441,7 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                 let name_span = Span::from(interface.id.span);
                 let extends = extract_heritage_type_names(&interface.extends);
                 ctx.interfaces
-                    .push((name_span, &interface.body.body, extends));
+                    .push((name_span, &interface.body.body, extends, &interface.extends));
             }
             // Collect exported type aliases and interfaces:
             // `export type Foo = { bar: string }` / `export interface Foo { bar: string }`
@@ -445,8 +455,12 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                         Declaration::TSInterfaceDeclaration(interface) => {
                             let name_span = Span::from(interface.id.span);
                             let extends = extract_heritage_type_names(&interface.extends);
-                            ctx.interfaces
-                                .push((name_span, &interface.body.body, extends));
+                            ctx.interfaces.push((
+                                name_span,
+                                &interface.body.body,
+                                extends,
+                                &interface.extends,
+                            ));
                         }
                         _ => {}
                     }
@@ -493,6 +507,7 @@ pub fn extract_companion_types(
                 resolve_interface_with_extends_ctx_ref(
                     &interface.body.body,
                     &extends,
+                    &interface.extends,
                     content_offset,
                     &mut resolved,
                     &ctx,
@@ -521,6 +536,7 @@ pub fn extract_companion_types(
                             resolve_interface_with_extends_ctx_ref(
                                 &interface.body.body,
                                 &extends,
+                                &interface.extends,
                                 content_offset,
                                 &mut resolved,
                                 &ctx,
@@ -769,7 +785,9 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
             resolve_type_elements_inner_with_ctx(aliased_type, base_offset, result, ctx);
         }
         // Check local interfaces (need to clone extends to avoid borrow conflict)
-        else if let Some((iface_members, iface_extends)) = ctx.find_interface(base_bytes) {
+        else if let Some((iface_members, iface_extends, _iface_heritage)) =
+            ctx.find_interface(base_bytes)
+        {
             let iface_extends_owned: Vec<String> = iface_extends.to_vec();
             resolve_interface_with_extends_ctx(
                 iface_members,
@@ -797,6 +815,7 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
 fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     members: &[TSSignature],
     extends: &[String],
+    heritage: &'ctx [TSInterfaceHeritage<'a>],
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &TypeResolutionContext<'ctx, 'a>,
@@ -805,8 +824,9 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     // Resolve own members
     resolve_type_literal_members(members, base_offset, result, ctx.source);
 
-    // Resolve extends
-    for base_name in extends {
+    // Resolve extends — try heritage AST first for utility type support,
+    // then fall back to string-based lookup.
+    for (i, base_name) in extends.iter().enumerate() {
         if recursion_guard.contains(base_name) {
             continue;
         }
@@ -814,13 +834,110 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
 
         let base_bytes = base_name.as_bytes();
 
+        // When a heritage clause has type arguments (e.g., `extends Pick<T, 'k'>`),
+        // the name-based lookup below won't find it since "Pick" isn't a local type.
+        // Resolve the full heritage expression through the type system which handles
+        // all TypeScript utility types (Pick, Omit, Partial, Required, Readonly,
+        // Record, Extract, Exclude, etc.) in a single code path.
+        if let Some(h) = heritage.get(i) {
+            if let Some(type_args) = &h.type_arguments {
+                if !type_args.params.is_empty() {
+                    // Resolve each type_argument through the normal pipeline.
+                    // For utility types like Pick<T, K>, the first param is the
+                    // source type; filtering/transformation is handled by the
+                    // utility type branch in resolve_type_elements_inner_with_ctx_ref
+                    // when it encounters the corresponding TSTypeReference node.
+                    //
+                    // We can't construct a synthetic TSTypeReference here (needs arena),
+                    // so we replicate the utility type dispatch inline. This covers the
+                    // most common cases; truly complex types may need the JS-side
+                    // type registry fallback.
+                    let name_str = base_name.as_str();
+                    let handled = match name_str {
+                        "Pick" if type_args.params.len() >= 2 => {
+                            let mut inner = ResolvedElements::default();
+                            resolve_type_elements_inner_with_ctx_ref(
+                                &type_args.params[0],
+                                base_offset,
+                                &mut inner,
+                                ctx,
+                            );
+                            let keys = extract_string_literal_keys(&type_args.params[1]);
+                            inner
+                                .props
+                                .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
+                            inner.emits.retain(|e| keys.contains(&e.name));
+                            result.props.extend(inner.props);
+                            result.emits.extend(inner.emits);
+                            true
+                        }
+                        "Omit" if type_args.params.len() >= 2 => {
+                            let mut inner = ResolvedElements::default();
+                            resolve_type_elements_inner_with_ctx_ref(
+                                &type_args.params[0],
+                                base_offset,
+                                &mut inner,
+                                ctx,
+                            );
+                            let keys = extract_string_literal_keys(&type_args.params[1]);
+                            inner
+                                .props
+                                .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
+                            inner.emits.retain(|e| !keys.contains(&e.name));
+                            result.props.extend(inner.props);
+                            result.emits.extend(inner.emits);
+                            true
+                        }
+                        "Partial" | "Required" | "Readonly" if !type_args.params.is_empty() => {
+                            let mut inner = ResolvedElements::default();
+                            resolve_type_elements_inner_with_ctx_ref(
+                                &type_args.params[0],
+                                base_offset,
+                                &mut inner,
+                                ctx,
+                            );
+                            if name_str == "Partial" {
+                                for p in &mut inner.props {
+                                    p.optional = true;
+                                }
+                            } else if name_str == "Required" {
+                                for p in &mut inner.props {
+                                    p.optional = false;
+                                }
+                            }
+                            result.props.extend(inner.props);
+                            result.emits.extend(inner.emits);
+                            true
+                        }
+                        "Record" if type_args.params.len() >= 2 => {
+                            // Record<K, V> — resolve as object type
+                            result.root_runtime_types.push(RuntimeType::Object);
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
+                        if result.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                        recursion_guard.pop();
+                        continue;
+                    }
+                    // Not a recognized utility type — fall through to name-based lookup
+                }
+            }
+        }
+
         if let Some(aliased_type) = ctx.find_type_alias(base_bytes) {
             resolve_type_elements_inner_with_ctx_ref(aliased_type, base_offset, result, ctx);
-        } else if let Some((iface_members, iface_extends)) = ctx.find_interface(base_bytes) {
+        } else if let Some((iface_members, iface_extends, iface_heritage)) =
+            ctx.find_interface(base_bytes)
+        {
             let iface_extends_owned: Vec<String> = iface_extends.to_vec();
             resolve_interface_with_extends_ctx_ref(
                 iface_members,
                 &iface_extends_owned,
+                iface_heritage,
                 base_offset,
                 result,
                 ctx,
@@ -885,7 +1002,9 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             }
 
             // 2. Check local interfaces (with extends support)
-            if let Some((interface_members, iface_extends)) = ctx.find_interface(type_name_bytes) {
+            if let Some((interface_members, iface_extends, _iface_heritage)) =
+                ctx.find_interface(type_name_bytes)
+            {
                 let extends_owned: Vec<String> = iface_extends.to_vec();
                 let mut guard = vec![type_name.clone()];
                 resolve_interface_with_extends_ctx(
@@ -1061,12 +1180,15 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             }
 
             // 2. Check local interfaces (with extends support)
-            if let Some((interface_members, iface_extends)) = ctx.find_interface(type_name_bytes) {
+            if let Some((interface_members, iface_extends, iface_heritage)) =
+                ctx.find_interface(type_name_bytes)
+            {
                 let extends_owned: Vec<String> = iface_extends.to_vec();
                 let mut guard = vec![type_name.clone()];
                 resolve_interface_with_extends_ctx_ref(
                     interface_members,
                     &extends_owned,
+                    iface_heritage,
                     base_offset,
                     result,
                     ctx,
@@ -1370,6 +1492,7 @@ fn resolve_property_signature(
         optional,
         types,
         type_span,
+        type_text: None,
         map_local: true,
         span_is_absolute: base_offset != 0,
     })
@@ -1393,6 +1516,7 @@ fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Opt
         optional,
         types: vec![RuntimeType::Function],
         type_span: None,
+        type_text: None,
         map_local: true,
         span_is_absolute: base_offset != 0,
     })
@@ -1742,6 +1866,7 @@ fn infer_props_from_object_literal(
             types: runtime_type,
             optional: false,
             type_span: None,
+            type_text: None,
             map_local: true,
             span_is_absolute: false,
         });
@@ -1869,13 +1994,14 @@ pub fn resolve_external_type_with_companion(
 
     // Try interface (with extends support)
     if result.is_none() {
-        if let Some((members, extends)) = ctx.find_interface(name_bytes) {
+        if let Some((members, extends, heritage)) = ctx.find_interface(name_bytes) {
             let mut r = ResolvedElements::default();
             let extends_owned: Vec<String> = extends.to_vec();
             let mut guard = vec![type_name.to_string()];
             resolve_interface_with_extends_ctx_ref(
                 members,
                 &extends_owned,
+                heritage,
                 0,
                 &mut r,
                 &ctx,
@@ -1915,6 +2041,20 @@ fn finalize_external_resolution(
         if prop.key_name.is_none() && start < end && end <= source_bytes.len() {
             if let Ok(name) = std::str::from_utf8(&source_bytes[start..end]) {
                 prop.key_name = Some(name.to_string());
+            }
+        }
+        // Set type_text from type_span for cross-file props (spans reference
+        // this external source, not the consuming SFC). Skip if already set
+        // by a previous resolution step (e.g., companion-derived props).
+        if prop.type_text.is_none() {
+            if let Some(type_span) = prop.type_span {
+                let ts = type_span.start as usize;
+                let te = type_span.end as usize;
+                if ts < te && te <= source_bytes.len() {
+                    if let Ok(text) = std::str::from_utf8(&source_bytes[ts..te]) {
+                        prop.type_text = Some(text.to_string());
+                    }
+                }
             }
         }
         prop.map_local = false;

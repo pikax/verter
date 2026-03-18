@@ -103,7 +103,11 @@ export function createNapiAdapter(workspace?: unknown): VerterHostAdapter {
   // @verter/native is CJS-only — use createRequire for ESM compatibility.
   const _require = typeof require === "function" ? require : createRequire(import.meta.url);
   const native = _require("@verter/native");
-  const config = { devMode: false, analysisLevel: "full" as const };
+  const config = {
+    devMode: false,
+    analysisLevel: "full" as const,
+    deepMacroResolutionType: true,
+  };
   const host = workspace
     ? native.VerterHost.withWorkspace(config, workspace)
     : new native.VerterHost(config);

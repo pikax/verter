@@ -725,6 +725,7 @@ type Test = Local;"#;
         optional: false,
         types: vec![RuntimeType::String],
         type_span: None,
+        type_text: None,
         map_local: true,
         span_is_absolute: false,
     });
@@ -792,6 +793,7 @@ export interface Props extends LocalBase {
         optional: false,
         types: vec![RuntimeType::String],
         type_span: None,
+        type_text: None,
         map_local: false,
         span_is_absolute: false,
     });
@@ -867,6 +869,133 @@ interface Extended extends Base { own: number }"#;
         extended.props.len(),
         2,
         "Extended should include base + own props"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Utility types in extends clauses (Pick, Omit, Partial, etc.)
+// ═══════════════════════════════════════════════════════════
+
+/// @ai-generated - interface extends Pick<Companion, 'key'> resolves selected prop
+#[test]
+fn interface_extends_pick_companion() {
+    let mut companions = FxHashMap::default();
+    let bar = parse_type("{ x: number; z: boolean }").unwrap();
+    companions.insert("Bar".to_string(), bar.resolved);
+
+    let (resolved, diags) = resolve_with_ctx_ref_and_companions(
+        "interface Foo extends Pick<Bar, 'x'> { y: string }; type Test = Foo",
+        companions,
+    );
+    assert!(diags.is_empty(), "should not emit diagnostics");
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "expected 2 props (x from Pick + y from body)"
+    );
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+    assert!(names.contains(&"x"), "should have 'x' from Pick<Bar, 'x'>");
+    assert!(names.contains(&"y"), "should have 'y' from interface body");
+    assert!(
+        !names.contains(&"z"),
+        "should NOT have 'z' (excluded by Pick)"
+    );
+}
+
+/// @ai-generated - interface extends Omit<Companion, 'key'> excludes specified prop
+#[test]
+fn interface_extends_omit_companion() {
+    let mut companions = FxHashMap::default();
+    let bar = parse_type("{ x: number; z: boolean }").unwrap();
+    companions.insert("Bar".to_string(), bar.resolved);
+
+    let (resolved, diags) = resolve_with_ctx_ref_and_companions(
+        "interface Foo extends Omit<Bar, 'z'> { y: string }; type Test = Foo",
+        companions,
+    );
+    assert!(diags.is_empty());
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "expected 2 props (x from Omit + y from body)"
+    );
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+    assert!(names.contains(&"x"), "should have 'x' (not omitted)");
+    assert!(names.contains(&"y"), "should have 'y' from interface body");
+    assert!(!names.contains(&"z"), "should NOT have 'z' (omitted)");
+}
+
+/// @ai-generated - interface extends Partial<Companion> makes all inherited props optional
+#[test]
+fn interface_extends_partial_companion() {
+    let mut companions = FxHashMap::default();
+    let bar = parse_type("{ x: number }").unwrap();
+    companions.insert("Bar".to_string(), bar.resolved);
+
+    let (resolved, _) = resolve_with_ctx_ref_and_companions(
+        "interface Foo extends Partial<Bar> { y: string }; type Test = Foo",
+        companions,
+    );
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "expected 2 props (x from Partial + y from body)"
+    );
+    let x = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("x"))
+        .unwrap();
+    let y = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("y"))
+        .unwrap();
+    assert!(x.optional, "'x' from Partial<Bar> should be optional");
+    assert!(!y.optional, "'y' from interface body should be required");
+}
+
+/// @ai-generated - interface with multiple utility type extends
+#[test]
+fn interface_extends_multi_utility() {
+    let mut companions = FxHashMap::default();
+    let a = parse_type("{ a: string; b: number }").unwrap();
+    let b = parse_type("{ b: number; c: boolean }").unwrap();
+    companions.insert("A".to_string(), a.resolved);
+    companions.insert("B".to_string(), b.resolved);
+
+    let (resolved, _) = resolve_with_ctx_ref_and_companions(
+        "interface Foo extends Pick<A, 'a'>, Omit<B, 'c'> { d: string }; type Test = Foo",
+        companions,
+    );
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+    assert_eq!(
+        resolved.props.len(),
+        3,
+        "expected 3 props: a, b, d. Got: {:?}",
+        names
+    );
+    assert!(names.contains(&"a"), "should have 'a' from Pick<A, 'a'>");
+    assert!(
+        names.contains(&"b"),
+        "should have 'b' from Omit<B, 'c'> (b not omitted)"
+    );
+    assert!(names.contains(&"d"), "should have 'd' from interface body");
+    assert!(
+        !names.contains(&"c"),
+        "should NOT have 'c' (omitted from B)"
     );
 }
 
@@ -1336,6 +1465,7 @@ fn ctx_ref_companion_fallback() {
         optional: false,
         types: vec![RuntimeType::String],
         type_span: None,
+        type_text: None,
         map_local: false,
         span_is_absolute: false,
     });
@@ -1454,6 +1584,7 @@ fn typeof_query_with_companion() {
         optional: false,
         types: vec![RuntimeType::Number],
         type_span: None,
+        type_text: None,
         map_local: false,
         span_is_absolute: false,
     });

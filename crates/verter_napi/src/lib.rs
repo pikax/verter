@@ -186,6 +186,7 @@ pub struct NapiHostConfig {
     pub maxProfilesPerFile: Option<u32>,
     pub resolveExtensions: Option<Vec<String>>,
     pub analysisLevel: Option<String>,
+    pub deepMacroResolutionType: Option<bool>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -197,6 +198,7 @@ impl From<NapiHostConfig> for FfiHostConfig {
             max_profiles_per_file: n.maxProfilesPerFile,
             resolve_extensions: n.resolveExtensions,
             analysis_level: n.analysisLevel,
+            deep_macro_resolution_type: n.deepMacroResolutionType,
         }
     }
 }

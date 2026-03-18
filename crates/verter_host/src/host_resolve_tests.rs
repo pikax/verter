@@ -1883,8 +1883,12 @@ fn workspace_resolution_used_for_aliased_imports() {
     // will also miss because configure_projects was not called. But the workspace
     // has the @/ alias configured, so workspace-backed resolution should find it.
     let files = read_lock(&host.files);
-    let result =
-        host.resolve_loaded_dependency_canonical(&files, "/project/src/Comp.vue", "@/utils");
+    let result = host.resolve_loaded_dependency_canonical(
+        &files,
+        "/project/src/Comp.vue",
+        "@/utils",
+        verter_vfs::ResolveRequestKind::EsmImport,
+    );
     drop(files);
 
     // This SHOULD resolve to /project/src/utils.ts via the workspace's project resolver.
@@ -1929,7 +1933,12 @@ fn workspace_resolution_does_not_override_exact_resolution() {
     );
 
     let files = read_lock(&host.files);
-    let result = host.resolve_loaded_dependency_canonical(&files, "/src/Comp.vue", "./dep");
+    let result = host.resolve_loaded_dependency_canonical(
+        &files,
+        "/src/Comp.vue",
+        "./dep",
+        verter_vfs::ResolveRequestKind::EsmImport,
+    );
     drop(files);
 
     // Phase 1 exact resolution should take priority
