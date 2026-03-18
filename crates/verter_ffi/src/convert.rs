@@ -908,6 +908,7 @@ mod tests {
             max_profiles_per_file: Some(4),
             resolve_extensions: Some(vec![".vue".to_string(), ".ts".to_string()]),
             analysis_level: Some("essential".to_string()),
+            deep_macro_resolution_type: Some(true),
         };
         let result = ffi_config_to_host(config).unwrap();
         assert!(!result.dev_mode);
@@ -919,6 +920,7 @@ mod tests {
         assert_eq!(result.max_profiles_per_file, 4);
         assert_eq!(result.resolve_extensions, vec![".vue", ".ts"]);
         assert_eq!(result.analysis_level, host::AnalysisLevel::Essential);
+        assert!(result.deep_macro_resolution_type);
     }
 
     // ── Config: all policy string variants ───────────────────────────
