@@ -637,11 +637,8 @@ pub(crate) fn fixture_workspace_root(name: &str) -> String {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../packages/vue-vscode/e2e/fixtures/{name}")),
     )
-    .expect("fixture workspace path should canonicalize")
-    .to_string_lossy()
-    .replace('\\', "/");
-    // Strip Windows extended-length prefix that canonicalize() produces
-    path.strip_prefix("//?/").unwrap_or(&path).to_string()
+    .expect("fixture workspace path should canonicalize");
+    crate::test_utils::canonical_test_path(&path)
 }
 
 /// Infer a language ID from a file extension.

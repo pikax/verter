@@ -1022,7 +1022,7 @@ async fn make_definition_test_server(
         while socket.next().await.is_some() {}
     });
 
-    let workspace_id = workspace.to_string_lossy().replace('\\', "/");
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let server = service.inner();
     let ide_project = crate::project_resolver::IdeProjectConfig::new(
         workspace_id.clone(),
@@ -1055,11 +1055,8 @@ fn fixture_workspace_root(name: &str) -> String {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../packages/vue-vscode/e2e/fixtures/{name}")),
     )
-    .expect("fixture workspace path should canonicalize")
-    .to_string_lossy()
-    .replace('\\', "/");
-    // Strip Windows extended-length prefix that canonicalize() produces
-    path.strip_prefix("//?/").unwrap_or(&path).to_string()
+    .expect("fixture workspace path should canonicalize");
+    crate::test_utils::canonical_test_path(&path)
 }
 
 #[test]
@@ -4807,14 +4804,16 @@ async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_ex
     let popup_source = "<script setup lang=\"ts\">\nimport type { MotionProps } from 'motion'\nconst props = defineProps<MotionProps>()\n</script>\n<template><div>{{ props.duration }}</div></template>";
     std::fs::write(workspace.join("src/Popup.vue"), popup_source).expect("write Popup.vue");
 
-    let workspace_id = std::fs::canonicalize(&workspace)
-        .expect("canonical workspace path")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let popup_id = format!("{workspace_id}/src/Popup.vue");
     let uri = crate::uri::path_to_file_uri(&popup_id).expect("file uri");
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    host.configure_projects(vec![crate::project_resolver::IdeProjectConfig::new(
+        workspace_id.clone(),
+        workspace_id.clone(),
+        Some(format!("{workspace_id}/tsconfig.json")),
+    )]);
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let _ = documents.did_open(&TextDocumentItem {
         uri: uri.clone(),
@@ -4921,7 +4920,7 @@ defineProps<{ msg: string }>()
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -4940,10 +4939,7 @@ defineProps<{ msg: string }>()
     });
 
     let server = service.inner();
-    let child_id = workspace
-        .join("src/Child.vue")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let child_id = crate::test_utils::canonical_test_path(&workspace.join("src/Child.vue"));
 
     server.sync_imported_vue_api_lightweight(&child_id).await;
 
@@ -5715,7 +5711,12 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
     let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
     let uri = crate::uri::path_to_file_uri(&app_path).expect("fixture uri should be valid");
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let fixture_path = std::fs::canonicalize(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/e2e/fixtures/single-project"),
+    )
+    .unwrap();
+    let host = crate::test_utils::make_filesystem_test_host(&fixture_path);
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let _ = documents.did_open(&TextDocumentItem {
         uri: uri.clone(),
@@ -6102,14 +6103,21 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
     )
     .expect("write nested dependency");
 
-    let workspace_id = std::fs::canonicalize(&workspace)
-        .expect("canonical workspace path")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let app_id = format!("{workspace_id}/src/App.vue");
     let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let mut project = crate::project_resolver::IdeProjectConfig::new(
+        workspace_id.clone(),
+        workspace_id.clone(),
+        Some(format!("{workspace_id}/tsconfig.app.json")),
+    );
+    project.compiler_options = crate::project_resolver::IdeProjectCompilerOptions {
+        base_url: Some(workspace_id.clone()),
+        paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+    };
+    host.configure_projects(vec![project.clone()]);
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let _ = documents.did_open(&TextDocumentItem {
             uri: uri.clone(),
@@ -6126,15 +6134,6 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         "DocumentRegistry alone should still miss IDE output before server hydration"
     );
 
-    let mut project = crate::project_resolver::IdeProjectConfig::new(
-        workspace_id.clone(),
-        workspace_id.clone(),
-        Some(format!("{workspace_id}/tsconfig.app.json")),
-    );
-    project.compiler_options = crate::project_resolver::IdeProjectCompilerOptions {
-        base_url: Some(workspace_id.clone()),
-        paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
-    };
     let snapshot = ResolverSnapshot {
         generation: 1,
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
@@ -6255,14 +6254,11 @@ async fn sync_pending_vue_provider_file_syncs_ide_artifact_for_tsgo() {
     std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
     std::fs::write(workspace.join("tsconfig.app.json"), "{}").expect("write tsconfig");
 
-    let workspace_id = std::fs::canonicalize(&workspace)
-        .expect("canonical workspace path")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let app_id = format!("{workspace_id}/src/App.vue");
     let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let _ = documents.did_open(&TextDocumentItem {
         uri: uri.clone(),
@@ -6959,17 +6955,10 @@ defineProps<{ msg: string }>()
     )
     .expect("write child");
 
-    let workspace_id_raw = std::fs::canonicalize(&workspace)
-        .expect("canonical workspace")
-        .to_string_lossy()
-        .replace('\\', "/");
-    let workspace_id = workspace_id_raw
-        .strip_prefix("//?/")
-        .unwrap_or(&workspace_id_raw)
-        .to_string();
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let app_id = format!("{workspace_id}/src/App.vue");
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
     let _ = documents.did_open(&TextDocumentItem {
@@ -7259,5 +7248,28 @@ fn vfs_workspace_with_project_graph() {
             .owner_for_file("/other-project/src/App.vue")
             .is_none(),
         "file outside project root should have no owner"
+    );
+}
+
+#[test]
+fn standalone_host_cannot_resolve_disk_files() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("App.vue"), "<template><div/></template>").unwrap();
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let file_id = verter_vfs::resolver::normalize_canonical_id(
+        &ws.join("App.vue").to_string_lossy().replace('\\', "/"),
+    );
+    // Positive: standalone host cannot load disk files (documents the limitation)
+    assert!(
+        !host.ensure_loaded(&file_id),
+        "standalone host should NOT be able to load disk files (no VFS)"
+    );
+    // Negative: also no analysis available
+    assert!(
+        host.get_analysis(&file_id).is_none(),
+        "standalone host should have no analysis for disk-only files"
     );
 }

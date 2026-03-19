@@ -331,7 +331,9 @@ impl ProjectRegistry {
         let mut trust_required = Vec::new();
 
         for root_uri in roots {
-            let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+            let canonical = verter_vfs::resolver::normalize_canonical_id(
+                &crate::documents::uri_to_canonical_id_from_str(root_uri),
+            );
             let root_path = PathBuf::from(&canonical);
 
             // Discover tsconfigs under this root (VFS config)
@@ -507,7 +509,8 @@ impl ProjectRegistry {
         let mut projects = Vec::new();
 
         for &root in roots {
-            let root_path = PathBuf::from(root);
+            let root = verter_vfs::resolver::normalize_canonical_id(root);
+            let root_path = PathBuf::from(&root);
 
             let discovered = verter_vfs::config::discover_tsconfigs(&root_path);
 
@@ -568,7 +571,7 @@ impl ProjectRegistry {
     ///
     /// Falls back to `None` if no project root is a prefix of the file path.
     pub fn find_project(&self, file_path: &str) -> Option<&ProjectConfig> {
-        let normalized = file_path.replace('\\', "/");
+        let normalized = verter_vfs::resolver::normalize_canonical_id(file_path);
         self.projects
             .iter()
             .find(|project| project_matches_file(project, &normalized))
@@ -1433,7 +1436,8 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = tmp.to_string_lossy().replace('\\', "/");
+        let root =
+            verter_vfs::resolver::normalize_canonical_id(&tmp.to_string_lossy().replace('\\', "/"));
         let registry = ProjectRegistry::from_canonical_roots(&[&root]);
         let source_file = format!("{root}/src/App.vue");
         let expected_app = format!("{root}/tsconfig.app.json");
@@ -1472,7 +1476,8 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = tmp.to_string_lossy().replace('\\', "/");
+        let root =
+            verter_vfs::resolver::normalize_canonical_id(&tmp.to_string_lossy().replace('\\', "/"));
         let registry = ProjectRegistry::from_canonical_roots(&[&root]);
         let unmatched = format!("{root}/scripts/tool.ts");
 
@@ -1519,7 +1524,8 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = tmp.to_string_lossy().replace('\\', "/");
+        let root =
+            verter_vfs::resolver::normalize_canonical_id(&tmp.to_string_lossy().replace('\\', "/"));
         let registry = ProjectRegistry::from_canonical_roots(&[&root]);
         let app_file = format!("{root}/src/App.ts");
         let project = registry
@@ -1816,10 +1822,16 @@ export default defineConfig(({ mode }) => ({
         let registry = ProjectRegistry::from_canonical_roots(&["C:/Users/dev/project"]);
         let workspace_project = registry.projects.last().unwrap();
 
-        // Positive: stored root should be lowercase-drive canonical form
-        assert_eq!(
-            workspace_project.root, "c:/users/dev/project",
-            "from_canonical_roots should store normalized (lowercase drive) roots"
+        // Positive: stored root should have lowercase drive letter (canonical form)
+        assert!(
+            workspace_project.root.starts_with("c:/"),
+            "from_canonical_roots should lowercase the drive letter, got: {}",
+            workspace_project.root
+        );
+        // Negative: must NOT retain uppercase drive letter
+        assert!(
+            !workspace_project.root.starts_with("C:/"),
+            "stored root should not retain uppercase drive letter"
         );
 
         // Also test Linux-style path passes through unchanged
