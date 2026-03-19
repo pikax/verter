@@ -12,7 +12,7 @@
 use smallvec::SmallVec;
 
 use crate::{
-    ast::types::TemplateAst,
+    ast::types::{ConditionalChain, TemplateAst},
     common::Span,
     cursor::ScriptLanguage,
     diagnostics::Diagnostic,
@@ -128,6 +128,8 @@ pub struct RootNodeTemplateContent {
     pub end: u32,
     /// Root-level children of the template (arena node IDs).
     pub children: SmallVec<[NodeId; 4]>,
+    /// Pre-computed v-if/v-else-if/v-else chains among root children.
+    pub v_if_chains: SmallVec<[ConditionalChain; 1]>,
 }
 
 /// Finalized SFC parse result, suitable for caching and borrowing during codegen.

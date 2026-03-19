@@ -1368,7 +1368,8 @@ fn dfs_through_pipeline() {
         std::mem::discriminant(&AstNodeKind::Text(crate::ast::types::TextNode {
             start: 0,
             end: 0,
-            is_entity: false
+            is_entity: false,
+            is_whitespace_only: false,
         }))
     );
 }

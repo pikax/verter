@@ -7,9 +7,9 @@
 use smallvec::SmallVec;
 
 use crate::ast::types::{
-    AstNode, AstNodeKind, ChildrenFlag, ChildrenFlags, ChildrenMode, CommentNode, ElementContent,
-    ElementNode, ElementNodeCondition, InterpolationNode, PropFlag, PropFlags, TagType,
-    TemplateAst, TextNode,
+    AstNode, AstNodeKind, ChildrenFlag, ChildrenFlags, ChildrenMode, CommentNode, ConditionalChain,
+    ElementContent, ElementNode, ElementNodeCondition, ElementNodeConditionKind, InterpolationNode,
+    PropFlag, PropFlags, TagType, TemplateAst, TextNode,
 };
 use crate::parser::types::RootNodeTemplate;
 use crate::types::{NodeId, NodeProp, NodeTag};
@@ -116,6 +116,7 @@ impl TemplateAstBuilder {
             start,
             end: start,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         });
     }
 
@@ -131,6 +132,17 @@ impl TemplateAstBuilder {
         let (children_flag, children_mode) = self.compute_children_meta(id);
         let is_fully_static = self.compute_is_fully_static(id, children_flag);
 
+        // Scan for v-if chains among children
+        let chains = if children_flag.has(ChildrenFlags::HasVIf) {
+            let el = element_ref(&self.ast.nodes[id.0]);
+            el.content
+                .as_ref()
+                .map(|c| scan_v_if_chains(&c.children, &self.ast.nodes))
+                .unwrap_or_default()
+        } else {
+            SmallVec::new()
+        };
+
         {
             let el = element_mut(&mut self.ast.nodes[id.0]);
             el.tag_close = tag_close;
@@ -139,6 +151,7 @@ impl TemplateAstBuilder {
             el.is_fully_static = is_fully_static;
             if let Some(content) = el.content.as_mut() {
                 content.end = content_end;
+                content.v_if_chains = chains;
             }
         }
 
@@ -399,11 +412,18 @@ impl TemplateAstBuilder {
     }
 
     /// Call on `TokenizerEvent::Text { start, end }` and `TextEntity`.
-    pub fn add_text(&mut self, start: u32, end: u32, is_entity: bool) -> NodeId {
+    pub fn add_text(
+        &mut self,
+        start: u32,
+        end: u32,
+        is_entity: bool,
+        is_whitespace_only: bool,
+    ) -> NodeId {
         let id = self.ast.alloc_node(AstNodeKind::Text(TextNode {
             start,
             end,
             is_entity,
+            is_whitespace_only,
         }));
         self.attach_leaf(id);
         id
@@ -455,15 +475,102 @@ impl TemplateAstBuilder {
         !self.open_stack.is_empty()
     }
 
-    pub fn finish(self) -> TemplateAst {
+    pub fn finish(mut self) -> TemplateAst {
         debug_assert!(
             self.open_stack.is_empty(),
             "TemplateAstBuilder::finish() called with {} unclosed element(s) on the open stack. \
              The caller must close all elements (or force-close on EOF) before finishing.",
             self.open_stack.len()
         );
+
+        // Scan for v-if chains among root-level children
+        if let Some(content) = self.ast.root.content.as_mut() {
+            let has_v_if = content.children.iter().any(|&child_id| {
+                matches!(
+                    &self.ast.nodes[child_id.0].kind,
+                    AstNodeKind::Element(el) if el.v_condition.is_some()
+                )
+            });
+            if has_v_if {
+                content.v_if_chains = scan_v_if_chains(&content.children, &self.ast.nodes);
+            }
+        }
+
         self.ast
     }
+}
+
+/// Scan a children list for v-if / v-else-if / v-else chains.
+///
+/// A chain starts at an element with `v-if`, continues through `v-else-if`/`v-else`
+/// siblings, skipping whitespace-only text and comments. Non-whitespace text or
+/// non-conditional elements break the chain.
+fn scan_v_if_chains(children: &[NodeId], nodes: &[AstNode]) -> SmallVec<[ConditionalChain; 1]> {
+    fn flush_chain(
+        chains: &mut SmallVec<[ConditionalChain; 1]>,
+        current_chain: &mut Option<SmallVec<[usize; 3]>>,
+    ) {
+        if let Some(members) = current_chain.take() {
+            chains.push(ConditionalChain {
+                member_indices: members,
+            });
+        }
+    }
+
+    let mut chains = SmallVec::new();
+    let mut current_chain: Option<SmallVec<[usize; 3]>> = None;
+
+    for (idx, &child_id) in children.iter().enumerate() {
+        let node = &nodes[child_id.0];
+        match &node.kind {
+            AstNodeKind::Element(el) => {
+                if let Some(ref cond) = el.v_condition {
+                    match cond.kind {
+                        ElementNodeConditionKind::If => {
+                            // Flush any previous chain
+                            flush_chain(&mut chains, &mut current_chain);
+                            // Start new chain
+                            let mut members = SmallVec::new();
+                            members.push(idx);
+                            current_chain = Some(members);
+                        }
+                        ElementNodeConditionKind::ElseIf | ElementNodeConditionKind::Else => {
+                            // Continue existing chain
+                            if let Some(ref mut members) = current_chain {
+                                members.push(idx);
+                            }
+                            // If v-else, finalize the chain
+                            if cond.kind == ElementNodeConditionKind::Else {
+                                flush_chain(&mut chains, &mut current_chain);
+                            }
+                        }
+                    }
+                } else {
+                    // Non-conditional element — break chain
+                    flush_chain(&mut chains, &mut current_chain);
+                }
+            }
+            AstNodeKind::Text(t) => {
+                if !t.is_whitespace_only {
+                    // Non-whitespace text breaks the chain
+                    flush_chain(&mut chains, &mut current_chain);
+                }
+                // Whitespace-only text: skip (chain continues)
+            }
+            AstNodeKind::Comment(_) => {
+                // Comments: skip (chain continues)
+            }
+            AstNodeKind::Interpolation(_) => {
+                // Interpolation breaks the chain
+                flush_chain(&mut chains, &mut current_chain);
+            }
+        }
+    }
+
+    // Flush any remaining chain (including solo v-if) for codegen.
+    flush_chain(&mut chains, &mut current_chain);
+
+    chains
 }
 
 #[cfg(test)]

@@ -749,6 +749,17 @@ impl PropFlag {
     }
 }
 
+/// A v-if / v-else-if / v-else chain discovered among sibling elements.
+///
+/// Stores the indices into the parent's `children` array for each chain member.
+/// Members are consecutive elements with v-if → v-else-if* → v-else?, separated
+/// only by whitespace-only text or comments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionalChain {
+    /// Indices into the parent's children vec for each chain member.
+    pub member_indices: SmallVec<[usize; 3]>,
+}
+
 /// The content region between an element's open and close tags.
 ///
 /// Tracks the byte range of the inner content and the ordered list of child
@@ -763,6 +774,9 @@ pub struct ElementContent {
     /// SmallVec<[NodeId; 4]> avoids heap allocation for ≤4 children, which covers
     /// ~78% of elements in real-world Vue projects (measured across 10k+ .vue files).
     pub children: SmallVec<[NodeId; 4]>,
+    /// Pre-computed v-if/v-else-if/v-else chains among direct children.
+    /// Each chain records the child indices of its members.
+    pub v_if_chains: SmallVec<[ConditionalChain; 1]>,
 }
 
 // ======================== Leaf node payloads ========================
@@ -778,6 +792,11 @@ pub struct TextNode {
     /// Whether this text segment contains an HTML entity (e.g., `&amp;`).
     /// Codegen may need to emit the decoded value rather than raw source.
     pub is_entity: bool,
+    /// Whether this text segment is all whitespace (spaces, tabs, newlines).
+    /// For entity text, this checks the decoded content.
+    /// Used by chain adjacency scanning to skip formatting whitespace between
+    /// `v-if`/`v-else-if`/`v-else` chain members.
+    pub is_whitespace_only: bool,
 }
 
 /// An HTML comment (`<!-- ... -->`).

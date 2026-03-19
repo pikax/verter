@@ -45,6 +45,7 @@ impl TemplateAst {
                 start: 0,
                 end: 0,
                 children: SmallVec::new(),
+                v_if_chains: SmallVec::new(),
             })
     }
 
@@ -84,6 +85,7 @@ impl TemplateAst {
                 start: 0,
                 end: 0,
                 children: SmallVec::new(),
+                v_if_chains: SmallVec::new(),
             });
             let idx = content.children.len();
             content.children.push(child);
@@ -189,10 +191,10 @@ mod ast_tests {
         // <div>
         b.open_element(make_tag(0, 5, 4));
         b.mark_element_content_start(5);
-        b.add_text(5, 6, false); // a
-        b.add_text(6, 7, false); // b
-        b.add_text(7, 8, false); // c
-                                 // </div>
+        b.add_text(5, 6, false, false); // a
+        b.add_text(6, 7, false, false); // b
+        b.add_text(7, 8, false, false); // c
+                                        // </div>
         b.close_element(Some(make_tag(8, 14, 13)), 8);
 
         b.finish()
@@ -206,8 +208,8 @@ mod ast_tests {
     #[test]
     fn siblings_of_root_child() {
         let mut b = TemplateAstBuilder::new(make_root());
-        b.add_text(0, 5, false);
-        b.add_text(5, 10, false);
+        b.add_text(0, 5, false, false);
+        b.add_text(5, 10, false, false);
         let ast = b.finish();
 
         let first = ast.root.content.as_ref().unwrap().children[0];
@@ -275,9 +277,9 @@ mod ast_tests {
     #[test]
     fn root_sibling_navigation() {
         let mut b = TemplateAstBuilder::new(make_root());
-        b.add_text(0, 3, false);
-        b.add_text(3, 6, false);
-        b.add_text(6, 9, false);
+        b.add_text(0, 3, false, false);
+        b.add_text(3, 6, false, false);
+        b.add_text(6, 9, false, false);
         let ast = b.finish();
 
         let children = &ast.root.content.as_ref().unwrap().children;
@@ -303,15 +305,15 @@ mod ast_tests {
         // <div>
         b.open_element(make_tag(0, 5, 4)); // node 0: div
         b.mark_element_content_start(5);
-        b.add_text(5, 6, false); // node 1: text "a"
-                                 // <span>
+        b.add_text(5, 6, false, false); // node 1: text "a"
+                                        // <span>
         b.open_element(make_tag(6, 12, 11)); // node 2: span
         b.mark_element_content_start(12);
-        b.add_text(12, 13, false); // node 3: text "b"
-                                   // </span>
+        b.add_text(12, 13, false, false); // node 3: text "b"
+                                          // </span>
         b.close_element(Some(make_tag(13, 20, 19)), 13);
-        b.add_text(20, 21, false); // node 4: text "c"
-                                   // </div>
+        b.add_text(20, 21, false, false); // node 4: text "c"
+                                          // </div>
         b.close_element(Some(make_tag(21, 27, 26)), 21);
 
         let ast = b.finish();
@@ -348,7 +350,7 @@ mod ast_tests {
     #[test]
     fn dfs_leaf_node() {
         let mut b = TemplateAstBuilder::new(make_root());
-        let text_id = b.add_text(0, 5, false);
+        let text_id = b.add_text(0, 5, false, false);
         let ast = b.finish();
 
         let mut visited = Vec::new();
@@ -371,11 +373,13 @@ mod ast_tests {
             start: 0,
             end: 1,
             is_entity: false,
+            is_whitespace_only: false,
         }));
         let id1 = ast.alloc_node(AstNodeKind::Text(TextNode {
             start: 1,
             end: 2,
             is_entity: false,
+            is_whitespace_only: false,
         }));
 
         assert_eq!(id0, NodeId(0));
@@ -392,11 +396,13 @@ mod ast_tests {
             start: 0,
             end: 1,
             is_entity: false,
+            is_whitespace_only: false,
         }));
         let id1 = ast.alloc_node(AstNodeKind::Text(TextNode {
             start: 1,
             end: 2,
             is_entity: false,
+            is_whitespace_only: false,
         }));
 
         ast.attach_to_root(id0);

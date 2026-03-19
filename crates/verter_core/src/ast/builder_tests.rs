@@ -170,7 +170,7 @@ fn deeply_nested_elements() {
 fn leaves_attach_to_root() {
     let mut b = TemplateAstBuilder::new(make_root());
 
-    let text_id = b.add_text(0, 5, false);
+    let text_id = b.add_text(0, 5, false, false);
     let comment_id = b.add_comment(5, 20, 9, 16);
     let interp_id = b.add_interpolation(20, 30, 22, 28);
 
@@ -205,7 +205,7 @@ fn leaves_attach_to_open_element() {
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
 
-    let text_id = b.add_text(5, 10, false);
+    let text_id = b.add_text(5, 10, false, false);
     let interp_id = b.add_interpolation(10, 20, 12, 18);
 
     b.close_element(Some(make_tag(20, 26, 25)), 20);
@@ -308,7 +308,7 @@ fn children_flag_single_text() {
 
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
-    b.add_text(5, 10, false);
+    b.add_text(5, 10, false, false);
     b.close_element(Some(make_tag(10, 16, 15)), 10);
 
     let ast = b.finish();
@@ -364,8 +364,8 @@ fn children_flag_multiple_text_no_single_child() {
 
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
-    b.add_text(5, 10, false);
-    b.add_text(10, 15, false);
+    b.add_text(5, 10, false, false);
+    b.add_text(10, 15, false, false);
     b.close_element(Some(make_tag(15, 21, 20)), 15);
 
     let ast = b.finish();
@@ -420,7 +420,7 @@ fn children_flag_text_plus_comment_is_single() {
 
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
-    b.add_text(5, 10, false);
+    b.add_text(5, 10, false, false);
     b.add_comment(10, 25, 14, 21);
     b.close_element(Some(make_tag(25, 31, 30)), 25);
 
@@ -526,7 +526,7 @@ fn children_flag_mixed_text_and_element() {
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
 
-    b.add_text(5, 10, false);
+    b.add_text(5, 10, false, false);
     b.open_element(make_tag(10, 16, 15));
     b.close_element(None, 16);
 
@@ -560,7 +560,7 @@ fn children_flag_text_and_interpolation() {
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
 
-    b.add_text(5, 10, false);
+    b.add_text(5, 10, false, false);
     b.add_interpolation(10, 20, 12, 18);
 
     b.close_element(Some(make_tag(20, 26, 25)), 20);
@@ -651,7 +651,7 @@ fn children_mode_mixed() {
 
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
-    b.add_text(5, 10, false);
+    b.add_text(5, 10, false, false);
     b.open_element(make_tag(10, 16, 15));
     b.close_element(None, 16);
     b.close_element(Some(make_tag(16, 22, 21)), 16);
@@ -694,7 +694,7 @@ fn multiple_root_children() {
     b.close_element(Some(make_tag(5, 11, 10)), 5);
 
     // Text leaf at root level
-    b.add_text(11, 15, false);
+    b.add_text(11, 15, false, false);
 
     // Second element
     b.open_element(make_tag(15, 21, 20));
@@ -734,8 +734,8 @@ fn multiple_root_children() {
 fn text_entity_flag() {
     let mut b = TemplateAstBuilder::new(make_root());
 
-    b.add_text(0, 5, false);
-    b.add_text(5, 10, true);
+    b.add_text(0, 5, false, false);
+    b.add_text(5, 10, true, false);
 
     let ast = b.finish();
     let AstNodeKind::Text(t0) = &ast.nodes[0].kind else {
@@ -1115,7 +1115,7 @@ fn parent_and_children_accessors() {
     // <div>
     b.open_element(make_tag(0, 5, 4));
     b.mark_element_content_start(5);
-    let text_id = b.add_text(5, 10, false);
+    let text_id = b.add_text(5, 10, false, false);
     b.close_element(Some(make_tag(10, 16, 15)), 10);
 
     let ast = b.finish();
@@ -1132,4 +1132,34 @@ fn parent_and_children_accessors() {
 
     // leaves have no children
     assert_eq!(ast.children(text_id).len(), 0);
+}
+
+/// Solo `v-if` should still be recorded as a chain when followed by a
+/// non-conditional sibling so codegen can preserve Vue 3 precedence for
+/// same-element `v-if + v-for`.
+#[test]
+fn root_v_if_chain_keeps_solo_if_before_nonconditional_sibling() {
+    let mut b = TemplateAstBuilder::new(make_root());
+
+    // <div v-if="show" v-for="item in items" />
+    b.open_element(make_tag(0, 5, 4));
+    assert!(!b.set_v_condition(ElementNodeCondition {
+        kind: ElementNodeConditionKind::If,
+        prop: make_attr(5, 9),
+    }));
+    assert!(!b.set_v_for(make_attr(10, 15)));
+    b.close_element(None, 5);
+
+    // <p />
+    b.open_element(make_tag(5, 8, 7));
+    b.close_element(None, 8);
+
+    let ast = b.finish();
+    let root_content = ast.root.content.as_ref().expect("root content");
+    assert_eq!(root_content.v_if_chains.len(), 1);
+    assert_eq!(
+        root_content.v_if_chains[0].member_indices.as_slice(),
+        &[0],
+        "solo v-if should still be preserved as a chain when followed by a normal sibling",
+    );
 }

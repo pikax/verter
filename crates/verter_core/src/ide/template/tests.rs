@@ -745,8 +745,8 @@ fn v_for_closing_structure() {
         r#"<template><div v-for="item in items" :key="item.id">text</div></template>"#,
     );
     assert!(
-        result.contains("))}"),
-        "v-for closing should produce CloseParen+CloseParen+CloseBrace for .map() closure, got: {}",
+        result.contains(") })}"),
+        "v-for closing should produce CloseParen+CloseBrace+CloseParen+CloseBrace for .map() statement-body closure, got: {}",
         result
     );
 }
@@ -4074,7 +4074,6 @@ fn ant_design_switch_basic_produces_valid_tsx() {
 }
 
 #[test]
-#[ignore = "v-else + v-for after v-if + v-for on sibling elements — known edge case"]
 fn activist_card_topic_selection_produces_valid_tsx() {
     let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/activist-org-activist/frontend/app/components/card/CardTopicSelection.vue") {
         Ok(s) => s,
@@ -6206,5 +6205,327 @@ fn event_handler_spread_with_event_param_uses_event_callbacks() {
     assert!(
         !result.contains(r#"": ($event) =>"#),
         "spread event should NOT use bare ($event) => pattern (without eventCallbacks): {result}"
+    );
+}
+
+// ── v-if/v-else + v-for lifted chain tests ───────────────────────
+
+#[test]
+fn v_if_v_for_followed_by_v_else_v_for() {
+    // The primary bug case: sibling elements with v-if+v-for and v-else+v-for
+    let result = gen_tsx_template(
+        r#"<template><div v-if="show" v-for="item in items" :key="item.id">{{ item.name }}</div><div v-else v-for="item in others" :key="item.id">{{ item.label }}</div></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_followed_by_v_else_v_for ===\n{}\n=== END ===",
+        result
+    );
+    // Positive: should have lifted ternary with condition outside map
+    assert!(
+        result.contains("show ?") || result.contains("show?"),
+        "should have lifted condition outside: {result}"
+    );
+    // Positive: both branches should have .map()
+    let map_count = result.matches(".map(").count();
+    assert!(
+        map_count >= 2,
+        "should have two .map() calls (one per branch), found {map_count}: {result}"
+    );
+    // Negative: should NOT have bare `else` keyword (IIFE style)
+    assert!(
+        !result.contains("else{") && !result.contains("else {"),
+        "should NOT use IIFE else (should be lifted ternary): {result}"
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><div v-if="show" v-for="item in items" :key="item.id">{{ item.name }}</div><div v-else v-for="item in others" :key="item.id">{{ item.label }}</div></template>"#,
+        "v-if+v-for followed by v-else+v-for",
+    );
+}
+
+#[test]
+fn v_if_v_for_chain_three_branches() {
+    let result = gen_tsx_template(
+        r#"<template><div v-if="mode === 'a'" v-for="item in listA">{{ item }}</div><div v-else-if="mode === 'b'" v-for="item in listB">{{ item }}</div><div v-else v-for="item in listC">{{ item }}</div></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_chain_three_branches ===\n{}\n=== END ===",
+        result
+    );
+    // Should have 3 .map() calls
+    let map_count = result.matches(".map(").count();
+    assert!(
+        map_count >= 3,
+        "should have three .map() calls, found {map_count}: {result}"
+    );
+    // Should have ternary structure, not IIFE
+    assert!(
+        !result.contains("else{") && !result.contains("else {"),
+        "should NOT use IIFE: {result}"
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><div v-if="mode === 'a'" v-for="item in listA">{{ item }}</div><div v-else-if="mode === 'b'" v-for="item in listB">{{ item }}</div><div v-else v-for="item in listC">{{ item }}</div></template>"#,
+        "three-branch v-if/v-else-if/v-else + v-for chain",
+    );
+}
+
+#[test]
+fn v_if_v_for_mixed_chain_some_with_for_some_without() {
+    // v-if+v-for followed by plain v-else (no v-for)
+    let result = gen_tsx_template(
+        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div><span v-else>fallback</span></template>"#,
+    );
+    eprintln!("=== v_if_v_for_mixed_chain ===\n{}\n=== END ===", result);
+    // Lifted ternary: condition outside
+    assert!(
+        result.contains("show ?") || result.contains("show?"),
+        "should have lifted condition: {result}"
+    );
+    // First branch has .map(), second doesn't
+    assert!(
+        result.contains(".map("),
+        "first branch should have .map(): {result}"
+    );
+    assert!(
+        result.contains("<span"),
+        "second branch should have plain <span>: {result}"
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div><span v-else>fallback</span></template>"#,
+        "mixed chain: v-if+v-for then plain v-else",
+    );
+}
+
+#[test]
+fn v_if_v_for_solo_lifts_condition() {
+    // Solo v-if + v-for: condition should be lifted outside .map()
+    // Vue 3 precedence: v-if has higher precedence, runs before v-for
+    let result = gen_tsx_template(
+        r#"<template><div v-if="show" v-for="item in list">{{ item }}</div></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_solo_lifts_condition ===\n{}\n=== END ===",
+        result
+    );
+    // Should have lifted ternary: `show ? list.map(...) : null`
+    assert!(
+        result.contains("show ?") || result.contains("show?"),
+        "should have lifted condition outside map: {result}"
+    );
+    assert!(
+        result.contains(": null"),
+        "solo lifted should have : null fallback: {result}"
+    );
+    assert!(result.contains(".map("), "should have .map(): {result}");
+}
+
+#[test]
+fn v_if_v_for_solo_lifts_condition_before_normal_sibling() {
+    // Same as the solo case, but followed by a normal sibling. This still
+    // needs the lifted `cond ? map(...) : null` shape.
+    let result = gen_tsx_template(
+        r#"<template><div v-if="show" v-for="item in list">{{ item }}</div><p>after</p></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_solo_lifts_condition_before_normal_sibling ===\n{}\n=== END ===",
+        result
+    );
+    assert!(
+        result.contains("show ?") || result.contains("show?"),
+        "should keep the lifted condition even with a following sibling: {result}"
+    );
+    assert!(
+        result.contains(": null"),
+        "solo lifted branch should still fall back to null before the next sibling: {result}"
+    );
+    assert!(
+        result.contains("<p"),
+        "following sibling should remain present: {result}"
+    );
+    assert_valid_jsx(
+        r#"<template><div v-if="show" v-for="item in list">{{ item }}</div><p>after</p></template>"#,
+        "solo v-if+v-for before normal sibling",
+    );
+}
+
+#[test]
+fn v_if_v_for_iife_chain_regression() {
+    // Standard v-if/v-else chain WITHOUT any v-for should still use IIFE
+    let result =
+        gen_tsx_template(r#"<template><div v-if="show">A</div><div v-else>B</div></template>"#);
+    // Should use IIFE (if/else), NOT ternary
+    assert!(
+        result.contains("if(") || result.contains("if ("),
+        "no-v-for chain should use IIFE with if(): {result}"
+    );
+    assert!(
+        result.contains("else"),
+        "no-v-for chain should have else: {result}"
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><div v-if="show">A</div><div v-else>B</div></template>"#,
+        "IIFE chain regression (no v-for)",
+    );
+}
+
+#[test]
+fn v_if_v_for_statement_body() {
+    // v-for should use statement-body callbacks: `=> { return (...) }`
+    let result =
+        gen_tsx_template(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    eprintln!("=== v_if_v_for_statement_body ===\n{}\n=== END ===", result);
+    // Should have statement body with return
+    assert!(
+        result.contains("=> { return"),
+        "v-for should use statement body `=> {{ return (...)  }}`, got: {result}"
+    );
+    // Negative: should NOT have expression body `=> (`
+    assert!(
+        !result.contains("=> ("),
+        "v-for should NOT use expression body `=> (`, got: {result}"
+    );
+}
+
+#[test]
+fn v_if_v_for_numeric_in_lifted_chain() {
+    // Numeric v-for in a lifted chain should use Array.from without leading {
+    let result = gen_tsx_template(
+        r#"<template><div v-if="show" v-for="n in 5">{{ n }}</div><div v-else>none</div></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_numeric_in_lifted_chain ===\n{}\n=== END ===",
+        result
+    );
+    assert!(
+        result.contains("Array.from("),
+        "numeric v-for should use Array.from: {result}"
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><div v-if="show" v-for="n in 5">{{ n }}</div><div v-else>none</div></template>"#,
+        "numeric v-for in lifted chain",
+    );
+}
+
+#[test]
+fn v_if_v_for_adjacent_chains_independent() {
+    // Two separate chains with a <p> separator
+    let result = gen_tsx_template(
+        "<template><div v-if=\"a\" v-for=\"x in xs\">{{ x }}</div><div v-else>no A</div><p>separator</p><div v-if=\"b\" v-for=\"y in ys\">{{ y }}</div><div v-else>no B</div></template>",
+    );
+    eprintln!(
+        "=== v_if_v_for_adjacent_chains_independent ===\n{}\n=== END ===",
+        result
+    );
+    // Should have 2 separate lifted ternaries
+    let map_count = result.matches(".map(").count();
+    assert!(
+        map_count >= 2,
+        "should have at least two .map() calls: {result}"
+    );
+    assert!(
+        result.contains("<p"),
+        "separator <p> should be preserved: {result}"
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        "<template><div v-if=\"a\" v-for=\"x in xs\">{{ x }}</div><div v-else>no A</div><p>separator</p><div v-if=\"b\" v-for=\"y in ys\">{{ y }}</div><div v-else>no B</div></template>",
+        "two independent chains",
+    );
+}
+
+#[test]
+fn v_if_v_for_inside_nested_element() {
+    // Chain inside a parent div (ElementContent chains, not root)
+    let result = gen_tsx_template(
+        r#"<template><div><span v-if="show" v-for="item in items">{{ item }}</span><span v-else>none</span></div></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_inside_nested_element ===\n{}\n=== END ===",
+        result
+    );
+    assert!(
+        result.contains("show ?") || result.contains("show?"),
+        "nested chain should be lifted: {result}"
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><div><span v-if="show" v-for="item in items">{{ item }}</span><span v-else>none</span></div></template>"#,
+        "chain inside nested element",
+    );
+}
+
+#[test]
+fn v_if_v_for_with_comments_between_branches() {
+    // Comments between chain members should be suppressed
+    let result = gen_tsx_template(
+        "<template><div v-if=\"show\" v-for=\"item in items\">{{ item }}</div><!-- separator comment --><div v-else v-for=\"item in others\">{{ item }}</div></template>",
+    );
+    eprintln!(
+        "=== v_if_v_for_with_comments_between_branches ===\n{}\n=== END ===",
+        result
+    );
+    // Must be valid TSX (comments between ternary branches would break)
+    assert_valid_jsx(
+        "<template><div v-if=\"show\" v-for=\"item in items\">{{ item }}</div><!-- separator comment --><div v-else v-for=\"item in others\">{{ item }}</div></template>",
+        "comments between v-if+v-for branches",
+    );
+}
+
+#[test]
+fn v_if_v_for_with_entity_whitespace_between_branches() {
+    // Entity-backed whitespace should be treated like ignorable formatting
+    // whitespace for v-if / v-else adjacency.
+    let result = gen_tsx_template(
+        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div>&nbsp;<div v-else>fallback</div></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_with_entity_whitespace_between_branches ===\n{}\n=== END ===",
+        result
+    );
+    assert!(
+        result.contains("show ?") || result.contains("show?"),
+        "entity-backed whitespace should not break the lifted chain: {result}"
+    );
+    assert_valid_jsx(
+        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div>&nbsp;<div v-else>fallback</div></template>"#,
+        "entity whitespace between v-if+v-for branches",
+    );
+}
+
+#[test]
+fn v_if_v_for_v_else_slot_outlet_plain_branch() {
+    // Lifted ternary where v-else branch is a plain slot outlet
+    let result = gen_tsx_template(
+        r#"<template><MyComp><div v-if="show" v-for="item in items">{{ item }}</div><slot v-else name="fallback"/></MyComp></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_v_else_slot_outlet ===\n{}\n=== END ===",
+        result
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><MyComp><div v-if="show" v-for="item in items">{{ item }}</div><slot v-else name="fallback"/></MyComp></template>"#,
+        "v-if+v-for then slot v-else",
+    );
+}
+
+#[test]
+fn v_if_v_for_v_else_component_is_plain_branch() {
+    // Lifted ternary where v-else is a dynamic component
+    let result = gen_tsx_template(
+        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div><component v-else :is="fallbackComp"/></template>"#,
+    );
+    eprintln!(
+        "=== v_if_v_for_v_else_component_is ===\n{}\n=== END ===",
+        result
+    );
+    // Must be valid TSX
+    assert_valid_jsx(
+        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div><component v-else :is="fallbackComp"/></template>"#,
+        "v-if+v-for then component :is v-else",
     );
 }

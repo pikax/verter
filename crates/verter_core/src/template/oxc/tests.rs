@@ -1271,7 +1271,7 @@ mod parse_template_expressions_tests {
     fn text_and_comment_produce_none() {
         let input = "hello <!-- comment -->";
         let mut b = TemplateAstBuilder::new(make_root());
-        b.add_text(0, 6, false);
+        b.add_text(0, 6, false, false);
         b.add_comment(6, 22, 11, 18);
         let ast = b.finish();
 
@@ -1575,7 +1575,7 @@ mod parse_template_expressions_tests {
 
         b.open_element(make_tag(0, 5, 4));
         b.mark_element_content_start(5);
-        b.add_text(5, 10, false);
+        b.add_text(5, 10, false, false);
         b.close_element(
             Some(make_tag(close_start, close_start + 6, close_start + 5)),
             close_start,
@@ -1618,7 +1618,7 @@ mod parse_template_expressions_tests {
             prop: directive_prop_no_arg(5, 9, Some(11), Some(15)),
         });
         b.mark_element_content_start(18);
-        b.add_text(18, 19, false);
+        b.add_text(18, 19, false, false);
         b.close_element(Some(make_tag(19, 25, 24)), 19);
 
         // <div v-else>B</div>
@@ -1628,7 +1628,7 @@ mod parse_template_expressions_tests {
             prop: directive_prop_no_arg(else_div_start + 5, else_div_start + 11, None, None),
         });
         b.mark_element_content_start(else_tag_end);
-        b.add_text(else_tag_end, else_tag_end + 1, false);
+        b.add_text(else_tag_end, else_tag_end + 1, false, false);
         b.close_element(
             Some(make_tag(
                 else_close_start,

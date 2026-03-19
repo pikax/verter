@@ -7791,7 +7791,7 @@ const handler = () => {}
 const items = [1]
 </script>
 <template><div v-for="item in items">{{ item + items.length }}</div></template>"#,
-            &["items).map((item) => (", "{ item + items.length }"],
+            &["items).map((item) => { return (", "{ item + items.length }"],
             &["_ctx."],
         ),
         (
@@ -8918,13 +8918,13 @@ fn tsx_v_for_with_index_and_destructure_params() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("map((item, index) => ("),
+        tsx.code.contains("map((item, index) => { return ("),
         "v-for with (item, index) should preserve both params, got:\n{}",
         tsx.code
     );
     assert!(
-        tsx.code.contains("map(({obj}, key, index) => (")
-            || tsx.code.contains("map(({ obj }, key, index) => ("),
+        tsx.code.contains("map(({obj}, key, index) => { return (")
+            || tsx.code.contains("map(({ obj }, key, index) => { return ("),
         "v-for with destructured value/key/index params should be preserved, got:\n{}",
         tsx.code
     );
@@ -8952,8 +8952,8 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> ("),
-        "template v-for should compile to map over item, got:\n{}",
+        tsx.code.contains(".map((item") && tsx.code.contains("=> { return ("),
+        "template v-for should compile to map over item with statement body, got:\n{}",
         tsx.code
     );
     assert!(
@@ -8963,8 +8963,8 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
         tsx.code
     );
     assert!(
-        tsx.code.contains("</>))"),
-        "template v-for branch should close with fragment syntax, got:\n{}",
+        tsx.code.contains("</>) })"),
+        "template v-for branch should close with fragment + statement-body syntax, got:\n{}",
         tsx.code
     );
 }
@@ -8976,13 +8976,13 @@ fn tsx_v_for_with_v_if_combination_contains_condition_and_map() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> ("),
-        "v-for branch should still emit map expression when combined with v-if, got:\n{}",
+        tsx.code.contains(".map((item") && tsx.code.contains("=> { return ("),
+        "v-for branch should still emit map expression with statement body when combined with v-if, got:\n{}",
         tsx.code
     );
     assert!(
         tsx.code.contains("item.active ?") || tsx.code.contains("_ctx.item.active ?"),
-        "v-if condition should be emitted as ternary for v-for + v-if, got:\n{}",
+        "v-if condition should be emitted as lifted ternary for v-for + v-if, got:\n{}",
         tsx.code
     );
 }
@@ -9004,8 +9004,8 @@ const items = [1]
         tsx.code
     );
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> ("),
-        "Child v-for under parent v-if should still emit map expression, got:\n{}",
+        tsx.code.contains(".map((item") && tsx.code.contains("=> { return ("),
+        "Child v-for under parent v-if should still emit map expression with statement body, got:\n{}",
         tsx.code
     );
 }
@@ -9131,8 +9131,8 @@ const items = [1]
         tsx.code
     );
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> (<Comp"),
-        "Component with v-for should keep Comp tag inside map branch, got:\n{}",
+        tsx.code.contains(".map((item") && tsx.code.contains("=> { return (<Comp"),
+        "Component with v-for should keep Comp tag inside map statement body, got:\n{}",
         tsx.code
     );
 }
@@ -13371,7 +13371,8 @@ const leftList = computed(() => props.list.filter((v, index) => index % 2 === 0)
 
     // Should have clean map body without JSX expression wrapping
     assert!(
-        tsx.code.contains("=> (___VERTER___instance.$slots"),
+        tsx.code
+            .contains("=> { return (___VERTER___instance.$slots"),
         "slot inside v-for should not have JSX {{...}} wrapping: {}",
         tsx.code
     );

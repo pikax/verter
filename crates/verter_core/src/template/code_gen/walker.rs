@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn single_text_node() {
         let mut b = TemplateAstBuilder::new(make_root());
-        b.add_text(0, 5, false);
+        b.add_text(0, 5, false, false);
         let ast = b.finish();
         let oxc_ast = make_oxc_none(ast.nodes.len());
         let alloc = oxc_allocator::Allocator::default();
@@ -271,7 +271,7 @@ mod tests {
         let mut b = TemplateAstBuilder::new(make_root());
         b.open_element(make_tag(0, 5, 4));
         b.mark_element_content_start(5);
-        b.add_text(5, 10, false);
+        b.add_text(5, 10, false, false);
         b.close_element(Some(make_tag(10, 16, 15)), 10);
         let ast = b.finish();
         let oxc_ast = make_oxc_none(ast.nodes.len());
@@ -304,7 +304,7 @@ mod tests {
         b.mark_element_content_start(5);
         b.open_element(make_tag(5, 11, 10)); // span
         b.mark_element_content_start(11);
-        b.add_text(11, 15, false); // text
+        b.add_text(11, 15, false, false); // text
         b.close_element(Some(make_tag(15, 22, 21)), 15); // </span>
         b.close_element(Some(make_tag(22, 28, 27)), 22); // </div>
         let ast = b.finish();
@@ -426,7 +426,7 @@ mod tests {
         let mut b = TemplateAstBuilder::new(make_root());
         b.open_element(make_tag(0, 5, 4));
         b.mark_element_content_start(5);
-        b.add_text(5, 9, false); // text
+        b.add_text(5, 9, false, false); // text
         b.add_interpolation(9, 16, 12, 13); // {{ x }}
         b.add_comment(16, 26, 21, 22); // <!-- c -->
         b.close_element(Some(make_tag(26, 32, 31)), 26);

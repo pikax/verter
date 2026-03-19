@@ -43,6 +43,7 @@ fn make_simple_element(
             start: open_end,
             end: close_start,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
         v_condition: None,
         v_for: None,
@@ -172,6 +173,7 @@ fn leave_template_empty_returns_null() {
             start: 10,
             end: 10,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = make_empty_ast(&root);
@@ -212,6 +214,7 @@ fn leave_template_single_root_prepends_return() {
             start: 10,
             end: 21,
             children: SmallVec::from_elem(NodeId(0), 1),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = TemplateAst {
@@ -266,6 +269,7 @@ fn leave_template_multi_root_wraps_in_fragment() {
             start: 10,
             end: 34,
             children: SmallVec::from_slice(&[NodeId(0), NodeId(1)]),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = TemplateAst {
@@ -323,6 +327,7 @@ fn leave_template_multi_root_production_no_comment() {
             start: 10,
             end: 34,
             children: SmallVec::from_slice(&[NodeId(0), NodeId(1)]),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = TemplateAst {

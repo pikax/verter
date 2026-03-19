@@ -169,6 +169,7 @@ mod tests {
             start,
             end,
             is_entity: false,
+            is_whitespace_only: false,
         }
     }
 

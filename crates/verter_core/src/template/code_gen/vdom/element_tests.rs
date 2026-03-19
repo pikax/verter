@@ -457,6 +457,7 @@ fn empty_element_no_props() {
             start: 5,
             end: 5,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let options = make_options();
@@ -500,6 +501,7 @@ fn element_with_static_text() {
             start: 5,
             end: 10,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     element.children_mode = ChildrenMode::TextOnlyStatic;
@@ -552,6 +554,7 @@ fn element_with_static_class() {
             start: 17,
             end: 17,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     element.props.push(NodeProp {
@@ -605,6 +608,7 @@ fn element_with_multiple_static_props() {
             start: 26,
             end: 26,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     element.props.push(NodeProp {
@@ -671,6 +675,7 @@ fn element_with_props_and_text_child() {
             start: 17,
             end: 22,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     element.props.push(NodeProp {
@@ -784,6 +789,7 @@ fn element_with_click_handler() {
             start: 21,
             end: 21,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     element.props.push(NodeProp {
@@ -844,6 +850,7 @@ fn element_with_leading_trailing_whitespace_removed() {
             start: 5,
             end: 16,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     element.children_mode = ChildrenMode::TextOnlyStatic;

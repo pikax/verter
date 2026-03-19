@@ -64,6 +64,7 @@ mod tests {
             start: 0,
             end: 5,
             is_entity: false,
+            is_whitespace_only: false,
         };
         let source = "hello";
         process_text(&text, source, &mut parent, true, &out);
@@ -81,11 +82,13 @@ mod tests {
             start: 0,
             end: 5,
             is_entity: false,
+            is_whitespace_only: false,
         };
         let t2 = TextNode {
             start: 5,
             end: 11,
             is_entity: false,
+            is_whitespace_only: false,
         };
         process_text(&t1, source, &mut parent, true, &out);
         process_text(&t2, source, &mut parent, true, &out);
@@ -103,6 +106,7 @@ mod tests {
             start: 0,
             end: 5,
             is_entity: false,
+            is_whitespace_only: false,
         };
         process_text(&text, "hello", &mut parent, true, &out);
 
@@ -121,6 +125,7 @@ mod tests {
             start: 0,
             end: source.len() as u32,
             is_entity: false,
+            is_whitespace_only: false,
         };
         process_text(&text, source, &mut parent, true, &out);
 
@@ -139,6 +144,7 @@ mod tests {
             start: 0,
             end: 5,
             is_entity: false,
+            is_whitespace_only: false,
         };
         process_text(&text, "hello", &mut parent, false, &out);
 
@@ -158,6 +164,7 @@ mod tests {
             start: 0,
             end: source.len() as u32,
             is_entity: false,
+            is_whitespace_only: false,
         };
         process_text(&text, source, &mut parent, true, &out);
 

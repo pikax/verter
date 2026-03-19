@@ -127,6 +127,7 @@ pub fn emit_v_if_close(el: &ElementNode, _source: &str, out: &mut CodeGenOutput<
 /// Uses mapped prepends so that TSGO can resolve types for:
 /// - The iterable expression (per-identifier mapping, like v-if)
 /// - The iteration parameter (mapped to its position in the v-for value)
+#[allow(clippy::too_many_arguments)]
 pub fn emit_v_for_open<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
@@ -135,6 +136,7 @@ pub fn emit_v_for_open<'alloc>(
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     is_jsx: bool,
+    bare: bool,
 ) {
     let v_for_prop = match &el.v_for {
         Some(p) => p,
@@ -157,6 +159,7 @@ pub fn emit_v_for_open<'alloc>(
                 v_for_expr,
                 oxc_el,
                 source,
+                bare,
                 resolver,
             );
 
@@ -198,8 +201,8 @@ pub fn emit_v_for_open<'alloc>(
                 );
             }
 
-            // Emit ") => (" — unmapped tail
-            let map_close = ") => (";
+            // Emit ") => { return (" — unmapped tail (statement-body for nested IIFEs)
+            let map_close = ") => { return (";
             out.prepend_alloc_mapped_with_offset(target_pos, 0, map_close.len() as u32, map_close);
         }
     }
@@ -219,6 +222,7 @@ fn emit_mapped_v_for_iterable<'alloc>(
     v_for_full_expr: &str,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &str,
+    bare: bool,
     resolver: &BindingResolver<'alloc>,
 ) {
     // Calculate absolute position of the iterable in the source
@@ -257,15 +261,29 @@ fn emit_mapped_v_for_iterable<'alloc>(
         // when the expression ends with a number (e.g., `endIndex - startIndex + 1`
         // would become `+ 1.map(...)` without parens).
         let content = if is_numeric_v_for_iterable(iterable) {
-            format!(
-                "{{Array.from({{length: {}}}, (_, __i) => __i + 1)",
-                resolved
-            )
+            if bare {
+                format!("Array.from({{length: {}}}, (_, __i) => __i + 1)", resolved)
+            } else {
+                format!(
+                    "{{Array.from({{length: {}}}, (_, __i) => __i + 1)",
+                    resolved
+                )
+            }
+        } else if bare {
+            format!("({}", resolved)
         } else {
             format!("{{({}", resolved)
         };
-        // Map to the iterable start position (offset 2 skips the `{(` prefix)
+        // Map to the iterable start position
+        // Normal: offset 2 skips `{(`, bare: offset 1 skips `(`
+        // Numeric normal: offset 1 skips `{`, bare: offset 0
         let offset = if is_numeric_v_for_iterable(iterable) {
+            if bare {
+                0
+            } else {
+                1
+            }
+        } else if bare {
             1
         } else {
             2
@@ -299,7 +317,16 @@ fn emit_mapped_v_for_iterable<'alloc>(
 
         // Wrap in parens to prevent parse errors with trailing numeric literals
         // e.g., `endIndex - startIndex + 1` → `(endIndex - startIndex + 1).map(...)`
-        let prefix = if first { "{(" } else { "" };
+        // Bare mode: `(` only (no `{`) — parent ternary owns braces
+        let prefix = if first {
+            if bare {
+                "("
+            } else {
+                "{("
+            }
+        } else {
+            ""
+        };
         first = false;
 
         let content = format!("{}{}{}{}{}", prefix, gap, bind_prefix, name, bind_suffix);
@@ -321,63 +348,21 @@ fn emit_mapped_v_for_iterable<'alloc>(
 }
 
 /// Emit the closing of a v-for map expression.
-pub fn emit_v_for_close(el: &ElementNode, _source: &str, out: &mut CodeGenOutput<'_>) {
+///
+/// Normal mode: `) })}` — closes statement-body, map call, JSX expression.
+/// Bare mode (lifted chain branch): `) })` — no outer JSX `}` (parent ternary owns braces).
+pub fn emit_v_for_close(el: &ElementNode, _source: &str, out: &mut CodeGenOutput<'_>, bare: bool) {
     let el_end = el
         .tag_close
         .as_ref()
         .map(|tc| tc.end)
         .unwrap_or(el.tag_open.end);
 
-    out.prepend_alloc(el_end, "))}");
-}
-
-/// Emit v-if as a ternary expression (for use inside v-for expression body where IIFE is invalid).
-///
-/// `v-if="cond"` → `cond ?\n`
-///
-/// When v-if and v-for coexist on the same element, the v-for emits `items.map((item) => (...))`.
-/// An IIFE `{()=>{if(cond){...}}}` inside the parenthesized expression body is parsed as an
-/// object literal → invalid JSX. A ternary is valid in that context.
-pub fn emit_v_if_ternary_open<'alloc>(
-    el: &ElementNode,
-    oxc_el: Option<&OxcParsedElement<'alloc>>,
-    source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
-    resolver: &BindingResolver<'alloc>,
-) {
-    let condition = match &el.v_condition {
-        Some(c) => c,
-        None => return,
-    };
-
-    if condition.kind != ElementNodeConditionKind::If {
-        return;
+    if bare {
+        out.prepend_alloc(el_end, ") })");
+    } else {
+        out.prepend_alloc(el_end, ") })}");
     }
-
-    if let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) {
-        emit_mapped_condition_expr(
-            out,
-            el.tag_open.start,
-            "",
-            " ?\n",
-            vs,
-            ve,
-            source,
-            oxc_el,
-            resolver,
-        );
-    }
-}
-
-/// Close the v-if ternary: `\n: null`
-pub fn emit_v_if_ternary_close(el: &ElementNode, out: &mut CodeGenOutput<'_>) {
-    let el_end = el
-        .tag_close
-        .as_ref()
-        .map(|tc| tc.end)
-        .unwrap_or(el.tag_open.end);
-
-    out.prepend_alloc(el_end, "\n: null");
 }
 
 /// Emit v-show as a style attribute.
@@ -498,7 +483,7 @@ pub fn emit_v_show<'alloc>(
 /// ordering — `apply_to` merges regular prepends before mapped prepends at the
 /// same position, which would break the interleaved order.
 #[allow(clippy::too_many_arguments)]
-fn emit_mapped_condition_expr<'alloc>(
+pub fn emit_mapped_condition_expr<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     target_pos: u32,
     prefix: &str,

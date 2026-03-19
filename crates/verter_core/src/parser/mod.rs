@@ -164,6 +164,7 @@ impl Syntax {
                     start: 0,
                     end: 0,
                     children: SmallVec::new(),
+                    v_if_chains: SmallVec::new(),
                 }),
             };
             Some(TemplateAstBuilder::new(synthetic_root))
@@ -393,10 +394,10 @@ impl<'alloc> Syntax {
 
             // Leafs
             TokenizerEvent::Text { start, end } => {
-                self.handle_text_leaf(*start, *end, false);
+                self.handle_text_leaf(*start, *end, false, ctx);
             }
             TokenizerEvent::TextEntity { start, end } => {
-                self.handle_text_leaf(*start, *end, true);
+                self.handle_text_leaf(*start, *end, true, ctx);
             }
             TokenizerEvent::Comment {
                 start,
@@ -869,6 +870,7 @@ impl Syntax {
                         start: se.tag_open_end,
                         end: se.tag_open_end,
                         children: SmallVec::new(),
+                        v_if_chains: SmallVec::new(),
                     }),
                 };
                 self.ast_builder = Some(TemplateAstBuilder::new(root));
@@ -1362,9 +1364,30 @@ impl Syntax {
 // leaf handling
 
 impl Syntax {
-    fn handle_text_leaf(&mut self, start: u32, end: u32, is_entity: bool) {
+    fn handle_text_leaf(
+        &mut self,
+        start: u32,
+        end: u32,
+        is_entity: bool,
+        ctx: &crate::diagnostics::SyntaxPluginContext<'_>,
+    ) {
         if let Some(b) = self.ast_builder.as_mut() {
-            b.add_text(start, end, is_entity);
+            let is_whitespace_only = if !is_entity {
+                ctx.input[start as usize..end as usize]
+                    .chars()
+                    .all(|c| c.is_whitespace())
+            } else {
+                // For entity text, decode and check if whitespace.
+                // Common whitespace entities: &#32;, &#10;, &nbsp;, &#160;
+                let raw = &ctx.input[start as usize..end as usize];
+                let mut decoded = String::new();
+                crate::template::code_gen::shared::helpers::decode_html_entities_into(
+                    &mut decoded,
+                    raw,
+                );
+                decoded.chars().all(|c| c.is_whitespace())
+            };
+            b.add_text(start, end, is_entity, is_whitespace_only);
         }
     }
 

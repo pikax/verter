@@ -17,6 +17,7 @@ pub fn make_root() -> RootNodeTemplate {
             start: 0,
             end: 0,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     }
 }

@@ -715,6 +715,7 @@ fn empty_template_returns_null() {
             start: 10,
             end: 10,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = make_empty_ast(&root);
@@ -754,6 +755,7 @@ fn single_static_element() {
             start: 10,
             end: 26,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = make_empty_ast(&root);
@@ -777,6 +779,7 @@ fn single_static_element() {
             start: 15,
             end: 20,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
         v_condition: None,
         v_for: None,
@@ -793,6 +796,7 @@ fn single_static_element() {
         start: 15,
         end: 20,
         is_entity: false,
+        is_whitespace_only: false,
     };
 
     // Simulate the DFS walk
@@ -844,6 +848,7 @@ fn inline_mode_uses_arrow_function() {
             start: 10,
             end: 21,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = make_empty_ast(&root);
@@ -867,6 +872,7 @@ fn inline_mode_uses_arrow_function() {
             start: 15,
             end: 15,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
         v_condition: None,
         v_for: None,
@@ -914,6 +920,7 @@ fn element_with_interpolation() {
             start: 10,
             end: 29,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
     );
     let ast = make_empty_ast(&root);
@@ -937,6 +944,7 @@ fn element_with_interpolation() {
             start: 15,
             end: 23,
             children: SmallVec::new(),
+            v_if_chains: SmallVec::new(),
         }),
         v_condition: None,
         v_for: None,
