@@ -19,6 +19,7 @@ verter_host = { path = "../verter_host" }
 verter_vfs = { path = "../verter_vfs" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_analysis = { path = "../verter_analysis" }
+verter_span = { path = "../verter_span" }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }

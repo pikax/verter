@@ -3454,6 +3454,7 @@ dependencies = [
  "verter_core",
  "verter_diagnostics",
  "verter_host",
+ "verter_span",
  "verter_vfs",
  "walkdir",
 ]
