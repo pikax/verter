@@ -1772,4 +1772,62 @@ export default defineConfig(({ mode }) => ({
         let config: verter_diagnostics::VerterProjectConfig = serde_json::from_str(json).unwrap();
         assert!(config.ssr.unwrap().enabled.unwrap());
     }
+
+    #[test]
+    fn find_project_normalizes_input_path() {
+        // Simulate a Windows root stored with lowercase (production canonical form)
+        let root = "c:/users/dev/project";
+        let registry = ProjectRegistry::from_canonical_roots(&[root]);
+
+        // Normalized query matches
+        assert!(
+            registry
+                .find_project("c:/users/dev/project/src/App.vue")
+                .is_some(),
+            "find_project should match normalized path"
+        );
+
+        // Uppercase drive letter in query — the actual bug on Windows
+        assert!(
+            registry
+                .find_project("C:/users/dev/project/src/App.vue")
+                .is_some(),
+            "find_project should match uppercase drive letter query"
+        );
+
+        // Backslash query (Windows raw path)
+        assert!(
+            registry
+                .find_project("c:\\users\\dev\\project\\src\\App.vue")
+                .is_some(),
+            "find_project should match backslash paths"
+        );
+
+        // Negative: unrelated path must NOT match
+        assert!(
+            registry.find_project("d:/other/src/App.vue").is_none(),
+            "find_project should not match unrelated paths"
+        );
+    }
+
+    #[test]
+    fn from_canonical_roots_normalizes_stored_roots() {
+        // Feed uppercase Windows drive — simulates what std::fs::canonicalize returns on Windows
+        let registry = ProjectRegistry::from_canonical_roots(&["C:/Users/dev/project"]);
+        let workspace_project = registry.projects.last().unwrap();
+
+        // Positive: stored root should be lowercase-drive canonical form
+        assert_eq!(
+            workspace_project.root, "c:/users/dev/project",
+            "from_canonical_roots should store normalized (lowercase drive) roots"
+        );
+
+        // Also test Linux-style path passes through unchanged
+        let registry2 = ProjectRegistry::from_canonical_roots(&["/home/user/project"]);
+        let ws2 = registry2.projects.last().unwrap();
+        assert_eq!(
+            ws2.root, "/home/user/project",
+            "Linux-style root should pass through unchanged"
+        );
+    }
 }

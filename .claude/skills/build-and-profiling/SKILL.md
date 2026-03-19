@@ -49,9 +49,23 @@ playground E2E tests
 cargo build --release --package verter_napi && rm -f packages/native/dist/verter-native.win32-x64-msvc.node && cp target/release/verter_napi.dll packages/native/dist/verter-native.win32-x64-msvc.node
 ```
 
-## Profiling with MCP
+## Profiling with Hotpath
 
-Use the real-world profiling example with hotpath instrumentation. Two pipeline modes are available:
+The `hotpath` feature flag enables `#[hotpath::measure]` annotations on key functions for timing/allocation profiling. It propagates across 7 crates:
+
+```
+verter_bench --features hotpath
+  ├── verter_core/hotpath         (compile_inner, generate_ide_script, generate_ide_template)
+  ├── verter_host/hotpath         (upsert_via_scheduler, ensure_compiled, compile_entry, execute_source)
+  │   ├── verter_analysis/hotpath (build_script_analysis_with_scope)
+  │   ├── verter_scheduler/hotpath (execute_source_stage)
+  │   └── verter_vfs/hotpath      (read_file, resolve_import)
+  └── verter_diagnostics/hotpath  (lint_inner)
+```
+
+### Core-only profiling
+
+Two pipeline modes for compiler-level profiling:
 
 ```bash
 # AST-only pipeline (tokenize → parse → OXC expressions):
@@ -63,11 +77,19 @@ pnpm run profile:hotpath:full          # Timing hotspots
 pnpm run profile:hotpath:full:alloc    # Timing + allocation hotspots
 ```
 
-The full pipeline exercises all instrumented functions across the compilation flow:
-compile, generate_script, process_script_setup, process_macro_item, generate_style,
-process_style, apply_scoped_normalized, parse_template_expressions, generate_template,
-walk_template, apply_to, batch_overwrite, batch_prepend_left_static, build_string,
-generate_map, generate_map_json, alloc_node, attach_to_parent.
+### Host-level profiling (`profile_host` example)
+
+Exercises the full host pipeline (upsert → bundler compile → IDE compile → lint) across real project directories from the `verter-test-repos` checkout:
+
+```bash
+# Without hotpath (wall-clock timing only):
+cargo run --package verter_bench --example profile_host
+
+# With hotpath instrumentation (per-function timing):
+cargo run --package verter_bench --example profile_host --features hotpath
+```
+
+Requires `VERTER_TEST_REPOS` env var or a sibling `verter-test-repos` directory. Processes all `.vue` files in each project subdirectory.
 
 ## Analysis MCP Server (`verter_mcp`)
 

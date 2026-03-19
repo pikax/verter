@@ -35,7 +35,7 @@ All Rust crates are in the `crates/` directory:
 | `verter_ffi` | FFI types -- shared serializable structs for NAPI and WASM boundaries |
 | `verter_napi` | NAPI-RS bindings -- Node.js native addon (cdylib) |
 | `verter_wasm` | wasm-bindgen bindings -- browser WASM module (cdylib) |
-| `verter_bench` | Benchmarks -- comparison examples against Vue's official compiler |
+| `verter_bench` | Benchmarks and profiling -- comparison examples, host-level profiling across real projects |
 
 ### Dependency Graph
 
@@ -60,7 +60,7 @@ verter_core (no deps on other verter crates)
     |       |
     |       +-- verter_wasm (depends on verter_ffi + verter_core)
     |
-    +-- verter_bench (depends on verter_core)
+    +-- verter_bench (depends on verter_core + verter_host + verter_vfs + verter_diagnostics + verter_analysis)
 ```
 
 ## Building
