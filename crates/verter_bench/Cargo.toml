@@ -10,11 +10,15 @@ publish = false
 description = "Benchmarks and examples for verter_core"
 
 [features]
-hotpath = ["verter_core/hotpath", "dep:hotpath", "hotpath/hotpath"]
+hotpath = ["verter_core/hotpath", "verter_host/hotpath", "verter_diagnostics/hotpath", "dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["verter_core/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
 verter_core = { path = "../verter_core", features = ["bench"] }
+verter_host = { path = "../verter_host" }
+verter_vfs = { path = "../verter_vfs" }
+verter_diagnostics = { path = "../verter_diagnostics" }
+verter_analysis = { path = "../verter_analysis" }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
@@ -97,3 +101,7 @@ path = "examples/new_impl_check.rs"
 [[example]]
 name = "vapor_check"
 path = "examples/vapor_check.rs"
+
+[[example]]
+name = "profile_host"
+path = "examples/profile_host.rs"

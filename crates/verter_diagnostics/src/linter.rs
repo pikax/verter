@@ -74,6 +74,7 @@ impl Linter {
     }
 
     /// Full lint pipeline.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn lint_inner(
         &self,
         script: Option<&ScriptAnalysisSnapshot>,

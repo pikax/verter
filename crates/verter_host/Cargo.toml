@@ -13,11 +13,13 @@ publish = false
 default = ["scheduler"]
 host_metrics = []
 scheduler = ["verter_scheduler", "dashmap"]
+hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_core/hotpath", "verter_analysis/hotpath", "verter_scheduler?/hotpath", "verter_vfs/hotpath"]
 
 [dependencies]
 verter_core = { path = "../verter_core" }
 verter_analysis = { path = "../verter_analysis" }
 verter_span = { path = "../verter_span" }
+hotpath = { version = "0.13", optional = true }
 oxc_allocator = { workspace = true }
 oxc_span = { workspace = true }
 rustc-hash = { workspace = true }

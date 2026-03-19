@@ -131,6 +131,7 @@ impl Engine {
     /// When the project resolver succeeds for a bare import, the result is
     /// cached in `lazily_resolved_deps` so the forward/reverse dep graph
     /// includes it.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn resolve_import(
         &self,
         reader: &dyn crate::traits::WorkspaceAccess,

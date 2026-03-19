@@ -282,6 +282,7 @@ pub struct IdeScriptGenResult<'alloc> {
 ///
 /// Returns the generated code, source map, and bindings for template generation.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn generate_ide_script<'alloc>(
     script: Option<&RootNodeScript>,
     script_setup: Option<&RootNodeScript>,

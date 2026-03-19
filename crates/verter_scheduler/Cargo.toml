@@ -9,8 +9,12 @@ authors.workspace = true
 description = "Async file scheduler for Verter — per-file staging, priority queue, declarative blockers"
 publish = false
 
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
 [dependencies]
 arc-swap = "1"
+hotpath = { version = "0.13", optional = true }
 parking_lot = "0.12"
 rustc-hash = { workspace = true }
 dashmap = "6"

@@ -60,6 +60,7 @@ impl VerterHost {
     /// Source+Analysis to commit, reads back the result, populates compile_cache
     /// and (transitionally) the `files` map.
     #[cfg(feature = "scheduler")]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn upsert_via_scheduler(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::CompletionState;

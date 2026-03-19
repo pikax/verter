@@ -82,6 +82,7 @@ impl FilesystemWorkspace {
 // ── WorkspaceAccess implementation ──
 
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // 1. Overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
@@ -145,6 +146,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         }
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn resolve_import(
         &self,
         importer_id: &str,

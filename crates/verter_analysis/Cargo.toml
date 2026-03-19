@@ -9,8 +9,12 @@ authors.workspace = true
 description = "Static analysis for Vue SFCs — imports, exports, bindings, type resolution"
 publish = false
 
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
 [dependencies]
 verter_span = { path = "../verter_span" }
+hotpath = { version = "0.13", optional = true }
 verter_vfs = { path = "../verter_vfs" }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }

@@ -79,6 +79,7 @@ pub fn build_script_analysis(
 ///
 /// When `AnalysisScope::FUNC_RETURNS` is set, also walks exported function bodies
 /// to extract return reactivity and composable info for non-SFC file analysis.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn build_script_analysis_with_scope(
     content: &str,
     source_type: SourceType,

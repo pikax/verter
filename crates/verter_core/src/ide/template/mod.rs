@@ -95,6 +95,7 @@ struct IdeTemplateCtx<'a, 'alloc> {
 ///
 /// Walks the AST and produces JSX output by overwriting Vue-specific syntax
 /// with JSX equivalents. Uses `CodeGenOutput` for deferred batch operations.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn generate_ide_template<'alloc>(
     ast: &crate::ast::types::TemplateAst,
     oxc_ast: &OxcParsedAst<'alloc>,

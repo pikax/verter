@@ -8,8 +8,12 @@ homepage.workspace = true
 authors.workspace = true
 description = "Vue SFC diagnostic engine — lint rules and DiagnosticSet"
 
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
 [dependencies]
 verter_span = { path = "../verter_span" }
+hotpath = { version = "0.13", optional = true }
 verter_analysis = { path = "../verter_analysis" }
 verter_vfs = { path = "../verter_vfs" }
 rustc-hash.workspace = true

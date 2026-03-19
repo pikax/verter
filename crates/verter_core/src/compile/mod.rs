@@ -458,6 +458,7 @@ pub fn compile_from_parsed(
 
 /// Internal compilation driver. Borrows a pre-parsed [`ParsedSfc`] — no cloning
 /// of template AST, script nodes, or style nodes.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn compile_inner(
     input: &str,
     parsed: &ParsedSfc,

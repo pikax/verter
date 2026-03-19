@@ -3423,6 +3423,7 @@ version = "0.0.1-beta.1"
 dependencies = [
  "bitflags",
  "criterion",
+ "hotpath",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",
@@ -3449,7 +3450,11 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "verter_analysis",
  "verter_core",
+ "verter_diagnostics",
+ "verter_host",
+ "verter_vfs",
  "walkdir",
 ]
 
@@ -3488,6 +3493,7 @@ dependencies = [
 name = "verter_diagnostics"
 version = "0.0.1-beta.1"
 dependencies = [
+ "hotpath",
  "rustc-hash 2.1.1",
  "serde",
  "serde_json",
@@ -3513,6 +3519,7 @@ version = "0.0.1-beta.1"
 dependencies = [
  "criterion",
  "dashmap 6.1.0",
+ "hotpath",
  "oxc_allocator",
  "oxc_span",
  "parking_lot",
@@ -3539,6 +3546,7 @@ dependencies = [
  "dashmap 6.1.0",
  "futures-util",
  "glob",
+ "hotpath",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",
@@ -3615,6 +3623,7 @@ dependencies = [
  "arc-swap",
  "crossbeam-channel",
  "dashmap 6.1.0",
+ "hotpath",
  "parking_lot",
  "rayon",
  "rustc-hash 2.1.1",
@@ -3653,6 +3662,7 @@ name = "verter_vfs"
 version = "0.0.1-beta.1"
 dependencies = [
  "glob",
+ "hotpath",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",

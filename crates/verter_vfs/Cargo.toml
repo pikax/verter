@@ -9,8 +9,12 @@ authors.workspace = true
 description = "Virtual filesystem layer for Verter — file access, resolution, project ownership"
 publish = false
 
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
 [dependencies]
 rustc-hash = { workspace = true }
+hotpath = { version = "0.13", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 glob = "0.3"

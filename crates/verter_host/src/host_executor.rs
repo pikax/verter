@@ -143,6 +143,7 @@ impl HostStageExecutor {
 
 #[cfg(feature = "scheduler")]
 impl StageExecutor for HostStageExecutor {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn execute_source(
         &self,
         canonical_id: &str,

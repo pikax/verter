@@ -368,6 +368,7 @@ impl VerterHost {
     ///
     /// Returns `Ok(())` on success (cache hit or successful compilation).
     /// Returns `Err(HostError)` if the file is missing or compilation fails.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn ensure_compiled(
         &self,
         canonical_id: &str,
@@ -1137,6 +1138,7 @@ impl VerterHost {
     }
 
     #[allow(clippy::type_complexity)]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn compile_entry(
         &self,
         snapshot: &CompileInput,

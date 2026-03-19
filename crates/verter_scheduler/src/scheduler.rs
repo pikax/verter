@@ -1148,6 +1148,7 @@ impl Scheduler {
     }
 
     /// Execute the Source stage: load content, run executor, commit.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn execute_source_stage(
         node: &FileNode,
         generation: u64,
