@@ -86,6 +86,7 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         required_root_dep: bool,
@@ -97,6 +98,7 @@ impl VerterHost {
         else {
             return if required_root_dep { Err(()) } else { Ok(None) };
         };
+        tracked_deps.insert(dep_canonical.clone());
         let cache_key = (dep_canonical.clone(), type_name.to_string());
         if let Some(cached) = cache.get(&cache_key) {
             return Ok(cached.clone());
@@ -136,6 +138,7 @@ impl VerterHost {
                 &dep_canonical,
                 &target.source,
                 &target.imported_name,
+                tracked_deps,
                 cache,
                 visiting,
                 false,
@@ -154,6 +157,7 @@ impl VerterHost {
                 &dep_canonical,
                 &binding.source,
                 &binding.imported_name,
+                tracked_deps,
                 cache,
                 visiting,
                 false,
@@ -183,6 +187,7 @@ impl VerterHost {
                     &dep_canonical,
                     source,
                     type_name,
+                    tracked_deps,
                     cache,
                     visiting,
                     false,
@@ -251,9 +256,14 @@ impl VerterHost {
         macro_type_deps: &[verter_analysis::MacroTypeDep],
         script_imports: &[verter_analysis::AnalyzedImport],
         profile_hash: Option<u64>,
-    ) -> (Option<ResolvedExternalTypes>, Vec<HostDiagnostic>) {
+    ) -> (
+        Option<ResolvedExternalTypes>,
+        Vec<HostDiagnostic>,
+        std::collections::BTreeSet<String>,
+    ) {
         let mut resolved = rustc_hash::FxHashMap::default();
         let mut missing = Vec::new();
+        let mut tracked_deps = std::collections::BTreeSet::new();
         let mut cache = rustc_hash::FxHashMap::default();
         let mut visiting = rustc_hash::FxHashSet::default();
 
@@ -262,6 +272,7 @@ impl VerterHost {
                 owner_canonical,
                 &dep.import_source,
                 &dep.type_name,
+                &mut tracked_deps,
                 &mut cache,
                 &mut visiting,
                 true,
@@ -297,6 +308,7 @@ impl VerterHost {
                 Some(resolved)
             },
             missing,
+            tracked_deps,
         )
     }
 }
@@ -1038,12 +1050,14 @@ impl VerterHost {
             .unwrap_or(&canonical)
             .trim_end_matches(".vue")
             .to_string();
-        let (external_types, _) = self.collect_external_types_from_loaded_files(
-            &canonical,
-            &macro_type_deps,
-            &script_imports,
-            profile_hash,
-        );
+        let (external_types, _, transitive_macro_type_deps) = self
+            .collect_external_types_from_loaded_files(
+                &canonical,
+                &macro_type_deps,
+                &script_imports,
+                profile_hash,
+            );
+        self.sync_transitive_macro_type_dependencies(&canonical, &transitive_macro_type_deps);
         let tsc_mode = match mode {
             PublicApiMode::Public => verter_core::tsc::TscMode::Public,
             PublicApiMode::Testing => verter_core::tsc::TscMode::Testing,
@@ -1223,13 +1237,17 @@ impl VerterHost {
         let mut unresolved_macro_type_diags = Vec::new();
         let profile_hash = compile_profile_hash(profile);
 
-        let (external_types, missing_macro_type_diags) = self
+        let (external_types, missing_macro_type_diags, transitive_macro_type_deps) = self
             .collect_external_types_from_loaded_files(
                 &snapshot.canonical_id,
                 &snapshot.macro_type_deps,
                 &snapshot.script_imports,
                 Some(profile_hash),
             );
+        self.sync_transitive_macro_type_dependencies(
+            &snapshot.canonical_id,
+            &transitive_macro_type_deps,
+        );
         unresolved_macro_type_diags.extend(missing_macro_type_diags);
 
         if !unresolved_macro_type_diags.is_empty() {

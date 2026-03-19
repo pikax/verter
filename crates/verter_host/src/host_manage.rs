@@ -12,6 +12,117 @@ use crate::types::*;
 use crate::VerterHost;
 
 impl VerterHost {
+    fn parse_dependency_set_for_file(
+        &self,
+        canonical_id: &str,
+    ) -> std::collections::BTreeSet<String> {
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+
+            let Some(source) = self.scheduler.try_get_source(canonical_id) else {
+                return std::collections::BTreeSet::new();
+            };
+            let Some(hd) = source.downcast_data::<HostSourceData>() else {
+                return std::collections::BTreeSet::new();
+            };
+
+            return hd
+                .parse
+                .external_requests
+                .iter()
+                .map(|r| r.resolved_canonical_id.clone())
+                .chain(
+                    hd.parse
+                        .script_analysis
+                        .imports
+                        .iter()
+                        .filter(|imp| imp.source.starts_with('.'))
+                        .map(|imp| crate::id::resolve_external(canonical_id, &imp.source)),
+                )
+                .collect();
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let Some(entry) = files.get(canonical_id) else {
+                return std::collections::BTreeSet::new();
+            };
+
+            entry
+                .external_requests
+                .iter()
+                .map(|r| r.resolved_canonical_id.clone())
+                .chain(
+                    entry
+                        .script_analysis
+                        .imports
+                        .iter()
+                        .filter(|imp| imp.source.starts_with('.'))
+                        .map(|imp| crate::id::resolve_external(canonical_id, &imp.source)),
+                )
+                .collect()
+        }
+    }
+
+    fn resolved_dependency_targets(
+        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+    ) -> std::collections::BTreeSet<String> {
+        dep_resolutions
+            .values()
+            .flat_map(|res| {
+                res.resolved_canonical_id
+                    .iter()
+                    .cloned()
+                    .chain(res.possible_canonical_ids.iter().cloned())
+            })
+            .collect()
+    }
+
+    pub(crate) fn sync_transitive_macro_type_dependencies(
+        &self,
+        canonical_id: &str,
+        transitive_deps: &std::collections::BTreeSet<String>,
+    ) {
+        let mut new_deps = self.parse_dependency_set_for_file(canonical_id);
+
+        #[cfg(feature = "scheduler")]
+        let old_deps = {
+            let mut cc_ref = self
+                .compile_cache
+                .entry(canonical_id.to_string())
+                .or_default();
+            let cc = cc_ref.value_mut();
+            new_deps.extend(Self::resolved_dependency_targets(
+                &cc.dependency_resolutions,
+            ));
+            new_deps.extend(transitive_deps.iter().cloned());
+            let old_deps = cc.dependencies.clone();
+            cc.dependencies = new_deps.clone();
+            old_deps
+        };
+
+        #[cfg(not(feature = "scheduler"))]
+        let old_deps = {
+            let mut files = write_lock(&self.files);
+            let Some(entry) = files.get_mut(canonical_id) else {
+                return;
+            };
+            new_deps.extend(Self::resolved_dependency_targets(
+                &entry.dependency_resolutions,
+            ));
+            new_deps.extend(transitive_deps.iter().cloned());
+            let old_deps = entry.dependencies.clone();
+            entry.dependencies = new_deps.clone();
+            old_deps
+        };
+
+        if old_deps != new_deps {
+            self.update_reverse_deps(canonical_id, &old_deps, &new_deps);
+        }
+    }
+
     /// Returns the original source for a file by canonical ID or alias.
     /// Returns `None` when the file does not exist in the host.
     pub fn get_source(&self, canonical_or_alias: &str) -> Option<std::sync::Arc<str>> {
@@ -233,12 +344,14 @@ impl VerterHost {
         }
 
         let mut enrichments = Vec::new();
+        let mut tracked_deps = std::collections::BTreeSet::new();
 
         for dep in &macro_type_deps {
             let resolved = match self.resolve_external_type_from_loaded_files(
                 canonical,
                 &dep.import_source,
                 &dep.type_name,
+                &mut tracked_deps,
                 &mut cache,
                 &mut visiting,
                 false,
@@ -392,6 +505,7 @@ impl VerterHost {
                             canonical,
                             &dep.import_source,
                             trimmed,
+                            &mut tracked_deps,
                             &mut cache,
                             &mut visiting,
                             false,
@@ -1637,6 +1751,7 @@ impl VerterHost {
         resolutions: Vec<DependencyResolution>,
     ) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let parse_deps = self.parse_dependency_set_for_file(&canonical);
 
         // Build VFS exact resolutions for ALL relevant (phase, kind) contexts.
         let vfs_resolutions: Vec<verter_vfs::ExactResolution> = resolutions
@@ -1672,8 +1787,7 @@ impl VerterHost {
             })
             .collect();
 
-        // Normalize resolutions and derive flat dependency set.
-        let mut new_deps = std::collections::BTreeSet::new();
+        // Normalize resolutions and persist direct import resolutions.
         let mut dep_resolutions = rustc_hash::FxHashMap::default();
         for mut res in resolutions {
             if let Some(ref mut id) = res.resolved_canonical_id {
@@ -1688,40 +1802,52 @@ impl VerterHost {
                     *candidate = norm.into_owned();
                 }
             }
-            if let Some(ref canonical_id) = res.resolved_canonical_id {
-                new_deps.insert(canonical_id.clone());
-            } else {
-                for candidate in &res.possible_canonical_ids {
-                    new_deps.insert(candidate.clone());
-                }
-            }
             dep_resolutions.insert(res.specifier.clone(), res);
         }
 
-        // Read old deps, write new deps. compile_cache is primary on scheduler path.
+        // Preserve already-discovered transitive macro-type deps; compilation
+        // refreshes them, but direct import updates should not discard them.
         #[cfg(feature = "scheduler")]
-        let old_deps = {
+        let old_transitive_deps = {
             let mut cc_ref = self.compile_cache.entry(canonical.clone()).or_default();
             let cc = cc_ref.value_mut();
-            let old = cc.dependencies.clone();
-            cc.dependencies = new_deps.clone();
+            let old_deps = cc.dependencies.clone();
+            let old_direct_deps = {
+                let mut deps = parse_deps.clone();
+                deps.extend(Self::resolved_dependency_targets(
+                    &cc.dependency_resolutions,
+                ));
+                deps
+            };
             cc.dependency_resolutions = dep_resolutions.clone();
-            old
+            old_deps
+                .difference(&old_direct_deps)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
         };
         #[cfg(not(feature = "scheduler"))]
-        let old_deps = {
+        let old_transitive_deps = {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
-                let old = entry.dependencies.clone();
-                entry.dependencies = new_deps.clone();
+                let old_deps = entry.dependencies.clone();
+                let old_direct_deps = {
+                    let mut deps = parse_deps.clone();
+                    deps.extend(Self::resolved_dependency_targets(
+                        &entry.dependency_resolutions,
+                    ));
+                    deps
+                };
                 entry.dependency_resolutions = dep_resolutions;
-                old
+                old_deps
+                    .difference(&old_direct_deps)
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
             } else {
                 std::collections::BTreeSet::new()
             }
         };
 
-        self.update_reverse_deps(&canonical, &old_deps, &new_deps);
+        self.sync_transitive_macro_type_dependencies(&canonical, &old_transitive_deps);
 
         // Sync exact resolutions to workspace.
         self.ws().set_exact_resolutions(&canonical, vfs_resolutions);

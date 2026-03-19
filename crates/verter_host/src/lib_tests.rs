@@ -1633,6 +1633,69 @@ fn tier3_stores_resolved_type_hashes() {
     }
 }
 
+#[test]
+fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/types.ts".to_string(),
+        Arc::from("import type { Nested } from './nested'\nexport interface Props { msg: Nested }"),
+    );
+    ws.inject_file(
+        "/src/nested.ts".to_string(),
+        Arc::from("export type Nested = string"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws);
+
+    let _ = upsert_vue(
+        &host,
+        "/src/App.vue",
+        "<script setup lang=\"ts\">\nimport type { Props } from './types'\ndefineProps<Props>()\n</script>\n<template><div/></template>",
+    );
+
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/App.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .expect("initial compile should succeed with workspace-backed type deps");
+
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/nested.ts".to_string(),
+            source: Arc::from("export type Nested = number"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    #[cfg(feature = "scheduler")]
+    {
+        let cc = host
+            .compile_cache
+            .get("/src/App.vue")
+            .expect("compile_cache entry exists");
+        assert!(
+            cc.compile_slots.is_empty(),
+            "compile slots should be cleared when a transitive macro type dep changes"
+        );
+    }
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/App.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "compile slots should be cleared when a transitive macro type dep changes"
+        );
+    }
+}
+
 /// @ai-generated - Tier 3: unrelated type changed in same file → NO invalidation
 #[test]
 fn tier3_unrelated_type_change_no_invalidation() {
