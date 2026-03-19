@@ -2190,3 +2190,86 @@ fn workspace_resolution_does_not_override_exact_resolution() {
         "exact resolution should take priority over workspace resolution"
     );
 }
+
+/// Macro type deps (defineProps<ExternalType>) should resolve packages with
+/// types-only exports (e.g., `"exports": { ".": { "types": "..." } }`).
+/// This requires using TypeImport (not EsmImport) so the "types" condition
+/// is included in package resolution.
+#[test]
+fn macro_type_dep_resolves_types_only_package_exports() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/motion/package.json".to_string(),
+        Arc::from(r#"{ "name": "motion", "exports": { ".": { "types": "./dist/index.d.ts" } } }"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/motion/dist/index.d.ts".to_string(),
+        Arc::from("export interface MotionProps { duration: number }"),
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let popup_source = "<script setup lang=\"ts\">\nimport type { MotionProps } from 'motion'\nconst props = defineProps<MotionProps>()\n</script>\n<template><div>{{ props.duration }}</div></template>";
+    upsert_vue(&host, "/workspace/src/Popup.vue", popup_source);
+
+    let analysis = host
+        .get_analysis("/workspace/src/Popup.vue")
+        .expect("Popup.vue should have analysis");
+
+    // Verify macro type deps are detected
+    assert!(
+        !analysis.macro_type_deps.is_empty(),
+        "Popup.vue should have macro type deps for MotionProps"
+    );
+    assert_eq!(
+        analysis.macro_type_deps[0].import_source, "motion",
+        "macro type dep should reference 'motion' package"
+    );
+
+    // Verify the resolution kind matters — EsmImport should NOT resolve types-only
+    let esm_resolve = host.resolve_loaded_dependency_canonical(
+        "/workspace/src/Popup.vue",
+        "motion",
+        verter_vfs::ResolveRequestKind::EsmImport,
+    );
+    assert!(
+        esm_resolve.is_none(),
+        "EsmImport should NOT resolve types-only exports, got: {esm_resolve:?}"
+    );
+    // But TypeImport should resolve
+    let type_resolve = host.resolve_loaded_dependency_canonical(
+        "/workspace/src/Popup.vue",
+        "motion",
+        verter_vfs::ResolveRequestKind::TypeImport,
+    );
+    assert!(
+        type_resolve.is_some(),
+        "TypeImport should resolve types-only exports"
+    );
+
+    // Re-upsert to trigger compilation with type resolution
+    let compile_result = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/Popup.vue".to_string(),
+            source: Arc::from(popup_source),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .expect("upsert should succeed");
+    let diags = &compile_result.diagnostics.diagnostics;
+    // Positive: should NOT have HOST_MISSING_MACRO_TYPE_DEP
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "macro type dep 'motion' with types-only exports should resolve, got: {diags:?}"
+    );
+}

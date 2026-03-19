@@ -265,7 +265,7 @@ impl VerterHost {
                 &mut cache,
                 &mut visiting,
                 true,
-                verter_vfs::ResolveRequestKind::EsmImport,
+                verter_vfs::ResolveRequestKind::TypeImport,
                 profile_hash,
             ) {
                 Ok(Some(elements)) => {

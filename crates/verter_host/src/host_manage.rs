@@ -1246,12 +1246,18 @@ impl VerterHost {
             if let Some(snap) = self.scheduler.try_get_source(resolved_canonical_id) {
                 return Some(snap.source.clone());
             }
-            // Try VFS resolution fallback
+            // Try VFS resolution fallback (handles aliases like @/... and bare modules)
             let dep_id = self.resolve_loaded_dependency_canonical(
                 owner_canonical,
                 specifier,
                 verter_vfs::ResolveRequestKind::EsmImport,
             );
+            if let Some(ref id) = dep_id {
+                // File resolved but not yet in scheduler — try loading from disk
+                if self.scheduler.try_get_source(id).is_none() {
+                    self.ensure_loaded(id);
+                }
+            }
             dep_id.and_then(|id| self.scheduler.try_get_source(&id).map(|s| s.source.clone()))
         }
 

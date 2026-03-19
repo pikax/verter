@@ -1496,3 +1496,56 @@ fn context_aware_require_picks_cjs() {
         "RequireCall should pick CJS entry via require condition"
     );
 }
+
+/// TypeImport + CodegenBlocker → resolves "types" condition in package exports.
+/// This is critical for macro type deps (defineProps<ExternalType>()) where the
+/// import source is a bare module with `exports: { ".": { "types": "..." } }`.
+#[test]
+fn type_import_codegen_blocker_resolves_types_condition() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&["/workspace/node_modules/motion/dist/index.d.ts"]);
+    reader.add_file(
+        "/workspace/node_modules/motion/package.json",
+        r#"{ "name": "motion", "exports": { ".": { "types": "./dist/index.d.ts" } } }"#,
+    );
+
+    // Positive: TypeImport should resolve via "types" condition
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/src/App.vue".to_string(),
+            specifier: "motion".to_string(),
+            kind: ResolveRequestKind::TypeImport,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+    assert!(
+        result.is_some(),
+        "TypeImport+CodegenBlocker should resolve 'types' export condition"
+    );
+    assert_eq!(
+        result.unwrap().source_id,
+        "/workspace/node_modules/motion/dist/index.d.ts",
+        "TypeImport should resolve to the types entry point"
+    );
+
+    // Negative: EsmImport+CodegenBlocker should NOT resolve types-only exports
+    let esm_result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/src/App.vue".to_string(),
+            specifier: "motion".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+    assert!(
+        esm_result.is_none(),
+        "EsmImport+CodegenBlocker should NOT resolve types-only exports (no 'import'/'default' condition)"
+    );
+}
