@@ -405,4 +405,34 @@ mod tests {
             path_to_host_id(path).expect("path conversion should not require the file to exist");
         assert_eq!(id, "C:/Users/dev/project/App.vue");
     }
+
+    #[test]
+    fn file_discovery_walks_excluded_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Create source files (should be included after fix)
+        std::fs::create_dir_all(base.join("src/components")).unwrap();
+        std::fs::write(base.join("src/App.vue"), "<template/>").unwrap();
+        std::fs::write(base.join("src/components/Btn.vue"), "<template/>").unwrap();
+
+        // Create files in directories that should be excluded after fix
+        std::fs::create_dir_all(base.join("node_modules/foo")).unwrap();
+        std::fs::write(base.join("node_modules/foo/Bar.vue"), "<template/>").unwrap();
+        std::fs::create_dir_all(base.join(".nuxt/generated")).unwrap();
+        std::fs::write(base.join(".nuxt/generated/X.vue"), "<template/>").unwrap();
+        std::fs::create_dir_all(base.join("dist/output")).unwrap();
+        std::fs::write(base.join("dist/output/Y.vue"), "<template/>").unwrap();
+
+        let files = load_project_vue_files_absolute(base);
+
+        // DOCUMENTS REGRESSION: current impl includes all 5 files (no pruning)
+        assert_eq!(
+            files.len(),
+            5,
+            "current impl finds all .vue files including excluded dirs (got {})",
+            files.len()
+        );
+        // TARGET after fix: assert_eq!(files.len(), 2) — only src/App.vue + src/components/Btn.vue
+    }
 }

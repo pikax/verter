@@ -1,7 +1,8 @@
 use super::*;
 use crate::types::ResolvePhase;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn project(
     root: &str,
@@ -70,6 +71,118 @@ impl crate::traits::WorkspaceAccess for TestReader {
             .cloned()
             .or_else(|| {
                 self.file_exists(canonical_id)
+                    .then(|| normalize_canonical_id(canonical_id))
+            })
+    }
+}
+
+// ── CountingReader: WorkspaceAccess with call counters ──
+
+struct CountingReader {
+    files: HashSet<String>,
+    texts: HashMap<String, Arc<str>>,
+    realpaths: HashMap<String, String>,
+    read_file_count: AtomicU64,
+    file_exists_count: AtomicU64,
+    realpath_count: AtomicU64,
+    /// Per-path read_file call counts for isolating specific file reads.
+    read_file_by_path: Mutex<HashMap<String, u64>>,
+}
+
+impl CountingReader {
+    fn with_files(paths: &[&str]) -> Self {
+        let mut files = HashSet::new();
+        let mut texts = HashMap::new();
+        for path in paths {
+            let normalized = normalize_canonical_id(path);
+            files.insert(normalized.clone());
+            texts.insert(normalized, Arc::<str>::from("// test file"));
+        }
+        Self {
+            files,
+            texts,
+            realpaths: HashMap::new(),
+            read_file_count: AtomicU64::new(0),
+            file_exists_count: AtomicU64::new(0),
+            realpath_count: AtomicU64::new(0),
+            read_file_by_path: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn add_file(&mut self, path: &str, text: &str) {
+        let normalized = normalize_canonical_id(path);
+        self.files.insert(normalized.clone());
+        self.texts
+            .insert(normalized, Arc::<str>::from(text.to_string()));
+    }
+
+    #[allow(dead_code)]
+    fn add_realpath(&mut self, path: &str, realpath: &str) {
+        self.realpaths.insert(
+            normalize_canonical_id(path),
+            normalize_canonical_id(realpath),
+        );
+    }
+
+    fn read_file_calls(&self) -> u64 {
+        self.read_file_count.load(Ordering::Relaxed)
+    }
+
+    fn file_exists_calls(&self) -> u64 {
+        self.file_exists_count.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)]
+    fn realpath_calls(&self) -> u64 {
+        self.realpath_count.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of read_file calls for a specific path.
+    fn read_file_calls_for(&self, path: &str) -> u64 {
+        let normalized = normalize_canonical_id(path);
+        *self
+            .read_file_by_path
+            .lock()
+            .unwrap()
+            .get(&normalized)
+            .unwrap_or(&0)
+    }
+
+    #[allow(dead_code)]
+    fn reset_counters(&self) {
+        self.read_file_count.store(0, Ordering::Relaxed);
+        self.file_exists_count.store(0, Ordering::Relaxed);
+        self.realpath_count.store(0, Ordering::Relaxed);
+        self.read_file_by_path.lock().unwrap().clear();
+    }
+}
+
+impl crate::traits::WorkspaceAccess for CountingReader {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.read_file_count.fetch_add(1, Ordering::Relaxed);
+        let normalized = normalize_canonical_id(canonical_id);
+        *self
+            .read_file_by_path
+            .lock()
+            .unwrap()
+            .entry(normalized.clone())
+            .or_insert(0) += 1;
+        self.texts.get(&normalized).cloned()
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        self.file_exists_count.fetch_add(1, Ordering::Relaxed);
+        self.files.contains(&normalize_canonical_id(canonical_id))
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.realpath_count.fetch_add(1, Ordering::Relaxed);
+        self.realpaths
+            .get(&normalize_canonical_id(canonical_id))
+            .cloned()
+            .or_else(|| {
+                self.files
+                    .contains(&normalize_canonical_id(canonical_id))
                     .then(|| normalize_canonical_id(canonical_id))
             })
     }
@@ -1548,4 +1661,152 @@ fn type_import_codegen_blocker_resolves_types_condition() {
         esm_result.is_none(),
         "EsmImport+CodegenBlocker should NOT resolve types-only exports (no 'import'/'default' condition)"
     );
+}
+
+// ── CountingReader infrastructure + regression tests ──
+
+#[test]
+fn counting_reader_tracks_calls() {
+    let reader = CountingReader::with_files(&["/repo/src/a.ts"]);
+    assert_eq!(reader.file_exists_calls(), 0);
+    assert_eq!(reader.read_file_calls(), 0);
+    assert_eq!(reader.realpath_calls(), 0);
+
+    <dyn crate::traits::WorkspaceAccess>::file_exists(&reader, "/repo/src/a.ts");
+    assert_eq!(reader.file_exists_calls(), 1);
+
+    <dyn crate::traits::WorkspaceAccess>::read_file(&reader, "/repo/src/a.ts");
+    assert_eq!(reader.read_file_calls(), 1);
+    assert_eq!(reader.read_file_calls_for("/repo/src/a.ts"), 1);
+
+    // Second read of same path increments per-path counter
+    <dyn crate::traits::WorkspaceAccess>::read_file(&reader, "/repo/src/a.ts");
+    assert_eq!(reader.read_file_calls(), 2);
+    assert_eq!(reader.read_file_calls_for("/repo/src/a.ts"), 2);
+
+    // Different path tracked separately
+    <dyn crate::traits::WorkspaceAccess>::read_file(&reader, "/repo/src/nonexistent.ts");
+    assert_eq!(reader.read_file_calls(), 3);
+    assert_eq!(reader.read_file_calls_for("/repo/src/a.ts"), 2);
+    assert_eq!(reader.read_file_calls_for("/repo/src/nonexistent.ts"), 1);
+}
+
+/// Documents regression: `resolve_node_modules_package` re-reads the same
+/// package.json manifest for every importer because the resolver has no
+/// manifest caching. `PackageIndex` exists on `Engine` (engine.rs:39)
+/// but is not wired into the resolution path.
+#[test]
+fn bare_package_json_reread_per_importer() {
+    use crate::engine::Engine;
+    use crate::types::{ResolutionContext, ResolveRequestKind};
+
+    let mut reader = CountingReader::with_files(&[
+        "/repo/src/0.vue",
+        "/repo/src/1.vue",
+        "/repo/src/2.vue",
+        "/repo/src/3.vue",
+        "/repo/src/4.vue",
+        "/repo/src/5.vue",
+        "/repo/src/6.vue",
+        "/repo/src/7.vue",
+        "/repo/node_modules/vue/dist/vue.esm.js",
+    ]);
+    reader.add_file(
+        "/repo/node_modules/vue/package.json",
+        r#"{"module":"dist/vue.esm.js"}"#,
+    );
+
+    let engine = Engine::new();
+    let resolver = ProjectResolver::new(vec![project(
+        "/repo",
+        "/repo",
+        None,
+        ProjectMembership::MatchAll,
+    )]);
+    *engine.resolver.write() = Some(resolver);
+
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+
+    for i in 0..8 {
+        let result = engine.resolve_import(&reader, &format!("/repo/src/{i}.vue"), "vue", ctx);
+        assert!(
+            result.is_some(),
+            "resolution should succeed for importer {i}"
+        );
+    }
+
+    // read_json() calls reader.read_file() for each candidate package.json path.
+    // For non-existent paths (e.g., /repo/src/node_modules/vue/package.json),
+    // read_file returns None but is still called. We track the REAL manifest path
+    // separately to isolate manifest re-reads from miss probes.
+    let manifest_path = "/repo/node_modules/vue/package.json";
+    let manifest_reads = reader.read_file_calls_for(manifest_path);
+
+    // Current behavior: the real manifest is re-read for every importer (8 times).
+    // Each importer walks ancestor_dirs, finds the manifest at /repo/node_modules/,
+    // and calls read_file again because there's no caching.
+    assert!(
+        manifest_reads >= 8,
+        "REGRESSION: manifest at {manifest_path} re-read {manifest_reads} times \
+         for 8 importers (no caching). Expected >= 8."
+    );
+    // TARGET after fix: manifest_reads == 1 (one read, then cache hits)
+}
+
+/// Documents regression: `resolve_package_imports` re-reads the same
+/// package.json for every importer when resolving `#imports` specifiers.
+#[test]
+fn package_imports_reread_per_importer() {
+    use crate::engine::Engine;
+    use crate::types::{ResolutionContext, ResolveRequestKind};
+
+    let mut reader = CountingReader::with_files(&[
+        "/repo/src/a.vue",
+        "/repo/src/b.vue",
+        "/repo/src/c.vue",
+        "/repo/src/d.vue",
+        "/repo/src/utils.ts",
+    ]);
+    reader.add_file(
+        "/repo/package.json",
+        r##"{"imports": {"#utils": "./src/utils.ts"}}"##,
+    );
+
+    let engine = Engine::new();
+    let resolver = ProjectResolver::new(vec![project(
+        "/repo",
+        "/repo",
+        None,
+        ProjectMembership::MatchAll,
+    )]);
+    *engine.resolver.write() = Some(resolver);
+
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+
+    for suffix in &["a", "b", "c", "d"] {
+        let result =
+            engine.resolve_import(&reader, &format!("/repo/src/{suffix}.vue"), "#utils", ctx);
+        assert!(
+            result.is_some(),
+            "resolution should succeed for importer {suffix}"
+        );
+    }
+
+    let manifest_path = "/repo/package.json";
+    let manifest_reads = reader.read_file_calls_for(manifest_path);
+
+    // Current behavior: package.json re-read for every importer.
+    // resolve_package_imports walks ancestor_dirs and calls read_json for each.
+    assert!(
+        manifest_reads >= 4,
+        "REGRESSION: manifest at {manifest_path} re-read {manifest_reads} times \
+         for 4 importers (no caching). Expected >= 4."
+    );
+    // TARGET after fix: manifest_reads == 1
 }

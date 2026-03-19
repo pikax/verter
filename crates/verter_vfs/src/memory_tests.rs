@@ -996,3 +996,66 @@ fn exact_resolution_context_keyed_different_targets() {
         "ProviderGraph exact should resolve to .d.ts"
     );
 }
+
+// ── Path identity mismatch reproduction tests ──
+//
+// These tests document that overlay stores keys as-is without normalizing
+// drive letter case. `canonicalize_id()` lowercases `C:` to `c:`, but
+// `notify_upsert`/`apply_changes` don't normalize, so a file upserted as
+// `C:/repo/App.vue` won't be found by a resolver looking up `c:/repo/App.vue`.
+
+/// Documents regression: overlay content stored via uppercase drive letter
+/// is not found when looked up via lowercase drive letter.
+#[test]
+fn overlay_case_mismatch_loses_content() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+
+    // Upsert with uppercase drive letter (simulates LSP uri_to_canonical_id output)
+    ws.notify_upsert("C:/repo/App.vue", Arc::from("<template>hi</template>"));
+
+    // Lookup with lowercase drive letter (simulates resolver normalize_canonical_id)
+    let content = ws.read_file("c:/repo/App.vue");
+
+    // FAILS today: overlay stores "C:/repo/App.vue", lookup for "c:/repo/App.vue" misses
+    assert!(
+        content.is_some(),
+        "overlay content should be found regardless of drive letter case"
+    );
+}
+
+/// Documents regression: `apply_changes` with `OverlaySet` stores keys
+/// without normalization, so case-mismatched lookups fail.
+#[test]
+fn apply_changes_overlay_set_case_mismatch() {
+    let engine = crate::engine::Engine::new();
+    engine.apply_changes(vec![WorkspaceChange::OverlaySet {
+        canonical_id: "C:/repo/App.vue".to_string(),
+        source: Arc::from("content"),
+    }]);
+
+    let has = engine.overlay.read().has_overlay("c:/repo/App.vue");
+    // FAILS today: key stored as-is, lookup misses
+    assert!(
+        has,
+        "overlay should normalize keys — C: and c: should match"
+    );
+}
+
+/// Documents regression: `notify_close` with a different-case drive letter
+/// does not clear the overlay set by `notify_upsert`.
+#[test]
+fn notify_close_case_mismatch_clears_overlay() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.notify_upsert("C:/repo/App.vue", Arc::from("content"));
+
+    // Close with normalized (lowercase) ID
+    ws.notify_close("c:/repo/App.vue");
+
+    // Should be cleared regardless of case
+    let content = ws.read_file("C:/repo/App.vue");
+    // FAILS today: close("c:/...") doesn't clear overlay set by "C:/..."
+    assert!(
+        content.is_none(),
+        "overlay should be cleared after close with different case"
+    );
+}

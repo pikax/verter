@@ -28,11 +28,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = "2"
 rayon = "1.7"
+tempfile = "3"
 hotpath = { version = "0.13", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 smallvec = "1"
+tempfile = "3"
 
 [[bench]]
 name = "bindings_bench"
@@ -106,3 +108,7 @@ path = "examples/vapor_check.rs"
 [[example]]
 name = "profile_host"
 path = "examples/profile_host.rs"
+
+[[example]]
+name = "profile_host_synthetic"
+path = "examples/profile_host_synthetic.rs"

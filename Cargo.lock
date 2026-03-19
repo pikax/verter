@@ -3450,6 +3450,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "tempfile",
  "verter_analysis",
  "verter_core",
  "verter_diagnostics",
