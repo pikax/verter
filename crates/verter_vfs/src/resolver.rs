@@ -335,7 +335,8 @@ impl ProjectResolver {
             } else {
                 join_paths(&importer_dir, specifier)
             };
-            return probe_path(reader, &base).map(|resolved| (resolved, ResolutionKind::Relative));
+            return probe_path_for_context(reader, &base, ctx)
+                .map(|resolved| (resolved, ResolutionKind::Relative));
         }
 
         // #imports
@@ -371,7 +372,8 @@ impl ProjectResolver {
             } else {
                 join_paths(&importer_dir, specifier)
             };
-            return probe_path(reader, &base).map(|resolved| (resolved, ResolutionKind::Relative));
+            return probe_path_for_context(reader, &base, ctx)
+                .map(|resolved| (resolved, ResolutionKind::Relative));
         }
 
         for alias in sorted_workspace_aliases(&importer_owner.workspace_aliases) {
@@ -380,7 +382,7 @@ impl ProjectResolver {
             }
             let remainder = &specifier[alias.find.len()..];
             let base = join_paths(&alias.replacement, remainder);
-            if let Some(resolved) = probe_path(reader, &base) {
+            if let Some(resolved) = probe_path_for_context(reader, &base, ctx) {
                 return Some((resolved, ResolutionKind::WorkspaceAlias));
             }
         }
@@ -391,7 +393,7 @@ impl ProjectResolver {
 
         if let Some(base_url) = importer_owner.compiler_options.base_url.as_deref() {
             let base = join_paths(base_url, specifier);
-            if let Some(resolved) = probe_path(reader, &base) {
+            if let Some(resolved) = probe_path_for_context(reader, &base, ctx) {
                 return Some((resolved, ResolutionKind::TsConfigPath));
             }
         }
@@ -711,6 +713,20 @@ fn probe_path(reader: &dyn crate::traits::WorkspaceAccess, base: &str) -> Option
     None
 }
 
+fn probe_path_for_context(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    base: &str,
+    ctx: ResolutionContext,
+) -> Option<String> {
+    let normalized = normalize_canonical_id(base);
+    if prefers_declaration_files(ctx) {
+        if let Some(resolved) = resolve_declaration_companion(reader, &normalized) {
+            return Some(resolved);
+        }
+    }
+    probe_path(reader, &normalized)
+}
+
 fn resolve_existing_path(
     reader: &dyn crate::traits::WorkspaceAccess,
     candidate: &str,
@@ -749,6 +765,69 @@ fn probe_index_files() -> &'static [&'static str] {
         "index.d.mts",
         "index.d.cts",
     ]
+}
+
+fn prefers_declaration_files(ctx: ResolutionContext) -> bool {
+    matches!(
+        (ctx.phase, ctx.kind),
+        (ResolvePhase::CodegenBlocker, ResolveRequestKind::TypeImport)
+            | (ResolvePhase::ProviderGraph, _)
+    )
+}
+
+fn is_declaration_file(path: &str) -> bool {
+    let normalized = normalize_canonical_id(path);
+    normalized.ends_with(".d.ts")
+        || normalized.ends_with(".d.mts")
+        || normalized.ends_with(".d.cts")
+}
+
+fn resolve_manifest_types_entry(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    package_dir: &str,
+    package_json: &PackageManifest,
+) -> Option<String> {
+    for target in [package_json.types.as_deref(), package_json.typings.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(resolved) = probe_path(reader, &resolve_package_path(package_dir, target, None))
+        {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
+fn resolve_declaration_companion(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    candidate: &str,
+) -> Option<String> {
+    let normalized = normalize_canonical_id(candidate);
+    let (runtime_ext, companion_exts): (&str, &[&str]) = if normalized.ends_with(".mjs") {
+        (".mjs", &[".d.mts", ".d.ts"])
+    } else if normalized.ends_with(".cjs") {
+        (".cjs", &[".d.cts", ".d.ts"])
+    } else if normalized.ends_with(".jsx") {
+        (".jsx", &[".d.ts"])
+    } else if normalized.ends_with(".js") {
+        (".js", &[".d.ts"])
+    } else {
+        return None;
+    };
+
+    let Some(stem) = normalized.strip_suffix(runtime_ext) else {
+        return None;
+    };
+
+    for companion_ext in companion_exts {
+        let companion = format!("{stem}{companion_ext}");
+        if let Some(resolved) = resolve_existing_path(reader, &companion) {
+            return Some(resolved);
+        }
+    }
+
+    None
 }
 
 fn relative_specifier(from_file: &str, to_file: &str) -> String {
@@ -895,7 +974,25 @@ fn resolve_node_modules_package(
                 if let Some(resolved) =
                     resolve_package_exports(reader, &package_dir, exports, &export_key, ctx)
                 {
+                    if subpath.is_empty()
+                        && prefers_declaration_files(ctx)
+                        && !is_declaration_file(&resolved)
+                    {
+                        if let Some(types_entry) =
+                            resolve_manifest_types_entry(reader, &package_dir, &package_json)
+                        {
+                            return Some((types_entry, ResolutionKind::NodeModules));
+                        }
+                    }
                     return Some((resolved, ResolutionKind::PackageExports));
+                }
+
+                if subpath.is_empty() && prefers_declaration_files(ctx) {
+                    if let Some(types_entry) =
+                        resolve_manifest_types_entry(reader, &package_dir, &package_json)
+                    {
+                        return Some((types_entry, ResolutionKind::NodeModules));
+                    }
                 }
 
                 continue;
@@ -912,7 +1009,7 @@ fn resolve_node_modules_package(
             } else {
                 join_paths(&package_dir, subpath)
             };
-            if let Some(resolved) = probe_path(reader, &base) {
+            if let Some(resolved) = probe_path_for_context(reader, &base, ctx) {
                 return Some((resolved, ResolutionKind::NodeModules));
             }
         }
@@ -959,7 +1056,7 @@ fn resolve_legacy_package(
     ctx: ResolutionContext,
 ) -> Option<String> {
     if !subpath.is_empty() {
-        return probe_path(reader, &join_paths(package_dir, subpath));
+        return probe_path_for_context(reader, &join_paths(package_dir, subpath), ctx);
     }
 
     let keys: &[&str] = match (ctx.phase, ctx.kind) {
@@ -981,13 +1078,17 @@ fn resolve_legacy_package(
         let Some(target) = target else {
             continue;
         };
-        if let Some(resolved) = probe_path(reader, &resolve_package_path(package_dir, target, None))
+        if let Some(resolved) = probe_path_for_context(
+            reader,
+            &resolve_package_path(package_dir, target, None),
+            ctx,
+        )
         {
             return Some(resolved);
         }
     }
 
-    probe_path(reader, &join_paths(package_dir, "index"))
+    probe_path_for_context(reader, &join_paths(package_dir, "index"), ctx)
 }
 
 fn resolve_package_target(
@@ -999,7 +1100,11 @@ fn resolve_package_target(
 ) -> Option<String> {
     match value {
         serde_json::Value::String(target) => {
-            probe_path(reader, &resolve_package_path(package_dir, target, captured))
+            probe_path_for_context(
+                reader,
+                &resolve_package_path(package_dir, target, captured),
+                ctx,
+            )
         }
         serde_json::Value::Array(items) => items
             .iter()

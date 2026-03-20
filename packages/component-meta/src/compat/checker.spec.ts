@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   ComponentMetaChecker,
   mapPropMeta,
@@ -165,6 +165,57 @@ describe("mapComponentMeta", () => {
 // ── Checker integration tests ───────────────────────────────────────
 
 describe("ComponentMetaChecker", () => {
+  it("reuses a single analysis snapshot within one getComponentMeta call", async () => {
+    const rawSnapshot = {
+      imports: [],
+      bindings: [],
+      macros: [
+        {
+          kind: "DefineProps",
+          isTypeBased: true,
+          typeReferences: ["Props"],
+          hasInheritAttrsFalse: false,
+          propFields: [
+            {
+              name: "label",
+              typeAnnotation: "string",
+              spanStart: 0,
+              spanEnd: 0,
+            },
+          ],
+          spanStart: 0,
+          spanEnd: 0,
+        },
+      ],
+      macroTypeDeps: [],
+      scriptFlags: 1 << 1,
+      styles: [],
+      template: null,
+      optionsApi: null,
+      vueApiCalls: [],
+    };
+    const getAnalysis = vi.fn(() => rawSnapshot);
+    const checker = new ComponentMetaChecker(
+      {
+        upsert: vi.fn(),
+        getAnalysis,
+        resolveImportedTypes: vi.fn(() => null),
+        evaluateTypes: vi.fn(() => null),
+      },
+      "/tmp",
+      {},
+    );
+
+    checker.updateFile(
+      "Single.vue",
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+    );
+    const meta = await checker.getComponentMeta("Single.vue");
+
+    expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
+    expect(getAnalysis).toHaveBeenCalledTimes(1);
+  });
+
   it("getComponentMeta returns Volar-shaped output", async () => {
     const adapter = createNapiAdapter();
     const checker = new ComponentMetaChecker(adapter, "/tmp", {});

@@ -11,7 +11,7 @@
 
 import { resolve, dirname } from "node:path";
 import { createRequire } from "node:module";
-import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
+import { buildTypeRegistry, snapshotToMeta } from "../extractor.js";
 import { parseType } from "../resolver.js";
 import type { TypeDescriptor } from "../type-ir.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
@@ -294,12 +294,13 @@ export class ComponentMetaChecker {
       // Graceful fallback — evaluation is optional
     }
 
-    const meta = extractComponentMeta(
-      this.adapter,
-      absPath,
-      absPath,
-      evaluatedTypes as import("../type-expr-bridge.js").NativeEvaluatedTypes | null,
-    );
+    const meta = rawSnapshot
+      ? snapshotToMeta(
+          rawSnapshot,
+          absPath,
+          evaluatedTypes as import("../type-expr-bridge.js").NativeEvaluatedTypes | null,
+        )
+      : null;
     if (!meta) {
       return {
         type: 0,

@@ -4,12 +4,52 @@
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
+
+fn component_meta_debug_enabled() -> bool {
+    std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
+        || std::env::var_os("VERTER_META_DEBUG").is_some()
+}
+
+fn component_meta_debug(message: impl AsRef<str>) {
+    if component_meta_debug_enabled() {
+        eprintln!("[verter-meta] {}", message.as_ref());
+    }
+}
+
+fn macro_debug_summary(snapshot: &FileAnalysisSnapshot) -> String {
+    snapshot
+        .macros
+        .iter()
+        .map(|mac| {
+            format!(
+                "{:?}(refs=[{}], props={}, emits={}, slots={})",
+                mac.kind,
+                mac.type_references.join(","),
+                mac.prop_fields.len(),
+                mac.emit_fields.len(),
+                mac.slot_fields.len(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn log_snapshot_debug(stage: &str, canonical: &str, started: Instant, snapshot: &FileAnalysisSnapshot) {
+    component_meta_debug(format!(
+        "{stage} {canonical} took {:?} imports={} macro_type_deps={} macros=[{}]",
+        started.elapsed(),
+        snapshot.imports.len(),
+        snapshot.macro_type_deps.len(),
+        macro_debug_summary(snapshot),
+    ));
+}
 
 impl VerterHost {
     fn build_eval_script_source(
@@ -550,8 +590,23 @@ impl VerterHost {
             return;
         }
 
+        let debug_enabled = component_meta_debug_enabled();
         let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
             snapshot.macro_type_deps.iter().cloned().collect();
+
+        if debug_enabled {
+            component_meta_debug(format!(
+                "enrich_imported_types start {canonical} deps=[{}]",
+                macro_type_deps
+                    .iter()
+                    .map(|dep| format!(
+                        "{:?}:{} from {}",
+                        dep.macro_kind, dep.type_name, dep.import_source
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
 
         let mut cache = rustc_hash::FxHashMap::default();
         let mut visiting = rustc_hash::FxHashSet::default();
@@ -571,6 +626,7 @@ impl VerterHost {
         let mut tracked_deps = std::collections::BTreeSet::new();
 
         for dep in &macro_type_deps {
+            let dep_start = debug_enabled.then(Instant::now);
             let resolved = match self.resolve_external_type_from_loaded_files(
                 canonical,
                 &dep.import_source,
@@ -583,8 +639,44 @@ impl VerterHost {
                 None,
             ) {
                 Ok(Some(r)) => r,
-                _ => continue,
+                Ok(None) => {
+                    if let Some(started) = dep_start {
+                        component_meta_debug(format!(
+                            "enrich_imported_types miss {canonical} {:?}:{} from {} took {:?}",
+                            dep.macro_kind,
+                            dep.type_name,
+                            dep.import_source,
+                            started.elapsed(),
+                        ));
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    if let Some(started) = dep_start {
+                        component_meta_debug(format!(
+                            "enrich_imported_types error {canonical} {:?}:{} from {} took {:?}: {:?}",
+                            dep.macro_kind,
+                            dep.type_name,
+                            dep.import_source,
+                            started.elapsed(),
+                            err,
+                        ));
+                    }
+                    continue;
+                }
             };
+
+            if let Some(started) = dep_start {
+                component_meta_debug(format!(
+                    "enrich_imported_types resolved {canonical} {:?}:{} from {} took {:?} props={} emits={}",
+                    dep.macro_kind,
+                    dep.type_name,
+                    dep.import_source,
+                    started.elapsed(),
+                    resolved.props.len(),
+                    resolved.emits.len(),
+                ));
+            }
 
             // Build expanded type text from resolved props using type_text.
             let expanded = resolved_elements_to_expanded_text_via_type_text(&resolved);
@@ -750,6 +842,11 @@ impl VerterHost {
         }
 
         if enrichments.is_empty() && extra_resolved_types.is_empty() {
+            if debug_enabled {
+                component_meta_debug(format!(
+                    "enrich_imported_types done {canonical} no enrichments produced"
+                ));
+            }
             return;
         }
 
@@ -816,6 +913,23 @@ impl VerterHost {
                     }
                 }
             }
+        }
+
+        if debug_enabled {
+            component_meta_debug(format!(
+                "enrich_imported_types done {canonical} enrichments={} nested_types={} macros=[{}]",
+                macros
+                    .iter()
+                    .filter(|mac| {
+                        !mac.prop_fields.is_empty()
+                            || !mac.emit_fields.is_empty()
+                            || !mac.slot_fields.is_empty()
+                            || !mac.resolved_local_types.is_empty()
+                    })
+                    .count(),
+                extra_resolved_types.len(),
+                macro_debug_summary(snapshot),
+            ));
         }
     }
 
@@ -1129,6 +1243,7 @@ impl VerterHost {
     /// file map, alias map, and parent dependency set.
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Option<FileAnalysisSnapshot> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let analysis_started = component_meta_debug_enabled().then(Instant::now);
 
         // Eviction gate (scheduler path)
         #[cfg(feature = "scheduler")]
@@ -1231,6 +1346,9 @@ impl VerterHost {
                 if self.config.deep_macro_resolution_type {
                     self.enrich_imported_types(&canonical, &mut snapshot);
                 }
+                if let Some(started) = analysis_started {
+                    log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
+                }
                 return Some(snapshot);
             }
             drop(source_snap);
@@ -1243,6 +1361,9 @@ impl VerterHost {
             }
             if self.config.deep_macro_resolution_type {
                 self.enrich_imported_types(&canonical, &mut snapshot);
+            }
+            if let Some(started) = analysis_started {
+                log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
             }
             Some(snapshot)
         }
@@ -1318,6 +1439,9 @@ impl VerterHost {
                 if self.config.deep_macro_resolution_type {
                     self.enrich_imported_types(&canonical, &mut snapshot);
                 }
+                if let Some(started) = analysis_started {
+                    log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
+                }
                 return Some(snapshot);
             }
 
@@ -1330,6 +1454,9 @@ impl VerterHost {
             }
             if self.config.deep_macro_resolution_type {
                 self.enrich_imported_types(&canonical, &mut snapshot);
+            }
+            if let Some(started) = analysis_started {
+                log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
             }
             Some(snapshot)
         }

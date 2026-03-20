@@ -244,6 +244,36 @@ enum LocalTypeDecl<'a> {
     Class,
 }
 
+fn insert_local_type_decl_from_declaration<'a>(
+    registry: &mut FxHashMap<String, LocalTypeDecl<'a>>,
+    decl: &'a Declaration<'a>,
+) {
+    match decl {
+        Declaration::TSInterfaceDeclaration(decl) => {
+            let extends: &[TSInterfaceHeritage<'_>] = &decl.extends;
+            registry.insert(
+                decl.id.name.to_string(),
+                LocalTypeDecl::Interface {
+                    body: &decl.body,
+                    extends,
+                },
+            );
+        }
+        Declaration::TSTypeAliasDeclaration(decl) => {
+            registry.insert(
+                decl.id.name.to_string(),
+                LocalTypeDecl::Alias(&decl.type_annotation),
+            );
+        }
+        Declaration::ClassDeclaration(decl) => {
+            if let Some(ref id) = decl.id {
+                registry.insert(id.name.to_string(), LocalTypeDecl::Class);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Build a registry of local type declarations from the program.
 fn build_local_type_registry<'a>(program: &'a Program<'a>) -> FxHashMap<String, LocalTypeDecl<'a>> {
     let mut registry = FxHashMap::default();
@@ -268,6 +298,11 @@ fn build_local_type_registry<'a>(program: &'a Program<'a>) -> FxHashMap<String, 
             Statement::ClassDeclaration(decl) => {
                 if let Some(ref id) = decl.id {
                     registry.insert(id.name.to_string(), LocalTypeDecl::Class);
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(ref decl) = export.declaration {
+                    insert_local_type_decl_from_declaration(&mut registry, decl);
                 }
             }
             _ => {}

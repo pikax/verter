@@ -145,12 +145,18 @@ Drop-in replacement for Volar's `vue-component-meta`. Consumers like `nuxt-compo
 
 That's it — the API surface is identical.
 
+Type resolution is native-first. For package type imports, Verter always anchors
+resolution through the package's `package.json` and prefers declaration entries
+(`exports.types`, `types`, `typings`) and declaration companions (`.d.ts`,
+`.d.mts`, `.d.cts`) before falling back to runtime JavaScript files.
+
 ### Usage
 
 ```ts
 import { createChecker } from "@verter/component-meta/compat";
 
-// Create a checker from your tsconfig.json — discovers and loads all .vue files
+// Create a checker from your tsconfig.json — resolves files through Verter's
+// native workspace/host and loads what it needs for metadata requests
 const checker = await createChecker("./tsconfig.json");
 
 try {

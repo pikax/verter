@@ -852,6 +852,23 @@ export interface Emits extends BaseEmits {
     assert!(resolved.emits.iter().any(|emit| emit.name == "confirm"));
 }
 
+#[test]
+fn resolve_external_type_interface_emits_shape() {
+    let alloc = Allocator::default();
+    let dep = r#"
+export interface AccordionRootEmits {
+  openChange: [value: boolean]
+}
+"#;
+
+    let resolved =
+        resolve_external_type_with_companion("AccordionRootEmits", dep, &FxHashMap::default(), &alloc)
+            .expect("interface emits shape should resolve");
+
+    assert_eq!(resolved.emits.len(), 1, "expected one resolved emit");
+    assert_eq!(resolved.emits[0].name, "openChange");
+}
+
 /// @ai-generated - extract_companion_types handles interface extends
 #[test]
 fn companion_types_interface_extends() {

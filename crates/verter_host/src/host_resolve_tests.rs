@@ -2208,7 +2208,13 @@ fn macro_type_dep_resolves_types_only_package_exports() {
         "/workspace/node_modules/motion/dist/index.d.ts".to_string(),
         Arc::from("export interface MotionProps { duration: number }"),
     );
-    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let host = VerterHost::new(
+        HostConfig {
+            deep_macro_resolution_type: true,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
     host.configure_projects(vec![
         verter_analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
@@ -2271,5 +2277,88 @@ fn macro_type_dep_resolves_types_only_package_exports() {
             .iter()
             .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
         "macro type dep 'motion' with types-only exports should resolve, got: {diags:?}"
+    );
+}
+
+#[test]
+fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/fancy/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js", "require": "./dist/index.cjs" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+        Arc::from(r#"import { AccordionRootEmits } from "./index3.js"; export type { AccordionRootEmits };"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index3.d.ts".to_string(),
+        Arc::from("export interface AccordionRootEmits { openChange: [boolean] }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index3.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    let consumer_source = "<script setup lang=\"ts\">\nimport type { AccordionRootEmits } from 'fancy'\ndefineEmits<AccordionRootEmits>()\n</script>\n<template><div /></template>";
+    upsert_vue(&host, "/workspace/src/Consumer.vue", consumer_source);
+
+    let package_decl = host.resolve_loaded_dependency_canonical(
+        "/workspace/src/Consumer.vue",
+        "fancy",
+        verter_vfs::ResolveRequestKind::TypeImport,
+    );
+    assert_eq!(
+        package_decl.as_deref(),
+        Some("/workspace/node_modules/fancy/dist/index.d.ts"),
+        "package root should resolve to the declaration entrypoint",
+    );
+
+    let companion_decl = host.resolve_loaded_dependency_canonical(
+        "/workspace/node_modules/fancy/dist/index.d.ts",
+        "./index3.js",
+        verter_vfs::ResolveRequestKind::TypeImport,
+    );
+    assert_eq!(
+        companion_decl.as_deref(),
+        Some("/workspace/node_modules/fancy/dist/index3.d.ts"),
+        "type imports from declaration files should prefer the declaration companion",
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let resolved = host
+        .resolve_external_type_from_loaded_files(
+            "/workspace/src/Consumer.vue",
+            "fancy",
+            "AccordionRootEmits",
+            &mut tracked_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            None,
+        )
+        .expect("external type resolution should succeed")
+        .expect("external type resolution should produce a result");
+
+    assert!(
+        resolved.emits.iter().any(|emit| emit.name == "openChange"),
+        "emit entries should resolve from the declaration companion: {:?}",
+        resolved.emits.iter().map(|emit| emit.name.clone()).collect::<Vec<_>>()
     );
 }

@@ -482,6 +482,102 @@ defineProps<{
 }
 
 #[test]
+fn get_analysis_resolves_exported_local_props_from_sibling_script_block() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "Comp.vue",
+            r#"<script lang="ts">
+export interface Props {
+  label: string
+  count?: number
+}
+</script>
+
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let analysis = session
+        .get_analysis("Comp.vue")
+        .unwrap()
+        .expect("analysis should exist");
+    let define_props = analysis
+        .macros
+        .iter()
+        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .expect("defineProps macro should exist");
+
+    let names: Vec<&str> = define_props
+        .prop_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"label"),
+        "exported interface field 'label' should resolve, got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"count"),
+        "exported interface field 'count' should resolve, got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn get_analysis_resolves_non_exported_local_props_from_sibling_script_block() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "Comp.vue",
+            r#"<script lang="ts">
+interface Props {
+  label: string
+  count?: number
+}
+</script>
+
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let analysis = session
+        .get_analysis("Comp.vue")
+        .unwrap()
+        .expect("analysis should exist");
+    let define_props = analysis
+        .macros
+        .iter()
+        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .expect("defineProps macro should exist");
+
+    let names: Vec<&str> = define_props
+        .prop_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"label"),
+        "sibling script field 'label' should resolve, got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"count"),
+        "sibling script field 'count' should resolve, got: {:?}",
+        names
+    );
+}
+
+#[test]
 fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     let project = make_project();
     project
@@ -526,6 +622,50 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
 
     assert!(third.props.iter().any(|field| field.name == "label"));
     assert!(!Arc::ptr_eq(&second_cache.1, &third_cache.1));
+}
+
+#[test]
+fn evaluate_types_resolves_local_typeof_from_sibling_script_block() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "Comp.vue",
+            r#"<script lang="ts">
+const theme = {
+  item: "item",
+  body: "body",
+}
+
+type Props = {
+  ui: typeof theme
+}
+</script>
+
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
+
+    match evaluated_prop_type(&evaluated, "ui") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"item"));
+            assert!(names.contains(&"body"));
+        }
+        other => panic!("expected typeof theme to resolve to an object, got {other:?}"),
+    }
 }
 
 #[test]
