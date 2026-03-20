@@ -595,6 +595,7 @@ impl VerterHost {
         }
     }
 
+    #[cfg(feature = "scheduler")]
     fn build_template_analysis(
         &self,
         canonical: &str,
@@ -1958,7 +1959,10 @@ impl VerterHost {
         var_name: &str,
         profile: Option<&CompileProfile>,
     ) -> verter_analysis::CssVarFlow {
+        #[cfg(feature = "scheduler")]
         let profile_hash = profile.map(compile_profile_hash);
+        #[cfg(not(feature = "scheduler"))]
+        let _ = profile;
 
         #[cfg(feature = "scheduler")]
         let canonical_ids: Vec<String> = self

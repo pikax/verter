@@ -19,6 +19,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_core/hotpath", "verter_anal
 verter_core = { path = "../verter_core" }
 verter_analysis = { path = "../verter_analysis" }
 verter_span = { path = "../verter_span" }
+verter_vfs = { path = "../verter_vfs" }
 hotpath = { version = "0.13", optional = true }
 oxc_allocator = { workspace = true }
 oxc_span = { workspace = true }
@@ -28,11 +29,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sourcemap = "9"
 thiserror = "2"
+parking_lot = "0.12"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-parking_lot = "0.12"
 dashmap = { version = "6", optional = true }
-verter_vfs = { path = "../verter_vfs" }
 verter_scheduler = { path = "../verter_scheduler", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -45,4 +45,3 @@ criterion = { version = "0.8", features = ["html_reports"] }
 [[bench]]
 name = "host_bench"
 harness = false
-

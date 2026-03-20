@@ -1,3 +1,4 @@
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "path";
 import { getWorkspace } from "./compiler";
 
@@ -26,12 +27,24 @@ async function walkDir(
   filter: (filename: string) => boolean,
   result: Map<string, string>,
 ): Promise<void> {
-  const ws = getWorkspace()!;
   let entries;
-  try {
-    entries = ws.readDir(normalizePath(dir));
-  } catch {
-    return;
+  const ws = getWorkspace();
+  if (ws) {
+    try {
+      entries = ws.readDir(normalizePath(dir));
+    } catch {
+      return;
+    }
+  } else {
+    try {
+      const dirents = await readdir(dir, { withFileTypes: true });
+      entries = dirents.map((entry) => ({
+        path: normalizePath(join(dir, entry.name)),
+        isDir: entry.isDirectory(),
+      }));
+    } catch {
+      return;
+    }
   }
 
   const subdirPromises: Promise<void>[] = [];
@@ -50,7 +63,7 @@ async function walkDir(
     if (!filter(absPath)) continue;
 
     try {
-      const content = ws.readFile(normalizePath(join(dir, name)));
+      const content = ws ? ws.readFile(absPath) : await readFile(join(dir, name), "utf8");
       if (content !== null) {
         result.set(absPath, content);
       }

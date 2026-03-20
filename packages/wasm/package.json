@@ -10,6 +10,7 @@
   },
   "author": "pikax",
   "homepage": "https://verterjs.dev/",
+  "type": "module",
   "engines": {
     "node": ">=18"
   },
@@ -18,14 +19,17 @@
     "wasm"
   ],
   "sideEffects": false,
-  "main": "dist/index.js",
+  "main": "dist/index.cjs",
   "module": "dist/index.mjs",
-  "types": "dist/index.d.ts",
+  "types": "dist/index.d.mts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": {
+        "import": "./dist/index.d.mts",
+        "require": "./dist/index.d.cts"
+      },
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "require": "./dist/index.cjs"
     }
   },
   "scripts": {

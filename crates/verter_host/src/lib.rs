@@ -78,14 +78,12 @@ pub use verter_core::VERTER_TYPES_STANDALONE_DTS;
 pub use verter_core::compile::CompileTarget;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use id::canonicalize_id;
 pub use id::resolve_external;
 use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
-
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc;
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///

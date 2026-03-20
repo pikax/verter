@@ -214,12 +214,12 @@ impl VerterHost {
     fn read_dep_source_for_type_resolution(
         &self,
         dep_canonical: &str,
-        profile_hash: Option<u64>,
+        _profile_hash: Option<u64>,
     ) -> Option<String> {
         // Try in-memory source first (scheduler or files map).
         #[cfg(feature = "scheduler")]
         {
-            if let Some(efs) = self.effective_file_state(dep_canonical, profile_hash) {
+            if let Some(efs) = self.effective_file_state(dep_canonical, _profile_hash) {
                 let source = efs.source.as_ref();
                 if dep_canonical.ends_with(".vue") {
                     return extract_script_from_raw_source(source);

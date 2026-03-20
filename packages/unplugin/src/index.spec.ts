@@ -643,6 +643,47 @@ const count = helper()
   });
 });
 
+describe("disk fallback without workspace", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = join(
+      tmpdir(),
+      `verter-disk-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    resetHost();
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  function createPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  it("transform loads external src blocks from disk when no workspace is initialized", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "ExternalStyle.vue").replace(/\\/g, "/");
+    writeFileSync(join(tempDir, "external.css"), ".from-disk { color: red; }\n");
+
+    const result = await plugin.transform(
+      `<template><div class="from-disk">ok</div></template>
+<style src="./external.css"></style>`,
+      filename,
+    );
+
+    expect(result).toBeDefined();
+    expect(result.code).toContain("type=style&index=0");
+    expect(result.code).not.toContain("<style src=");
+  });
+});
+
 describe("bundler dependency delegation", () => {
   let tempDir: string;
 

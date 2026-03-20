@@ -1,5 +1,6 @@
 import type { UnpluginFactory } from "unplugin";
 import { createUnplugin } from "unplugin";
+import { existsSync, statSync } from "node:fs";
 import type { ResolvedConfig } from "vite";
 import type { VerterPluginOptions, HmrStrategy, BlockPreprocessor } from "./core/types";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
@@ -28,6 +29,34 @@ export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
 /** Normalize Windows backslashes to forward slashes for the workspace API. */
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+async function readTextFileThroughWorkspaceOrDisk(pathname: string): Promise<string | null> {
+  const ws = getWorkspace();
+  if (ws) {
+    return ws.readFile(normalizePath(pathname));
+  }
+
+  const fs = await import("node:fs/promises");
+  try {
+    return await fs.readFile(pathname, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function fileExistsThroughWorkspaceOrDisk(pathname: string): Promise<boolean> {
+  const ws = getWorkspace();
+  if (ws) {
+    return ws.fileExists(normalizePath(pathname));
+  }
+
+  const fs = await import("node:fs/promises");
+  try {
+    return (await fs.stat(pathname)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 type ResolveHook = (
@@ -63,13 +92,12 @@ async function resolveUpsertDependencies(
   // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
   if (upsertResult.externalSourceRequests.length > 0) {
     const path = await import("path");
-    const ws = getWorkspace()!;
     for (const req of upsertResult.externalSourceRequests) {
       const resolvedId: string = req.resolvedCanonicalId;
       const specifier: string = req.specifier;
       // Resolve relative to the owner file's directory
       const absPath = path.resolve(path.dirname(filename), specifier);
-      const extSource = ws.readFile(normalizePath(absPath));
+      const extSource = await readTextFileThroughWorkspaceOrDisk(absPath);
       if (extSource !== null) {
         host.upsert({
           inputId: resolvedId,
@@ -89,7 +117,6 @@ async function resolveUpsertDependencies(
   );
   if (dependencySpecifiers.length > 0) {
     const path = await import("path");
-    const ws = getWorkspace()!;
     const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".d.ts", ".d.mts", ".d.cts"];
     for (const specifier of dependencySpecifiers) {
       // Try bundler resolve hook first (if available)
@@ -99,17 +126,18 @@ async function resolveUpsertDependencies(
         );
         if (resolvedId) {
           if (resolvedId.endsWith(".vue")) {
-            resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
+            resolutions.push({ specifier, resolvedCanonicalId: normalizePath(resolvedId) });
             continue;
           }
-          const depSource = ws.readFile(normalizePath(resolvedId));
+          const depSource = await readTextFileThroughWorkspaceOrDisk(resolvedId);
           if (depSource !== null) {
+            const normalizedResolvedId = normalizePath(resolvedId);
             host.upsert({
-              inputId: resolvedId,
+              inputId: normalizedResolvedId,
               source: depSource,
               fileKind: "non_sfc",
             });
-            resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
+            resolutions.push({ specifier, resolvedCanonicalId: normalizedResolvedId });
             continue;
           }
           // readFile returned null — fall through for relative specifiers
@@ -123,19 +151,20 @@ async function resolveUpsertDependencies(
       const absBase = path.resolve(path.dirname(filename), specifier);
       for (const ext of exts) {
         const fullPath = absBase + ext;
-        if (fullPath.endsWith(".vue") && ws.fileExists(normalizePath(fullPath))) {
-          resolutions.push({ specifier, resolvedCanonicalId: fullPath });
+        const normalizedFullPath = normalizePath(fullPath);
+        if (fullPath.endsWith(".vue") && (await fileExistsThroughWorkspaceOrDisk(fullPath))) {
+          resolutions.push({ specifier, resolvedCanonicalId: normalizedFullPath });
           break;
         }
         if (fullPath.endsWith(".vue")) continue;
-        const depSource = ws.readFile(normalizePath(fullPath));
+        const depSource = await readTextFileThroughWorkspaceOrDisk(fullPath);
         if (depSource !== null) {
           host.upsert({
-            inputId: fullPath,
+            inputId: normalizedFullPath,
             source: depSource,
             fileKind: "non_sfc",
           });
-          resolutions.push({ specifier, resolvedCanonicalId: fullPath });
+          resolutions.push({ specifier, resolvedCanonicalId: normalizedFullPath });
           break;
         }
       }
@@ -217,13 +246,14 @@ function createFilter(
 /** Detect if a project uses Nuxt by checking for nuxt.config.* or .nuxt/ directory. */
 function detectNuxt(root: string): boolean {
   const ws = getWorkspace();
-  if (!ws) return false;
   const normalizedRoot = normalizePath(root);
   const configFiles = ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mts", "nuxt.config.mjs"];
   for (const f of configFiles) {
-    if (ws.fileExists(`${normalizedRoot}/${f}`)) return true;
+    const path = `${normalizedRoot}/${f}`;
+    if (ws ? ws.fileExists(path) : existsSync(path)) return true;
   }
-  if (ws.isDir(`${normalizedRoot}/.nuxt`)) return true;
+  const nuxtDir = `${normalizedRoot}/.nuxt`;
+  if (ws ? ws.isDir(nuxtDir) : existsSync(nuxtDir) && statSync(nuxtDir).isDirectory()) return true;
   return false;
 }
 

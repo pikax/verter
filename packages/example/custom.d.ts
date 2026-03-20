@@ -1,4 +1,4 @@
-// declare module '*.vue' {
-//     type _Component = import("vue").DefineComponent
-//     export default _Component
-// }
+declare module "*.vue" {
+  const component: import("vue").DefineComponent;
+  export default component;
+}

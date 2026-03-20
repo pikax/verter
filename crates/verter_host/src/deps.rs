@@ -126,6 +126,7 @@ fn import_resolves_to_dep_view(
 /// Check if an import source from `file` resolves to `dependency_id`.
 /// Legacy wrapper that delegates to `import_resolves_to_dep_view`.
 #[cfg(any(not(feature = "scheduler"), test))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn import_resolves_to_dep(
     file: &FileEntry,
     import_source: &str,
@@ -164,6 +165,7 @@ fn import_resolves_to_dep_with_resolver_view(
 /// Like [`import_resolves_to_dep`], but also consults the workspace resolver
 /// for aliased specifiers that heuristic matching cannot handle.
 #[cfg(not(feature = "scheduler"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn import_resolves_to_dep_with_resolver(
     file: &FileEntry,
     import_source: &str,
@@ -333,6 +335,7 @@ pub(crate) fn should_invalidate_dependent(
 /// workspace's authoritative EdgeStore instead of the host's legacy
 /// `reverse_dependencies` map.
 #[cfg(not(feature = "scheduler"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn smart_invalidate_dependents_with_owners(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     owners: BTreeSet<String>,
