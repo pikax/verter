@@ -87,6 +87,7 @@ struct CountingReader {
     realpath_count: AtomicU64,
     /// Per-path read_file call counts for isolating specific file reads.
     read_file_by_path: Mutex<HashMap<String, u64>>,
+    package_manifest_cache: Mutex<HashMap<String, crate::types::PackageManifest>>,
 }
 
 impl CountingReader {
@@ -106,6 +107,7 @@ impl CountingReader {
             file_exists_count: AtomicU64::new(0),
             realpath_count: AtomicU64::new(0),
             read_file_by_path: Mutex::new(HashMap::new()),
+            package_manifest_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -154,6 +156,7 @@ impl CountingReader {
         self.file_exists_count.store(0, Ordering::Relaxed);
         self.realpath_count.store(0, Ordering::Relaxed);
         self.read_file_by_path.lock().unwrap().clear();
+        self.package_manifest_cache.lock().unwrap().clear();
     }
 }
 
@@ -185,6 +188,21 @@ impl crate::traits::WorkspaceAccess for CountingReader {
                     .contains(&normalize_canonical_id(canonical_id))
                     .then(|| normalize_canonical_id(canonical_id))
             })
+    }
+
+    fn read_package_manifest(&self, canonical_id: &str) -> Option<crate::types::PackageManifest> {
+        let normalized = normalize_canonical_id(canonical_id);
+        if let Some(manifest) = self.package_manifest_cache.lock().unwrap().get(&normalized) {
+            return Some(manifest.clone());
+        }
+
+        let source = self.read_file(&normalized)?;
+        let manifest = crate::package_index::parse_package_json(&source);
+        self.package_manifest_cache
+            .lock()
+            .unwrap()
+            .insert(normalized, manifest.clone());
+        Some(manifest)
     }
 }
 
@@ -226,6 +244,39 @@ fn owner_selection_ignores_solution_style_root_membership() {
         owner.tsconfig_path.as_deref(),
         Some("/workspace/tsconfig.json"),
         "solution-style tsconfig.json must not win when it owns no files"
+    );
+}
+
+#[test]
+fn ambiguous_configured_owner_returns_none() {
+    let resolver = ProjectResolver::new(vec![
+        project(
+            "/workspace",
+            "/workspace",
+            Some("/workspace/tsconfig.app.json"),
+            ProjectMembership::IncludeExclude {
+                files: vec!["/workspace/src/shared.ts".to_string()],
+                include: Vec::new(),
+                exclude: Vec::new(),
+            },
+        ),
+        project(
+            "/workspace",
+            "/workspace",
+            Some("/workspace/tsconfig.vitest.json"),
+            ProjectMembership::IncludeExclude {
+                files: vec!["/workspace/src/shared.ts".to_string()],
+                include: Vec::new(),
+                exclude: Vec::new(),
+            },
+        ),
+    ]);
+
+    assert!(
+        resolver
+            .owner_for_file("/workspace/src/shared.ts")
+            .is_none(),
+        "single-owner resolver API must not invent a winner for overlapping configured owners"
     );
 }
 
@@ -1691,10 +1742,8 @@ fn counting_reader_tracks_calls() {
     assert_eq!(reader.read_file_calls_for("/repo/src/nonexistent.ts"), 1);
 }
 
-/// Documents regression: `resolve_node_modules_package` re-reads the same
-/// package.json manifest for every importer because the resolver has no
-/// manifest caching. `PackageIndex` exists on `Engine` (engine.rs:39)
-/// but is not wired into the resolution path.
+/// Resolving through the workspace manifest API should not re-read the same
+/// package.json for every importer.
 #[test]
 fn bare_package_json_reread_per_importer() {
     use crate::engine::Engine;
@@ -1717,13 +1766,24 @@ fn bare_package_json_reread_per_importer() {
     );
 
     let engine = Engine::new();
-    let resolver = ProjectResolver::new(vec![project(
-        "/repo",
-        "/repo",
-        None,
-        ProjectMembership::MatchAll,
-    )]);
-    *engine.resolver.write() = Some(resolver);
+    {
+        use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
+        use crate::resolver::IdeProjectCompilerOptions;
+        let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
+            root: "/repo".to_string(),
+            rank: ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "/repo".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: ProjectMembership::MatchAll,
+        }]);
+        *engine.project_graph.write() = graph;
+        engine.rebuild_and_publish();
+    }
 
     let ctx = ResolutionContext {
         phase: ResolvePhase::CodegenBlocker,
@@ -1738,26 +1798,17 @@ fn bare_package_json_reread_per_importer() {
         );
     }
 
-    // read_json() calls reader.read_file() for each candidate package.json path.
-    // For non-existent paths (e.g., /repo/src/node_modules/vue/package.json),
-    // read_file returns None but is still called. We track the REAL manifest path
-    // separately to isolate manifest re-reads from miss probes.
     let manifest_path = "/repo/node_modules/vue/package.json";
     let manifest_reads = reader.read_file_calls_for(manifest_path);
 
-    // Current behavior: the real manifest is re-read for every importer (8 times).
-    // Each importer walks ancestor_dirs, finds the manifest at /repo/node_modules/,
-    // and calls read_file again because there's no caching.
-    assert!(
-        manifest_reads >= 8,
-        "REGRESSION: manifest at {manifest_path} re-read {manifest_reads} times \
-         for 8 importers (no caching). Expected >= 8."
+    assert_eq!(
+        manifest_reads, 1,
+        "manifest at {manifest_path} should be read once and then served from the workspace manifest cache"
     );
-    // TARGET after fix: manifest_reads == 1 (one read, then cache hits)
 }
 
-/// Documents regression: `resolve_package_imports` re-reads the same
-/// package.json for every importer when resolving `#imports` specifiers.
+/// Resolving `#imports` through the workspace manifest API should not re-read
+/// the same package.json for every importer.
 #[test]
 fn package_imports_reread_per_importer() {
     use crate::engine::Engine;
@@ -1776,13 +1827,24 @@ fn package_imports_reread_per_importer() {
     );
 
     let engine = Engine::new();
-    let resolver = ProjectResolver::new(vec![project(
-        "/repo",
-        "/repo",
-        None,
-        ProjectMembership::MatchAll,
-    )]);
-    *engine.resolver.write() = Some(resolver);
+    {
+        use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
+        use crate::resolver::IdeProjectCompilerOptions;
+        let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
+            root: "/repo".to_string(),
+            rank: ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "/repo".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: ProjectMembership::MatchAll,
+        }]);
+        *engine.project_graph.write() = graph;
+        engine.rebuild_and_publish();
+    }
 
     let ctx = ResolutionContext {
         phase: ResolvePhase::CodegenBlocker,
@@ -1801,12 +1863,8 @@ fn package_imports_reread_per_importer() {
     let manifest_path = "/repo/package.json";
     let manifest_reads = reader.read_file_calls_for(manifest_path);
 
-    // Current behavior: package.json re-read for every importer.
-    // resolve_package_imports walks ancestor_dirs and calls read_json for each.
-    assert!(
-        manifest_reads >= 4,
-        "REGRESSION: manifest at {manifest_path} re-read {manifest_reads} times \
-         for 4 importers (no caching). Expected >= 4."
+    assert_eq!(
+        manifest_reads, 1,
+        "manifest at {manifest_path} should be read once and then served from the workspace manifest cache"
     );
-    // TARGET after fix: manifest_reads == 1
 }

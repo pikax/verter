@@ -25,7 +25,6 @@ use verter_host::{CompileProfile, FileKind, UpsertRequest, VerterHost};
 
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
-    ResolverSnapshot,
 };
 use crate::tsgo::project_sync::ProjectSync;
 
@@ -67,8 +66,8 @@ pub struct WorkspaceScannerConfig {
     pub host: Arc<VerterHost>,
     /// Optional project sync for sending files to the type provider.
     pub project_sync: Option<ProjectSync>,
-    /// Resolver snapshot used to materialize owner-aware provider paths.
-    pub resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
+    /// VFS workspace for published resolver snapshot.
+    pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
     /// Tracks provider materialization per source file (shared with server).
     pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// Whether the type provider is TSGO (affects sync strategy).
@@ -76,7 +75,12 @@ pub struct WorkspaceScannerConfig {
     /// Compile profile for IDE output.
     pub tsx_profile: CompileProfile,
     /// Coverage patterns from `verter_vfs::config::discover_tsconfigs()` (e.g., `"C:/project/src/**"`).
+    /// Legacy — used when `workspace_snapshot` is `None`.
     pub tsconfig_patterns: Vec<String>,
+    /// Published workspace snapshot for ownership-based tier classification.
+    /// When `Some`, `classify_from_snapshot()` is used instead of
+    /// `classify_tiers()`. Generation-pinned at spawn time.
+    pub workspace_snapshot: Option<std::sync::Arc<verter_vfs::WorkspaceSnapshot>>,
     /// Optional oneshot channel fired after the full scanner loop completes
     /// (both Phase 1 `.vue` files and Phase 2 non-Vue source files).
     /// Used by the server to send `$/verter/typeProviderSyncComplete`.
@@ -93,18 +97,16 @@ pub enum Tier {
 }
 
 /// Directories excluded from workspace scanning.
-const EXCLUDED_DIRS: &[&str] = &["node_modules", "dist", "build"];
+const EXCLUDED_DIRS: &[&str] = &["node_modules"];
 
 /// Returns true if a directory name should be excluded from workspace scanning.
 fn is_excluded_dir(name: &str) -> bool {
-    name.starts_with('.') || EXCLUDED_DIRS.contains(&name)
+    EXCLUDED_DIRS.contains(&name)
 }
 
 /// Recursively collect all `.vue` file paths under `root`.
 ///
-/// Skips `node_modules`, dot-directories (`.git`, `.vscode`, etc.),
-/// `dist`, and `build` directories — same exclusions as the old
-/// `scan_vue_files_recursive`.
+/// Skips only fallback-excluded directories (`node_modules`).
 ///
 /// Returns paths with forward slashes (canonical form).
 pub fn collect_vue_paths(root: &Path) -> Vec<String> {
@@ -117,7 +119,7 @@ pub fn collect_vue_paths(root: &Path) -> Vec<String> {
 /// under `root`.
 ///
 /// Excludes `.d.ts`/`.d.mts`/`.d.cts` files (type declarations loaded via dependency
-/// resolution, not FS walk), `node_modules`, dot-directories, `dist`, and `build`.
+/// resolution, not FS walk) and fallback-excluded directories (`node_modules`).
 ///
 /// Returns paths with forward slashes (canonical form).
 pub fn collect_source_paths(root: &Path) -> Vec<String> {
@@ -188,6 +190,27 @@ pub fn classify_tiers(paths: &[String], tsconfig_patterns: &[String]) -> Vec<(St
                 Tier::ProjectSource
             } else {
                 Tier::Other
+            };
+            (path.clone(), tier)
+        })
+        .collect()
+}
+
+/// Classify paths into priority tiers using the published workspace snapshot.
+///
+/// A path is `Tier::ProjectSource` if any configured project in the snapshot
+/// claims it. Otherwise it's `Tier::Other`. This replaces glob-based
+/// `classify_tiers()` with exact ownership semantics.
+pub fn classify_from_snapshot(
+    paths: &[String],
+    snapshot: &verter_vfs::WorkspaceSnapshot,
+) -> Vec<(String, Tier)> {
+    paths
+        .iter()
+        .map(|path| {
+            let tier = match snapshot.configured_owner_resolution_for_file(path) {
+                verter_vfs::ConfiguredOwnerResolution::None => Tier::Other,
+                _ => Tier::ProjectSource, // Unique or Ambiguous → both are configured
             };
             (path.clone(), tier)
         })
@@ -288,6 +311,7 @@ async fn scanner_loop(
 ) {
     let roots = config.root_paths.clone();
     let tsconfig_patterns = config.tsconfig_patterns.clone();
+    let workspace_snapshot = config.workspace_snapshot.clone();
 
     // Step 1: FS walk all roots (blocking) — collect both Vue and non-Vue files
     let (vue_paths, source_paths) = tokio::task::spawn_blocking(move || {
@@ -310,13 +334,21 @@ async fn scanner_loop(
         return;
     }
 
-    // Step 2: Classify into tiers
-    let mut vue_classified = classify_tiers(&vue_paths, &tsconfig_patterns);
+    // Step 2: Classify into tiers (prefer snapshot, fallback to patterns)
+    let mut vue_classified = if let Some(ref snap) = workspace_snapshot {
+        classify_from_snapshot(&vue_paths, snap)
+    } else {
+        classify_tiers(&vue_paths, &tsconfig_patterns)
+    };
     let vue_project_count = vue_classified
         .iter()
         .filter(|(_, t)| *t == Tier::ProjectSource)
         .count();
-    let mut source_classified = classify_tiers(&source_paths, &tsconfig_patterns);
+    let mut source_classified = if let Some(ref snap) = workspace_snapshot {
+        classify_from_snapshot(&source_paths, snap)
+    } else {
+        classify_tiers(&source_paths, &tsconfig_patterns)
+    };
     let source_project_count = source_classified
         .iter()
         .filter(|(_, t)| *t == Tier::ProjectSource)
@@ -373,7 +405,7 @@ async fn scanner_loop(
                     &config.host,
                     &config.tsx_profile,
                     sync,
-                    &config.resolver_snapshot,
+                    &config.vfs_workspace,
                     config.is_tsgo,
                     &config.provider_sync_states,
                 )
@@ -411,7 +443,7 @@ async fn scanner_loop(
                 path,
                 &config.host,
                 sync,
-                &config.resolver_snapshot,
+                &config.vfs_workspace,
                 config.is_tsgo,
                 &config.provider_sync_states,
             )
@@ -422,7 +454,7 @@ async fn scanner_loop(
                 deps,
                 &config.host,
                 sync,
-                &config.resolver_snapshot,
+                &config.vfs_workspace,
                 config.is_tsgo,
                 &config.provider_sync_states,
                 &mut node_modules_synced,
@@ -477,7 +509,7 @@ pub(crate) async fn resync_non_vue_file(
     canonical_id: &str,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
-    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) {
@@ -494,7 +526,7 @@ pub(crate) async fn resync_non_vue_file(
         canonical_id,
         host,
         sync,
-        resolver_snapshot,
+        vfs_workspace,
         is_tsgo,
         sync_states,
     )
@@ -509,11 +541,19 @@ async fn sync_non_vue_file_to_provider(
     canonical_id: &str,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
-    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) -> Vec<crate::project_resolver::ResolveResult> {
-    let snapshot = match resolver_snapshot.read().clone() {
+    let snapshot = match {
+        let ws = vfs_workspace.read();
+        ws.as_ref().and_then(|ws| {
+            let published = ws.load_published()?;
+            Some(crate::server::PublishedResolverSnapshot {
+                resolver: published.snapshot.resolver.clone(),
+            })
+        })
+    } {
         Some(s) => s,
         None => return Vec::new(),
     };
@@ -631,7 +671,7 @@ async fn follow_node_modules_deps(
     initial_deps: Vec<crate::project_resolver::ResolveResult>,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
-    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
     node_modules_synced: &mut HashSet<String>,
@@ -667,7 +707,7 @@ async fn follow_node_modules_deps(
             &dep.source_id,
             host,
             sync,
-            resolver_snapshot,
+            vfs_workspace,
             is_tsgo,
             sync_states,
         )
@@ -689,11 +729,19 @@ async fn sync_file_to_provider(
     host: &VerterHost,
     profile: &CompileProfile,
     sync: &ProjectSync,
-    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) {
-    let Some(snapshot) = resolver_snapshot.read().clone() else {
+    let Some(snapshot) = ({
+        let ws = vfs_workspace.read();
+        ws.as_ref().and_then(|ws| {
+            let published = ws.load_published()?;
+            Some(crate::server::PublishedResolverSnapshot {
+                resolver: published.snapshot.resolver.clone(),
+            })
+        })
+    }) else {
         return;
     };
     host.ensure_loaded(canonical_id);
@@ -846,24 +894,24 @@ mod tests {
             paths.iter().any(|p| p.ends_with("scripts/Tool.vue")),
             "should find scripts/Tool.vue"
         );
-        assert_eq!(paths.len(), 4, "should find exactly 4 .vue files");
+        assert!(
+            paths.iter().any(|p| p.contains(".hidden/Secret.vue")),
+            "should not prune dot-directories before ownership classification"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("/dist/Built.vue")),
+            "should not prune dist/ before ownership classification"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("/build/Output.vue")),
+            "should not prune build/ before ownership classification"
+        );
+        assert_eq!(paths.len(), 7, "should find exactly 7 .vue files");
 
-        // Negative: does NOT include excluded directories
+        // Negative: does NOT include fallback-excluded directories
         assert!(
             !paths.iter().any(|p| p.contains("node_modules")),
             "must not include node_modules"
-        );
-        assert!(
-            !paths.iter().any(|p| p.contains(".hidden")),
-            "must not include dot-directories"
-        );
-        assert!(
-            !paths.iter().any(|p| p.contains("/dist/")),
-            "must not include dist/"
-        );
-        assert!(
-            !paths.iter().any(|p| p.contains("/build/")),
-            "must not include build/"
         );
         assert!(
             !paths.iter().any(|p| p.ends_with(".ts")),
@@ -1085,10 +1133,17 @@ mod tests {
                 None,
             ),
         ]);
-        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-            generation: 1,
+        let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
             resolver,
-        }));
+            &[
+                (
+                    "/workspace/pkg-a",
+                    "/workspace",
+                    Some("/workspace/pkg-a/tsconfig.json"),
+                ),
+                ("/workspace", "/workspace", None),
+            ],
+        );
         let sync_states = DashMap::new();
         let sync = ProjectSync::new(
             Arc::new(MockTypeProvider::new()),
@@ -1144,10 +1199,17 @@ mod tests {
                 None,
             ),
         ]);
-        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-            generation: 1,
+        let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
             resolver,
-        }));
+            &[
+                (
+                    "/workspace/src",
+                    "/workspace",
+                    Some("/workspace/tsconfig.app.json"),
+                ),
+                ("/workspace", "/workspace", None),
+            ],
+        );
         let sync_states = DashMap::new();
         let sync = ProjectSync::new(
             Arc::new(MockTypeProvider::new()),
@@ -1223,10 +1285,10 @@ defineProps<{ msg: string }>()
                 Some("/workspace/tsconfig.json".to_string()),
             ),
         ]);
-        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-            generation: 1,
+        let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
             resolver,
-        }));
+            &[("/workspace", "/workspace", Some("/workspace/tsconfig.json"))],
+        );
         let sync_states = DashMap::new();
         let provider = Arc::new(MockTypeProvider::new());
         let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
@@ -1307,13 +1369,13 @@ import Child from '@/Child.vue'
             crate::project_resolver::IdeProjectConfig::new(
                 root_path.clone(),
                 root_path.clone(),
-                Some(tsconfig_path),
+                Some(tsconfig_path.clone()),
             ),
         ]);
-        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-            generation: 1,
+        let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
             resolver,
-        }));
+            &[(&root_path, &root_path, Some(&tsconfig_path))],
+        );
         let sync_states = DashMap::new();
         let provider = Arc::new(MockTypeProvider::new());
         let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
@@ -1321,7 +1383,14 @@ import Child from '@/Child.vue'
             snapshot
                 .read()
                 .as_ref()
-                .and_then(|snapshot| snapshot.resolver.owner_for_file(&canonical_id))
+                .and_then(|ws| ws.load_published())
+                .and_then(|published| {
+                    published
+                        .snapshot
+                        .resolver
+                        .owner_for_file(&canonical_id)
+                        .cloned()
+                })
                 .is_some(),
             "resolver should match the Vue file to the temp tsconfig owner"
         );
@@ -1433,22 +1502,22 @@ import Child from '@/Child.vue'
                 .any(|p| p.contains(".d.ts") || p.contains(".d.mts") || p.contains(".d.cts")),
             "should not include .d.ts/.d.mts/.d.cts files"
         );
-        // Negative: must NOT include node_modules, dot-dirs, dist, build
+        // Negative: must NOT include node_modules
         assert!(
             !paths.iter().any(|p| p.contains("node_modules")),
             "must not include node_modules"
         );
         assert!(
+            paths.iter().any(|p| p.contains("/dist/app.js")),
+            "scanner should not prune dist/ before ownership classification"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("/build/output.js")),
+            "scanner should not prune build/ before ownership classification"
+        );
+        assert!(
             !paths.iter().any(|p| p.contains(".git")),
-            "must not include dot-directories"
-        );
-        assert!(
-            !paths.iter().any(|p| p.contains("/dist/")),
-            "must not include dist/"
-        );
-        assert!(
-            !paths.iter().any(|p| p.contains("/build/")),
-            "must not include build/"
+            "dot-directories without matching source extensions should not appear"
         );
 
         // All paths use forward slashes
@@ -1530,16 +1599,131 @@ import Child from '@/Child.vue'
     #[test]
     fn test_is_excluded_dir() {
         assert!(is_excluded_dir("node_modules"));
-        assert!(is_excluded_dir("dist"));
-        assert!(is_excluded_dir("build"));
-        assert!(is_excluded_dir(".git"));
-        assert!(is_excluded_dir(".vscode"));
+        assert!(!is_excluded_dir("dist"));
+        assert!(!is_excluded_dir("build"));
+        assert!(!is_excluded_dir(".git"));
+        assert!(!is_excluded_dir(".vscode"));
 
         assert!(!is_excluded_dir("src"), "src should not be excluded");
         assert!(!is_excluded_dir("lib"), "lib should not be excluded");
         assert!(
             !is_excluded_dir("packages"),
             "packages should not be excluded"
+        );
+    }
+
+    // ── classify_from_snapshot tests ──
+
+    #[test]
+    fn classify_from_snapshot_configured_is_project_source() {
+        use verter_vfs::workspace_snapshot::*;
+        use verter_vfs::{
+            CanonicalPath, ConfiguredMembership, FallbackMembership, NormalizedGlob,
+            ProjectResolver, StaticMembershipSpec,
+        };
+
+        let root = CanonicalPath::new("d:/project");
+        let spec = StaticMembershipSpec::with_typescript_defaults(&root);
+
+        let snap = WorkspaceSnapshot {
+            projects: vec![
+                OwnershipProject {
+                    id: ProjectId(0),
+                    root: root.clone(),
+                    workspace_root: root.clone(),
+                    payload: ProjectPayload::Configured {
+                        tsconfig_path: CanonicalPath::new("d:/project/tsconfig.json"),
+                        membership: ConfiguredMembership {
+                            spec,
+                            materialized_files: Default::default(), // empty → falls back to spec
+                        },
+                        compiler_options: Default::default(),
+                        references: vec![],
+                        workspace_aliases: vec![],
+                    },
+                },
+                OwnershipProject {
+                    id: ProjectId(1),
+                    root: root.clone(),
+                    workspace_root: root.clone(),
+                    payload: ProjectPayload::Fallback {
+                        membership: FallbackMembership {
+                            root: root.clone(),
+                            exclude: vec![NormalizedGlob::new("d:/project/node_modules/**")],
+                        },
+                    },
+                },
+            ],
+            resolver: ProjectResolver::default(),
+            generation: SnapshotGeneration(1),
+        };
+
+        let paths = vec![
+            "d:/project/src/App.vue".to_string(),
+            "d:/project/scripts/build.ts".to_string(),
+        ];
+
+        let classified = classify_from_snapshot(&paths, &snap);
+
+        // src/App.vue is under the configured project root with MatchAll → ProjectSource
+        assert_eq!(classified[0].1, Tier::ProjectSource);
+        // scripts/build.ts is also under root with MatchAll → ProjectSource
+        assert_eq!(classified[1].1, Tier::ProjectSource);
+    }
+
+    #[test]
+    fn classify_from_snapshot_outside_all_projects_is_other() {
+        use verter_vfs::workspace_snapshot::*;
+        use verter_vfs::ProjectResolver;
+
+        let snap = WorkspaceSnapshot {
+            projects: vec![],
+            resolver: ProjectResolver::default(),
+            generation: SnapshotGeneration(1),
+        };
+
+        let paths = vec!["d:/other/foo.vue".to_string()];
+        let classified = classify_from_snapshot(&paths, &snap);
+        assert_eq!(classified[0].1, Tier::Other);
+    }
+
+    #[test]
+    fn classify_from_snapshot_node_modules_is_other() {
+        use verter_vfs::workspace_snapshot::*;
+        use verter_vfs::{
+            CanonicalPath, ConfiguredMembership, ProjectResolver, StaticMembershipSpec,
+        };
+
+        let root = CanonicalPath::new("d:/project");
+
+        let snap = WorkspaceSnapshot {
+            projects: vec![OwnershipProject {
+                id: ProjectId(0),
+                root: root.clone(),
+                workspace_root: root.clone(),
+                payload: ProjectPayload::Configured {
+                    tsconfig_path: CanonicalPath::new("d:/project/tsconfig.json"),
+                    membership: ConfiguredMembership {
+                        spec: StaticMembershipSpec::with_typescript_defaults(&root),
+                        materialized_files: Default::default(),
+                    },
+                    compiler_options: Default::default(),
+                    references: vec![],
+                    workspace_aliases: vec![],
+                },
+            }],
+            resolver: ProjectResolver::default(),
+            generation: SnapshotGeneration(1),
+        };
+
+        let paths = vec!["d:/project/node_modules/vue/index.ts".to_string()];
+        let classified = classify_from_snapshot(&paths, &snap);
+
+        // node_modules is excluded by default TS excludes
+        assert_eq!(
+            classified[0].1,
+            Tier::Other,
+            "node_modules should be excluded by configured project defaults"
         );
     }
 }

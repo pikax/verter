@@ -322,7 +322,3 @@ impl ProjectGraph {
 fn normalize_path(path: &str) -> String {
     path.replace('\\', "/").to_lowercase()
 }
-
-#[cfg(test)]
-#[path = "project_graph_tests.rs"]
-mod tests;

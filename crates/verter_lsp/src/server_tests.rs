@@ -6,6 +6,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use verter_host::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
+use crate::server::PublishedResolverSnapshot;
+use crate::test_utils::make_test_vfs_workspace_from_registry;
 use crate::tsgo::mock::{MockCall, MockTypeProvider};
 use crate::tsgo::protocol::{
     CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken, SignatureHelp,
@@ -635,16 +637,53 @@ fn make_hover_test_service(
 }
 
 fn install_test_resolver(server: &VerterLanguageServer) {
-    *server.resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                "/workspace".to_string(),
-                "/workspace".to_string(),
-                Some("/workspace/tsconfig.json".to_string()),
-            ),
-        ]),
+    install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
+}
+
+fn install_test_resolver_for_root(
+    server: &VerterLanguageServer,
+    root: &str,
+    tsconfig: Option<&str>,
+) {
+    let vfs_ws = std::sync::Arc::new(verter_vfs::FilesystemWorkspace::new(
+        verter_vfs::FilesystemOptions::default(),
+    ));
+
+    // Build a minimal project graph with a single project.
+    let projects = vec![verter_vfs::workspace_snapshot::OwnershipProject {
+        id: verter_vfs::workspace_snapshot::ProjectId(0),
+        root: verter_vfs::CanonicalPath::new(root),
+        workspace_root: verter_vfs::CanonicalPath::new(root),
+        payload: verter_vfs::workspace_snapshot::ProjectPayload::Fallback {
+            membership: verter_vfs::FallbackMembership {
+                root: verter_vfs::CanonicalPath::new(root),
+                exclude: vec![verter_vfs::NormalizedGlob::new(&format!(
+                    "{}/node_modules/**",
+                    root
+                ))],
+            },
+        },
+    }];
+
+    let resolver =
+        verter_vfs::ProjectResolver::new(vec![crate::project_resolver::IdeProjectConfig::new(
+            root.to_string(),
+            root.to_string(),
+            tsconfig.map(|s| s.to_string()),
+        )]);
+
+    let snapshot = std::sync::Arc::new(verter_vfs::WorkspaceSnapshot {
+        projects,
+        resolver,
+        generation: verter_vfs::workspace_snapshot::SnapshotGeneration(1),
     });
+
+    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    server.install_vfs_workspace(vfs_ws);
 }
 
 fn open_test_vue(server: &VerterLanguageServer, path: &str, source: &str) -> Uri {
@@ -1029,12 +1068,13 @@ async fn make_definition_test_server(
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),
     );
-    *server.resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![ide_project.clone()]),
-    });
     // Sync resolver to host's VFS so resolve_import_via_workspace works
     host.configure_projects(vec![ide_project]);
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
 
     for (relative_path, language_id, source) in files {
         let canonical_id = format!("{workspace_id}/{relative_path}");
@@ -1235,10 +1275,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let dynamic_start = source.find(dynamic_expr).unwrap();
 
     let prepared = prepare_non_vue_provider_sync(
-        Some(&ResolverSnapshot {
-            generation: 1,
-            resolver,
-        }),
+        Some(&PublishedResolverSnapshot { resolver }),
         &reader,
         "/workspace/src/App.ts",
         source,
@@ -1816,10 +1853,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
         "/workspace/src/util.ts",
     ]);
     let targets = collect_priority_vue_targets_from_module_references(
-        Some(&ResolverSnapshot {
-            generation: 1,
-            resolver,
-        }),
+        Some(&PublishedResolverSnapshot { resolver }),
         &reader,
         "/workspace/src/App.vue",
         &[
@@ -1862,10 +1896,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
     ]);
     let reader = TestResolverReader::with_files(&["/workspace/src/Foo.vue"]);
     let targets = collect_priority_vue_targets_from_module_references(
-        Some(&ResolverSnapshot {
-            generation: 1,
-            resolver,
-        }),
+        Some(&PublishedResolverSnapshot { resolver }),
         &reader,
         "/workspace/src/App.vue",
         &[test_analyzed_module_reference(
@@ -4719,16 +4750,10 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
 
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
-    let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                "/workspace".to_string(),
-                "/workspace".to_string(),
-                Some("/workspace/tsconfig.app.json".to_string()),
-            ),
-        ]),
-    }));
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
     let provider_sync_states = DashMap::new();
     let pending_snapshot_provider_sync = DashSet::new();
     pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
@@ -4736,7 +4761,7 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
     drain_pending_snapshot_provider_sync(
         Some(&sync),
         &documents,
-        &resolver_snapshot,
+        &vfs_workspace,
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         false,
@@ -4824,21 +4849,12 @@ async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_ex
     });
 
     let cached_verter_diags = DashMap::new();
-    let project_registry = parking_lot::RwLock::new(None);
-    let fallback_linter = parking_lot::RwLock::new(verter_diagnostics::Linter::new(
-        verter_diagnostics::LintConfig::default(),
-    ));
 
     // With TypeImport resolution and a filesystem-backed host, the macro type dep
     // resolves immediately via the "types" export condition in package.json.
     // No stale HOST_MISSING_MACRO_TYPE_DEP diagnostic should appear.
-    let diags = compute_verter_diagnostics_for(
-        &documents,
-        &uri,
-        &cached_verter_diags,
-        &project_registry,
-        &fallback_linter,
-    );
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
     assert!(
         !diags.iter().any(|d| matches!(
             &d.code,
@@ -5365,16 +5381,11 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     });
 
     let server = service.inner();
-    *server.resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                workspace_id.clone(),
-                workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.json")),
-            ),
-        ]),
-    });
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
 
     let app_path = format!("{workspace_id}/src/App.vue");
     let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
@@ -5500,16 +5511,11 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
     });
 
     let server = service.inner();
-    *server.resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                workspace_id.clone(),
-                workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.json")),
-            ),
-        ]),
-    });
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
 
     let app_path = format!("{workspace_id}/src/App.vue");
     let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
@@ -5606,16 +5612,11 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
     });
 
     let server = service.inner();
-    *server.resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                workspace_id.clone(),
-                workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.json")),
-            ),
-        ]),
-    });
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
 
     let app_path = format!("{workspace_id}/src/App.vue");
     let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
@@ -5678,18 +5679,9 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
     });
 
     let cached_verter_diags = Arc::new(DashMap::new());
-    let project_registry = Arc::new(parking_lot::RwLock::new(None));
-    let fallback_linter = Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
-        verter_diagnostics::LintConfig::default(),
-    )));
 
-    let diags = compute_verter_diagnostics_for(
-        &documents,
-        &uri,
-        &cached_verter_diags,
-        &project_registry,
-        &fallback_linter,
-    );
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
     let fragment_path = format!("{workspace_id}/src/FragmentComp.vue");
     let fragment_analysis = resolve_component_for(host.as_ref(), &app_path, "./FragmentComp.vue");
 
@@ -5779,16 +5771,11 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
     });
 
     let server = service.inner();
-    *server.resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                workspace_id.clone(),
-                workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.json")),
-            ),
-        ]),
-    });
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
 
     let app_path = format!("{workspace_id}/src/App.vue");
     let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
@@ -5876,16 +5863,11 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     });
 
     let server = service.inner();
-    *server.resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: 1,
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                workspace_id.clone(),
-                workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.json")),
-            ),
-        ]),
-    });
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
 
     let child_path = format!("{workspace_id}/src/TypedSlotComp.vue");
     let child_source =
@@ -6095,8 +6077,7 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
     );
 
     // Verify the resolver can resolve these specifiers
-    let snapshot = ResolverSnapshot {
-        generation: 1,
+    let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
     };
     let ws = documents.host().workspace();
@@ -6196,8 +6177,7 @@ defineProps<{ msg: string }>()
         aliases: Vec::new(),
     });
 
-    let snapshot = ResolverSnapshot {
-        generation: 1,
+    let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 workspace_id.clone(),
@@ -6568,18 +6548,9 @@ fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     });
 
     let cached_verter_diags = Arc::new(DashMap::new());
-    let project_registry = Arc::new(parking_lot::RwLock::new(None));
-    let fallback_linter = Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
-        verter_diagnostics::LintConfig::default(),
-    )));
 
-    let diags = compute_verter_diagnostics_for(
-        &documents,
-        &uri,
-        &cached_verter_diags,
-        &project_registry,
-        &fallback_linter,
-    );
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         documents.get(&uri).is_some(),
@@ -6628,19 +6599,10 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
     });
 
     let cached_verter_diags = Arc::new(DashMap::new());
-    let project_registry = Arc::new(parking_lot::RwLock::new(None));
-    let fallback_linter = Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
-        verter_diagnostics::LintConfig::default(),
-    )));
 
     // First call — should contain HOST_MISSING_MACRO_TYPE_DEP
-    let diags1 = compute_verter_diagnostics_for(
-        &documents,
-        &uri,
-        &cached_verter_diags,
-        &project_registry,
-        &fallback_linter,
-    );
+    let diags1 =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
     assert!(
         diags1.iter().any(|d| matches!(
             &d.code,
@@ -6662,13 +6624,8 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
     let _ = host.ensure_compiled("/workspace/src/Comp.vue", &documents.tsx_profile.read());
 
     // Second call — same doc version, but diagnostics_generation changed
-    let diags2 = compute_verter_diagnostics_for(
-        &documents,
-        &uri,
-        &cached_verter_diags,
-        &project_registry,
-        &fallback_linter,
-    );
+    let diags2 =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
     assert!(
             !diags2.iter().any(|d| matches!(
                 &d.code,
@@ -6744,8 +6701,7 @@ import Child from '@/components/Child.vue'
         text: app_source,
     });
 
-    // Phase 1: project_registry is None — aliased import should NOT resolve
-    let project_registry = parking_lot::RwLock::new(None);
+    // Phase 1: before VFS snapshot is built — aliased import should NOT resolve
     let analysis = host.get_analysis(&app_id).expect("analysis for App.vue");
     let ids_before = collect_imported_vue_priority_ids_from_imports_with_fallback(
         &analysis.imports,
@@ -6764,11 +6720,6 @@ import Child from '@/components/Child.vue'
         crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
     let registry = build_result.registry;
 
-    let resolver = registry.to_native_project_resolver();
-    let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-        generation: 1,
-        resolver,
-    }));
     host.configure_projects(
         registry
             .projects()
@@ -6776,7 +6727,7 @@ import Child from '@/components/Child.vue'
             .map(|p| p.to_ide_project_config())
             .collect(),
     );
-    *project_registry.write() = Some(registry);
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
 
     // Now aliased import should resolve
     let ids_after = collect_imported_vue_priority_ids_from_imports_with_fallback(
@@ -6801,7 +6752,7 @@ import Child from '@/components/Child.vue'
     resync_aliased_imports_for_open_files(
         &documents,
         Some(&sync),
-        &resolver_snapshot,
+        &vfs_workspace,
         &provider_sync_states,
         false,
     )
@@ -6885,17 +6836,12 @@ import Child from '@/components/Child.vue'
             .to_string(),
     });
 
-    let project_registry = parking_lot::RwLock::new(None);
     let vite_opts = crate::vite_config::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
     let build_result =
         crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
     let registry = build_result.registry;
-    let resolver = registry.to_native_project_resolver();
-    let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-        generation: 1,
-        resolver,
-    }));
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
     host.configure_projects(
         registry
             .projects()
@@ -6903,7 +6849,6 @@ import Child from '@/components/Child.vue'
             .map(|p| p.to_ide_project_config())
             .collect(),
     );
-    *project_registry.write() = Some(registry);
 
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
@@ -6912,7 +6857,7 @@ import Child from '@/components/Child.vue'
     resync_aliased_imports_for_open_files(
         &documents,
         Some(&sync),
-        &resolver_snapshot,
+        &vfs_workspace,
         &provider_sync_states,
         true,
     )
@@ -6997,17 +6942,12 @@ import { Overlay } from './components'
             .to_string(),
     });
 
-    let project_registry = parking_lot::RwLock::new(None);
     let vite_opts = crate::vite_config::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
     let build_result =
         crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
     let registry = build_result.registry;
-    let resolver = registry.to_native_project_resolver();
-    let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
-        generation: 1,
-        resolver,
-    }));
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
     host.configure_projects(
         registry
             .projects()
@@ -7015,7 +6955,6 @@ import { Overlay } from './components'
             .map(|p| p.to_ide_project_config())
             .collect(),
     );
-    *project_registry.write() = Some(registry);
 
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
@@ -7024,7 +6963,7 @@ import { Overlay } from './components'
     resync_aliased_imports_for_open_files(
         &documents,
         Some(&sync),
-        &resolver_snapshot,
+        &vfs_workspace,
         &provider_sync_states,
         true,
     )

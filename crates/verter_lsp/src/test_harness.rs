@@ -14,7 +14,6 @@ use tower_lsp_server::ls_types::*;
 use tower_lsp_server::LanguageServer;
 use verter_host::{HostConfig, VerterHost};
 
-use crate::provider_sync::ResolverSnapshot;
 use crate::server::VerterLanguageServer;
 use crate::tsgo::traits::TypeProvider;
 use crate::LspConfig;
@@ -174,22 +173,10 @@ impl TestSessionBuilder {
 
         let server = service.inner();
 
-        // Install resolver snapshot pointing at the fixture workspace
-        let tsconfig_path_str = format!("{workspace_id}/tsconfig.json");
-        server.install_resolver_snapshot(ResolverSnapshot {
-            generation: 1,
-            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
-                crate::project_resolver::IdeProjectConfig::new(
-                    workspace_id.clone(),
-                    workspace_id.clone(),
-                    Some(tsconfig_path_str.clone()),
-                ),
-            ]),
-        });
-
         // Build a project registry from the workspace root so verter-internal
         // definition handlers can resolve path aliases (e.g. "@/*" → "./src/*").
         let root_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+        let tsconfig_path_str = format!("{workspace_id}/tsconfig.json");
         let vite_opts = crate::vite_config::ViteConfigOptions::default();
         let build_result =
             crate::config::ProjectRegistry::from_workspace_roots(&[root_uri.clone()], &vite_opts);
@@ -202,7 +189,33 @@ impl TestSessionBuilder {
                 .map(|p| p.to_ide_project_config())
                 .collect(),
         );
-        server.install_project_registry(build_result.registry);
+
+        // Build and install VFS workspace with published snapshot (replaces old resolver_snapshot + project_registry)
+        {
+            let vfs_ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
+                verter_vfs::FilesystemOptions::default(),
+            ));
+            let vfs_vite_opts = verter_vfs::ViteConfigOptions {
+                enabled: false,
+                trusted_files: Vec::new(),
+                node_path: None,
+            };
+            let vfs_build = verter_vfs::ProjectGraph::from_workspace_roots(
+                &*vfs_ws,
+                &[workspace_id.clone()],
+                &vfs_vite_opts,
+            );
+            vfs_ws.set_project_graph(vfs_build.graph);
+            if let Some(published) = vfs_ws.load_published() {
+                let snapshot_arc = Arc::clone(&published.snapshot);
+                let views = crate::workspace_state::build_lsp_views(&snapshot_arc, vec![]);
+                vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+                    snapshot_arc,
+                    Box::new(views),
+                ));
+            }
+            server.install_vfs_workspace(vfs_ws);
+        }
 
         // Replicate the lifecycle from `initialized()`:
         // 1. Notify the type provider about workspace folders

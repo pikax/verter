@@ -36,9 +36,6 @@ pub(super) struct BackgroundInitArgs {
     pub(super) my_gen: u64,
     pub(super) client: Client,
     pub(super) type_provider: Option<Arc<dyn TypeProvider>>,
-    pub(super) project_registry: Arc<parking_lot::RwLock<Option<crate::config::ProjectRegistry>>>,
-    pub(super) resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
-    pub(super) fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
     pub(super) workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
     pub(super) init_generation: Arc<std::sync::atomic::AtomicU64>,
@@ -56,10 +53,75 @@ pub(super) struct BackgroundInitArgs {
         Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
 }
 
+struct PublishedWorkspaceBuild {
+    root: verter_vfs::PublishedRoot,
+    trust_required: Vec<crate::vite_config::ViteConfigTrustInfo>,
+    configured_projects: Vec<(String, String)>,
+}
+
+fn build_published_workspace(
+    ws: &verter_vfs::FilesystemWorkspace,
+    canonical_roots: &[String],
+    vite_opts: &crate::vite_config::ViteConfigOptions,
+    generation: u64,
+    init_lint_opts: Option<serde_json::Value>,
+    conditional_root_narrowing: bool,
+) -> PublishedWorkspaceBuild {
+    let vfs_vite_opts = verter_vfs::ViteConfigOptions {
+        enabled: vite_opts.enabled,
+        trusted_files: vite_opts.trusted_files.clone(),
+        node_path: vite_opts.node_path.clone(),
+    };
+    let build = verter_vfs::build_workspace_snapshot(
+        ws,
+        canonical_roots,
+        verter_vfs::workspace_snapshot::SnapshotGeneration(generation),
+        &vfs_vite_opts,
+    );
+    let trust_required: Vec<crate::vite_config::ViteConfigTrustInfo> = build
+        .trust_required
+        .iter()
+        .map(|info| crate::vite_config::ViteConfigTrustInfo {
+            config_path: info.config_path.clone(),
+            workspace_root: info.workspace_root.clone(),
+            reason: info.reason.clone(),
+        })
+        .collect();
+    let snapshot = Arc::new(build.snapshot);
+    let mut views = crate::workspace_state::build_lsp_views(&snapshot, trust_required.clone());
+
+    if let Some(init_opts) = init_lint_opts.as_ref() {
+        crate::workspace_state::apply_default_lint_to_views(&mut views, init_opts);
+    }
+    if conditional_root_narrowing {
+        crate::workspace_state::set_conditional_root_narrowing(&mut views, true);
+    }
+
+    let configured_projects = snapshot
+        .projects
+        .iter()
+        .filter_map(|project| match &project.payload {
+            verter_vfs::workspace_snapshot::ProjectPayload::Configured {
+                tsconfig_path, ..
+            } => Some((
+                project.root.as_str().to_string(),
+                tsconfig_path.as_str().to_string(),
+            )),
+            verter_vfs::workspace_snapshot::ProjectPayload::Fallback { .. } => None,
+        })
+        .collect();
+
+    PublishedWorkspaceBuild {
+        root: verter_vfs::PublishedRoot::with_ext(snapshot, Box::new(views)),
+        trust_required,
+        configured_projects,
+    }
+}
+
 /// Run all blocking initialization work in the background.
 ///
 /// This function is spawned from `initialized()` and performs:
-/// 1. Project registry build (blocking: vite config eval, tsconfig discovery)
+/// 1. Exact workspace snapshot build (blocking: tsconfig discovery/materialization)
 /// 2. Type provider workspace sync (async)
 /// 3. Lint option merging
 /// 4. @verter/types materialisation (blocking FS)
@@ -75,9 +137,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         my_gen,
         client,
         type_provider,
-        project_registry,
-        resolver_snapshot,
-        fallback_linter,
         workspace_scanner,
         init_generation,
         project_sync,
@@ -93,23 +152,41 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     let host = documents.host_arc();
     let tsx_profile = Arc::clone(&documents.tsx_profile);
+    let canonical_roots: Vec<String> = roots
+        .iter()
+        .map(|uri| crate::documents::uri_to_canonical_id_from_str(uri))
+        .collect();
+    let conditional_root_narrowing = tsx_profile.read().conditional_root_narrowing;
+    let ws = vfs_workspace
+        .read()
+        .clone()
+        .expect("workspace created in initialize()");
 
-    // 1. Build project registry (spawn_blocking — blocking I/O: vite eval, tsconfig)
-    let roots_for_registry = roots.clone();
-    let vite_opts_for_registry = vite_opts.clone();
-    let registry_result = tokio::task::spawn_blocking(move || {
-        crate::config::ProjectRegistry::from_workspace_roots(
-            &roots_for_registry,
-            &vite_opts_for_registry,
+    // 1. Build exact published workspace (spawn_blocking — blocking I/O: tsconfig discovery/materialization)
+    let canonical_roots_for_build = canonical_roots.clone();
+    let vite_opts_for_build = vite_opts.clone();
+    let ws_for_build = Arc::clone(&ws);
+    let published_build = tokio::task::spawn_blocking(move || {
+        build_published_workspace(
+            &ws_for_build,
+            &canonical_roots_for_build,
+            &vite_opts_for_build,
+            my_gen,
+            init_lint_opts,
+            conditional_root_narrowing,
         )
     })
     .await;
 
-    let build_result = match registry_result {
-        Ok(r) => r,
+    let PublishedWorkspaceBuild {
+        root: published_root,
+        trust_required,
+        configured_projects,
+    } = match published_build {
+        Ok(build) => build,
         Err(e) => {
             if e.is_panic() {
-                tracing::error!("project registry build panicked: {e}");
+                tracing::error!("workspace snapshot build panicked: {e}");
                 client
                     .show_message(
                         MessageType::WARNING,
@@ -121,21 +198,13 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         }
     };
 
-    let mut registry = build_result.registry;
-    let trust_required = build_result.trust_required;
-
-    // Log discovered projects
-    for project in registry.projects() {
-        tracing::info!(
-            "project config: root={}, tsconfig={:?}, workspace_aliases={}, lint_explicit={}",
-            project.root,
-            project.tsconfig_path,
-            project.workspace_aliases.len(),
-            project.lint_explicitly_configured,
-        );
+    // 2. Generation check before any commit or provider reconfiguration
+    if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+        tracing::info!("init gen={my_gen} superseded, discarding built snapshot");
+        return Ok(());
     }
 
-    // 2. Type provider: workspace folder sync + path config (async, non-blocking)
+    // 3. Type provider: workspace folder sync + path config (async, non-blocking)
     if let Some(tp) = &type_provider {
         let added: Vec<serde_json::Value> = roots
             .iter()
@@ -148,16 +217,12 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             .collect();
         let _ = tp.update_workspace_folders(added, vec![]).await;
 
-        for project in registry.projects() {
-            let Some(tsconfig_path) = project.tsconfig_path.as_deref() else {
-                continue;
-            };
-            let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
-            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&ws, tsconfig_path)
+        for (project_root, tsconfig_path) in &configured_projects {
+            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&*ws, tsconfig_path)
             {
                 tracing::info!(
                     "configuring tsserver paths for {} via {} (baseUrl: {})",
-                    project.root,
+                    project_root,
                     tsconfig_path,
                     base_url,
                 );
@@ -172,71 +237,22 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let _ = tp.resync_open_files().await;
     }
 
-    // 3. Merge lint options
-    if let Some(init_opts) = init_lint_opts {
-        let mut resolved = crate::config::ResolvedLintConfig::default();
-        crate::config::merge_init_options(&mut resolved, &init_opts);
-        if resolved.explicitly_configured {
-            *fallback_linter.write() = verter_diagnostics::Linter::new(resolved.config.clone());
-            registry.apply_default_lint(&resolved.config);
-        }
-    }
-
-    // 3b. Propagate conditional_root_narrowing to lint configs
-    if tsx_profile.read().conditional_root_narrowing {
-        registry.set_conditional_root_narrowing(true);
-        fallback_linter
-            .write()
-            .config_mut()
-            .conditional_root_narrowing = true;
-    }
-
-    // 4. Generation check → commit registry
+    // 4. Generation check → commit snapshot
     if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
-        tracing::info!("init gen={my_gen} superseded, discarding registry");
+        tracing::info!("init gen={my_gen} superseded, discarding built snapshot");
         return Ok(());
     }
-    let resolver = registry.to_native_project_resolver();
-    *resolver_snapshot.write() = Some(ResolverSnapshot {
-        generation: my_gen,
-        resolver,
-    });
 
-    // Set the host's internal resolver for compilation without syncing to
-    // the workspace — the workspace resolver comes from set_project_graph().
-    host.set_internal_resolver(
-        registry
-            .projects()
-            .iter()
-            .map(|p| p.to_ide_project_config())
-            .collect(),
+    ws.publish_snapshot(published_root);
+    tracing::info!(
+        "Published exact workspace snapshot with consumer views for {} roots",
+        canonical_roots.len()
     );
-
-    // Update the existing VFS workspace's project graph. The workspace was
-    // created in initialize() with an empty graph; now populate it with the
-    // discovered tsconfig/vite configuration so alias resolution works.
-    {
-        let vfs_vite_opts = verter_vfs::ViteConfigOptions {
-            enabled: vite_opts.enabled,
-            trusted_files: vite_opts.trusted_files.clone(),
-            node_path: vite_opts.node_path.clone(),
-        };
-        let ws = vfs_workspace
-            .read()
-            .clone()
-            .expect("workspace created in initialize()");
-        let vfs_build =
-            verter_vfs::ProjectGraph::from_workspace_roots(&*ws, &roots, &vfs_vite_opts);
-        ws.set_project_graph(vfs_build.graph);
-        tracing::info!("VFS project graph updated with {} roots", roots.len());
-    }
-
-    *project_registry.write() = Some(registry);
 
     drain_pending_snapshot_provider_sync(
         project_sync.as_ref(),
         &documents,
-        &resolver_snapshot,
+        &vfs_workspace,
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         is_tsgo,
@@ -244,14 +260,11 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     )
     .await;
 
-    // 4b. Re-resolve aliased imports for open files now that project_registry is built.
-    // During did_open, aliased imports (e.g., @/components/MyComp.vue) could not
-    // be resolved because project_registry was None. Now that it's available,
-    // re-run the import collection pipeline and sync any missing .vue.ts files.
+    // 4b. Re-resolve aliased imports for open files now that the VFS snapshot is built.
     let aliased_imports_synced = resync_aliased_imports_for_open_files(
         &documents,
         project_sync.as_ref(),
-        &resolver_snapshot,
+        &vfs_workspace,
         &provider_sync_states,
         is_tsgo,
     )
@@ -284,11 +297,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         return Ok(());
     }
 
-    let roots_for_scan = roots.clone();
-    let tsconfig_patterns =
-        tokio::task::spawn_blocking(move || collect_tsconfig_patterns(&roots_for_scan))
-            .await
-            .unwrap_or_default();
+    // Get the published snapshot for snapshot-driven scanner classification.
+    // When a snapshot is available, the scanner uses `classify_from_snapshot()`
+    // for ownership-based tier classification, eliminating the need for
+    // `collect_tsconfig_patterns()` glob patterns.
+    let scanner_snapshot = vfs_workspace
+        .read()
+        .as_ref()
+        .and_then(|ws| ws.load_published())
+        .map(|root| Arc::clone(&root.snapshot));
 
     let root_paths: Vec<std::path::PathBuf> = roots
         .iter()
@@ -302,11 +319,12 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             root_paths,
             host: Arc::clone(&host),
             project_sync: project_sync.clone(),
-            resolver_snapshot: Arc::clone(&resolver_snapshot),
+            vfs_workspace: Arc::clone(&vfs_workspace),
             provider_sync_states: Arc::clone(&provider_sync_states),
             is_tsgo,
             tsx_profile: tsx_profile.read().clone(),
-            tsconfig_patterns,
+            tsconfig_patterns: Vec::new(),
+            workspace_snapshot: scanner_snapshot,
             done_tx: Some(scanner_done_tx),
         },
     );
@@ -325,13 +343,11 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let client = client.clone();
         let documents = documents.clone();
         let cached_verter_diags = Arc::clone(&cached_verter_diags);
-        let project_registry = Arc::clone(&project_registry);
-        let fallback_linter = Arc::clone(&fallback_linter);
         let type_provider = type_provider.clone();
         let tsx_profile = tsx_profile.clone();
-        let resolver_snapshot = Arc::clone(&resolver_snapshot);
         let position_encoding = position_encoding.clone();
         let init_generation = Arc::clone(&init_generation);
+        let vfs_workspace = Arc::clone(&vfs_workspace);
         tokio::spawn(async move {
             if scanner_done_rx.await.is_err() {
                 return; // Scanner was dropped/cancelled
@@ -357,13 +373,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     Err(_) => continue,
                 };
 
-                let verter_diags = compute_verter_diagnostics_for(
-                    &documents,
-                    &uri,
-                    &cached_verter_diags,
-                    &project_registry,
-                    &fallback_linter,
-                );
+                let verter_diags = {
+                    let vfs_ws = vfs_workspace.read();
+                    compute_verter_diagnostics_for_with_views(
+                        &documents,
+                        &uri,
+                        &cached_verter_diags,
+                        vfs_ws.as_deref(),
+                    )
+                };
 
                 let diagnostics = if let Some(tp) = &type_provider {
                     let canonical_id = crate::documents::uri_to_canonical_id(&uri);
@@ -371,13 +389,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     let ide = documents.host.get_ide(&canonical_id, &profile);
 
                     if let Some(ide) = ide {
-                        let snapshot = resolver_snapshot.read().clone();
-                        let Some(tsx_path) = snapshot.as_ref().and_then(|snapshot| {
-                            provider_ide_path_for_source(
-                                &snapshot.resolver,
-                                &canonical_id,
-                                ide.is_jsx,
-                            )
+                        let resolver = {
+                            let ws = vfs_workspace.read();
+                            ws.as_ref().and_then(|ws| {
+                                let published = ws.load_published()?;
+                                Some(published.snapshot.resolver.clone())
+                            })
+                        };
+                        let Some(tsx_path) = resolver.as_ref().and_then(|resolver| {
+                            provider_ide_path_for_source(resolver, &canonical_id, ide.is_jsx)
                         }) else {
                             continue;
                         };
@@ -443,13 +463,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 Err(_) => continue,
             };
 
-            let verter_diags = compute_verter_diagnostics_for(
-                &documents,
-                &uri,
-                &cached_verter_diags,
-                &project_registry,
-                &fallback_linter,
-            );
+            let verter_diags = {
+                let vfs_ws = vfs_workspace.read();
+                compute_verter_diagnostics_for_with_views(
+                    &documents,
+                    &uri,
+                    &cached_verter_diags,
+                    vfs_ws.as_deref(),
+                )
+            };
 
             let diagnostics = if let Some(tp) = &type_provider {
                 let canonical_id = crate::documents::uri_to_canonical_id(&uri);
@@ -457,9 +479,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 let ide = documents.host.get_ide(&canonical_id, &profile);
 
                 if let Some(ide) = ide {
-                    let snapshot = resolver_snapshot.read().clone();
-                    let Some(tsx_path) = snapshot.as_ref().and_then(|snapshot| {
-                        provider_ide_path_for_source(&snapshot.resolver, &canonical_id, ide.is_jsx)
+                    let resolver = {
+                        let ws = vfs_workspace.read();
+                        ws.as_ref().and_then(|ws| {
+                            let published = ws.load_published()?;
+                            Some(published.snapshot.resolver.clone())
+                        })
+                    };
+                    let Some(tsx_path) = resolver.as_ref().and_then(|resolver| {
+                        provider_ide_path_for_source(resolver, &canonical_id, ide.is_jsx)
                     }) else {
                         continue;
                     };
@@ -524,7 +552,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 pub(super) async fn drain_pending_snapshot_provider_sync(
     project_sync: Option<&ProjectSync>,
     documents: &DocumentRegistry,
-    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     pending_snapshot_provider_sync: &DashSet<String>,
     is_tsgo: bool,
@@ -534,7 +562,15 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
         pending_snapshot_provider_sync.clear();
         return;
     };
-    let Some(snapshot) = resolver_snapshot.read().clone() else {
+    let Some(snapshot) = ({
+        let ws = vfs_workspace.read();
+        ws.as_ref().and_then(|ws| {
+            let published = ws.load_published()?;
+            Some(super::PublishedResolverSnapshot {
+                resolver: published.snapshot.resolver.clone(),
+            })
+        })
+    }) else {
         return;
     };
 
@@ -594,14 +630,22 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
 pub(super) async fn resync_aliased_imports_for_open_files(
     documents: &DocumentRegistry,
     project_sync: Option<&ProjectSync>,
-    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     is_tsgo: bool,
 ) -> bool {
     let Some(sync) = project_sync else {
         return false;
     };
-    let snapshot = match resolver_snapshot.read().clone() {
+    let snapshot = match {
+        let ws = vfs_workspace.read();
+        ws.as_ref().and_then(|ws| {
+            let published = ws.load_published()?;
+            Some(super::PublishedResolverSnapshot {
+                resolver: published.snapshot.resolver.clone(),
+            })
+        })
+    } {
         Some(s) => s,
         None => return false,
     };
@@ -906,7 +950,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
 }
 
 pub(super) fn owner_path_config_for_source(
-    snapshot: &ResolverSnapshot,
+    snapshot: &super::PublishedResolverSnapshot,
     canonical_id: &str,
 ) -> Option<(String, serde_json::Value)> {
     let owner = snapshot.resolver.owner_for_file(canonical_id)?;
@@ -917,7 +961,7 @@ pub(super) fn owner_path_config_for_source(
 
 pub(crate) async fn configure_provider_paths_for_source(
     sync: &ProjectSync,
-    snapshot: &ResolverSnapshot,
+    snapshot: &super::PublishedResolverSnapshot,
     canonical_id: &str,
     background: bool,
 ) {
@@ -941,7 +985,7 @@ pub(crate) async fn configure_provider_paths_for_source(
 pub(super) async fn sync_pending_snapshot_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
-    snapshot: &ResolverSnapshot,
+    snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     is_tsgo: bool,
@@ -972,7 +1016,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
 pub(super) async fn sync_pending_vue_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
-    snapshot: &ResolverSnapshot,
+    snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     is_tsgo: bool,
@@ -1077,7 +1121,7 @@ pub(super) async fn sync_pending_vue_provider_file(
 pub(super) async fn sync_pending_non_vue_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
-    snapshot: &ResolverSnapshot,
+    snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     is_tsgo: bool,
@@ -1273,15 +1317,69 @@ pub(super) fn materialize_verter_types(roots: &[String]) -> MaterializeVerterTyp
     result
 }
 
-/// Collect tsconfig patterns for all workspace roots (blocking FS walk).
-pub(super) fn collect_tsconfig_patterns(roots: &[String]) -> Vec<String> {
-    let mut patterns = Vec::new();
-    for root_uri in roots {
-        let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-        let root_path = std::path::PathBuf::from(&canonical);
-        for entry in verter_vfs::config::discover_tsconfigs(&root_path) {
-            patterns.push(format!("{}/**", entry.root));
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn build_published_workspace_materializes_exact_snapshot_with_views() {
+        let tmp = tempdir().expect("temp dir");
+        let root = crate::test_utils::canonical_test_path(tmp.path());
+        std::fs::create_dir_all(tmp.path().join("src")).expect("src dir");
+        std::fs::write(
+            tmp.path().join("tsconfig.app.json"),
+            r#"{
+  "include": ["src/**/*"]
+}"#,
+        )
+        .expect("tsconfig should be written");
+        std::fs::write(
+            tmp.path().join("src").join("App.ts"),
+            "export const app = 1;",
+        )
+        .expect("source file should be written");
+
+        let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+        let build = build_published_workspace(
+            &ws,
+            std::slice::from_ref(&root),
+            &crate::vite_config::ViteConfigOptions::default(),
+            7,
+            None,
+            false,
+        );
+        let app_path = format!("{root}/src/App.ts");
+
+        assert_eq!(
+            build.root.snapshot.generation.0, 7,
+            "helper should pin the published snapshot generation"
+        );
+        assert!(
+            build
+                .root
+                .ext::<crate::workspace_state::LspViews>()
+                .is_some(),
+            "helper should attach LSP views before publication"
+        );
+        assert!(
+            matches!(
+                build
+                    .root
+                    .snapshot
+                    .configured_owner_resolution_for_file(&app_path),
+                verter_vfs::ConfiguredOwnerResolution::Unique(_)
+            ),
+            "exact snapshot builder should materialize include-owned files before publish"
+        );
+        assert!(
+            build
+                .root
+                .snapshot
+                .resolver
+                .owner_for_file(&app_path)
+                .is_some(),
+            "resolver published with the snapshot should own the configured file"
+        );
     }
-    patterns
 }

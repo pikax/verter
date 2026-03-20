@@ -1,6 +1,8 @@
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+use crate::canonical_path::canonicalize_path;
+
 /// In-memory overlay store for active editor content.
 ///
 /// When a file has an overlay, all reads return the overlay content
@@ -18,22 +20,26 @@ impl OverlayStore {
 
     /// Get overlay content for a file. Returns `None` if no overlay is set.
     pub fn get(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.entries.get(canonical_id).cloned()
+        let key = canonicalize_path(canonical_id);
+        self.entries.get(&key).cloned()
     }
 
     /// Set overlay content for a file.
     pub fn set(&mut self, canonical_id: String, source: Arc<str>) {
-        self.entries.insert(canonical_id, source);
+        let key = canonicalize_path(&canonical_id);
+        self.entries.insert(key, source);
     }
 
     /// Clear overlay for a file. Returns `true` if an overlay was removed.
     pub fn clear(&mut self, canonical_id: &str) -> bool {
-        self.entries.remove(canonical_id).is_some()
+        let key = canonicalize_path(canonical_id);
+        self.entries.remove(&key).is_some()
     }
 
     /// Check if a file has an overlay set.
     pub fn has_overlay(&self, canonical_id: &str) -> bool {
-        self.entries.contains_key(canonical_id)
+        let key = canonicalize_path(canonical_id);
+        self.entries.contains_key(&key)
     }
 
     /// Number of active overlays.

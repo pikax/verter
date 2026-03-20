@@ -1,0 +1,369 @@
+//! Builder for [`WorkspaceSnapshot`]: one tsconfig discovery pass,
+//! exact membership materialization, atomic snapshot construction.
+//!
+//! The builder runs off-thread (spawn_blocking) and produces a complete
+//! immutable snapshot before publication.
+
+use rustc_hash::FxHashSet;
+
+use crate::canonical_path::CanonicalPath;
+use crate::membership::{
+    typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
+};
+use crate::normalized_glob::NormalizedGlob;
+use crate::resolver::{IdeProjectConfig, ProjectMembership, ProjectResolver};
+use crate::workspace_snapshot::{
+    compare_project_precedence, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+    WorkspaceSnapshot,
+};
+
+/// Result of building a workspace snapshot from workspace roots.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct SnapshotBuildResult {
+    pub snapshot: WorkspaceSnapshot,
+    /// Vite configs that need user trust approval.
+    pub trust_required: Vec<crate::vite_config::ViteConfigTrustInfo>,
+}
+
+/// Build a [`WorkspaceSnapshot`] from workspace roots.
+///
+/// Discovers tsconfigs, loads membership/compiler options, materializes
+/// exact configured file sets, creates fallback projects, sorts by
+/// precedence, and builds the resolver.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_workspace_snapshot(
+    ws: &dyn crate::traits::WorkspaceAccess,
+    roots: &[String],
+    generation: SnapshotGeneration,
+    vite_opts: &crate::vite_config::ViteConfigOptions,
+) -> SnapshotBuildResult {
+    use crate::config::{
+        discover_tsconfigs, load_compiler_options, load_project_membership, load_project_references,
+    };
+    use crate::vite_config::{analyze_vite_config, ViteConfigAnalysis, ViteConfigTrustInfo};
+    use std::path::PathBuf;
+
+    let mut projects = Vec::new();
+    let mut trust_required = Vec::new();
+    let mut next_id: u32 = 0;
+
+    for root_str in roots {
+        let canonical_root = CanonicalPath::new(root_str);
+        let root_path = PathBuf::from(canonical_root.as_str());
+
+        // ── Discover tsconfigs ──
+        let tsconfig_entries = discover_tsconfigs(&root_path);
+
+        for entry in &tsconfig_entries {
+            let tsconfig_path = CanonicalPath::new(&entry.path);
+            let project_root = CanonicalPath::new(&entry.root);
+            let raw_membership = load_project_membership(ws, &entry.path);
+            let compiler_options = load_compiler_options(ws, &entry.path);
+            let raw_references = load_project_references(ws, &entry.path);
+
+            let spec = membership_to_spec(&project_root, &raw_membership);
+            let materialized_files = materialize_from_spec(&spec, &project_root, Some(ws));
+
+            let references = raw_references
+                .into_iter()
+                .map(|r| CanonicalPath::new(&r))
+                .collect();
+
+            let id = ProjectId(next_id);
+            next_id += 1;
+
+            projects.push(OwnershipProject {
+                id,
+                root: project_root,
+                workspace_root: canonical_root.clone(),
+                payload: ProjectPayload::Configured {
+                    tsconfig_path,
+                    membership: ConfiguredMembership {
+                        spec,
+                        materialized_files,
+                    },
+                    compiler_options,
+                    references,
+                    workspace_aliases: Vec::new(),
+                },
+            });
+        }
+
+        // ── Fallback project ──
+        let has_tsconfigs = !tsconfig_entries.is_empty();
+
+        // Collect trust-required notifications for complex vite configs.
+        // Alias resolution is handled by the VFS ProjectGraph's
+        // `from_workspace_roots` which stores aliases on the fallback project.
+        if vite_opts.enabled && !has_tsconfigs {
+            if let ViteConfigAnalysis::Complex {
+                config_path,
+                reason,
+            } = analyze_vite_config(ws, canonical_root.as_str())
+            {
+                let is_trusted = vite_opts
+                    .trusted_files
+                    .iter()
+                    .any(|tf| tf.replace('\\', "/") == config_path);
+                if !is_trusted {
+                    trust_required.push(ViteConfigTrustInfo {
+                        config_path,
+                        workspace_root: canonical_root.as_str().to_string(),
+                        reason,
+                    });
+                }
+            }
+        }
+
+        let id = ProjectId(next_id);
+        next_id += 1;
+
+        projects.push(OwnershipProject {
+            id,
+            root: canonical_root.clone(),
+            workspace_root: canonical_root.clone(),
+            payload: ProjectPayload::Fallback {
+                membership: FallbackMembership {
+                    root: canonical_root,
+                    exclude: typescript_default_excludes(&CanonicalPath::new(root_str)),
+                },
+            },
+        });
+    }
+
+    // ── Sort by precedence ──
+    projects.sort_by(compare_project_precedence);
+
+    // Re-assign IDs after sorting (IDs must match index position)
+    for (i, project) in projects.iter_mut().enumerate() {
+        project.id = ProjectId(i as u32);
+    }
+
+    let resolver = build_resolver_from_projects(&projects);
+
+    SnapshotBuildResult {
+        snapshot: WorkspaceSnapshot {
+            projects,
+            resolver,
+            generation,
+        },
+        trust_required,
+    }
+}
+
+/// Build a workspace snapshot for tests/WASM (no vite, no disk).
+pub fn build_workspace_snapshot_simple(
+    projects: Vec<OwnershipProject>,
+    generation: SnapshotGeneration,
+) -> WorkspaceSnapshot {
+    let mut projects = projects;
+    projects.sort_by(compare_project_precedence);
+
+    for (i, project) in projects.iter_mut().enumerate() {
+        project.id = ProjectId(i as u32);
+    }
+
+    let resolver = build_resolver_from_projects(&projects);
+
+    WorkspaceSnapshot {
+        projects,
+        resolver,
+        generation,
+    }
+}
+
+/// Convert the old `ProjectMembership` enum to the new `StaticMembershipSpec`.
+///
+/// Fills in TypeScript defaults when the old representation was `MatchAll`.
+pub fn membership_to_spec(
+    project_root: &CanonicalPath,
+    membership: &ProjectMembership,
+) -> StaticMembershipSpec {
+    match membership {
+        ProjectMembership::MatchAll => StaticMembershipSpec::with_typescript_defaults(project_root),
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            let files_cp: Vec<CanonicalPath> =
+                files.iter().map(|f| CanonicalPath::new(f)).collect();
+
+            let include_globs: Vec<NormalizedGlob> =
+                include.iter().map(|g| NormalizedGlob::new(g)).collect();
+
+            let exclude_globs: Vec<NormalizedGlob> = if exclude.is_empty() {
+                typescript_default_excludes(project_root)
+            } else {
+                exclude.iter().map(|g| NormalizedGlob::new(g)).collect()
+            };
+
+            StaticMembershipSpec {
+                files: files_cp,
+                include: include_globs,
+                exclude: exclude_globs,
+            }
+        }
+    }
+}
+
+/// Materialize the configured file set from a static membership spec.
+///
+/// When `ws` is `Some` and the workspace supports `walk()`, walks the
+/// project root directory to expand `include` patterns (minus `exclude`).
+/// `files` entries are always included — they are immune to `exclude`.
+///
+/// When `ws` is `None` or `walk()` returns `UnsupportedOperation`, only
+/// `files` entries are materialized (bridge mode for Engine path / WASM).
+fn materialize_from_spec(
+    spec: &StaticMembershipSpec,
+    project_root: &CanonicalPath,
+    ws: Option<&dyn crate::traits::WorkspaceAccess>,
+) -> FxHashSet<CanonicalPath> {
+    let mut result = FxHashSet::default();
+
+    // files entries are always members (immune to exclude)
+    for file in &spec.files {
+        result.insert(file.clone());
+    }
+
+    // Walk the project root and check each file against include - exclude
+    if !spec.include.is_empty() {
+        if let Some(ws) = ws {
+            // Use exclude patterns to skip entire directories during walk.
+            // This avoids descending into node_modules/, dist/, etc.
+            let exclude_globs = &spec.exclude;
+            let filter_dir = |dir: &str| {
+                let dir_cp = CanonicalPath::new(dir);
+                // If any exclude glob matches this directory (as a prefix),
+                // prune the entire subtree. We check by appending a dummy
+                // file name to see if the directory itself is excluded.
+                !exclude_globs.iter().any(|glob| {
+                    glob.matches(&CanonicalPath::new(&format!("{}/x", dir_cp.as_str())))
+                })
+            };
+
+            if let Ok(entries) = ws.walk(project_root.as_str(), &filter_dir, &|_| true) {
+                for entry_path in entries {
+                    let cp = CanonicalPath::new(&entry_path);
+                    if spec.matches(&cp) {
+                        result.insert(cp);
+                    }
+                }
+            }
+            // If walk() returns Err (UnsupportedOperation, NotFound, etc.),
+            // gracefully fall through — only files entries are materialized.
+        }
+    }
+
+    result
+}
+
+/// Build a `ProjectResolver` from ownership projects.
+fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolver {
+    let ide_configs: Vec<IdeProjectConfig> = projects
+        .iter()
+        .map(|p| match &p.payload {
+            ProjectPayload::Configured {
+                tsconfig_path,
+                compiler_options,
+                references,
+                workspace_aliases,
+                membership,
+            } => {
+                let mut config = IdeProjectConfig::new(
+                    p.root.as_str().to_string(),
+                    p.workspace_root.as_str().to_string(),
+                    Some(tsconfig_path.as_str().to_string()),
+                );
+                config.compiler_options = compiler_options.clone();
+                config.references = references.iter().map(|r| r.as_str().to_string()).collect();
+                config.workspace_aliases = workspace_aliases.clone();
+                config.membership = spec_to_membership(&membership.spec);
+                config
+            }
+            ProjectPayload::Fallback { .. } => IdeProjectConfig::new(
+                p.root.as_str().to_string(),
+                p.workspace_root.as_str().to_string(),
+                None,
+            ),
+        })
+        .collect();
+
+    ProjectResolver::new(ide_configs)
+}
+
+/// Convert StaticMembershipSpec back to ProjectMembership for the resolver.
+fn spec_to_membership(spec: &StaticMembershipSpec) -> ProjectMembership {
+    if spec.files.is_empty() && spec.include.is_empty() && spec.exclude.is_empty() {
+        return ProjectMembership::MatchAll;
+    }
+    ProjectMembership::IncludeExclude {
+        files: spec.files.iter().map(|f| f.as_str().to_string()).collect(),
+        include: spec
+            .include
+            .iter()
+            .map(|g| g.as_str().to_string())
+            .collect(),
+        exclude: spec
+            .exclude
+            .iter()
+            .map(|g| g.as_str().to_string())
+            .collect(),
+    }
+}
+
+/// Bridge: Convert a legacy `VfsProjectConfig` to an `OwnershipProject`.
+///
+/// Used during the migration period by `Engine::rebuild_and_publish()` to
+/// build a `WorkspaceSnapshot` from the legacy `ProjectGraph`.
+pub fn ownership_project_from_vfs_config(
+    config: &crate::project_graph::VfsProjectConfig,
+    id: ProjectId,
+) -> OwnershipProject {
+    let root = CanonicalPath::new(&config.root);
+    let workspace_root = CanonicalPath::new(&config.workspace_root);
+
+    if let Some(ref tsconfig) = config.tsconfig_path {
+        // Configured project
+        let spec = membership_to_spec(&root, &config.membership);
+        let materialized_files = materialize_from_spec(&spec, &root, None);
+
+        OwnershipProject {
+            id,
+            root,
+            workspace_root,
+            payload: ProjectPayload::Configured {
+                tsconfig_path: CanonicalPath::new(tsconfig),
+                membership: ConfiguredMembership {
+                    spec,
+                    materialized_files,
+                },
+                compiler_options: config.compiler_options.clone(),
+                references: config
+                    .references
+                    .iter()
+                    .map(|r| CanonicalPath::new(r))
+                    .collect(),
+                workspace_aliases: config.workspace_aliases.clone(),
+            },
+        }
+    } else {
+        // Fallback project
+        OwnershipProject {
+            id,
+            root: root.clone(),
+            workspace_root,
+            payload: ProjectPayload::Fallback {
+                membership: FallbackMembership {
+                    root: root.clone(),
+                    exclude: typescript_default_excludes(&root),
+                },
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "snapshot_builder_tests.rs"]
+mod tests;

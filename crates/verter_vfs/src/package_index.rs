@@ -72,7 +72,7 @@ impl std::fmt::Debug for PackageIndex {
 }
 
 /// Parse a package.json string into a `PackageManifest`.
-fn parse_package_json(source: &str) -> PackageManifest {
+pub(crate) fn parse_package_json(source: &str) -> PackageManifest {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(source) else {
         return PackageManifest {
             raw: Some(Arc::from(source)),

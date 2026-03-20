@@ -38,28 +38,35 @@
 //! 2. Snapshot (cached content)
 //! 3. Disk via `NativeFs`
 
+pub mod canonical_path;
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config;
 pub mod error;
 pub mod exact_resolution;
 pub mod filesystem;
+pub mod membership;
 pub mod memory;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_fs;
+pub mod normalized_glob;
 pub mod overlay;
 pub mod package_index;
-pub mod project_graph;
+pub(crate) mod project_graph;
+pub mod published_state;
 pub mod resolver;
+pub mod snapshot_builder;
 pub mod traits;
 pub mod types;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vite_config;
+pub mod workspace_snapshot;
 
 mod engine;
 
 // ── Public re-exports ──
 
+pub use canonical_path::{canonicalize_path, CanonicalPath};
 pub use changes::{ChangeResult, OwnedFileInfo, OwnershipDiff, WorkspaceChange};
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::{
@@ -70,16 +77,21 @@ pub use config::{
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::EdgeStore;
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
+pub use membership::{
+    typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
+};
 pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
+pub use normalized_glob::NormalizedGlob;
 pub use overlay::OverlayStore;
 pub use package_index::PackageIndex;
-#[cfg(not(target_arch = "wasm32"))]
-pub use project_graph::ProjectGraphBuildResult;
-pub use project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
+pub use published_state::PublishedRoot;
 pub use resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
     ProjectResolver, WorkspaceAlias,
 };
+pub use snapshot_builder::build_workspace_snapshot_simple;
+#[cfg(not(target_arch = "wasm32"))]
+pub use snapshot_builder::{build_workspace_snapshot, membership_to_spec, SnapshotBuildResult};
 pub use traits::{EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess};
 pub use types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
@@ -92,3 +104,25 @@ pub use vite_config::{
     get_lkg_or_empty, normalize_alias_pair, TrustedExecResult, ViteConfigAnalysis,
     ViteConfigOptions, ViteConfigTrustInfo,
 };
+pub use workspace_snapshot::{
+    ConfiguredOwnerResolution, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+    WorkspaceSnapshot,
+};
+
+// ── Deprecated re-exports (transitional) ──
+// These types are pub(crate) in project_graph but still referenced by
+// verter_lsp, verter_host tests, and verter_bench. They will be removed
+// once callers migrate to the snapshot-based ownership types.
+
+#[deprecated(note = "use OwnershipProject / WorkspaceSnapshot instead")]
+pub use project_graph::ProjectGraph;
+
+#[deprecated(note = "use OwnershipProject / WorkspaceSnapshot instead")]
+pub use project_graph::ProjectRank;
+
+#[deprecated(note = "use OwnershipProject / WorkspaceSnapshot instead")]
+pub use project_graph::VfsProjectConfig;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[deprecated(note = "use OwnershipProject / WorkspaceSnapshot instead")]
+pub use project_graph::ProjectGraphBuildResult;

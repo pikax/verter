@@ -303,7 +303,7 @@ pub(crate) fn rewrite_non_vue_source_with_resolver(
 }
 
 pub(crate) fn prepare_non_vue_provider_sync(
-    snapshot: Option<&ResolverSnapshot>,
+    snapshot: Option<&super::PublishedResolverSnapshot>,
     reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     source: &str,
@@ -781,7 +781,7 @@ where
 }
 
 pub(super) fn collect_priority_vue_targets_from_module_references(
-    snapshot: Option<&ResolverSnapshot>,
+    snapshot: Option<&super::PublishedResolverSnapshot>,
     reader: &dyn verter_vfs::WorkspaceAccess,
     importer_id: &str,
     module_references: &[verter_analysis::AnalyzedModuleReference],
@@ -828,12 +828,16 @@ pub(super) fn collect_priority_vue_targets_from_module_references(
 /// Results are cached per `(document version, host diagnostics generation)` in
 /// `cached_verter_diags` to avoid redundant re-computation after host-driven
 /// recompiles that do not change the editor document version.
-pub(crate) fn compute_verter_diagnostics_for(
+///
+/// ## Lint resolution
+///
+/// Uses the published `LspViews` from the VFS workspace for per-project lint.
+/// If no published snapshot exists or the file has no owner, uses a default linter.
+pub(crate) fn compute_verter_diagnostics_for_with_views(
     documents: &DocumentRegistry,
     uri: &Uri,
     cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
-    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
-    fallback_linter: &parking_lot::RwLock<verter_diagnostics::Linter>,
+    vfs_workspace: Option<&verter_vfs::FilesystemWorkspace>,
 ) -> Vec<Diagnostic> {
     // Check cache: if version AND diagnostics generation both match, return cached.
     let uri_str = uri.as_str();
@@ -865,46 +869,33 @@ pub(crate) fn compute_verter_diagnostics_for(
         if let Some(analysis) = documents.get_analysis(uri) {
             let canonical_id = uri_to_canonical_id(uri);
 
-            // Look up per-project lint config
-            let lint_explicitly_configured = {
-                let registry_guard = project_registry.read();
-                registry_guard
-                    .as_ref()
-                    .and_then(|r| r.linter_for(&canonical_id))
-                    .map(|p| p.lint_explicitly_configured)
-                    .unwrap_or(false)
-            };
+            // Use published LspViews from VFS workspace for per-project lint.
+            let published = vfs_workspace.and_then(|ws| ws.load_published());
+            let views_lint = published.as_ref().and_then(|p| {
+                let views = p.ext::<crate::workspace_state::LspViews>()?;
+                let view = views.linter_view_for_file(&p.snapshot, &canonical_id)?;
+                Some((view.lint_explicitly_configured, &view.linter))
+            });
 
-            // Run lint rules using per-project linter.
-            // Lock ordering: project_registry → release → fallback_linter (never nested).
-            {
-                let used_project = {
-                    let registry_guard = project_registry.read();
-                    if let Some(project) = registry_guard
-                        .as_ref()
-                        .and_then(|r| r.linter_for(&canonical_id))
-                    {
-                        diags.extend(crate::features::diagnostics_bridge::run_linter(
-                            &project.linter,
-                            &analysis,
-                            &doc.source,
-                            &doc.line_index,
-                        ));
-                        true
-                    } else {
-                        false
-                    }
-                }; // registry_guard dropped here
-
-                if !used_project {
-                    let fl = fallback_linter.read();
-                    diags.extend(crate::features::diagnostics_bridge::run_linter(
-                        &fl,
-                        &analysis,
-                        &doc.source,
-                        &doc.line_index,
-                    ));
-                }
+            let lint_explicitly_configured;
+            if let Some((explicit, linter)) = views_lint {
+                lint_explicitly_configured = explicit;
+                diags.extend(crate::features::diagnostics_bridge::run_linter(
+                    linter,
+                    &analysis,
+                    &doc.source,
+                    &doc.line_index,
+                ));
+            } else {
+                // No published snapshot or file not owned — use default linter.
+                lint_explicitly_configured = false;
+                let default_linter = verter_diagnostics::Linter::default();
+                diags.extend(crate::features::diagnostics_bridge::run_linter(
+                    &default_linter,
+                    &analysis,
+                    &doc.source,
+                    &doc.line_index,
+                ));
             }
 
             // Component usage diagnostics (unknown props, unknown v-models).

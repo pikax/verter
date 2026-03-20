@@ -5,13 +5,13 @@
 //! and the tiered invalidation decision (`should_invalidate_dependent`).
 
 use std::collections::BTreeSet;
+#[cfg(not(feature = "scheduler"))]
 use std::sync::Arc;
 
-use verter_analysis::project_resolver::{
-    NativeProjectResolver, ResolvePhase, ResolveRequest, ResolveRequestKind,
-};
+use verter_analysis::project_resolver::{ResolvePhase, ResolveRequestKind};
 
 use crate::id;
+#[cfg(not(feature = "scheduler"))]
 use crate::shared::read_lock;
 #[cfg(not(feature = "scheduler"))]
 use crate::shared::write_lock;
@@ -136,50 +136,24 @@ pub(crate) fn import_resolves_to_dep(
     import_resolves_to_dep_view(&view, import_source, dependency_id, resolve_extensions)
 }
 
-/// A lightweight reader backed by a set of known file IDs.
-/// Used during smart invalidation where only `file_exists` is needed
-/// and the full file map is mutably borrowed.
-struct FileIdSetReader<'a> {
-    ids: &'a rustc_hash::FxHashSet<String>,
-}
-
-impl verter_vfs::WorkspaceAccess for FileIdSetReader<'_> {
-    fn file_exists(&self, canonical_id: &str) -> bool {
-        self.ids.contains(canonical_id)
-    }
-    fn read_file(&self, _canonical_id: &str) -> Option<Arc<str>> {
-        None // Not needed for existence-only resolution
-    }
-    fn realpath(&self, canonical_id: &str) -> Option<String> {
-        if self.ids.contains(canonical_id) {
-            Some(canonical_id.to_string())
-        } else {
-            None
-        }
-    }
-}
-
 fn import_resolves_to_dep_with_resolver_view(
     view: &DependentView,
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
-    resolver: Option<&NativeProjectResolver>,
-    file_ids: &rustc_hash::FxHashSet<String>,
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
 ) -> bool {
     if import_resolves_to_dep_view(view, import_source, dependency_id, resolve_extensions) {
         return true;
     }
 
-    if let Some(resolver) = resolver {
-        let reader = FileIdSetReader { ids: file_ids };
-        let request = ResolveRequest {
-            importer_id: view.canonical_id.clone(),
-            specifier: import_source.to_string(),
-            kind: ResolveRequestKind::EsmImport,
+    // Workspace resolution (goes through published snapshot)
+    if let Some(ws) = workspace {
+        let ctx = verter_vfs::ResolutionContext {
             phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
         };
-        if let Some(result) = resolver.resolve_with_reader(&reader, &request) {
+        if let Some(result) = ws.resolve_import(&view.canonical_id, import_source, ctx) {
             return result.source_id == dependency_id;
         }
     }
@@ -187,7 +161,7 @@ fn import_resolves_to_dep_with_resolver_view(
     false
 }
 
-/// Like [`import_resolves_to_dep`], but also consults the project resolver
+/// Like [`import_resolves_to_dep`], but also consults the workspace resolver
 /// for aliased specifiers that heuristic matching cannot handle.
 #[cfg(not(feature = "scheduler"))]
 pub(crate) fn import_resolves_to_dep_with_resolver(
@@ -195,8 +169,7 @@ pub(crate) fn import_resolves_to_dep_with_resolver(
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
-    resolver: Option<&NativeProjectResolver>,
-    file_ids: &rustc_hash::FxHashSet<String>,
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
 ) -> bool {
     let view = DependentView::from_file_entry(file);
     import_resolves_to_dep_with_resolver_view(
@@ -204,8 +177,7 @@ pub(crate) fn import_resolves_to_dep_with_resolver(
         import_source,
         dependency_id,
         resolve_extensions,
-        resolver,
-        file_ids,
+        workspace,
     )
 }
 
@@ -218,7 +190,6 @@ pub(crate) fn import_resolves_to_dep_with_resolver(
 ///
 /// Returns `(should_invalidate, updated_resolved_type_hashes)`. The caller must
 /// write back the updated hashes to the appropriate store (FileEntry or CompileCacheEntry).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn should_invalidate_dependent_view(
     view: &mut DependentView,
     dependency_id: &str,
@@ -226,8 +197,7 @@ pub(crate) fn should_invalidate_dependent_view(
     no_signatures: bool,
     dep_source: Option<&str>,
     resolve_extensions: &[String],
-    resolver: Option<&NativeProjectResolver>,
-    file_ids: &rustc_hash::FxHashSet<String>,
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
 ) -> bool {
     if no_signatures {
         return true;
@@ -246,8 +216,7 @@ pub(crate) fn should_invalidate_dependent_view(
                 &dep.import_source,
                 dependency_id,
                 resolve_extensions,
-                resolver,
-                file_ids,
+                workspace,
             )
         })
         .collect();
@@ -307,8 +276,7 @@ pub(crate) fn should_invalidate_dependent_view(
                 &imp.source,
                 dependency_id,
                 resolve_extensions,
-                resolver,
-                file_ids,
+                workspace,
             )
     });
 
@@ -323,8 +291,7 @@ pub(crate) fn should_invalidate_dependent_view(
                 &imp.source,
                 dependency_id,
                 resolve_extensions,
-                resolver,
-                file_ids,
+                workspace,
             )
         })
     {
@@ -336,7 +303,6 @@ pub(crate) fn should_invalidate_dependent_view(
 
 /// Legacy wrapper for should_invalidate_dependent_view using FileEntry.
 #[cfg(not(feature = "scheduler"))]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn should_invalidate_dependent(
     file: &mut FileEntry,
     dependency_id: &str,
@@ -344,8 +310,7 @@ pub(crate) fn should_invalidate_dependent(
     no_signatures: bool,
     dep_source: Option<&str>,
     resolve_extensions: &[String],
-    resolver: Option<&NativeProjectResolver>,
-    file_ids: &rustc_hash::FxHashSet<String>,
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
 ) -> bool {
     let mut view = DependentView::from_file_entry(file);
     let result = should_invalidate_dependent_view(
@@ -355,8 +320,7 @@ pub(crate) fn should_invalidate_dependent(
         no_signatures,
         dep_source,
         resolve_extensions,
-        resolver,
-        file_ids,
+        workspace,
     );
     // Write back updated type hashes
     file.resolved_type_hashes = view.resolved_type_hashes;
@@ -372,7 +336,7 @@ pub(crate) fn should_invalidate_dependent(
 pub(crate) fn smart_invalidate_dependents_with_owners(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     owners: BTreeSet<String>,
-    project_resolver: &crate::shared::Shared<Option<NativeProjectResolver>>,
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
     config: &HostConfig,
     dependency_id: &str,
     old_export_signatures: &[verter_analysis::ExportSignature],
@@ -383,14 +347,8 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
     }
 
     let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
-    let resolver = read_lock(project_resolver);
     let mut files = write_lock(files);
     let dep_source = files.get(dependency_id).map(|f| Arc::clone(&f.source));
-    let file_ids: rustc_hash::FxHashSet<String> = if resolver.is_some() {
-        files.keys().cloned().collect()
-    } else {
-        rustc_hash::FxHashSet::default()
-    };
 
     for owner in owners {
         if let Some(file) = files.get_mut(&owner) {
@@ -401,8 +359,7 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
                 old_export_signatures.is_empty() && new_export_signatures.is_empty(),
                 dep_source.as_deref(),
                 &config.resolve_extensions,
-                resolver.as_ref(),
-                &file_ids,
+                workspace,
             ) {
                 file.compile_slots.clear();
             }
@@ -413,11 +370,12 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
 /// Scheduler-backed smart invalidation. Reads analysis from scheduler snapshots
 /// and dependency metadata from compile_cache. Clears compile_cache slots directly.
 #[cfg(feature = "scheduler")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn smart_invalidate_dependents_via_scheduler(
     scheduler: &verter_scheduler::scheduler::Scheduler,
     compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,
     owners: BTreeSet<String>,
-    project_resolver: &crate::shared::Shared<Option<NativeProjectResolver>>,
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
     config: &HostConfig,
     dependency_id: &str,
     old_export_signatures: &[verter_analysis::ExportSignature],
@@ -429,17 +387,10 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
 
     let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
     let no_signatures = old_export_signatures.is_empty() && new_export_signatures.is_empty();
-    let resolver = read_lock(project_resolver);
 
     let dep_source = scheduler
         .try_get_source(dependency_id)
         .map(|s| s.source.clone());
-
-    let file_ids: rustc_hash::FxHashSet<String> = if resolver.is_some() {
-        scheduler.node_ids().into_iter().collect()
-    } else {
-        rustc_hash::FxHashSet::default()
-    };
 
     for owner in owners {
         let Some(mut view) = build_dependent_view(scheduler, compile_cache, &owner) else {
@@ -452,8 +403,7 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
             no_signatures,
             dep_source.as_deref(),
             &config.resolve_extensions,
-            resolver.as_ref(),
-            &file_ids,
+            workspace,
         );
         if let Some(mut cc) = compile_cache.get_mut(&owner) {
             if should_clear {
@@ -517,7 +467,7 @@ fn build_dependent_view(
 pub(crate) fn smart_invalidate_dependents(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     reverse_dependencies: &crate::shared::Shared<rustc_hash::FxHashMap<String, BTreeSet<String>>>,
-    project_resolver: &crate::shared::Shared<Option<NativeProjectResolver>>,
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
     config: &HostConfig,
     dependency_id: &str,
     old_export_signatures: &[verter_analysis::ExportSignature],
@@ -550,21 +500,10 @@ pub(crate) fn smart_invalidate_dependents(
     // Compute which export names changed between old and new signatures
     let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
 
-    let resolver = read_lock(project_resolver);
     let mut files = write_lock(files);
 
     // Get dep source for Tier 3 resolution (clone Arc to avoid borrow conflict)
     let dep_source = files.get(dependency_id).map(|f| Arc::clone(&f.source));
-
-    // Build a read-only snapshot of file IDs for the resolver reader.
-    // We need this because we hold a write lock on files for get_mut(),
-    // but the resolver reader needs shared access to check file_exists().
-    // Only built if the resolver is actually configured.
-    let file_ids: rustc_hash::FxHashSet<String> = if resolver.is_some() {
-        files.keys().cloned().collect()
-    } else {
-        rustc_hash::FxHashSet::default()
-    };
 
     for owner in owners {
         if let Some(file) = files.get_mut(&owner) {
@@ -575,8 +514,7 @@ pub(crate) fn smart_invalidate_dependents(
                 old_export_signatures.is_empty() && new_export_signatures.is_empty(),
                 dep_source.as_deref(),
                 resolve_extensions,
-                resolver.as_ref(),
-                &file_ids,
+                workspace,
             ) {
                 file.compile_slots.clear();
             }

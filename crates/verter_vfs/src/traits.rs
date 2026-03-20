@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::types::{
-    ExactResolution, ExactResolutionResult, FileKind, ParsedEdge, ProjectOwnership,
-    ResolutionContext, ResolveResult,
+    ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
+    ProjectOwnership, ResolutionContext, ResolveResult,
 };
 
 /// Single workspace trait — sole authority for file access and resolution.
@@ -39,6 +39,16 @@ pub trait WorkspaceAccess: Send + Sync {
 
     /// Resolve symlinks to real path.
     fn realpath(&self, canonical_id: &str) -> Option<String>;
+
+    /// Read and parse a `package.json` manifest.
+    ///
+    /// Concrete workspaces can override this to add caching. The default
+    /// implementation reads the file through `read_file()` and parses it
+    /// directly.
+    fn read_package_manifest(&self, canonical_id: &str) -> Option<PackageManifest> {
+        let source = self.read_file(canonical_id)?;
+        Some(crate::package_index::parse_package_json(&source))
+    }
 
     /// Classify a file by extension.
     /// Default: classifies `.vue` as `VueSfc`, everything else as `NonSfc`.

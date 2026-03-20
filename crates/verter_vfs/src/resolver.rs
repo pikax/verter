@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::types::PackageManifest;
 use crate::types::{
     ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
     ResolveRequestKind, ResolveResult,
@@ -132,9 +133,28 @@ impl ProjectResolver {
     }
 
     pub fn owner_for_file(&self, file_id: &str) -> Option<&IdeProjectConfig> {
-        self.projects
-            .iter()
-            .find(|project| project.matches_file(file_id))
+        let mut configured: Option<&IdeProjectConfig> = None;
+        let mut fallback: Option<&IdeProjectConfig> = None;
+        let mut fallback_ambiguous = false;
+
+        for project in &self.projects {
+            if !project.matches_file(file_id) {
+                continue;
+            }
+
+            if project.tsconfig_path.is_some() {
+                if configured.is_some() {
+                    return None;
+                }
+                configured = Some(project);
+            } else if fallback.is_some() {
+                fallback_ambiguous = true;
+            } else {
+                fallback = Some(project);
+            }
+        }
+
+        configured.or_else(|| (!fallback_ambiguous).then_some(fallback).flatten())
     }
 
     /// Map a source file path to the provider-graph path used by the type provider.
@@ -828,11 +848,14 @@ fn resolve_package_imports(
     ctx: ResolutionContext,
 ) -> Option<String> {
     for directory in ancestor_dirs(importer_id) {
-        let Some(package_json) = read_json(reader, &join_paths(&directory, "package.json")) else {
+        let Some(package_json) =
+            reader.read_package_manifest(&join_paths(&directory, "package.json"))
+        else {
             continue;
         };
         let Some(imports) = package_json
-            .get("imports")
+            .imports
+            .as_ref()
             .and_then(|value| value.as_object())
         else {
             continue;
@@ -861,8 +884,8 @@ fn resolve_node_modules_package(
         let package_dir = join_paths(&join_paths(&directory, "node_modules"), &package_name);
         let package_json_path = join_paths(&package_dir, "package.json");
 
-        if let Some(package_json) = read_json(reader, &package_json_path) {
-            if let Some(exports) = package_json.get("exports") {
+        if let Some(package_json) = reader.read_package_manifest(&package_json_path) {
+            if let Some(exports) = package_json.exports.as_ref() {
                 let export_key = if subpath.is_empty() {
                     ".".to_string()
                 } else {
@@ -930,7 +953,7 @@ fn resolve_package_exports(
 fn resolve_legacy_package(
     reader: &dyn crate::traits::WorkspaceAccess,
     package_dir: &str,
-    package_json: &serde_json::Value,
+    package_json: &PackageManifest,
     subpath: &str,
     ctx: ResolutionContext,
 ) -> Option<String> {
@@ -947,7 +970,14 @@ fn resolve_legacy_package(
         _ => &["types", "typings", "main"],
     };
     for key in keys {
-        let Some(target) = package_json.get(*key).and_then(|value| value.as_str()) else {
+        let target = match *key {
+            "main" => package_json.main.as_deref(),
+            "module" => package_json.module.as_deref(),
+            "types" => package_json.types.as_deref(),
+            "typings" => package_json.typings.as_deref(),
+            _ => None,
+        };
+        let Some(target) = target else {
             continue;
         };
         if let Some(resolved) = probe_path(reader, &resolve_package_path(package_dir, target, None))
@@ -1052,14 +1082,6 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
         current = next;
     }
     result
-}
-
-fn read_json(
-    reader: &dyn crate::traits::WorkspaceAccess,
-    canonical_id: &str,
-) -> Option<serde_json::Value> {
-    let text = reader.read_file(canonical_id)?;
-    serde_json::from_str(&text).ok()
 }
 
 fn match_package_mapping<'a>(

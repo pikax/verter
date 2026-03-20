@@ -18,15 +18,13 @@ use tokio::sync::mpsc;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::Client;
 
-use crate::config::ProjectRegistry;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
-    ResolverSnapshot,
 };
-use crate::server::compute_verter_diagnostics_for;
+use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
 use crate::tsgo::traits::TypeProvider;
@@ -73,14 +71,10 @@ pub struct SyncCoordinatorDeps {
     pub cached_verter_diags: Arc<DashMap<String, crate::server::CachedVerterDiagEntry>>,
     /// Negotiated position encoding for building line indexes.
     pub position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
-    /// Resolver snapshot for owner-aware provider path materialization.
-    pub resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
     /// Source-keyed provider materialization state shared with the server.
     pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
-    /// Per-project configuration registry.
-    pub project_registry: Arc<parking_lot::RwLock<Option<ProjectRegistry>>>,
-    /// Fallback linter for files outside any project.
-    pub fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
+    /// VFS workspace for published LspViews and resolver snapshot.
+    pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
@@ -157,7 +151,15 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
 /// Perform the actual sync: sync TSX/DTS to the type provider.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
-    let Some(snapshot) = deps.resolver_snapshot.read().clone() else {
+    let Some(snapshot) = ({
+        let ws = deps.vfs_workspace.read();
+        ws.as_ref().and_then(|ws| {
+            let published = ws.load_published()?;
+            Some(crate::server::PublishedResolverSnapshot {
+                resolver: published.snapshot.resolver.clone(),
+            })
+        })
+    }) else {
         tracing::debug!(
             "sync_coordinator: deferring sync without resolver snapshot {canonical_id}"
         );
@@ -242,13 +244,15 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     };
 
     // Recompute verter diagnostics fresh (lint + host errors) instead of reading stale cache.
-    let mut verter_diags = compute_verter_diagnostics_for(
-        &deps.documents,
-        &uri,
-        &deps.cached_verter_diags,
-        &deps.project_registry,
-        &deps.fallback_linter,
-    );
+    let mut verter_diags = {
+        let vfs_ws = deps.vfs_workspace.read();
+        compute_verter_diagnostics_for_with_views(
+            &deps.documents,
+            &uri,
+            &deps.cached_verter_diags,
+            vfs_ws.as_deref(),
+        )
+    };
 
     // When a TypeProvider is active, suppress component usage diagnostics
     // (unknown-prop, unknown-model) since the TypeProvider validates props
@@ -269,12 +273,17 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
             tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
 
         if let Some(ide) = ide {
-            let snapshot = deps.resolver_snapshot.read().clone();
-            let Some(tsx_path) = snapshot.as_ref().and_then(|snapshot| {
-                snapshot
-                    .resolver
-                    .provider_ide_id_for_source(canonical_id, ide.is_jsx)
-            }) else {
+            let resolver = {
+                let ws = deps.vfs_workspace.read();
+                ws.as_ref().and_then(|ws| {
+                    let published = ws.load_published()?;
+                    Some(published.snapshot.resolver.clone())
+                })
+            };
+            let Some(tsx_path) = resolver
+                .as_ref()
+                .and_then(|resolver| resolver.provider_ide_id_for_source(canonical_id, ide.is_jsx))
+            else {
                 return deps
                     .client
                     .publish_diagnostics(uri, verter_diags, None)
@@ -510,12 +519,8 @@ mod tests {
             type_provider: None,
             cached_verter_diags: Arc::new(DashMap::new()),
             position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
-            resolver_snapshot: Arc::new(parking_lot::RwLock::new(None)),
             provider_sync_states: Arc::new(DashMap::new()),
-            project_registry: Arc::new(parking_lot::RwLock::new(None)),
-            fallback_linter: Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
-                verter_diagnostics::LintConfig::default(),
-            ))),
+            vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         };
 
         sync_file(

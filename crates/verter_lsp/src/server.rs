@@ -35,7 +35,7 @@ use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::features::workspace_symbol::workspace_symbols;
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
-    ProviderSyncState, ResolverSnapshot,
+    ProviderSyncState,
 };
 use crate::statistics::Statistics;
 use crate::tsgo::merge;
@@ -94,7 +94,7 @@ pub use self::protocol_types::*;
 mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    compute_verter_diagnostics_for, prepare_non_vue_provider_sync, resolve_component_for,
+    compute_verter_diagnostics_for_with_views, prepare_non_vue_provider_sync, resolve_component_for,
 };
 
 #[path = "background_init.rs"]
@@ -111,6 +111,14 @@ fn block_in_place_if_available<R>(f: impl FnOnce() -> R) -> R {
         }
         _ => f(),
     }
+}
+
+/// Lightweight snapshot of the published resolver, replacing the old `ResolverSnapshot`.
+///
+/// Preserves the `.resolver` field access pattern so callers don't need deep changes.
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedResolverSnapshot {
+    pub(crate) resolver: crate::project_resolver::NativeProjectResolver,
 }
 
 /// Pre-extracted data for type provider calls.
@@ -142,15 +150,6 @@ struct ResolvedComponentDocument {
 /// Wraps `verter_host` for SFC analysis and optionally a `TypeProvider`
 /// (e.g., TSGO) for richer type information.
 ///
-/// ## Lock Ordering (to prevent deadlocks)
-///
-/// 1. `workspace_roots` (tokio::sync::Mutex — async, never held across sync locks)
-/// 2. `project_registry` (parking_lot::RwLock — sync read lock, never nested with fallback_linter)
-/// 3. `fallback_linter` (parking_lot::RwLock — only acquired after project_registry is released)
-///
-/// Rule: Never acquire `fallback_linter` while holding `project_registry`.
-///
-/// Pattern: check project_registry → drop guard → acquire fallback_linter if needed.
 pub struct VerterLanguageServer {
     client: Client,
     documents: Arc<DocumentRegistry>,
@@ -161,16 +160,6 @@ pub struct VerterLanguageServer {
     /// Negotiated position encoding (LSP 3.17). Set during `initialize()`.
     /// Shared with SyncCoordinator so it can compute diagnostics with the correct encoding.
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
-    /// Per-project configuration registry (path aliases, lint config, linters).
-    /// Initialized during `initialized()` from workspace roots.
-    /// Arc-wrapped so background init can commit the registry without &self.
-    project_registry: Arc<parking_lot::RwLock<Option<crate::config::ProjectRegistry>>>,
-    /// The current native resolver snapshot used by all provider-path and dependency sync work.
-    /// Swapped atomically after background initialization completes.
-    resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
-    /// Fallback linter for files outside any project. Uses default config.
-    /// Arc-wrapped so background init can update it without &self.
-    fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
     /// Action engine — produces quick fixes and refactoring code actions.
     action_engine: verter_actions::ActionEngine,
     /// Lint options from initializationOptions, stored during initialize() for use in initialized().
@@ -265,13 +254,10 @@ impl VerterLanguageServer {
         let documents = Arc::new(DocumentRegistry::new(config.host));
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
-        let project_registry = Arc::new(parking_lot::RwLock::new(None));
-        let resolver_snapshot = Arc::new(parking_lot::RwLock::new(None));
-        let fallback_linter = Arc::new(parking_lot::RwLock::new(
-            verter_diagnostics::Linter::default(),
-        ));
         let provider_sync_states = Arc::new(DashMap::new());
         let pending_snapshot_provider_sync = Arc::new(DashSet::new());
+        let vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
+            Arc::new(parking_lot::RwLock::new(None));
 
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
@@ -286,10 +272,8 @@ impl VerterLanguageServer {
                     type_provider: config.type_provider.clone(),
                     cached_verter_diags: Arc::clone(&cached_verter_diags),
                     position_encoding: Arc::clone(&position_encoding),
-                    resolver_snapshot: Arc::clone(&resolver_snapshot),
                     provider_sync_states: Arc::clone(&provider_sync_states),
-                    project_registry: Arc::clone(&project_registry),
-                    fallback_linter: Arc::clone(&fallback_linter),
+                    vfs_workspace: Arc::clone(&vfs_workspace),
                 },
             )
         });
@@ -302,9 +286,6 @@ impl VerterLanguageServer {
             workspace_roots: tokio::sync::Mutex::new(Vec::new()),
             statistics: Arc::new(Statistics::new(500)),
             position_encoding,
-            project_registry,
-            resolver_snapshot,
-            fallback_linter,
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),
             vite_config_options: tokio::sync::Mutex::new(
@@ -327,7 +308,7 @@ impl VerterLanguageServer {
             mcp_port: config.mcp_port,
             type_provider_none_reason: config.type_provider_none_reason,
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
-            vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+            vfs_workspace,
         }
     }
 
@@ -335,12 +316,12 @@ impl VerterLanguageServer {
     /// Caches results per document version to avoid redundant re-computation when both
     /// push (didChange) and pull (textDocument/diagnostic) paths request diagnostics.
     fn compute_verter_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
-        compute_verter_diagnostics_for(
+        let vfs_ws = self.vfs_workspace.read();
+        compute_verter_diagnostics_for_with_views(
             &self.documents,
             uri,
             &self.cached_verter_diags,
-            &self.project_registry,
-            &self.fallback_linter,
+            vfs_ws.as_deref(),
         )
     }
 
@@ -516,7 +497,7 @@ impl VerterLanguageServer {
             };
             self.documents.host().ensure_loaded(&canonical_id);
             if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-                if let Some(snapshot) = self.resolver_snapshot() {
+                if let Some(snapshot) = self.published_resolver() {
                     configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false)
                         .await;
                 }
@@ -566,7 +547,7 @@ impl VerterLanguageServer {
     }
 
     fn refresh_vue_dependency_tracking(&self, canonical_id: &str) {
-        let Some(snapshot) = self.resolver_snapshot() else {
+        let Some(snapshot) = self.published_resolver() else {
             return;
         };
         let Some(analysis) = self.documents.host().get_analysis(canonical_id) else {
@@ -596,7 +577,7 @@ impl VerterLanguageServer {
 
     async fn sync_non_vue_file_to_provider(
         &self,
-        snapshot: &ResolverSnapshot,
+        snapshot: &PublishedResolverSnapshot,
         canonical_id: &str,
         source: Arc<str>,
         module_references: &[verter_host::ScriptModuleReference],
@@ -719,8 +700,7 @@ impl VerterLanguageServer {
                 .unwrap_or_default();
 
             let Some(prepared) = prepare_non_vue_provider_sync(
-                Some(&ResolverSnapshot {
-                    generation: 0,
+                Some(&PublishedResolverSnapshot {
                     resolver: resolver.clone(),
                 }),
                 &reader,
@@ -732,8 +712,7 @@ impl VerterLanguageServer {
             };
 
             if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-                let snapshot = ResolverSnapshot {
-                    generation: 0,
+                let snapshot = PublishedResolverSnapshot {
                     resolver: resolver.clone(),
                 };
                 configure_provider_paths_for_source(sync, &snapshot, &canonical_id, true).await;
@@ -804,7 +783,7 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
             return;
         };
-        let Some(snapshot) = self.resolver_snapshot() else {
+        let Some(snapshot) = self.published_resolver() else {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
         };
@@ -909,7 +888,7 @@ impl VerterLanguageServer {
         let is_jsx = ide.as_ref().map(|r| r.is_jsx).unwrap_or(false);
 
         // Determine IDE path — owner-aware or provisional
-        let (ide_path, provisional) = if let Some(snapshot) = self.resolver_snapshot() {
+        let (ide_path, provisional) = if let Some(snapshot) = self.published_resolver() {
             if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
                 configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false).await;
             }
@@ -958,8 +937,7 @@ impl VerterLanguageServer {
                         api_path: None,
                         ..Default::default()
                     }
-                } else {
-                    let snapshot = self.resolver_snapshot().unwrap();
+                } else if let Some(snapshot) = self.published_resolver() {
                     crate::provider_sync::vue_sync_state_for_source(
                         &snapshot.resolver,
                         &canonical_id,
@@ -968,11 +946,19 @@ impl VerterLanguageServer {
                     .unwrap_or_else(|| {
                         crate::provider_sync::ProviderSyncState {
                             owner_key: "__provisional__".to_string(),
-                            ide_path: Some(ide_path),
+                            ide_path: Some(ide_path.clone()),
                             api_path: None,
                             ..Default::default()
                         }
                     })
+                } else {
+                    // Snapshot vanished between check and use (rare race) — provisional fallback
+                    crate::provider_sync::ProviderSyncState {
+                        owner_key: "__provisional__".to_string(),
+                        ide_path: Some(ide_path),
+                        api_path: None,
+                        ..Default::default()
+                    }
                 };
                 state.set_background_loaded(ProviderPathKind::Ide, true);
                 self.commit_provider_sync_state(&canonical_id, state);
@@ -1066,7 +1052,7 @@ impl VerterLanguageServer {
             |parent, specifier| self.resolve_import_specifier(parent, specifier),
         );
 
-        let snapshot = self.resolver_snapshot();
+        let snapshot = self.published_resolver();
         let reader = LspProjectResolverReader::new(&self.documents);
         let dynamic_ids = collect_priority_vue_targets_from_module_references(
             snapshot.as_ref(),
@@ -1099,7 +1085,7 @@ impl VerterLanguageServer {
         let Some(sync) = &self.project_sync else {
             return;
         };
-        let Some(snapshot) = self.resolver_snapshot() else {
+        let Some(snapshot) = self.published_resolver() else {
             return;
         };
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
@@ -1291,8 +1277,59 @@ impl VerterLanguageServer {
         Some((ide_path, ide.code, mapper))
     }
 
-    fn resolver_snapshot(&self) -> Option<ResolverSnapshot> {
-        self.resolver_snapshot.read().clone()
+    /// Load the current workspace snapshot's resolver, if a published snapshot exists.
+    ///
+    /// Returns a `ResolverSnapshot`-like wrapper with a `.resolver` field for
+    /// compatibility with existing access patterns (`snapshot.resolver.method()`).
+    fn published_resolver(&self) -> Option<PublishedResolverSnapshot> {
+        let ws = self.vfs_workspace.read();
+        let ws = ws.as_ref()?;
+        let published = ws.load_published()?;
+        Some(PublishedResolverSnapshot {
+            resolver: published.snapshot.resolver.clone(),
+        })
+    }
+
+    /// Check if a file is in an SSR context using the published LspViews.
+    fn is_ssr_context(&self, canonical_id: &str) -> bool {
+        let ws = self.vfs_workspace.read();
+        ws.as_ref()
+            .and_then(|ws| ws.load_published())
+            .and_then(|published| {
+                let views = published.ext::<crate::workspace_state::LspViews>()?;
+                Some(views.is_ssr_context(&published.snapshot, canonical_id))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Find the project root for a file using the published LspViews.
+    #[allow(dead_code)]
+    fn find_project_root(&self, canonical_id: &str) -> Option<String> {
+        let ws = self.vfs_workspace.read();
+        let ws = ws.as_ref()?;
+        let published = ws.load_published()?;
+        let views = published.ext::<crate::workspace_state::LspViews>()?;
+        views
+            .find_project_root(&published.snapshot, canonical_id)
+            .map(|s| s.to_string())
+    }
+
+    /// Get a linter for a file from the published LspViews. Returns a default linter
+    /// if no published snapshot exists or the file has no owner.
+    fn linter_for_file(&self, canonical_id: &str) -> verter_diagnostics::Linter {
+        let ws = self.vfs_workspace.read();
+        if let Some(ws) = ws.as_ref() {
+            if let Some(published) = ws.load_published() {
+                if let Some(views) = published.ext::<crate::workspace_state::LspViews>() {
+                    if let Some(view) =
+                        views.linter_view_for_file(&published.snapshot, canonical_id)
+                    {
+                        return verter_diagnostics::Linter::new(view.lint_config.config.clone());
+                    }
+                }
+            }
+        }
+        verter_diagnostics::Linter::default()
     }
 
     /// Generate a provisional IDE file path (.tsx or .jsx) without resolver.
@@ -1422,7 +1459,7 @@ impl VerterLanguageServer {
             .documents
             .get_canonical_id(uri)
             .unwrap_or_else(|| uri.as_str().to_string());
-        if let Some(snapshot) = self.resolver_snapshot() {
+        if let Some(snapshot) = self.published_resolver() {
             return provider_ide_path_for_source(
                 &snapshot.resolver,
                 &canonical,
@@ -1435,7 +1472,7 @@ impl VerterLanguageServer {
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
     fn ide_context_by_path(&self, ide_path: &str) -> Option<(String, Arc<str>, PositionMapper)> {
-        let snapshot = self.resolver_snapshot()?;
+        let snapshot = self.published_resolver()?;
         let canonical_id =
             source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
@@ -2321,7 +2358,7 @@ impl VerterLanguageServer {
         let (_tsx_path, tsx_content, mapper) = self.ide_context_by_path(ide_path)?;
         let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
         // Get the Vue file's line index
-        let snapshot = self.resolver_snapshot()?;
+        let snapshot = self.published_resolver()?;
         let canonical_id =
             source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
@@ -2352,7 +2389,7 @@ impl VerterLanguageServer {
 
     /// Find the Vue URI corresponding to an IDE path.
     fn vue_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
-        let snapshot = self.resolver_snapshot()?;
+        let snapshot = self.published_resolver()?;
         let canonical_id =
             source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
         self.documents.canonical_id_to_uri(&canonical_id)
@@ -2383,7 +2420,7 @@ impl VerterLanguageServer {
         canonical_id: &str,
         is_jsx: bool,
     ) -> Option<crate::provider_sync::ProviderSyncTransition> {
-        let snapshot = self.resolver_snapshot()?;
+        let snapshot = self.published_resolver()?;
         let next_state = crate::provider_sync::vue_sync_state_for_source(
             &snapshot.resolver,
             canonical_id,
@@ -2400,7 +2437,7 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> Option<crate::provider_sync::ProviderSyncTransition> {
-        let snapshot = self.resolver_snapshot()?;
+        let snapshot = self.published_resolver()?;
         let next_state =
             crate::provider_sync::non_vue_sync_state_for_source(&snapshot.resolver, canonical_id)?;
         Some(prepare_sync_transition(
@@ -2696,7 +2733,7 @@ impl VerterLanguageServer {
                 .map(|result| result.module_references)
                 .unwrap_or_default();
 
-            if let Some(snapshot) = self.resolver_snapshot() {
+            if let Some(snapshot) = self.published_resolver() {
                 self.sync_non_vue_file_to_provider(
                     &snapshot,
                     &path,
@@ -2763,14 +2800,20 @@ impl VerterLanguageServer {
         // Check if the changed file is a known vite config or its dependency.
         // If so, trigger a full registry rebuild to re-analyze aliases.
         let is_vite_dep = {
-            let registry = self.project_registry.read();
-            if let Some(reg) = registry.as_ref() {
-                reg.projects()
-                    .iter()
-                    .any(|p| p.vite_config_deps.iter().any(|dep| dep == &canonical_id))
-            } else {
-                false
-            }
+            let ws = self.vfs_workspace.read();
+            ws.as_ref()
+                .and_then(|ws| ws.load_published())
+                .and_then(|published| {
+                    published
+                        .ext::<crate::workspace_state::LspViews>()
+                        .map(|views| {
+                            views
+                                .project_views
+                                .iter()
+                                .any(|v| v.vite_config_deps.iter().any(|dep| dep == &canonical_id))
+                        })
+                })
+                .unwrap_or(false)
         };
 
         if is_vite_dep {
@@ -2811,9 +2854,6 @@ impl VerterLanguageServer {
             my_gen,
             client: self.client.clone(),
             type_provider: self.type_provider.clone(),
-            project_registry: Arc::clone(&self.project_registry),
-            resolver_snapshot: Arc::clone(&self.resolver_snapshot),
-            fallback_linter: Arc::clone(&self.fallback_linter),
             workspace_scanner: Arc::clone(&self.workspace_scanner),
             init_generation: Arc::clone(&self.init_generation),
             project_sync: self.project_sync.clone(),
@@ -2866,7 +2906,7 @@ impl VerterLanguageServer {
                 None
             };
 
-            if self.resolver_snapshot().is_none() {
+            if self.published_resolver().is_none() {
                 if let Some(ide) = ide.as_ref() {
                     let _ = self
                         .sync_vue_ide_provisionally(canonical_id, &ide.code, ide.is_jsx)
@@ -2935,7 +2975,7 @@ impl VerterLanguageServer {
             return;
         }
 
-        if self.resolver_snapshot().is_none() {
+        if self.published_resolver().is_none() {
             let compiled = block_in_place_if_available(|| {
                 self.documents.host.remove(canonical_id);
                 if !self.documents.host.ensure_loaded(canonical_id) {
@@ -3018,7 +3058,7 @@ impl VerterLanguageServer {
                 return;
             };
             if is_tsgo {
-                if let Some(snapshot) = self.resolver_snapshot() {
+                if let Some(snapshot) = self.published_resolver() {
                     configure_provider_paths_for_source(sync, &snapshot, canonical_id, true).await;
                 }
             }
@@ -3606,11 +3646,6 @@ impl VerterLanguageServer {
 // Test-only accessors for the cross-module test harness (`test_harness.rs`).
 #[cfg(test)]
 impl VerterLanguageServer {
-    /// Install a resolver snapshot (test harness access).
-    pub(crate) fn install_resolver_snapshot(&self, snapshot: ResolverSnapshot) {
-        *self.resolver_snapshot.write() = Some(snapshot);
-    }
-
     /// Access the document registry (test harness access).
     pub(crate) fn test_documents(&self) -> &std::sync::Arc<crate::documents::DocumentRegistry> {
         &self.documents
@@ -3619,11 +3654,6 @@ impl VerterLanguageServer {
     /// Trigger interactive file sync to the type provider (test harness access).
     pub(crate) async fn test_ensure_synced(&self, uri: &tower_lsp_server::ls_types::Uri) {
         self.ensure_current_file_synced(uri).await;
-    }
-
-    /// Install a project registry (test harness access).
-    pub(crate) fn install_project_registry(&self, registry: crate::config::ProjectRegistry) {
-        *self.project_registry.write() = Some(registry);
     }
 
     /// Access the VFS workspace (test harness access).
@@ -4030,7 +4060,7 @@ impl LanguageServer for VerterLanguageServer {
                 // Supplement: module_references for dynamic import()/require() cases
                 // that aren't in analysis.imports (needs resolver, may return empty pre-init)
                 if let Some(canonical_id) = current_canonical_id.as_ref() {
-                    let snapshot = self.resolver_snapshot();
+                    let snapshot = self.published_resolver();
                     let reader = LspProjectResolverReader::new(&self.documents);
                     let dynamic_ids = collect_priority_vue_targets_from_module_references(
                         snapshot.as_ref(),
@@ -4421,7 +4451,7 @@ impl LanguageServer for VerterLanguageServer {
             if let Some(sync) = &self.project_sync {
                 let host = self.documents.host_arc();
                 let sync = sync.clone();
-                let resolver_snapshot = Arc::clone(&self.resolver_snapshot);
+                let vfs_workspace = Arc::clone(&self.vfs_workspace);
                 let provider_sync_states = Arc::clone(&self.provider_sync_states);
                 let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
@@ -4431,7 +4461,7 @@ impl LanguageServer for VerterLanguageServer {
                             &canonical_id,
                             &host,
                             &sync,
-                            &resolver_snapshot,
+                            &vfs_workspace,
                             is_tsgo,
                             &provider_sync_states,
                         )
@@ -4451,19 +4481,21 @@ impl LanguageServer for VerterLanguageServer {
                 .iter()
                 .map(|e| uri_to_canonical_id(&e.uri))
                 .collect();
-            let registry = self.project_registry.read();
-            if let Some(reg) = registry.as_ref() {
-                for canonical_id in &all_changed {
-                    if reg
-                        .projects()
-                        .iter()
-                        .any(|p| p.vite_config_deps.iter().any(|dep| dep == canonical_id))
-                    {
-                        config_changed = true;
-                        tracing::debug!(
-                            "did_change_watched_files: vite config dep changed: {canonical_id}"
-                        );
-                        break;
+            let ws = self.vfs_workspace.read();
+            if let Some(published) = ws.as_ref().and_then(|ws| ws.load_published()) {
+                if let Some(views) = published.ext::<crate::workspace_state::LspViews>() {
+                    for canonical_id in &all_changed {
+                        if views
+                            .project_views
+                            .iter()
+                            .any(|v| v.vite_config_deps.iter().any(|dep| dep == canonical_id))
+                        {
+                            config_changed = true;
+                            tracing::debug!(
+                                "did_change_watched_files: vite config dep changed: {canonical_id}"
+                            );
+                            break;
+                        }
                     }
                 }
             }
@@ -4556,10 +4588,9 @@ impl LanguageServer for VerterLanguageServer {
 
         let ssr_context = {
             let canonical_id = self.documents.get_canonical_id(uri);
-            let registry_guard = self.project_registry.read();
             canonical_id
                 .as_deref()
-                .and_then(|cid| registry_guard.as_ref().map(|r| r.is_ssr_context(cid)))
+                .map(|cid| self.is_ssr_context(cid))
                 .unwrap_or(false)
         };
 
@@ -4820,10 +4851,9 @@ impl LanguageServer for VerterLanguageServer {
 
         let completion_ssr_context = {
             let canonical_id = self.documents.get_canonical_id(uri);
-            let registry_guard = self.project_registry.read();
             canonical_id
                 .as_deref()
-                .and_then(|cid| registry_guard.as_ref().map(|r| r.is_ssr_context(cid)))
+                .map(|cid| self.is_ssr_context(cid))
                 .unwrap_or(false)
         };
 
@@ -6152,81 +6182,36 @@ impl LanguageServer for VerterLanguageServer {
             let wants_refactor = wants_code_action_kind(only, "refactor");
 
             // Action engine quick fixes and refactorings.
-            // Lock ordering: project_registry → release → fallback_linter (never nested).
             if wants_quickfix || wants_refactor {
                 if let Some(ref analysis) = analysis {
                     let canonical_id = uri_to_canonical_id(uri);
-                    let used_project = {
-                        let registry_guard = self.project_registry.read();
-                        if let Some(project) = registry_guard
-                            .as_ref()
-                            .and_then(|r| r.linter_for(&canonical_id))
-                        {
-                            if wants_quickfix {
-                                all_actions.extend(
-                                    crate::features::diagnostics_bridge::action_engine_fixes(
-                                        &self.action_engine,
-                                        analysis,
-                                        &doc.source,
-                                        &doc.line_index,
-                                        &project.linter,
-                                        &params.context.diagnostics,
-                                        uri,
-                                    ),
-                                );
-                            }
-                            if wants_refactor {
-                                if let Some(offset) =
-                                    doc.line_index.position_to_offset(&range.start)
-                                {
-                                    all_actions.extend(
-                                        crate::features::diagnostics_bridge::action_engine_refactorings(
-                                            &self.action_engine,
-                                            analysis,
-                                            &doc.source,
-                                            &doc.line_index,
-                                            &project.linter,
-                                            offset,
-                                            uri,
-                                        ),
-                                    );
-                                }
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    }; // registry_guard dropped here
-
-                    if !used_project {
-                        let fl = self.fallback_linter.read();
-                        if wants_quickfix {
+                    let linter = self.linter_for_file(&canonical_id);
+                    if wants_quickfix {
+                        all_actions.extend(
+                            crate::features::diagnostics_bridge::action_engine_fixes(
+                                &self.action_engine,
+                                analysis,
+                                &doc.source,
+                                &doc.line_index,
+                                &linter,
+                                &params.context.diagnostics,
+                                uri,
+                            ),
+                        );
+                    }
+                    if wants_refactor {
+                        if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
                             all_actions.extend(
-                                crate::features::diagnostics_bridge::action_engine_fixes(
+                                crate::features::diagnostics_bridge::action_engine_refactorings(
                                     &self.action_engine,
                                     analysis,
                                     &doc.source,
                                     &doc.line_index,
-                                    &fl,
-                                    &params.context.diagnostics,
+                                    &linter,
+                                    offset,
                                     uri,
                                 ),
                             );
-                        }
-                        if wants_refactor {
-                            if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
-                                all_actions.extend(
-                                    crate::features::diagnostics_bridge::action_engine_refactorings(
-                                        &self.action_engine,
-                                        analysis,
-                                        &doc.source,
-                                        &doc.line_index,
-                                        &fl,
-                                        offset,
-                                        uri,
-                                    ),
-                                );
-                            }
                         }
                     }
                 }

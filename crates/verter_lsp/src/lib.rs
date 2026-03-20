@@ -16,6 +16,7 @@ pub mod tsserver;
 pub mod utils;
 pub mod vite_config;
 pub mod workspace_scanner;
+pub mod workspace_state;
 
 mod resilient_provider;
 mod uri;

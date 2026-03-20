@@ -429,6 +429,89 @@ fn resolve_import_returns_none_for_unknown() {
     assert!(result.is_none(), "should return None for unknown specifier");
 }
 
+#[test]
+fn resolve_import_populates_engine_manifest_cache() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file("/repo/src/a.vue".to_string(), Arc::from("<template/>"));
+    ws.inject_file("/repo/src/b.vue".to_string(), Arc::from("<template/>"));
+    ws.inject_file(
+        "/repo/node_modules/vue/package.json".to_string(),
+        Arc::from(r#"{"module":"dist/vue.esm.js"}"#),
+    );
+    ws.inject_file(
+        "/repo/node_modules/vue/dist/vue.esm.js".to_string(),
+        Arc::from("export default {}"),
+    );
+
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+
+    let first = ws.resolve_import("/repo/src/a.vue", "vue", ctx);
+    let second = ws.resolve_import("/repo/src/b.vue", "vue", ctx);
+
+    assert!(first.is_some(), "first importer should resolve vue");
+    assert!(second.is_some(), "second importer should resolve vue");
+    assert_eq!(
+        ws.engine.package_index.read().len(),
+        1,
+        "package manifests should be cached in Engine::package_index"
+    );
+}
+
+#[test]
+fn package_manifest_cache_invalidates_after_package_json_write() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file("/repo/src/App.vue".to_string(), Arc::from("<template/>"));
+    ws.inject_file(
+        "/repo/node_modules/pkg/package.json".to_string(),
+        Arc::from(r#"{"module":"dist/old.js"}"#),
+    );
+    ws.inject_file(
+        "/repo/node_modules/pkg/dist/old.js".to_string(),
+        Arc::from("export const oldValue = 1;"),
+    );
+    ws.inject_file(
+        "/repo/node_modules/pkg/dist/new.js".to_string(),
+        Arc::from("export const newValue = 1;"),
+    );
+
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+
+    let first = ws
+        .resolve_import("/repo/src/App.vue", "pkg", ctx)
+        .expect("initial package.json should resolve");
+    assert_eq!(first.source_id, "/repo/node_modules/pkg/dist/old.js");
+    assert_eq!(
+        ws.engine.package_index.read().len(),
+        1,
+        "initial resolution should populate the manifest cache"
+    );
+
+    ws.write_file(
+        "/repo/node_modules/pkg/package.json",
+        r#"{"module":"dist/new.js"}"#,
+    )
+    .expect("package.json rewrite should succeed");
+
+    assert!(
+        ws.engine.package_index.read().is_empty(),
+        "writing package.json should invalidate the cached manifest"
+    );
+
+    let second = ws
+        .resolve_import("/repo/src/App.vue", "pkg", ctx)
+        .expect("updated package.json should resolve");
+    assert_eq!(
+        second.source_id, "/repo/node_modules/pkg/dist/new.js",
+        "resolution should observe the new manifest after invalidation"
+    );
+}
+
 // ── MemoryWorkspace::record_parsed_edges ──
 
 #[test]
@@ -560,6 +643,52 @@ fn owner_for_file_with_project_graph() {
     assert!(
         no_owner.is_none(),
         "file outside project should have no owner"
+    );
+}
+
+#[test]
+fn owner_for_file_returns_none_for_ambiguous_configured_projects() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+
+    let graph = ProjectGraph::from_configs(vec![
+        VfsProjectConfig {
+            root: "d:/project".to_string(),
+            rank: ProjectRank::Explicit,
+            tsconfig_path: Some("d:/project/tsconfig.app.json".to_string()),
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "d:/project".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: ProjectMembership::IncludeExclude {
+                files: vec!["d:/project/src/shared.ts".to_string()],
+                include: vec![],
+                exclude: vec![],
+            },
+        },
+        VfsProjectConfig {
+            root: "d:/project".to_string(),
+            rank: ProjectRank::Explicit,
+            tsconfig_path: Some("d:/project/tsconfig.vitest.json".to_string()),
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "d:/project".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: ProjectMembership::IncludeExclude {
+                files: vec!["d:/project/src/shared.ts".to_string()],
+                include: vec![],
+                exclude: vec![],
+            },
+        },
+    ]);
+    ws.set_project_graph(graph);
+
+    assert!(
+        ws.owner_for_file("d:/project/src/shared.ts").is_none(),
+        "workspace single-owner API must not collapse overlapping configured owners"
     );
 }
 

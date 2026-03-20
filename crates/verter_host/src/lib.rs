@@ -83,7 +83,6 @@ use id::canonicalize_id;
 pub use id::resolve_external;
 use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
-use verter_analysis::project_resolver::NativeProjectResolver;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
@@ -114,7 +113,6 @@ pub struct VerterHost {
     /// Used to detect changes on re-computation (Phase 7 invalidation).
     pub(crate) last_const_prop_overrides:
         Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
-    pub(crate) project_resolver: Shared<Option<NativeProjectResolver>>,
     #[cfg(feature = "host_metrics")]
     pub(crate) metrics: HostMetrics,
     /// Scheduler for async per-file staging.
@@ -168,7 +166,6 @@ impl VerterHost {
             reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
-            project_resolver: default_shared(None),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
             #[cfg(feature = "scheduler")]
@@ -192,7 +189,6 @@ impl VerterHost {
             reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
-            project_resolver: default_shared(None),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
         }
@@ -474,7 +470,6 @@ impl VerterHost {
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
-        *write_lock(&self.project_resolver) = None;
 
         #[cfg(feature = "scheduler")]
         {
@@ -491,39 +486,15 @@ impl VerterHost {
     /// resolve aliased import specifiers (e.g. `@/components/Foo.vue`,
     /// `#imports`) without relying on external caller-provided resolutions.
     ///
+    /// Delegates to the VFS workspace's `configure_resolver()` which updates
+    /// the project graph and publishes a new snapshot atomically.
+    ///
     /// Pass an empty slice to clear the resolver.
     pub fn configure_projects(
         &self,
         projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
     ) {
-        let resolver = if projects.is_empty() {
-            None
-        } else {
-            Some(NativeProjectResolver::new(projects.clone()))
-        };
-        *write_lock(&self.project_resolver) = resolver;
-
-        // Sync to workspace so the VFS resolver stays in sync.
-        #[cfg(not(target_arch = "wasm32"))]
         self.ws().configure_resolver(projects);
-    }
-
-    /// Set the host's internal project resolver for compilation (Phase 2 fallback).
-    ///
-    /// Does NOT sync to the workspace — workspace resolver comes from
-    /// `set_project_graph()` on the `FilesystemWorkspace`. Use this when
-    /// the workspace resolver is populated separately (e.g., by the LSP's
-    /// `background_init` which calls `set_project_graph()` directly).
-    pub fn set_internal_resolver(
-        &self,
-        projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
-    ) {
-        let resolver = if projects.is_empty() {
-            None
-        } else {
-            Some(NativeProjectResolver::new(projects))
-        };
-        *write_lock(&self.project_resolver) = resolver;
     }
 
     #[cfg(feature = "host_metrics")]
@@ -888,11 +859,12 @@ impl VerterHost {
 
             #[cfg(feature = "scheduler")]
             {
+                let ws = self.workspace.read();
                 deps::smart_invalidate_dependents_via_scheduler(
                     &self.scheduler,
                     &self.compile_cache,
                     owners,
-                    &self.project_resolver,
+                    Some(ws.as_ref()),
                     &self.config,
                     dependency_id,
                     old_export_signatures,
@@ -901,15 +873,18 @@ impl VerterHost {
             }
 
             #[cfg(not(feature = "scheduler"))]
-            deps::smart_invalidate_dependents_with_owners(
-                &self.files,
-                owners,
-                &self.project_resolver,
-                &self.config,
-                dependency_id,
-                old_export_signatures,
-                new_export_signatures,
-            );
+            {
+                let ws = self.workspace.read();
+                deps::smart_invalidate_dependents_with_owners(
+                    &self.files,
+                    owners,
+                    Some(ws.as_ref()),
+                    &self.config,
+                    dependency_id,
+                    old_export_signatures,
+                    new_export_signatures,
+                );
+            }
 
             return;
         }
@@ -918,15 +893,18 @@ impl VerterHost {
         #[cfg(not(feature = "scheduler"))]
         {
             #[allow(unreachable_code)]
-            deps::smart_invalidate_dependents(
-                &self.files,
-                &self.reverse_dependencies,
-                &self.project_resolver,
-                &self.config,
-                dependency_id,
-                old_export_signatures,
-                new_export_signatures,
-            );
+            {
+                let ws = self.workspace.read();
+                deps::smart_invalidate_dependents(
+                    &self.files,
+                    &self.reverse_dependencies,
+                    Some(ws.as_ref()),
+                    &self.config,
+                    dependency_id,
+                    old_export_signatures,
+                    new_export_signatures,
+                );
+            }
         }
     }
 }

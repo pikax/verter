@@ -1,12 +1,6 @@
 use crate::project_resolver::NativeProjectResolver;
 use dashmap::DashMap;
 
-#[derive(Debug, Clone)]
-pub struct ResolverSnapshot {
-    pub generation: u64,
-    pub resolver: NativeProjectResolver,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderPathKind {
     Ide,

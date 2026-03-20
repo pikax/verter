@@ -10,6 +10,146 @@ pub(crate) fn canonical_test_path(path: &Path) -> String {
     verter_vfs::resolver::normalize_canonical_id(&raw)
 }
 
+/// Create a test VFS workspace with a published resolver snapshot wrapped in RwLock.
+///
+/// Used by tests that call functions expecting a
+/// `&parking_lot::RwLock<Option<Arc<FilesystemWorkspace>>>`.
+pub(crate) fn make_test_vfs_workspace_with_resolver(
+    root: &str,
+    tsconfig: Option<&str>,
+) -> parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>> {
+    let vfs_ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
+        verter_vfs::FilesystemOptions::default(),
+    ));
+
+    let projects = vec![verter_vfs::workspace_snapshot::OwnershipProject {
+        id: verter_vfs::workspace_snapshot::ProjectId(0),
+        root: verter_vfs::CanonicalPath::new(root),
+        workspace_root: verter_vfs::CanonicalPath::new(root),
+        payload: verter_vfs::workspace_snapshot::ProjectPayload::Fallback {
+            membership: verter_vfs::FallbackMembership {
+                root: verter_vfs::CanonicalPath::new(root),
+                exclude: vec![verter_vfs::NormalizedGlob::new(&format!(
+                    "{}/node_modules/**",
+                    root
+                ))],
+            },
+        },
+    }];
+
+    let resolver =
+        verter_vfs::ProjectResolver::new(vec![crate::project_resolver::IdeProjectConfig::new(
+            root.to_string(),
+            root.to_string(),
+            tsconfig.map(|s| s.to_string()),
+        )]);
+
+    let snapshot = Arc::new(verter_vfs::WorkspaceSnapshot {
+        projects,
+        resolver,
+        generation: verter_vfs::workspace_snapshot::SnapshotGeneration(1),
+    });
+
+    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    parking_lot::RwLock::new(Some(vfs_ws))
+}
+
+/// Create a test VFS workspace from a `ProjectRegistry`.
+///
+/// Builds a published snapshot from the registry's resolver and projects,
+/// then wraps it in `RwLock<Option<Arc<FilesystemWorkspace>>>`.
+pub(crate) fn make_test_vfs_workspace_from_registry(
+    registry: &crate::config::ProjectRegistry,
+) -> parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>> {
+    let vfs_ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
+        verter_vfs::FilesystemOptions::default(),
+    ));
+
+    let resolver = registry.to_native_project_resolver();
+    let projects: Vec<verter_vfs::workspace_snapshot::OwnershipProject> = registry
+        .projects()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| verter_vfs::workspace_snapshot::OwnershipProject {
+            id: verter_vfs::workspace_snapshot::ProjectId(i as u32),
+            root: verter_vfs::CanonicalPath::new(&p.root),
+            workspace_root: verter_vfs::CanonicalPath::new(&p.workspace_root),
+            payload: verter_vfs::workspace_snapshot::ProjectPayload::Fallback {
+                membership: verter_vfs::FallbackMembership {
+                    root: verter_vfs::CanonicalPath::new(&p.root),
+                    exclude: vec![verter_vfs::NormalizedGlob::new(&format!(
+                        "{}/node_modules/**",
+                        p.root
+                    ))],
+                },
+            },
+        })
+        .collect();
+
+    let snapshot = Arc::new(verter_vfs::WorkspaceSnapshot {
+        projects,
+        resolver,
+        generation: verter_vfs::workspace_snapshot::SnapshotGeneration(1),
+    });
+
+    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    parking_lot::RwLock::new(Some(vfs_ws))
+}
+
+/// Create a test VFS workspace from a pre-built `NativeProjectResolver`.
+///
+/// Creates fallback projects for each workspace root in the resolver.
+pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
+    resolver: verter_vfs::ProjectResolver,
+    project_roots: &[(&str, &str, Option<&str>)], // (root, workspace_root, tsconfig)
+) -> parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>> {
+    let vfs_ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
+        verter_vfs::FilesystemOptions::default(),
+    ));
+
+    let projects: Vec<verter_vfs::workspace_snapshot::OwnershipProject> = project_roots
+        .iter()
+        .enumerate()
+        .map(
+            |(i, (root, ws_root, _tsconfig))| verter_vfs::workspace_snapshot::OwnershipProject {
+                id: verter_vfs::workspace_snapshot::ProjectId(i as u32),
+                root: verter_vfs::CanonicalPath::new(root),
+                workspace_root: verter_vfs::CanonicalPath::new(ws_root),
+                payload: verter_vfs::workspace_snapshot::ProjectPayload::Fallback {
+                    membership: verter_vfs::FallbackMembership {
+                        root: verter_vfs::CanonicalPath::new(root),
+                        exclude: vec![verter_vfs::NormalizedGlob::new(&format!(
+                            "{}/node_modules/**",
+                            root
+                        ))],
+                    },
+                },
+            },
+        )
+        .collect();
+
+    let snapshot = Arc::new(verter_vfs::WorkspaceSnapshot {
+        projects,
+        resolver,
+        generation: verter_vfs::workspace_snapshot::SnapshotGeneration(1),
+    });
+
+    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    parking_lot::RwLock::new(Some(vfs_ws))
+}
+
 /// VerterHost backed by a real `FilesystemWorkspace`.
 pub(crate) fn make_filesystem_test_host(workspace_path: &Path) -> Arc<VerterHost> {
     let workspace_id = canonical_test_path(workspace_path);

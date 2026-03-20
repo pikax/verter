@@ -45,6 +45,7 @@ impl FilesystemWorkspace {
 
     /// Inject a file directly into the snapshot cache.
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
+        self.engine.invalidate_package_manifest(&canonical_id);
         self.engine.snapshot.write().inject(canonical_id, source);
     }
 
@@ -65,7 +66,21 @@ impl FilesystemWorkspace {
     /// Set the project graph and rebuild the resolver.
     pub fn set_project_graph(&self, graph: ProjectGraph) {
         *self.engine.project_graph.write() = graph;
-        self.engine.rebuild_resolver();
+        self.engine.rebuild_and_publish();
+    }
+
+    /// Publish a workspace snapshot with optional consumer extension.
+    ///
+    /// After this call, all readers see the new snapshot (lock-free).
+    pub fn publish_snapshot(&self, root: crate::published_state::PublishedRoot) {
+        self.engine.publish_snapshot(root);
+    }
+
+    /// Load the current published state (lock-free).
+    ///
+    /// Returns `None` before first publish.
+    pub fn load_published(&self) -> Option<std::sync::Arc<crate::published_state::PublishedRoot>> {
+        self.engine.load_published()
     }
 
     /// Add an explicit project to the graph and rebuild the resolver.
@@ -75,7 +90,7 @@ impl FilesystemWorkspace {
         projects.push(config);
         *graph = ProjectGraph::from_configs(projects);
         drop(graph);
-        self.engine.rebuild_resolver();
+        self.engine.rebuild_and_publish();
     }
 }
 
@@ -138,6 +153,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         None
     }
 
+    fn read_package_manifest(&self, canonical_id: &str) -> Option<crate::types::PackageManifest> {
+        self.engine.read_package_manifest(self, canonical_id)
+    }
+
     fn classify_file(&self, canonical_id: &str) -> crate::types::FileKind {
         if canonical_id.ends_with(".vue") {
             crate::types::FileKind::VueSfc
@@ -187,6 +206,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     }
 
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
+        self.engine.invalidate_package_manifest(canonical_id);
         self.engine
             .overlay
             .write()
@@ -194,6 +214,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     }
 
     fn notify_close(&self, canonical_id: &str) {
+        self.engine.invalidate_package_manifest(canonical_id);
         self.engine.overlay.write().clear(canonical_id);
         // Invalidate snapshot so next read falls through to disk,
         // picking up any saves made while the overlay was active.
@@ -201,6 +222,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     }
 
     fn notify_delete(&self, canonical_id: &str) {
+        self.engine.invalidate_package_manifest(canonical_id);
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
@@ -224,7 +246,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             .collect();
         let graph = crate::project_graph::ProjectGraph::from_configs(vfs_configs);
         *self.engine.project_graph.write() = graph;
-        self.engine.rebuild_resolver();
+        self.engine.rebuild_and_publish();
     }
 
     // ── Directory and mutation operations (delegate to NativeFs) ──
@@ -247,6 +269,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg(not(target_arch = "wasm32"))]
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
         self.native_fs.write_file(path, content)?;
+        self.engine.invalidate_package_manifest(path);
         // Inject into snapshot so subsequent reads see the new content
         self.engine
             .snapshot
@@ -263,6 +286,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg(not(target_arch = "wasm32"))]
     fn delete_file(&self, path: &str) -> Result<(), crate::error::VfsError> {
         self.native_fs.delete_file(path)?;
+        self.engine.invalidate_package_manifest(path);
         self.engine.snapshot.write().remove(path);
         Ok(())
     }

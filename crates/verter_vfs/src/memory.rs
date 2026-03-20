@@ -85,11 +85,13 @@ impl MemoryWorkspace {
 
     /// Inject a file into the snapshot.
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
+        self.engine.invalidate_package_manifest(&canonical_id);
         self.engine.snapshot.write().inject(canonical_id, source);
     }
 
     /// Remove a file from the snapshot.
     pub fn remove_file(&self, canonical_id: &str) {
+        self.engine.invalidate_package_manifest(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
     }
@@ -111,7 +113,7 @@ impl MemoryWorkspace {
     /// Set the project graph and rebuild the resolver.
     pub fn set_project_graph(&self, graph: ProjectGraph) {
         *self.engine.project_graph.write() = graph;
-        self.engine.rebuild_resolver();
+        self.engine.rebuild_and_publish();
     }
 
     /// Add an explicit project to the graph and rebuild the resolver.
@@ -121,7 +123,7 @@ impl MemoryWorkspace {
         projects.push(config);
         *graph = ProjectGraph::from_configs(projects);
         drop(graph);
-        self.engine.rebuild_resolver();
+        self.engine.rebuild_and_publish();
     }
 }
 
@@ -148,6 +150,10 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         } else {
             None
         }
+    }
+
+    fn read_package_manifest(&self, canonical_id: &str) -> Option<crate::types::PackageManifest> {
+        self.engine.read_package_manifest(self, canonical_id)
     }
 
     fn classify_file(&self, canonical_id: &str) -> crate::types::FileKind {
@@ -193,6 +199,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     }
 
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
+        self.engine.invalidate_package_manifest(canonical_id);
         self.engine
             .overlay
             .write()
@@ -200,10 +207,12 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     }
 
     fn notify_close(&self, canonical_id: &str) {
+        self.engine.invalidate_package_manifest(canonical_id);
         self.engine.overlay.write().clear(canonical_id);
     }
 
     fn notify_delete(&self, canonical_id: &str) {
+        self.engine.invalidate_package_manifest(canonical_id);
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
@@ -227,7 +236,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .collect();
         let graph = crate::project_graph::ProjectGraph::from_configs(vfs_configs);
         *self.engine.project_graph.write() = graph;
-        self.engine.rebuild_resolver();
+        self.engine.rebuild_and_publish();
     }
 
     // ── Directory and mutation operations (in-memory) ──
@@ -310,6 +319,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     }
 
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
+        self.engine.invalidate_package_manifest(path);
         self.engine
             .snapshot
             .write()
@@ -323,6 +333,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     }
 
     fn delete_file(&self, path: &str) -> Result<(), crate::error::VfsError> {
+        self.engine.invalidate_package_manifest(path);
         self.engine.snapshot.write().remove(path);
         self.engine.edges.write().remove_file(path);
         Ok(())
