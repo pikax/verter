@@ -160,10 +160,10 @@ impl ProjectResolver {
     /// Map a source file path to the provider-graph path used by the type provider.
     ///
     /// For `.vue` files this appends `.ts` (the public API shim); for non-Vue
-    /// files the source path is returned as-is. Returns `None` if the file is
-    /// not owned by any project.
+    /// files the source path is returned as-is. This is a pure path transform
+    /// that does not require project ownership — callers that need ownership
+    /// must check it separately via `owner_for_file()`.
     pub fn provider_id_for_source(&self, source_id: &str) -> Option<String> {
-        let _project = self.owner_for_file(source_id)?;
         let normalized_source = normalize_canonical_id(source_id);
         if normalized_source.ends_with(".vue") {
             Some(format!("{}.ts", normalized_source))
@@ -174,10 +174,11 @@ impl ProjectResolver {
 
     /// Map a `.vue` source path to the IDE artifact path (`.vue.tsx` or `.vue.jsx`).
     ///
-    /// Returns `None` for non-Vue files or files not owned by any project.
+    /// Returns `None` for non-Vue files. This is a pure path transform that
+    /// does not require project ownership — callers that need ownership must
+    /// check it separately via `owner_for_file()`.
     /// `is_jsx` selects between `.tsx` (TypeScript) and `.jsx` (JavaScript) output.
     pub fn provider_ide_id_for_source(&self, source_id: &str, is_jsx: bool) -> Option<String> {
-        let _project = self.owner_for_file(source_id)?;
         let normalized_source = normalize_canonical_id(source_id);
         if !normalized_source.ends_with(".vue") {
             return None;

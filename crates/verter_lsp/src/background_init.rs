@@ -157,10 +157,34 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         .map(|uri| crate::documents::uri_to_canonical_id_from_str(uri))
         .collect();
     let conditional_root_narrowing = tsx_profile.read().conditional_root_narrowing;
-    let ws = vfs_workspace
-        .read()
-        .clone()
-        .expect("workspace created in initialize()");
+    // Normally the VFS workspace is created early in `initialize()` when
+    // `workspace_folders` is present in `InitializeParams`. If a client omits
+    // workspace folders (or in tests that call `initialized()` directly without
+    // going through `initialize()`), the workspace will be `None` here. Create
+    // it lazily so `background_init` is self-sufficient in both cases.
+    let ws = {
+        let existing = vfs_workspace.read().clone();
+        match existing {
+            Some(ws) => ws,
+            None => {
+                let new_ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
+                    verter_vfs::FilesystemOptions {
+                        roots: canonical_roots.clone(),
+                        eager_preload: false,
+                    },
+                ));
+                new_ws.set_project_graph(verter_vfs::ProjectGraph::new());
+                let ws_dyn: Arc<dyn verter_vfs::WorkspaceAccess> = new_ws.clone();
+                host.set_workspace(ws_dyn);
+                *vfs_workspace.write() = Some(Arc::clone(&new_ws));
+                tracing::info!(
+                    "VFS workspace created lazily in background_init with {} roots",
+                    canonical_roots.len()
+                );
+                new_ws
+            }
+        }
+    };
 
     // 1. Build exact published workspace (spawn_blocking — blocking I/O: tsconfig discovery/materialization)
     let canonical_roots_for_build = canonical_roots.clone();
@@ -348,6 +372,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let position_encoding = position_encoding.clone();
         let init_generation = Arc::clone(&init_generation);
         let vfs_workspace = Arc::clone(&vfs_workspace);
+        let provider_sync_states = Arc::clone(&provider_sync_states);
         tokio::spawn(async move {
             if scanner_done_rx.await.is_err() {
                 return; // Scanner was dropped/cancelled
@@ -389,18 +414,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     let ide = documents.host.get_ide(&canonical_id, &profile);
 
                     if let Some(ide) = ide {
-                        let resolver = {
-                            let ws = vfs_workspace.read();
-                            ws.as_ref().and_then(|ws| {
-                                let published = ws.load_published()?;
-                                Some(published.snapshot.resolver.clone())
-                            })
-                        };
-                        let Some(tsx_path) = resolver.as_ref().and_then(|resolver| {
-                            provider_ide_path_for_source(resolver, &canonical_id, ide.is_jsx)
-                        }) else {
-                            continue;
-                        };
+                        let tsx_path = provider_sync_states
+                            .get(&canonical_id)
+                            .and_then(|state| state.ide_path.clone());
                         let encoding = position_encoding.read().clone();
                         let tsx_li = crate::documents::line_index::LineIndex::new(
                             &ide.code,
@@ -412,8 +428,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                             .and_then(|sm| PositionMapper::from_json(sm).ok());
                         let vue_source = documents.host.get_source(&canonical_id);
 
-                        match (tp.get_diagnostics(&tsx_path).await, mapper, vue_source) {
-                            (Ok(type_diags), Some(mapper), Some(vue_src)) => {
+                        let type_diags = if let Some(tsx_path) = tsx_path.as_ref() {
+                            tp.get_diagnostics(tsx_path).await.ok()
+                        } else {
+                            None
+                        };
+
+                        match (type_diags, mapper, vue_source) {
+                            (Some(type_diags), Some(mapper), Some(vue_src)) => {
                                 let vue_li = crate::documents::line_index::LineIndex::new(
                                     &vue_src, encoding,
                                 );
@@ -479,18 +501,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 let ide = documents.host.get_ide(&canonical_id, &profile);
 
                 if let Some(ide) = ide {
-                    let resolver = {
-                        let ws = vfs_workspace.read();
-                        ws.as_ref().and_then(|ws| {
-                            let published = ws.load_published()?;
-                            Some(published.snapshot.resolver.clone())
-                        })
-                    };
-                    let Some(tsx_path) = resolver.as_ref().and_then(|resolver| {
-                        provider_ide_path_for_source(resolver, &canonical_id, ide.is_jsx)
-                    }) else {
-                        continue;
-                    };
+                    let tsx_path = provider_sync_states
+                        .get(&canonical_id)
+                        .and_then(|state| state.ide_path.clone());
                     let encoding = position_encoding.read().clone();
                     let tsx_li =
                         crate::documents::line_index::LineIndex::new(&ide.code, encoding.clone());
@@ -500,8 +513,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                         .and_then(|sm| PositionMapper::from_json(sm).ok());
                     let vue_source = documents.host.get_source(&canonical_id);
 
-                    match (tp.get_diagnostics(&tsx_path).await, mapper, vue_source) {
-                        (Ok(type_diags), Some(mapper), Some(vue_src)) => {
+                    let type_diags = if let Some(tsx_path) = tsx_path.as_ref() {
+                        tp.get_diagnostics(tsx_path).await.ok()
+                    } else {
+                        None
+                    };
+
+                    match (type_diags, mapper, vue_source) {
+                        (Some(type_diags), Some(mapper), Some(vue_src)) => {
                             let vue_li =
                                 crate::documents::line_index::LineIndex::new(&vue_src, encoding);
                             crate::tsgo::merge::merge_diagnostics(
@@ -568,6 +587,7 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
             let published = ws.load_published()?;
             Some(super::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                ownership_ready: published.ownership_ready,
             })
         })
     }) else {
@@ -643,6 +663,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             let published = ws.load_published()?;
             Some(super::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                ownership_ready: published.ownership_ready,
             })
         })
     } {
@@ -736,6 +757,15 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             import_id,
             ide.as_ref().map(|output| output.is_jsx).unwrap_or(false),
         ) else {
+            if snapshot.ownership_ready {
+                remove_provider_sync_state_and_close_paths(
+                    sync,
+                    provider_sync_states,
+                    import_id,
+                    "aliased_resync",
+                )
+                .await;
+            }
             continue;
         };
         let transition = crate::provider_sync::prepare_sync_transition(
@@ -883,6 +913,15 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 vue_id,
                 ide.as_ref().map(|output| output.is_jsx).unwrap_or(false),
             ) else {
+                if snapshot.ownership_ready {
+                    remove_provider_sync_state_and_close_paths(
+                        sync,
+                        provider_sync_states,
+                        vue_id,
+                        "barrel_vue_dep",
+                    )
+                    .await;
+                }
                 continue;
             };
             let transition = crate::provider_sync::prepare_sync_transition(
@@ -1037,6 +1076,15 @@ pub(super) async fn sync_pending_vue_provider_file(
     let Some(next_state) =
         crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
     else {
+        if snapshot.ownership_ready {
+            remove_provider_sync_state_and_close_paths(
+                sync,
+                provider_sync_states,
+                canonical_id,
+                "pending_snapshot",
+            )
+            .await;
+        }
         return false;
     };
     if is_tsgo {
@@ -1210,6 +1258,18 @@ pub(super) async fn close_stale_provider_paths(
         if let Err(error) = result {
             tracing::warn!("{context}: failed to close stale provider path {path}: {error}");
         }
+    }
+}
+
+async fn remove_provider_sync_state_and_close_paths(
+    sync: &ProjectSync,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    canonical_id: &str,
+    context: &str,
+) {
+    if let Some(state) = crate::provider_sync::remove_sync_state(provider_sync_states, canonical_id)
+    {
+        close_stale_provider_paths(sync, &state.active_paths(), context).await;
     }
 }
 

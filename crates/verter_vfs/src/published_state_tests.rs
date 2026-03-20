@@ -79,6 +79,37 @@ fn debug_shows_generation_and_has_ext() {
     assert!(debug.contains("false"), "has_ext should be false");
 }
 
+// ── Ownership readiness ──
+
+#[test]
+fn new_vfs_only_is_not_ownership_ready() {
+    let root = PublishedRoot::new_vfs_only(empty_snapshot(1));
+    assert!(
+        !root.ownership_ready,
+        "bootstrap VFS-only snapshot should not be ownership_ready"
+    );
+}
+
+#[test]
+fn with_ext_is_ownership_ready() {
+    let views = MockLspViews { project_count: 1 };
+    let root = PublishedRoot::with_ext(empty_snapshot(1), Box::new(views));
+    assert!(
+        root.ownership_ready,
+        "snapshot published via with_ext should be ownership_ready"
+    );
+}
+
+#[test]
+fn debug_shows_ownership_ready() {
+    let root = PublishedRoot::new_vfs_only(empty_snapshot(1));
+    let debug = format!("{:?}", root);
+    assert!(
+        debug.contains("ownership_ready"),
+        "debug output should include ownership_ready field"
+    );
+}
+
 // ── Send + Sync ──
 
 #[test]

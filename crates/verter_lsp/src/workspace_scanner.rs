@@ -551,6 +551,7 @@ async fn sync_non_vue_file_to_provider(
             let published = ws.load_published()?;
             Some(crate::server::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                ownership_ready: published.ownership_ready,
             })
         })
     } {
@@ -739,6 +740,7 @@ async fn sync_file_to_provider(
             let published = ws.load_published()?;
             Some(crate::server::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                ownership_ready: published.ownership_ready,
             })
         })
     }) else {
@@ -1165,8 +1167,11 @@ mod tests {
             .get(canonical_id)
             .expect("scanner should commit a source-keyed provider state");
         assert_eq!(
-            state.owner_key, "/workspace/pkg-a/tsconfig.json",
-            "matched Vue files should have owner_key set to the tsconfig path"
+            state.owner_binding,
+            crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/workspace/pkg-a/tsconfig.json".to_string()
+            ),
+            "matched Vue files should have owner_binding set to the tsconfig path"
         );
     }
 
@@ -1231,9 +1236,9 @@ mod tests {
             .get(canonical_id)
             .expect("unmatched Vue files should still sync to the workspace project");
         assert_eq!(
-            state.owner_key,
-            "/workspace",
-            "unmatched Vue files should have owner_key set to the workspace root (fallback project)"
+            state.owner_binding,
+            crate::provider_sync::ProviderOwnerBinding::Owned("/workspace".to_string()),
+            "unmatched Vue files should have owner_binding set to the workspace root (fallback project)"
         );
     }
 

@@ -78,7 +78,8 @@ impl FilesystemWorkspace {
 
     /// Load the current published state (lock-free).
     ///
-    /// Returns `None` before first publish.
+    /// Always returns `Some` after construction. Check `ownership_ready`
+    /// to distinguish bootstrap from real snapshots.
     pub fn load_published(&self) -> Option<std::sync::Arc<crate::published_state::PublishedRoot>> {
         self.engine.load_published()
     }

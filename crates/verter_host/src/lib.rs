@@ -883,8 +883,6 @@ impl VerterHost {
                     new_export_signatures,
                 );
             }
-
-            return;
         }
 
         // WASM fallback: use legacy reverse_dependencies map.

@@ -27,8 +27,7 @@ impl VerterHost {
                 return std::collections::BTreeSet::new();
             };
 
-            return hd
-                .parse
+            hd.parse
                 .external_requests
                 .iter()
                 .map(|r| r.resolved_canonical_id.clone())
@@ -40,7 +39,7 @@ impl VerterHost {
                         .filter(|imp| imp.source.starts_with('.'))
                         .map(|imp| crate::id::resolve_external(canonical_id, &imp.source)),
                 )
-                .collect();
+                .collect()
         }
 
         #[cfg(not(feature = "scheduler"))]
@@ -187,16 +186,14 @@ impl VerterHost {
             for dep in macro_type_deps.iter() {
                 let dep_canonical = if dep.import_source.starts_with('.') {
                     crate::id::resolve_external(&canonical, &dep.import_source)
-                } else {
-                    if let Some(res) = dep_resolutions.get(&dep.import_source) {
-                        if let Some(ref id) = res.resolved_canonical_id {
-                            id.clone()
-                        } else {
-                            continue;
-                        }
+                } else if let Some(res) = dep_resolutions.get(&dep.import_source) {
+                    if let Some(ref id) = res.resolved_canonical_id {
+                        id.clone()
                     } else {
                         continue;
                     }
+                } else {
+                    continue;
                 };
 
                 // Try scheduler for source, then extensions, then VFS fallback
@@ -1969,7 +1966,7 @@ impl VerterHost {
             .scheduler
             .node_ids()
             .into_iter()
-            .filter(|id| self.compile_cache.get(id).map_or(true, |cc| !cc.evicted))
+            .filter(|id| self.compile_cache.get(id).is_none_or(|cc| !cc.evicted))
             .collect();
 
         #[cfg(not(feature = "scheduler"))]
@@ -2112,12 +2109,12 @@ impl VerterHost {
             let analysis_snap = self.scheduler.try_get_analysis(&canonical)?;
             let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
-            return Self::find_export_span(
+            Self::find_export_span(
                 file_kind,
                 &ad.script_analysis,
                 &ad.export_signatures,
                 binding_name,
-            );
+            )
         }
 
         #[cfg(not(feature = "scheduler"))]

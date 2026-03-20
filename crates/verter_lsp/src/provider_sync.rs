@@ -8,9 +8,42 @@ pub enum ProviderPathKind {
     Shadow,
 }
 
+/// Typed ownership binding for provider sync state.
+///
+/// Replaces the `"__provisional__"` magic string sentinel. Bootstrap state
+/// is now explicitly typed instead of encoded in a string comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderOwnerBinding {
+    /// Pre-snapshot provisional state: file synced before ownership is known.
+    Provisional,
+    /// Owner-aware state: file bound to a real project (tsconfig path or root).
+    Owned(String),
+}
+
+impl Default for ProviderOwnerBinding {
+    fn default() -> Self {
+        Self::Provisional
+    }
+}
+
+impl ProviderOwnerBinding {
+    /// Returns `true` if this is a provisional (pre-snapshot) binding.
+    pub fn is_provisional(&self) -> bool {
+        matches!(self, Self::Provisional)
+    }
+
+    /// Returns the owner key string, or `None` for provisional.
+    pub fn owner_key(&self) -> Option<&str> {
+        match self {
+            Self::Provisional => None,
+            Self::Owned(key) => Some(key),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderSyncState {
-    pub owner_key: String,
+    pub owner_binding: ProviderOwnerBinding,
     pub ide_path: Option<String>,
     pub api_path: Option<String>,
     pub shadow_path: Option<String>,
@@ -60,13 +93,13 @@ impl ProviderSyncState {
 
     /// Returns `true` if this state was created by provisional (pre-snapshot) sync.
     pub fn is_provisional(&self) -> bool {
-        self.owner_key == "__provisional__"
+        self.owner_binding.is_provisional()
     }
 
     /// Create a provisional sync state (no resolver, IDE-only).
     pub fn provisional(ide_path: String) -> Self {
         Self {
-            owner_key: "__provisional__".to_string(),
+            owner_binding: ProviderOwnerBinding::Provisional,
             ide_path: Some(ide_path),
             api_path: None,
             shadow_path: None,
@@ -112,7 +145,7 @@ pub fn vue_sync_state_for_source(
         .clone()
         .unwrap_or_else(|| owner.root.clone());
     Some(ProviderSyncState {
-        owner_key,
+        owner_binding: ProviderOwnerBinding::Owned(owner_key),
         ide_path: resolver.provider_ide_id_for_source(source_id, is_jsx),
         api_path: resolver.provider_id_for_source(source_id),
         shadow_path: None,
@@ -132,7 +165,7 @@ pub fn non_vue_sync_state_for_source(
         .clone()
         .unwrap_or_else(|| owner.root.clone());
     Some(ProviderSyncState {
-        owner_key,
+        owner_binding: ProviderOwnerBinding::Owned(owner_key),
         ide_path: None,
         api_path: None,
         shadow_path: resolver.provider_id_for_source(source_id),
@@ -146,7 +179,7 @@ pub fn stale_paths_for_transition(
     previous: &ProviderSyncState,
     next: &ProviderSyncState,
 ) -> Vec<(ProviderPathKind, String)> {
-    let owner_changed = previous.owner_key != next.owner_key;
+    let owner_changed = previous.owner_binding != next.owner_binding;
 
     // Provisional → owner-aware upgrade with unchanged IDE path: not stale.
     // The type provider already has the correct TSX content; only the owner metadata changes.
@@ -244,8 +277,9 @@ mod tests {
             .expect("matched Vue source should materialize provider state");
 
         assert_eq!(
-            state.owner_key, "/workspace/pkg-a/tsconfig.json",
-            "owner_key should be tsconfig path when available"
+            state.owner_binding,
+            ProviderOwnerBinding::Owned("/workspace/pkg-a/tsconfig.json".to_string()),
+            "owner_binding should be Owned with tsconfig path when available"
         );
         assert_eq!(
             state.ide_path.as_deref(),
@@ -262,13 +296,13 @@ mod tests {
     #[test]
     fn stale_paths_only_include_paths_that_change() {
         let previous = ProviderSyncState {
-            owner_key: "/workspace/tsconfig.json".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
         };
         let next = ProviderSyncState {
-            owner_key: "/workspace/tsconfig.json".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
@@ -283,13 +317,13 @@ mod tests {
     #[test]
     fn owner_change_forces_stale_even_when_paths_unchanged() {
         let previous = ProviderSyncState {
-            owner_key: "/workspace/tsconfig.old.json".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.old.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
         };
         let next = ProviderSyncState {
-            owner_key: "/workspace/tsconfig.new.json".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.new.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
@@ -314,12 +348,12 @@ mod tests {
     #[test]
     fn fallback_to_fallback_owner_change_detected() {
         let previous = ProviderSyncState {
-            owner_key: "/workspace/old-root".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/old-root".to_string()),
             shadow_path: Some("/workspace/src/utils.ts".to_string()),
             ..Default::default()
         };
         let next = ProviderSyncState {
-            owner_key: "/workspace/new-root".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/new-root".to_string()),
             shadow_path: Some("/workspace/src/utils.ts".to_string()),
             ..Default::default()
         };
@@ -339,7 +373,7 @@ mod tests {
         states.insert(
             "/workspace/src/App.vue".to_string(),
             ProviderSyncState {
-                owner_key: "/workspace/tsconfig.json".to_string(),
+                owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
                 ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
                 api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ide_background_loaded: true,
@@ -352,7 +386,7 @@ mod tests {
             &states,
             "/workspace/src/App.vue",
             ProviderSyncState {
-                owner_key: "/workspace/tsconfig.json".to_string(),
+                owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
                 ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
                 api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ..Default::default()
@@ -371,7 +405,7 @@ mod tests {
             state.is_provisional(),
             "provisional state should be detected"
         );
-        assert_eq!(state.owner_key, "__provisional__");
+        assert_eq!(state.owner_binding, ProviderOwnerBinding::Provisional);
         assert_eq!(
             state.ide_path.as_deref(),
             Some("/workspace/src/App.vue.tsx")
@@ -383,7 +417,7 @@ mod tests {
     fn provisional_to_owner_aware_same_ide_path_not_stale() {
         let provisional = ProviderSyncState::provisional("/workspace/src/App.vue.tsx".to_string());
         let owner_aware = ProviderSyncState {
-            owner_key: "/workspace/tsconfig.json".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
@@ -401,7 +435,7 @@ mod tests {
     fn provisional_to_owner_aware_different_ide_path_is_stale() {
         let provisional = ProviderSyncState::provisional("/workspace/src/App.vue.tsx".to_string());
         let owner_aware = ProviderSyncState {
-            owner_key: "/workspace/tsconfig.json".to_string(),
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
@@ -418,7 +452,7 @@ mod tests {
         states.insert(
             "/workspace/src/util.ts".to_string(),
             ProviderSyncState {
-                owner_key: "/workspace".to_string(),
+                owner_binding: ProviderOwnerBinding::Owned("/workspace".to_string()),
                 shadow_path: Some("/workspace/src/util.ts".to_string()),
                 shadow_background_loaded: true,
                 ..Default::default()

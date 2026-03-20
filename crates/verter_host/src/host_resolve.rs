@@ -940,12 +940,12 @@ impl VerterHost {
             }
             let slot = cc.compile_slots.get(&profile_hash)?;
             let tsx = slot.tsx.as_ref()?;
-            return Some(IdeResponse {
+            Some(IdeResponse {
                 code: tsx.code.clone(),
                 source_map: tsx.source_map.clone(),
                 is_jsx: tsx.is_jsx,
                 destructured_block: tsx.destructured_block.clone(),
-            });
+            })
         }
 
         #[cfg(not(feature = "scheduler"))]

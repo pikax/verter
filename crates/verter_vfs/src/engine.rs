@@ -52,10 +52,12 @@ pub(crate) struct Engine {
     pub(crate) package_index: RwLock<PackageIndex>,
 
     /// Atomic published workspace state — primary source of truth for
-    /// ownership and resolution after first publish.
+    /// ownership and resolution.
     ///
-    /// `None` before first publish (during `initialize()` → `background_init()`).
-    /// Always `Some` after first `publish_snapshot()`.
+    /// Always `Some` after `Engine::new()` — the constructor eagerly publishes
+    /// an empty bootstrap snapshot (`ownership_ready: false`). After
+    /// `background_init` builds the full project graph, a real snapshot with
+    /// `ownership_ready: true` is published.
     pub(crate) published_state: ArcSwapOption<PublishedRoot>,
 }
 
@@ -87,7 +89,8 @@ impl Engine {
 
     /// Load the current published state (lock-free).
     ///
-    /// Returns `None` before first publish.
+    /// Always returns `Some` after `Engine::new()`. Check
+    /// `ownership_ready` to distinguish bootstrap from real snapshots.
     pub(crate) fn load_published(&self) -> Option<Arc<PublishedRoot>> {
         self.published_state.load_full()
     }

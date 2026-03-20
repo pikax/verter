@@ -186,6 +186,24 @@ TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner r
 
 **Key module**: `crates/verter_lsp/src/workspace_scanner.rs` — `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
 
+### Ownership Lifecycle & Bootstrap Sync
+
+The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snapshot carries an `ownership_ready: bool` flag:
+
+- **Bootstrap** (`ownership_ready: false`): `Engine::new()` eagerly publishes an empty snapshot so basic relative resolution works immediately. Ownership queries return no results. Provider path transforms (`provider_id_for_source`, `provider_ide_id_for_source`) are pure — they work without ownership.
+- **Ready** (`ownership_ready: true`): After `background_init` builds the full project graph, a real snapshot is published. Ownership queries are now authoritative.
+
+**Provider sync state uses typed ownership** (`ProviderOwnerBinding`):
+- `Provisional` — file synced before ownership is known (bootstrap).
+- `Owned(String)` — file bound to a real project (tsconfig path or root).
+
+**Readiness-gated sync rules**:
+- `ensure_current_file_synced()`: During bootstrap, provisional sync is allowed. With a ready snapshot, only files with a project owner are synced — unowned files are queued in `pending_snapshot_provider_sync` for later drain.
+- `sync_imported_vue_api_lightweight()`: Same rule — provisional sync only during bootstrap.
+- `SyncCoordinator::sync_file()`: Always queues files with no owner for retry. Uses `ownership_ready` for log level (warn vs info).
+
+**Key files**: `crates/verter_vfs/src/published_state.rs` (`PublishedRoot`, `ownership_ready`), `crates/verter_lsp/src/provider_sync.rs` (`ProviderOwnerBinding`, `ProviderSyncState`), `crates/verter_lsp/src/server.rs` (`PublishedResolverSnapshot`, `ensure_current_file_synced`).
+
 ### Multi-Root Workspace & Per-Project Configuration
 
 In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.

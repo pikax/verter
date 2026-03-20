@@ -1868,3 +1868,65 @@ fn package_imports_reread_per_importer() {
         "manifest at {manifest_path} should be read once and then served from the workspace manifest cache"
     );
 }
+
+// ── Test 1: Pure path transforms work without ownership ──
+
+#[test]
+fn provider_id_for_source_vue_without_ownership() {
+    let resolver = NativeProjectResolver::new(vec![]);
+    assert_eq!(
+        resolver.provider_id_for_source("/foo.vue"),
+        Some("/foo.vue.ts".to_string()),
+        "Vue file should get .ts suffix even without project ownership"
+    );
+}
+
+#[test]
+fn provider_id_for_source_non_vue_without_ownership() {
+    let resolver = NativeProjectResolver::new(vec![]);
+    assert_eq!(
+        resolver.provider_id_for_source("/foo.ts"),
+        Some("/foo.ts".to_string()),
+        "Non-Vue file should return as-is even without project ownership"
+    );
+}
+
+#[test]
+fn provider_id_for_source_custom_ext_without_ownership() {
+    let resolver = NativeProjectResolver::new(vec![]);
+    assert_eq!(
+        resolver.provider_id_for_source("/foo.custom"),
+        Some("/foo.custom".to_string()),
+        "Custom extension should return as-is even without project ownership"
+    );
+}
+
+#[test]
+fn provider_ide_id_for_source_vue_tsx_without_ownership() {
+    let resolver = NativeProjectResolver::new(vec![]);
+    assert_eq!(
+        resolver.provider_ide_id_for_source("/foo.vue", false),
+        Some("/foo.vue.tsx".to_string()),
+        "Vue file should get .tsx suffix without ownership"
+    );
+}
+
+#[test]
+fn provider_ide_id_for_source_vue_jsx_without_ownership() {
+    let resolver = NativeProjectResolver::new(vec![]);
+    assert_eq!(
+        resolver.provider_ide_id_for_source("/foo.vue", true),
+        Some("/foo.vue.jsx".to_string()),
+        "Vue file with is_jsx should get .jsx suffix without ownership"
+    );
+}
+
+#[test]
+fn provider_ide_id_for_source_non_vue_returns_none() {
+    let resolver = NativeProjectResolver::new(vec![]);
+    assert_eq!(
+        resolver.provider_ide_id_for_source("/foo.ts", false),
+        None,
+        "Non-Vue file should still return None for IDE path"
+    );
+}

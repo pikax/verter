@@ -22,7 +22,8 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
+    commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
+    ProviderSyncState,
 };
 use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::tsgo::merge;
@@ -157,6 +158,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             let published = ws.load_published()?;
             Some(crate::server::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                ownership_ready: published.ownership_ready,
             })
         })
     }) else {
@@ -178,7 +180,22 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     let Some(next_state) =
         crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
     else {
-        tracing::debug!("sync_coordinator: no owner-aware provider state for {canonical_id}");
+        // Always queue for retry on future snapshot rebuild.
+        if snapshot.ownership_ready {
+            clear_provider_sync_state(&deps.project_sync, &deps.provider_sync_states, canonical_id)
+                .await;
+        }
+        deps.pending_snapshot_provider_sync
+            .insert(canonical_id.to_string());
+        if snapshot.ownership_ready {
+            tracing::warn!(
+                "sync_coordinator: {canonical_id} has no project owner after real snapshot"
+            );
+        } else {
+            tracing::info!(
+                "sync_coordinator: {canonical_id} unowned during bootstrap, queued for drain"
+            );
+        }
         return;
     };
     let transition = prepare_sync_transition(&deps.provider_sync_states, canonical_id, next_state);
@@ -217,6 +234,16 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
 
     commit_sync_transition(&deps.provider_sync_states, canonical_id, committed_state);
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
+}
+
+async fn clear_provider_sync_state(
+    sync: &ProjectSync,
+    states: &DashMap<String, ProviderSyncState>,
+    canonical_id: &str,
+) {
+    if let Some(state) = remove_sync_state(states, canonical_id) {
+        close_stale_paths(sync, &state.active_paths()).await;
+    }
 }
 
 async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind, String)]) {
@@ -273,16 +300,13 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
             tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
 
         if let Some(ide) = ide {
-            let resolver = {
-                let ws = deps.vfs_workspace.read();
-                ws.as_ref().and_then(|ws| {
-                    let published = ws.load_published()?;
-                    Some(published.snapshot.resolver.clone())
-                })
-            };
-            let Some(tsx_path) = resolver
-                .as_ref()
-                .and_then(|resolver| resolver.provider_ide_id_for_source(canonical_id, ide.is_jsx))
+            // Use committed provider sync state for the tsx_path.
+            // This ensures we only query the type provider for paths
+            // that are actually materialized in provider state.
+            let Some(tsx_path) = deps
+                .provider_sync_states
+                .get(canonical_id)
+                .and_then(|state| state.ide_path.clone())
             else {
                 return deps
                     .client
@@ -449,7 +473,9 @@ mod tests {
         states.insert(
             "/workspace/src/App.vue".to_string(),
             ProviderSyncState {
-                owner_key: "/workspace/tsconfig.old.json".to_string(),
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                    "/workspace/tsconfig.old.json".to_string(),
+                ),
                 ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
                 api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ..Default::default()
@@ -460,7 +486,9 @@ mod tests {
             &states,
             "/workspace/src/App.vue",
             ProviderSyncState {
-                owner_key: "/workspace/tsconfig.new.json".to_string(),
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                    "/workspace/tsconfig.new.json".to_string(),
+                ),
                 ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
                 api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ..Default::default()
@@ -498,9 +526,11 @@ mod tests {
             states
                 .get("/workspace/src/App.vue")
                 .expect("new owner state should be committed")
-                .owner_key,
-            "/workspace/tsconfig.new.json",
-            "committed state should have the new owner key"
+                .owner_binding,
+            crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/workspace/tsconfig.new.json".to_string()
+            ),
+            "committed state should have the new owner binding"
         );
     }
 
@@ -534,6 +564,43 @@ mod tests {
             deps.pending_snapshot_provider_sync
                 .contains("/workspace/src/App.vue"),
             "sync coordinator should preserve pending IDE/API sync until resolver discovery completes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_merged_diagnostics_skips_type_provider_without_committed_state() {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+        let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<script setup lang=\"ts\">const msg = 'hello'</script><template><div>{{ msg }}</div></template>".to_string(),
+        });
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let deps = SyncCoordinatorDeps {
+            documents,
+            project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+            needs_provider_sync: Arc::new(DashSet::new()),
+            pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+            client: make_test_client(),
+            type_provider: Some(provider.clone()),
+            cached_verter_diags: Arc::new(DashMap::new()),
+            position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+            provider_sync_states: Arc::new(DashMap::new()),
+            vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        };
+
+        publish_merged_diagnostics(&deps, "/workspace/src/App.vue", uri.as_str()).await;
+
+        let calls = provider.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, MockCall::GetDiagnostics { .. })),
+            "diagnostics publishing must not query the type provider without a committed path, calls={calls:?}"
         );
     }
 }

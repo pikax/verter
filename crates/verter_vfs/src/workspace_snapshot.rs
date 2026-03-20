@@ -159,7 +159,7 @@ impl WorkspaceSnapshot {
             ConfiguredOwnerResolution::Ambiguous(_) => None,
             ConfiguredOwnerResolution::None => {
                 let owners = self.owners_for_file(canonical_id);
-                (owners.len() == 1).then_some(owners[0])
+                (owners.len() == 1).then(|| owners[0])
             }
         }
     }

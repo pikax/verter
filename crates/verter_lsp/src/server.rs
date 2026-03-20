@@ -119,6 +119,9 @@ fn block_in_place_if_available<R>(f: impl FnOnce() -> R) -> R {
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedResolverSnapshot {
     pub(crate) resolver: crate::project_resolver::NativeProjectResolver,
+    /// `true` after `background_init` publishes a real snapshot with the
+    /// full project graph. `false` during bootstrap (empty resolver).
+    pub(crate) ownership_ready: bool,
 }
 
 /// Pre-extracted data for type provider calls.
@@ -702,6 +705,7 @@ impl VerterLanguageServer {
             let Some(prepared) = prepare_non_vue_provider_sync(
                 Some(&PublishedResolverSnapshot {
                     resolver: resolver.clone(),
+                    ownership_ready: true,
                 }),
                 &reader,
                 &canonical_id,
@@ -714,6 +718,7 @@ impl VerterLanguageServer {
             if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
                 let snapshot = PublishedResolverSnapshot {
                     resolver: resolver.clone(),
+                    ownership_ready: true,
                 };
                 configure_provider_paths_for_source(sync, &snapshot, &canonical_id, true).await;
             }
@@ -854,15 +859,23 @@ impl VerterLanguageServer {
         // Touch MRU for snapshot drain ordering
         self.touch_mru(&canonical_id);
 
-        let has_committed_state = self.provider_sync_states.contains_key(&canonical_id);
-        let ide_already_synced = self
-            .provider_sync_states
-            .get(&canonical_id)
+        let current_state = self.provider_sync_state_for_source(&canonical_id);
+        let has_committed_state = current_state.is_some();
+        let ide_already_synced = current_state
+            .as_ref()
             .map(|s| s.ide_background_loaded)
+            .unwrap_or(false);
+        let ownership_ready = self
+            .published_resolver()
+            .map(|snapshot| snapshot.ownership_ready)
+            .unwrap_or(false);
+        let needs_owner_reconcile = current_state
+            .as_ref()
+            .map(|state| state.is_provisional() && ownership_ready)
             .unwrap_or(false);
         let needs_sync = self.needs_ide_sync.remove(&canonical_id).is_some();
 
-        if !needs_sync && has_committed_state && ide_already_synced {
+        if !needs_sync && has_committed_state && ide_already_synced && !needs_owner_reconcile {
             return; // IDE is fresh
         }
 
@@ -887,31 +900,83 @@ impl VerterLanguageServer {
         let ide = self.documents.get_ide(uri);
         let is_jsx = ide.as_ref().map(|r| r.is_jsx).unwrap_or(false);
 
-        // Determine IDE path — owner-aware or provisional
-        let (ide_path, provisional) = if let Some(snapshot) = self.published_resolver() {
-            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-                configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false).await;
-            }
-            match provider_ide_path_for_source(&snapshot.resolver, &canonical_id, is_jsx) {
-                Some(path) => (path, false),
-                None => {
-                    self.pending_snapshot_provider_sync
-                        .insert(canonical_id.clone());
+        // Determine sync plan: owner-aware, provisional, or skip.
+        let snapshot = self.published_resolver();
+        let (ide_path, provisional) = match &snapshot {
+            Some(snap) if snap.ownership_ready => {
+                // Ready snapshot: only sync if file has an owner.
+                let Some(ide_path) =
+                    provider_ide_path_for_source(&snap.resolver, &canonical_id, is_jsx)
+                else {
+                    // Non-Vue file: IDE sync not applicable.
                     return;
+                };
+                match crate::provider_sync::vue_sync_state_for_source(
+                    &snap.resolver,
+                    &canonical_id,
+                    is_jsx,
+                ) {
+                    Some(_) => (ide_path, false),
+                    None => {
+                        // Ready snapshot but no owner: do NOT open/sync provider.
+                        self.clear_provider_sync_state(&canonical_id).await;
+                        self.pending_snapshot_provider_sync
+                            .insert(canonical_id.clone());
+                        return;
+                    }
                 }
             }
-        } else {
-            // Provisional: no resolver
-            let ext = if is_jsx { ".jsx" } else { ".tsx" };
-            (format!("{canonical_id}{ext}"), true)
+            Some(snap) => {
+                // Bootstrap snapshot (ownership_ready = false): provisional sync allowed.
+                let Some(ide_path) =
+                    provider_ide_path_for_source(&snap.resolver, &canonical_id, is_jsx)
+                else {
+                    // Non-Vue file: IDE sync not applicable.
+                    return;
+                };
+                if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                    configure_provider_paths_for_source(sync, snap, &canonical_id, false).await;
+                }
+                (ide_path, true)
+            }
+            None => {
+                // No VFS workspace at all: provisional
+                if !canonical_id.ends_with(".vue") {
+                    return;
+                }
+                let ext = if is_jsx { ".jsx" } else { ".tsx" };
+                (format!("{canonical_id}{ext}"), true)
+            }
         };
 
         let Some(ide) = ide else {
             return;
         };
 
+        let previous_ide_path = current_state
+            .as_ref()
+            .and_then(|state| state.ide_path.clone());
+        let ide_path_loaded = current_state
+            .as_ref()
+            .map(|state| {
+                state.ide_path.as_deref() == Some(ide_path.as_str()) && state.ide_background_loaded
+            })
+            .unwrap_or(false);
+
+        if let Some(stale_ide_path) = previous_ide_path
+            .as_ref()
+            .filter(|path| path.as_str() != ide_path.as_str())
+        {
+            if let Err(error) = sync.close_tsx(stale_ide_path).await {
+                tracing::warn!(
+                    "ensure_current_file_synced: failed to close stale IDE path {}: {error}",
+                    stale_ide_path
+                );
+            }
+        }
+
         // Choose open_file vs update_file based on existing state
-        let result = if has_committed_state {
+        let result = if ide_path_loaded {
             // Already known to provider — update
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
@@ -932,12 +997,12 @@ impl VerterLanguageServer {
                 // Commit state
                 let mut state = if provisional {
                     crate::provider_sync::ProviderSyncState {
-                        owner_key: "__provisional__".to_string(),
+                        owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
                         ide_path: Some(ide_path),
                         api_path: None,
                         ..Default::default()
                     }
-                } else if let Some(snapshot) = self.published_resolver() {
+                } else if let Some(snapshot) = &snapshot {
                     crate::provider_sync::vue_sync_state_for_source(
                         &snapshot.resolver,
                         &canonical_id,
@@ -945,16 +1010,16 @@ impl VerterLanguageServer {
                     )
                     .unwrap_or_else(|| {
                         crate::provider_sync::ProviderSyncState {
-                            owner_key: "__provisional__".to_string(),
+                            owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
                             ide_path: Some(ide_path.clone()),
                             api_path: None,
                             ..Default::default()
                         }
                     })
                 } else {
-                    // Snapshot vanished between check and use (rare race) — provisional fallback
+                    // No VFS workspace (rare) — provisional fallback
                     crate::provider_sync::ProviderSyncState {
-                        owner_key: "__provisional__".to_string(),
+                        owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
                         ide_path: Some(ide_path),
                         api_path: None,
                         ..Default::default()
@@ -999,7 +1064,7 @@ impl VerterLanguageServer {
         let Some(ide) = self.documents.get_ide(uri) else {
             return;
         };
-        let Some(ide_path) = self.ide_path_for_uri(uri) else {
+        let Some(ide_path) = self.active_ide_path_for_uri(uri) else {
             return;
         };
 
@@ -1221,11 +1286,20 @@ impl VerterLanguageServer {
             return true;
         };
 
+        if state.is_provisional()
+            && self
+                .published_resolver()
+                .map(|snapshot| snapshot.ownership_ready)
+                .unwrap_or(false)
+        {
+            return true;
+        }
+
         if !state.ide_background_loaded {
             return true;
         }
 
-        let Some(ide_path) = self.ide_path_for_uri(uri) else {
+        let Some(ide_path) = self.target_ide_path_for_uri(uri) else {
             return false;
         };
 
@@ -1273,7 +1347,7 @@ impl VerterLanguageServer {
             tracing::info!("ide_context: no position mapper for {}", uri.as_str());
             return None;
         };
-        let ide_path = self.ide_path_for_uri(uri)?;
+        let ide_path = self.active_ide_path_for_uri(uri)?;
         Some((ide_path, ide.code, mapper))
     }
 
@@ -1287,6 +1361,7 @@ impl VerterLanguageServer {
         let published = ws.load_published()?;
         Some(PublishedResolverSnapshot {
             resolver: published.snapshot.resolver.clone(),
+            ownership_ready: published.ownership_ready,
         })
     }
 
@@ -1332,26 +1407,6 @@ impl VerterLanguageServer {
         verter_diagnostics::Linter::default()
     }
 
-    /// Generate a provisional IDE file path (.tsx or .jsx) without resolver.
-    ///
-    /// Mirrors `provider_ide_id_for_source()` but skips `owner_for_file()` — used
-    /// before `background_init()` finishes building the resolver snapshot.
-    fn provisional_ide_path(&self, uri: &Uri) -> Option<String> {
-        let canonical = self
-            .documents
-            .get_canonical_id(uri)
-            .unwrap_or_else(|| uri.as_str().to_string());
-        if !canonical.ends_with(".vue") {
-            return None;
-        }
-        let ext = if self.documents.is_jsx(uri) {
-            ".jsx"
-        } else {
-            ".tsx"
-        };
-        Some(format!("{canonical}{ext}"))
-    }
-
     /// Generate a provisional public API path (.vue.ts) without resolver ownership.
     ///
     /// Mirrors `provider_id_for_source()` for Vue files and is used during cold
@@ -1377,13 +1432,9 @@ impl VerterLanguageServer {
         let mut state = self
             .provider_sync_state_for_source(canonical_id)
             .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
-                owner_key: "__provisional__".to_string(),
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
                 ..Default::default()
             });
-
-        if state.owner_key.is_empty() {
-            state.owner_key = "__provisional__".to_string();
-        }
 
         let needs_open =
             state.ide_path.as_deref() != Some(ide_path.as_str()) || !state.ide_background_loaded;
@@ -1420,13 +1471,9 @@ impl VerterLanguageServer {
         let mut state = self
             .provider_sync_state_for_source(canonical_id)
             .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
-                owner_key: "__provisional__".to_string(),
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
                 ..Default::default()
             });
-
-        if state.owner_key.is_empty() {
-            state.owner_key = "__provisional__".to_string();
-        }
 
         let needs_open =
             state.api_path.as_deref() != Some(dts_path.as_str()) && !state.api_background_loaded;
@@ -1452,22 +1499,61 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Generate the IDE file path (.tsx or .jsx) for a given Vue file URI.
-    /// Falls back to `provisional_ide_path` when no resolver snapshot is available.
-    fn ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
+    /// Get the active IDE file path (.tsx or .jsx) currently materialized in the provider.
+    ///
+    /// This must only return committed sync state, never a resolver-derived target path.
+    fn active_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
         let canonical = self
             .documents
             .get_canonical_id(uri)
             .unwrap_or_else(|| uri.as_str().to_string());
-        if let Some(snapshot) = self.published_resolver() {
-            return provider_ide_path_for_source(
-                &snapshot.resolver,
-                &canonical,
-                self.documents.is_jsx(uri),
-            );
+
+        self.provider_sync_states
+            .get(&canonical)
+            .and_then(|state| state.ide_path.clone())
+    }
+
+    /// Get the target IDE path formula for a Vue file URI.
+    ///
+    /// This is safe for sync planning, but not for live provider queries.
+    /// When no published resolver exists yet, fall back to the local
+    /// provisional `.vue.tsx` / `.vue.jsx` formula.
+    fn target_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
+        let canonical = self
+            .documents
+            .get_canonical_id(uri)
+            .unwrap_or_else(|| uri.as_str().to_string());
+        let is_jsx = self.documents.is_jsx(uri);
+
+        self.published_resolver()
+            .and_then(|snapshot| {
+                provider_ide_path_for_source(&snapshot.resolver, &canonical, is_jsx)
+            })
+            .or_else(|| {
+                canonical
+                    .ends_with(".vue")
+                    .then(|| format!("{canonical}{}", if is_jsx { ".jsx" } else { ".tsx" }))
+            })
+    }
+
+    /// Returns the active IDE path only when the provider is already bound to
+    /// the current desired artifact path and can be updated in place.
+    fn eager_syncable_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
+        let canonical_id = self.documents.get_canonical_id(uri)?;
+        let state = self.provider_sync_state_for_source(&canonical_id)?;
+        if !state.ide_background_loaded {
+            return None;
         }
-        // Fallback: provisional path without resolver
-        self.provisional_ide_path(uri)
+        if state.is_provisional()
+            && self
+                .published_resolver()
+                .map(|snapshot| snapshot.ownership_ready)
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        let desired_path = self.target_ide_path_for_uri(uri)?;
+        (state.ide_path.as_deref() == Some(desired_path.as_str())).then_some(desired_path)
     }
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
@@ -2455,6 +2541,12 @@ impl VerterLanguageServer {
         remove_sync_state(&self.provider_sync_states, canonical_id)
     }
 
+    async fn clear_provider_sync_state(&self, canonical_id: &str) {
+        if let Some(state) = self.remove_provider_sync_state(canonical_id) {
+            self.close_provider_state(&state).await;
+        }
+    }
+
     fn is_background_loaded_for_source_kind(
         &self,
         canonical_id: &str,
@@ -2682,7 +2774,7 @@ impl VerterLanguageServer {
         let source_uri: Uri = source_uri_str.parse().ok()?;
 
         // Get the TSX path from the source .vue file
-        let tsx_path = self.ide_path_for_uri(&source_uri)?;
+        let tsx_path = self.active_ide_path_for_uri(&source_uri)?;
 
         // Build LineIndex from the virtual file's content (for offset conversion)
         let doc = self.documents.get(uri)?;
@@ -2897,6 +2989,11 @@ impl VerterLanguageServer {
     async fn sync_imported_vue_api_lightweight(&self, canonical_id: &str) {
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let profile = self.documents.tsx_profile.read().clone();
+        let snapshot = self.published_resolver();
+        let ownership_ready = snapshot
+            .as_ref()
+            .map(|s| s.ownership_ready)
+            .unwrap_or(false);
 
         // Fast path: host already has the file — sync directly from cached artifacts.
         if let Some(api) = self.documents.host.get_public_api(canonical_id) {
@@ -2906,7 +3003,8 @@ impl VerterLanguageServer {
                 None
             };
 
-            if self.published_resolver().is_none() {
+            if !ownership_ready {
+                // Bootstrap: provisional sync is allowed
                 if let Some(ide) = ide.as_ref() {
                     let _ = self
                         .sync_vue_ide_provisionally(canonical_id, &ide.code, ide.is_jsx)
@@ -2923,9 +3021,10 @@ impl VerterLanguageServer {
                     canonical_id,
                     ide.as_ref().map(|output| output.is_jsx).unwrap_or(false),
                 ) else {
-                    let _ = self
-                        .sync_vue_api_provisionally(canonical_id, &api.code)
-                        .await;
+                    // Ready snapshot but no owner: queue and return.
+                    // Do NOT perform provisional provider I/O.
+                    self.clear_provider_sync_state(canonical_id).await;
+                    self.queue_snapshot_provider_sync(canonical_id.to_string());
                     return;
                 };
                 self.close_provider_paths(&transition.stale_paths).await;
@@ -2975,7 +3074,8 @@ impl VerterLanguageServer {
             return;
         }
 
-        if self.published_resolver().is_none() {
+        if !ownership_ready {
+            // Bootstrap: no owner snapshot yet, provisional sync allowed.
             let compiled = block_in_place_if_available(|| {
                 self.documents.host.remove(canonical_id);
                 if !self.documents.host.ensure_loaded(canonical_id) {
@@ -3065,6 +3165,7 @@ impl VerterLanguageServer {
             let Some(transition) =
                 self.prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx)
             else {
+                self.clear_provider_sync_state(canonical_id).await;
                 self.queue_snapshot_provider_sync(canonical_id.to_string());
                 return;
             };
@@ -3103,7 +3204,10 @@ impl VerterLanguageServer {
                 } else if is_bg {
                     sync.sync_dts(&dts_path, &api.code).await
                 } else {
-                    sync.load_dts(&dts_path, &api.code).await
+                    // First-time DTS sync: use open_dts to send to the type provider.
+                    // load_dts only caches locally (tsserver wouldn't know the file),
+                    // which breaks cross-file operations like rename.
+                    sync.open_dts(&dts_path, &api.code).await
                 };
                 if result.is_ok() {
                     committed_state.set_background_loaded(ProviderPathKind::Api, true);
@@ -4227,7 +4331,7 @@ impl LanguageServer for VerterLanguageServer {
                 // see fresh content without needing per-handler inline sync.
                 if let Some(sync) = &self.project_sync {
                     if let Some(ide) = self.documents.get_ide(&uri) {
-                        if let Some(ide_path) = self.ide_path_for_uri(&uri) {
+                        if let Some(ide_path) = self.eager_syncable_ide_path_for_uri(&uri) {
                             if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
                                 tracing::warn!("did_change: eager tsx sync failed: {e}");
                             }

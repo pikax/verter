@@ -756,6 +756,40 @@ fn hover_text(hover: Option<Hover>) -> String {
     }
 }
 
+fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> TypeProviderContext {
+    let canonical_id = server
+        .documents
+        .get_canonical_id(uri)
+        .expect("canonical id should exist");
+    server.documents.host().ensure_loaded(&canonical_id);
+    let ide = server
+        .documents
+        .get_ide(uri)
+        .expect("IDE output should exist");
+    let mapper = server
+        .documents
+        .get_position_mapper(uri)
+        .expect("position mapper should exist");
+    let tsx_path = server
+        .active_ide_path_for_uri(uri)
+        .or_else(|| server.target_ide_path_for_uri(uri))
+        .expect("type provider path should exist");
+    let tsx_line_index = LineIndex::new(&ide.code, server.documents.encoding());
+    let vue_line_index = server
+        .documents
+        .get(uri)
+        .expect("document should exist")
+        .line_index
+        .clone();
+    TypeProviderContext {
+        tsx_path,
+        tsx_content: ide.code,
+        mapper,
+        tsx_line_index,
+        vue_line_index,
+    }
+}
+
 fn set_type_hover_at_vue_position(
     server: &VerterLanguageServer,
     provider: &MockTypeProvider,
@@ -763,9 +797,7 @@ fn set_type_hover_at_vue_position(
     position: Position,
     contents: &str,
 ) {
-    let ctx = server
-        .type_provider_context(uri)
-        .expect("type provider context should exist");
+    let ctx = synced_type_provider_context(server, uri);
     let tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &ctx.vue_line_index,
@@ -791,9 +823,7 @@ fn set_type_completions_at_vue_position(
     position: Position,
     items: Vec<crate::tsgo::protocol::Completion>,
 ) {
-    let ctx = server
-        .type_provider_context(uri)
-        .expect("type provider context should exist");
+    let ctx = synced_type_provider_context(server, uri);
     let tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &ctx.vue_line_index,
@@ -1275,7 +1305,10 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let dynamic_start = source.find(dynamic_expr).unwrap();
 
     let prepared = prepare_non_vue_provider_sync(
-        Some(&PublishedResolverSnapshot { resolver }),
+        Some(&PublishedResolverSnapshot {
+            resolver,
+            ownership_ready: true,
+        }),
         &reader,
         "/workspace/src/App.ts",
         source,
@@ -1853,7 +1886,10 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
         "/workspace/src/util.ts",
     ]);
     let targets = collect_priority_vue_targets_from_module_references(
-        Some(&PublishedResolverSnapshot { resolver }),
+        Some(&PublishedResolverSnapshot {
+            resolver,
+            ownership_ready: true,
+        }),
         &reader,
         "/workspace/src/App.vue",
         &[
@@ -1896,7 +1932,10 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
     ]);
     let reader = TestResolverReader::with_files(&["/workspace/src/Foo.vue"]);
     let targets = collect_priority_vue_targets_from_module_references(
-        Some(&PublishedResolverSnapshot { resolver }),
+        Some(&PublishedResolverSnapshot {
+            resolver,
+            ownership_ready: true,
+        }),
         &reader,
         "/workspace/src/App.vue",
         &[test_analyzed_module_reference(
@@ -2240,9 +2279,7 @@ async fn goto_definition_component_event_name_skips_type_provider_virtual_fallba
     let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
-    let ctx = server
-        .type_provider_context(&app_uri)
-        .expect("provider context should exist");
+    let ctx = synced_type_provider_context(server, &app_uri);
     let tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &ctx.vue_line_index,
@@ -2863,9 +2900,7 @@ async fn barrel_import_binding_in_vue_script_skips_type_provider_barrel_result()
     let barrel_path = format!("{workspace_id}/src/components/index.ts");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "{ Overlay, Button }", 2);
-    let ctx = server
-        .type_provider_context(&app_uri)
-        .expect("provider context should exist");
+    let ctx = synced_type_provider_context(server, &app_uri);
     let tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &ctx.vue_line_index,
@@ -3124,7 +3159,8 @@ async fn goto_type_definition_delegates_to_provider() {
     let position = find_document_position(server, &app_uri, "count", 0);
 
     // Set up mock to return a type definition when queried
-    if let Some(ctx) = server.type_provider_context(&app_uri) {
+    {
+        let ctx = synced_type_provider_context(server, &app_uri);
         if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
             &position,
             &ctx.vue_line_index,
@@ -3539,9 +3575,7 @@ const outerLabel = 'outer'
     let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "{{ sl }}", 5);
-    let slot_ctx = server
-        .type_provider_context(&slot_uri)
-        .expect("type provider context should exist");
+    let slot_ctx = synced_type_provider_context(server, &slot_uri);
     let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &slot_ctx.vue_line_index,
@@ -3680,9 +3714,7 @@ const outerLabel = 'outer'
     let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.name", 9);
-    let slot_ctx = server
-        .type_provider_context(&slot_uri)
-        .expect("type provider context should exist");
+    let slot_ctx = synced_type_provider_context(server, &slot_uri);
     let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &slot_ctx.vue_line_index,
@@ -3807,9 +3839,7 @@ const outerLabel = 'outer'
     let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.na", 11);
-    let slot_ctx = server
-        .type_provider_context(&slot_uri)
-        .expect("type provider context should exist");
+    let slot_ctx = synced_type_provider_context(server, &slot_uri);
     let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &slot_ctx.vue_line_index,
@@ -3920,9 +3950,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
 
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.di", 7);
-    let ctx = server
-        .type_provider_context(&uri)
-        .expect("type provider context should exist");
+    let ctx = synced_type_provider_context(server, &uri);
     let tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &ctx.vue_line_index,
@@ -4029,9 +4057,7 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
         include_str!("../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.disabled", 7);
-    let ctx = server
-        .type_provider_context(&uri)
-        .expect("type provider context should exist");
+    let ctx = synced_type_provider_context(server, &uri);
     let tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &ctx.vue_line_index,
@@ -4377,9 +4403,7 @@ const broken =
         recovery_source,
     );
     let position = find_document_position(server, &recovery_uri, "{{ cou }}", 6);
-    let recovery_ctx = server
-        .type_provider_context(&recovery_uri)
-        .expect("type provider context should exist");
+    let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
     let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &recovery_ctx.vue_line_index,
@@ -4495,9 +4519,7 @@ const broken =
         recovery_source,
     );
     let position = find_document_position(server, &recovery_uri, "{{ safeA }}", 8);
-    let recovery_ctx = server
-        .type_provider_context(&recovery_uri)
-        .expect("type provider context should exist");
+    let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
     let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &recovery_ctx.vue_line_index,
@@ -4779,8 +4801,8 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
         .map(|entry| entry.clone())
         .expect("drained sync should commit owner-aware provider state");
     assert!(
-        !state.owner_key.is_empty(),
-        "drain must set an owner key on provider state"
+        !state.is_provisional(),
+        "drain must set an owner-aware binding on provider state"
     );
 
     let calls = provider.file_sync_calls();
@@ -4797,6 +4819,85 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
             MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
         )),
         "drain should sync the open Vue IDE file through the synthetic TSX path"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_init_drain_removes_stale_provisional_state_when_ready_snapshot_has_no_owner() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+    let provider_sync_states = DashMap::new();
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "ready-but-unowned files should stay queued for future rebuilds"
+    );
+    assert!(
+        provider_sync_states.get("/workspace/src/App.vue").is_none(),
+        "ready-but-unowned drain must remove stale provisional provider state"
+    );
+
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "drain should close the stale provisional IDE path, calls={calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+        )),
+        "drain should close the stale provisional API path, calls={calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".vue.ts") || path.ends_with(".vue.tsx")
+        )),
+        "ready-but-unowned drain must not keep syncing guessed provider paths, calls={calls:?}"
     );
 }
 
@@ -4926,8 +5027,8 @@ defineProps<{ msg: string }>()
         .get(&child_id)
         .map(|entry| entry.clone())
         .expect("provisional API sync should commit provider state");
-    assert_eq!(
-        state.owner_key, "__provisional__",
+    assert!(
+        state.is_provisional(),
         "pre-snapshot imported sync should mark the owner as provisional"
     );
     assert_eq!(
@@ -5114,8 +5215,8 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         .get("/workspace/src/App.vue")
         .map(|entry| entry.clone())
         .expect("provisional IDE sync should commit provider state");
-    assert_eq!(
-        state.owner_key, "__provisional__",
+    assert!(
+        state.is_provisional(),
         "pre-snapshot current-file sync should mark the IDE owner as provisional"
     );
     assert_eq!(
@@ -5128,6 +5229,247 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             .pending_snapshot_provider_sync
             .contains("/workspace/src/App.vue"),
         "pre-snapshot current-file sync should queue owner-aware reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_clears_provisional_state_when_ready_snapshot_has_no_owner() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+
+    let server = service.inner();
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .provider_sync_state_for_source("/workspace/src/App.vue")
+            .expect("bootstrap sync should commit provisional state")
+            .is_provisional(),
+        "bootstrap sync should start from provisional state"
+    );
+
+    provider.clear_calls();
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    server.ensure_current_file_synced(&uri).await;
+
+    assert!(
+        server
+            .provider_sync_state_for_source("/workspace/src/App.vue")
+            .is_none(),
+        "ready-but-unowned current-file sync must remove stale provisional state"
+    );
+    assert!(
+        server
+            .pending_snapshot_provider_sync
+            .contains("/workspace/src/App.vue"),
+        "ready-but-unowned current-file sync should stay queued for future rebuilds"
+    );
+    assert!(
+        server.type_provider_context(&uri).is_none(),
+        "interactive type-provider lookups must not synthesize a live path from the resolver alone"
+    );
+
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "ready-but-unowned current-file sync should close the stale provisional IDE path, calls={calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == "/workspace/src/App.vue.tsx"
+        )),
+        "ready-but-unowned current-file sync must not reopen or update the guessed IDE path, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn did_change_does_not_eager_sync_ready_unowned_file_through_resolver_path() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+
+    tower_lsp_server::LanguageServer::did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: r#"<script setup lang="ts">
+const msg = 'updated'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#
+                .to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.is_empty(),
+        "did_change must not eagerly sync a ready-but-unowned file through a raw resolver path, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn current_file_sync_reopens_when_live_ide_path_changes() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        server
+            .provider_sync_state_for_source("/workspace/src/App.vue")
+            .and_then(|state| state.ide_path),
+        Some("/workspace/src/App.vue.tsx".to_string()),
+        "initial sync should materialize the TSX path"
+    );
+
+    provider.clear_calls();
+    tower_lsp_server::LanguageServer::did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: r#"<script setup lang="js">
+const msg = 'updated'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#
+                .to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let eager_calls = provider.file_sync_calls();
+    assert!(
+        !eager_calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == "/workspace/src/App.vue.tsx"
+        )),
+        "did_change must not eagerly sync the stale TSX path after the live IDE path changes, calls={eager_calls:?}"
+    );
+
+    server.ensure_current_file_synced(&uri).await;
+
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("inline sync should commit the updated IDE path");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "inline sync should switch the committed IDE path to JSX"
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the new JSX path should be marked as loaded"
+    );
+
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "path change should close the stale TSX path, calls={calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "path change should open the new JSX path, calls={calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, .. } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "path change should not treat the new JSX path as an already-open file, calls={calls:?}"
     );
 }
 
@@ -5155,7 +5497,9 @@ const msg = 'hello'
     server.provider_sync_states.insert(
         "/workspace/src/App.vue".to_string(),
         ProviderSyncState {
-            owner_key: "/workspace/tsconfig.json".to_string(),
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/workspace/tsconfig.json".to_string(),
+            ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ide_background_loaded: false,
@@ -5237,9 +5581,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 
     server.ensure_current_file_synced(&uri).await;
 
-    let ctx = server
-        .type_provider_context(&uri)
-        .expect("type provider context should exist");
+    let ctx = synced_type_provider_context(server, &uri);
     provider.drop_open_path(&ctx.tsx_path);
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
@@ -5406,9 +5748,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
-    let ctx = server
-        .type_provider_context(&uri)
-        .expect("type provider context should exist");
+    let ctx = synced_type_provider_context(server, &uri);
     let tsx_offset = merge::vue_position_to_tsx_offset_validated(
         &position,
         &ctx.vue_line_index,
@@ -5915,7 +6255,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
             .await
             .expect("slot hover request should succeed"),
     );
-    let literal_debug = server.type_provider_context(&parent_uri).and_then(|ctx| {
+    let literal_debug = Some(synced_type_provider_context(server, &parent_uri)).and_then(|ctx| {
         ctx.tsx_content.find("slotItem.name").map(|start| {
             (
                 ctx.tsx_path.clone(),
@@ -5924,8 +6264,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         })
     });
     let direct_provider = provider.clone();
-    let direct_debug = server
-        .type_provider_context(&parent_uri)
+    let direct_debug = Some(synced_type_provider_context(server, &parent_uri))
         .and_then(|ctx| {
             let tsx_path = ctx.tsx_path.clone();
             merge::vue_position_to_tsx_offset_validated(
@@ -6079,6 +6418,7 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
     // Verify the resolver can resolve these specifiers
     let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
+        ownership_ready: true,
     };
     let ws = documents.host().workspace();
     let external_resolved = snapshot.resolver.resolve_with_reader(
@@ -6185,6 +6525,7 @@ defineProps<{ msg: string }>()
                 Some(format!("{workspace_id}/tsconfig.app.json")),
             ),
         ]),
+        ownership_ready: true,
     };
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
