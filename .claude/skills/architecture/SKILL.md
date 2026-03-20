@@ -5,6 +5,18 @@ description: "Verter codebase architecture: Rust compiler modules, TypeScript pa
 
 # Verter Architecture Reference
 
+## Shared Substrate Principle
+
+Verter is designed as one shared optimized codebase. Consumers should reuse the same lower-level crates instead of growing separate semantic pipelines.
+
+- Put reusable parsing, analysis, type-resolution, caching, and import-following behavior in the shared owner crate.
+- `verter_host` is the shared host/session/cache boundary for host-backed consumers.
+- `verter_analysis` and `verter_core` own reusable semantics.
+- `verter_ffi` owns boundary DTOs shared by NAPI and WASM.
+- Consumer packages and apps should stay adapter-oriented: thin wrappers, public API shaping, transport glue, and UX-specific behavior.
+
+When a bug or slowdown shows up in one product surface, prefer fixing it in the shared substrate so other consumers benefit automatically.
+
 ## TypeScript Packages
 
 | Package | Purpose | Entry Point |

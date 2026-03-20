@@ -6,6 +6,21 @@ The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template 
 
 ## Architecture
 
+### Shared Optimized Codebase (CRITICAL)
+
+Verter is one shared optimized codebase, not separate semantic implementations per consumer.
+
+- Improvements should land in the lowest reusable owner crate that can correctly serve all consumers.
+- `verter_host` and shared workspace/VFS integration are the authority for host-backed loading, invalidation, dependency tracking, and cache reuse.
+- `verter_analysis` and `verter_core` own reusable semantics and type-resolution logic.
+- `verter_ffi` owns shared boundary DTOs between native bindings and WASM bindings.
+- Consumer packages such as `@verter/component-meta`, the LSP, MCP, unplugin, and playground should consume the shared substrate rather than carrying their own semantic forks.
+
+Architectural consequence:
+
+- A performance or correctness fix discovered in one surface should be implemented in the shared owner layer whenever that behavior is reusable.
+- Consumer-local wrappers should stay thin and should not bypass shared parsing, analysis, resolution, or cache ownership.
+
 ### Package Dependency Graph
 
 ```
