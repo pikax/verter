@@ -273,20 +273,48 @@ impl VerterHost {
     /// When a content override exists for `profile`, returns the override's
     /// synthetic source, meta, script_analysis, and cached_parse. Otherwise
     /// returns raw scheduler data. Returns `None` if file not in scheduler.
-    #[cfg(feature = "scheduler")]
     pub(crate) fn effective_file_state(
         &self,
         canonical_id: &str,
         profile: Option<u64>,
     ) -> Option<EffectiveFileState> {
-        use crate::host_executor::HostSourceData;
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
 
-        let snap = self.scheduler.try_get_source(canonical_id)?;
-        let hd = snap.downcast_data::<HostSourceData>()?;
+            let snap = self.scheduler.try_get_source(canonical_id)?;
+            let hd = snap.downcast_data::<HostSourceData>()?;
 
-        if let Some(profile_hash) = profile {
-            if let Some(cc) = self.compile_cache.get(canonical_id) {
-                if let Some(ovr) = cc.content_overrides.get(&profile_hash) {
+            if let Some(profile_hash) = profile {
+                if let Some(cc) = self.compile_cache.get(canonical_id) {
+                    if let Some(ovr) = cc.content_overrides.get(&profile_hash) {
+                        return Some(EffectiveFileState {
+                            source: ovr.source.clone(),
+                            meta: ovr.parse.meta.clone(),
+                            script_analysis: ovr.parse.script_analysis.clone(),
+                            cached_parse: ovr.cached_parse.clone(),
+                            whole_hash: ovr.parse.whole_hash,
+                        });
+                    }
+                }
+            }
+
+            Some(EffectiveFileState {
+                source: snap.source.clone(),
+                meta: hd.parse.meta.clone(),
+                script_analysis: hd.parse.script_analysis.clone(),
+                cached_parse: hd.cached_parse.clone(),
+                whole_hash: hd.parse.whole_hash,
+            })
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(canonical_id)?;
+
+            if let Some(profile_hash) = profile {
+                if let Some(ovr) = entry.content_overrides.get(&profile_hash) {
                     return Some(EffectiveFileState {
                         source: ovr.source.clone(),
                         meta: ovr.parse.meta.clone(),
@@ -296,15 +324,15 @@ impl VerterHost {
                     });
                 }
             }
-        }
 
-        Some(EffectiveFileState {
-            source: snap.source.clone(),
-            meta: hd.parse.meta.clone(),
-            script_analysis: hd.parse.script_analysis.clone(),
-            cached_parse: hd.cached_parse.clone(),
-            whole_hash: hd.parse.whole_hash,
-        })
+            Some(EffectiveFileState {
+                source: entry.source.clone(),
+                meta: entry.meta.clone(),
+                script_analysis: entry.script_analysis.clone(),
+                cached_parse: entry.cached_parse.clone(),
+                whole_hash: entry.whole_hash,
+            })
+        }
     }
 
     /// Materialize native-side lifecycle state from the current scheduler snapshot.
@@ -751,6 +779,7 @@ impl VerterHost {
                     target: verter_scheduler::stage::TargetStage::Analysis,
                     priority: verter_scheduler::stage::Priority::Interactive,
                     source: None,
+                    file_kind: None,
                 });
 
             // Wait for the scheduler to reach Analysis

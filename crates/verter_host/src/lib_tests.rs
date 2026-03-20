@@ -3242,6 +3242,7 @@ mod scheduler_tests {
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: Some(Arc::from(src)),
+                file_kind: None,
             });
         handle.wait();
     }
@@ -3936,6 +3937,7 @@ mod phase2a_upsert_tests {
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: None,
+                file_kind: None,
             });
 
         assert!(

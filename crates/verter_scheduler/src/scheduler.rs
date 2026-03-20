@@ -20,7 +20,7 @@ use crate::job::{
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileNode, SourceSnapshot};
 use crate::overlay::OverlayMap;
 use crate::queue::{AgingConfig, JobIndex, JobKey, QueueEntry};
-use crate::source_loader::SourceLoader;
+use crate::source_loader::{FileKind as SourceFileKind, SourceLoader};
 use crate::stage::{Priority, TargetStage, TaskKind};
 
 /// Configuration for the scheduler.
@@ -60,6 +60,7 @@ pub struct Request {
     pub target: TargetStage,
     pub priority: Priority,
     pub source: Option<Arc<str>>,
+    pub file_kind: Option<SourceFileKind>,
 }
 
 /// The main scheduler.
@@ -227,6 +228,7 @@ impl Scheduler {
             target: request.target,
             priority: request.priority,
             source: request.source,
+            file_kind: request.file_kind,
             sender: sender.clone(),
             submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
         };
@@ -380,7 +382,7 @@ impl Scheduler {
         // Ensure the node exists.
         self.nodes
             .entry(file_id.to_string())
-            .or_insert_with(|| self.create_node(file_id));
+            .or_insert_with(|| self.create_node(file_id, None));
 
         // Update forward/reverse edges.
         let new_deps: std::collections::BTreeSet<String> = resolved_dep_ids.into_iter().collect();
@@ -418,7 +420,7 @@ impl Scheduler {
                 continue;
             }
             if !self.nodes.contains_key(dep_id) {
-                let dep_node = self.create_node(dep_id);
+                let dep_node = self.create_node(dep_id, None);
                 dep_node.bump_generation();
                 self.nodes.insert(dep_id.clone(), dep_node);
                 let _ = self.inbox.sender.send(Submission::NewRequest {
@@ -426,6 +428,7 @@ impl Scheduler {
                     target: TargetStage::Analysis,
                     priority: std::cmp::min(inherited_priority, Priority::Interactive),
                     source: None,
+                    file_kind: None,
                     sender: {
                         let (_, s) = completion_pair::<RequestResult>();
                         s
@@ -458,8 +461,8 @@ impl Scheduler {
 
     /// Create a FileNode for a file, respecting the generation floor
     /// from prior incarnations so stale completions never match.
-    fn create_node(&self, file_id: &str) -> Arc<FileNode> {
-        let kind = self.source_loader.classify(file_id);
+    fn create_node(&self, file_id: &str, file_kind: Option<SourceFileKind>) -> Arc<FileNode> {
+        let kind = file_kind.unwrap_or_else(|| self.source_loader.classify(file_id));
         let node = Arc::new(FileNode::new(
             file_id.to_string(),
             crate::node::FileKind::from_source_loader_kind(kind),
@@ -576,6 +579,7 @@ impl Scheduler {
                 target: TargetStage::Analysis,
                 priority: Priority::Background,
                 source: None,
+                file_kind: None,
                 submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
                 sender: {
                     let (_, sender) = completion_pair::<RequestResult>();
@@ -654,10 +658,19 @@ impl Scheduler {
                 target,
                 priority,
                 source,
+                file_kind,
                 sender,
                 submitted_epoch,
             } => {
-                self.handle_new_request(file_id, target, priority, source, sender, submitted_epoch);
+                self.handle_new_request(
+                    file_id,
+                    target,
+                    priority,
+                    source,
+                    file_kind,
+                    sender,
+                    submitted_epoch,
+                );
             }
             Submission::StageComplete {
                 file_id,
@@ -683,6 +696,7 @@ impl Scheduler {
         target: TargetStage,
         priority: Priority,
         source: Option<Arc<str>>,
+        file_kind: Option<SourceFileKind>,
         sender: CompletionSender<RequestResult>,
         submitted_epoch: u64,
     ) {
@@ -722,7 +736,7 @@ impl Scheduler {
         let node = self
             .nodes
             .entry(file_id.clone())
-            .or_insert_with(|| self.create_node(&file_id))
+            .or_insert_with(|| self.create_node(&file_id, file_kind))
             .clone();
 
         let generation = if source.is_some() {
@@ -879,7 +893,7 @@ impl Scheduler {
                             }
                             if !self.nodes.contains_key(dep_id) {
                                 // Auto-ingest: create node and enqueue Source job.
-                                let dep_node = self.create_node(dep_id);
+                                let dep_node = self.create_node(dep_id, None);
                                 let dep_gen = dep_node.bump_generation();
                                 self.nodes.insert(dep_id.clone(), dep_node);
 
@@ -1423,7 +1437,7 @@ mod tests {
     use super::*;
     use crate::source_loader::MemorySourceLoader;
 
-    fn test_scheduler() -> Arc<Scheduler> {
+    fn _test_scheduler() -> Arc<Scheduler> {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
         loader.insert("/b.vue".to_string(), Arc::from("<template>bye</template>"));
@@ -1447,6 +1461,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1473,6 +1488,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1498,6 +1514,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1527,6 +1544,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("provided content")),
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1554,6 +1572,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
+            file_kind: None,
         });
 
         // Second request (newer source) — before first is processed
@@ -1562,6 +1581,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v2")),
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1593,6 +1613,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
         sched.drive_all();
         assert!(h1.try_get().unwrap().is_ready());
@@ -1603,6 +1624,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
         // Process the submission (but no stage work needed)
         sched.drain_inbox();
@@ -1625,18 +1647,21 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
         let hb = sched.submit_request(Request {
             file_id: "/b.vue".to_string(),
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
         let hc = sched.submit_request(Request {
             file_id: "/c.vue".to_string(),
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1661,6 +1686,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
         sched.drive_all();
 
@@ -1683,6 +1709,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("editor content")),
+            file_kind: None,
         });
         sched.drive_all();
 
@@ -1709,6 +1736,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Background,
             source: None,
+            file_kind: None,
         });
 
         // Process submission but DON'T drive stages — the handle stays pending
@@ -1745,6 +1773,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Background,
             source: None,
+            file_kind: None,
         });
         // Submit high priority second
         sched.submit_request(Request {
@@ -1752,6 +1781,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Critical,
             source: None,
+            file_kind: None,
         });
 
         // Drain inbox so jobs are in the queue
@@ -1780,6 +1810,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Critical,
             source: None,
+            file_kind: None,
         });
 
         // Wait for completion (driver thread processes it)
@@ -1839,6 +1870,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Critical,
             source: None,
+            file_kind: None,
         });
 
         // Drive: Source(A) → Analysis(A), but Artifact(A) should be gated
@@ -1886,6 +1918,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 7 },
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1910,6 +1943,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
 
         sched.drive_all();
@@ -1940,6 +1974,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
+            file_kind: None,
         });
         sched.drive_all();
         let gen1 = match h.try_get().unwrap() {
@@ -1958,6 +1993,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v2")),
+            file_kind: None,
         });
         sched.drive_all();
         let gen2 = match h2.try_get().unwrap() {
@@ -2020,6 +2056,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
+            file_kind: None,
         });
         sched.drive_all();
         assert!(h.try_get().unwrap().is_ready());
@@ -2040,6 +2077,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content v2")),
+            file_kind: None,
         });
         sched.drive_all();
         assert!(h2.try_get().unwrap().is_ready());
@@ -2087,6 +2125,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
+            file_kind: None,
         });
 
         // Remove BEFORE the driver processes h1 (bumps epoch to 1)
@@ -2131,6 +2170,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         sched.drive_all();
 
@@ -2167,6 +2207,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         sched.drive_all();
 
@@ -2191,6 +2232,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         h.wait();
         assert!(sched.has_node("/a.vue"));
@@ -2213,6 +2255,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
+            file_kind: None,
         });
         let state = h2.wait();
         assert!(
@@ -2234,6 +2277,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         let pre_gen = match h.wait() {
             CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
@@ -2250,6 +2294,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
+            file_kind: None,
         });
         let post_gen = match h2.wait() {
             CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
@@ -2275,9 +2320,10 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         sched.drive_all();
-        let gen = match h.try_get().unwrap() {
+        let _gen = match h.try_get().unwrap() {
             CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
             other => panic!("expected Analysis, got {:?}", other),
         };
@@ -2288,6 +2334,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
+            file_kind: None,
         });
         // DON'T drive yet — the new gen hasn't been assigned
 
@@ -2326,6 +2373,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         sched.drive_all();
         let gen = match h.try_get().unwrap() {
@@ -2388,6 +2436,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v1")),
+            file_kind: None,
         });
         sched.drive_all();
         let gen_g = sched.try_get_source("/a.vue").unwrap().generation;
@@ -2398,6 +2447,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
+            file_kind: None,
         });
         // Node is still at gen G — the G+1 bump hasn't happened yet.
         assert_eq!(
@@ -2446,6 +2496,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         sched.drive_one(); // processes the Source job only
         let gen = sched.try_get_source("/a.vue").unwrap().generation;
@@ -2491,6 +2542,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v1")),
+            file_kind: None,
         });
         sched.drive_all();
 
@@ -2507,6 +2559,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
+            file_kind: None,
         });
         sched.drive_all();
 
@@ -2530,6 +2583,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         // DON'T drive — scheduler hasn't processed anything
 
@@ -2582,6 +2636,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
+            file_kind: None,
         });
         sched.drive_all();
         let gen = sched.try_get_source("/a.vue").unwrap().generation;
@@ -2600,6 +2655,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 7 },
             priority: Priority::Interactive,
             source: None,
+            file_kind: None,
         });
         // Drive just admission — don't drive the dep's Source/Analysis
         sched.drain_inbox();

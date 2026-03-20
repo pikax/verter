@@ -43,6 +43,28 @@ fn evaluated_prop_type<'a>(types: &'a EvaluatedComponentTypes, name: &str) -> &'
         .r#type
 }
 
+fn cached_evaluated_types(
+    project: &MetaProject,
+    canonical: &str,
+) -> Option<(crate::types::Hash16, Arc<EvaluatedComponentTypes>)> {
+    #[cfg(feature = "scheduler")]
+    {
+        project
+            .host()
+            .compile_cache
+            .get(canonical)
+            .and_then(|entry| entry.cached_evaluated_types.clone())
+    }
+
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = crate::shared::read_lock(&project.host().files);
+        files
+            .get(canonical)
+            .and_then(|entry| entry.cached_evaluated_types.clone())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Basic project lifecycle
 // ---------------------------------------------------------------------------
@@ -591,19 +613,11 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
         &TypeExpr::Primitive(PrimitiveName::Number)
     );
 
-    let first_cache = project
-        .host()
-        .compile_cache
-        .get("Comp.vue")
-        .and_then(|entry| entry.cached_evaluated_types.clone())
+    let first_cache = cached_evaluated_types(&project, "Comp.vue")
         .expect("first evaluation should populate the cache");
 
     let second = session.evaluate_types("Comp.vue").unwrap().unwrap();
-    let second_cache = project
-        .host()
-        .compile_cache
-        .get("Comp.vue")
-        .and_then(|entry| entry.cached_evaluated_types.clone())
+    let second_cache = cached_evaluated_types(&project, "Comp.vue")
         .expect("second evaluation should reuse the cache");
 
     assert_eq!(first.props.len(), second.props.len());
@@ -613,11 +627,7 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
         .upsert("Comp.vue", sfc("count: number; label: string"))
         .unwrap();
     let third = session.evaluate_types("Comp.vue").unwrap().unwrap();
-    let third_cache = project
-        .host()
-        .compile_cache
-        .get("Comp.vue")
-        .and_then(|entry| entry.cached_evaluated_types.clone())
+    let third_cache = cached_evaluated_types(&project, "Comp.vue")
         .expect("updated file should repopulate the cache");
 
     assert!(third.props.iter().any(|field| field.name == "label"));
@@ -713,5 +723,86 @@ defineProps<{
             assert!(!names.contains(&"password"));
         }
         other => panic!("expected imported utility to resolve to an object, got {other:?}"),
+    }
+}
+
+#[test]
+fn evaluate_types_invalidates_cached_results_when_dependency_changes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "types.ts",
+            r#"export interface ImportedUser {
+  id: number
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+import type { ImportedUser } from './types'
+
+defineProps<{
+  user: ImportedUser
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let first = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    let first_cache = cached_evaluated_types(&project, "Comp.vue")
+        .expect("first evaluation should populate the cache");
+
+    match evaluated_prop_type(&first, "user") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(names, vec!["id"]);
+        }
+        other => panic!("expected imported interface to resolve to an object, got {other:?}"),
+    }
+
+    session
+        .upsert(
+            "types.ts",
+            r#"export interface ImportedUser {
+  id: number
+  label: string
+}"#
+            .into(),
+        )
+        .unwrap();
+
+    let second = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    let second_cache = cached_evaluated_types(&project, "Comp.vue")
+        .expect("dependency update should repopulate the cache");
+
+    assert!(
+        !Arc::ptr_eq(&first_cache.1, &second_cache.1),
+        "dependency change must invalidate the owner's evaluated-type cache",
+    );
+    match evaluated_prop_type(&second, "user") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"id"));
+            assert!(names.contains(&"label"));
+        }
+        other => panic!("expected imported interface to resolve to an object, got {other:?}"),
     }
 }

@@ -335,8 +335,11 @@ impl ProjectResolver {
             } else {
                 join_paths(&importer_dir, specifier)
             };
-            return probe_path_for_context(reader, &base, ctx)
-                .map(|resolved| (resolved, ResolutionKind::Relative));
+            let resolved = probe_path_for_context(reader, &base, ctx)?;
+            if !package_follow_is_confirmed(reader, importer_id, &resolved) {
+                return None;
+            }
+            return Some((resolved, ResolutionKind::Relative));
         }
 
         // #imports
@@ -372,8 +375,11 @@ impl ProjectResolver {
             } else {
                 join_paths(&importer_dir, specifier)
             };
-            return probe_path_for_context(reader, &base, ctx)
-                .map(|resolved| (resolved, ResolutionKind::Relative));
+            let resolved = probe_path_for_context(reader, &base, ctx)?;
+            if !package_follow_is_confirmed(reader, importer_id, &resolved) {
+                return None;
+            }
+            return Some((resolved, ResolutionKind::Relative));
         }
 
         for alias in sorted_workspace_aliases(&importer_owner.workspace_aliases) {
@@ -787,9 +793,12 @@ fn resolve_manifest_types_entry(
     package_dir: &str,
     package_json: &PackageManifest,
 ) -> Option<String> {
-    for target in [package_json.types.as_deref(), package_json.typings.as_deref()]
-        .into_iter()
-        .flatten()
+    for target in [
+        package_json.types.as_deref(),
+        package_json.typings.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
     {
         if let Some(resolved) = probe_path(reader, &resolve_package_path(package_dir, target, None))
         {
@@ -828,6 +837,43 @@ fn resolve_declaration_companion(
     }
 
     None
+}
+
+fn package_follow_is_confirmed(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    importer_id: &str,
+    resolved: &str,
+) -> bool {
+    let Some(package_dir) = candidate_package_dir_for_importer(importer_id) else {
+        return true;
+    };
+    let package_json_path = join_paths(&package_dir, "package.json");
+    if reader.read_package_manifest(&package_json_path).is_none() {
+        return false;
+    }
+    normalized_starts_with(resolved, &package_dir)
+}
+
+fn candidate_package_dir_for_importer(importer_id: &str) -> Option<String> {
+    let normalized = normalize_canonical_id(importer_id);
+    let node_modules_marker = "/node_modules/";
+    let marker_index = normalized.rfind(node_modules_marker)?;
+    let package_start = marker_index + node_modules_marker.len();
+    let package_path = &normalized[package_start..];
+
+    let mut parts = package_path.split('/');
+    let first = parts.next()?;
+    let package_rel = if first.starts_with('@') {
+        let second = parts.next()?;
+        format!("{first}/{second}")
+    } else {
+        first.to_string()
+    };
+
+    Some(format!(
+        "{}{node_modules_marker}{package_rel}",
+        &normalized[..marker_index]
+    ))
 }
 
 fn relative_specifier(from_file: &str, to_file: &str) -> String {
@@ -1082,8 +1128,7 @@ fn resolve_legacy_package(
             reader,
             &resolve_package_path(package_dir, target, None),
             ctx,
-        )
-        {
+        ) {
             return Some(resolved);
         }
     }
@@ -1099,13 +1144,11 @@ fn resolve_package_target(
     ctx: ResolutionContext,
 ) -> Option<String> {
     match value {
-        serde_json::Value::String(target) => {
-            probe_path_for_context(
-                reader,
-                &resolve_package_path(package_dir, target, captured),
-                ctx,
-            )
-        }
+        serde_json::Value::String(target) => probe_path_for_context(
+            reader,
+            &resolve_package_path(package_dir, target, captured),
+            ctx,
+        ),
         serde_json::Value::Array(items) => items
             .iter()
             .find_map(|item| resolve_package_target(reader, package_dir, item, captured, ctx)),

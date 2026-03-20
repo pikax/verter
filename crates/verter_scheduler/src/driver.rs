@@ -6,6 +6,7 @@
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::job::{CompletionSender, RequestResult};
+use crate::source_loader::FileKind;
 use crate::stage::{Priority, TargetStage, TaskKind};
 
 /// A submission to the scheduler inbox.
@@ -18,6 +19,7 @@ pub enum Submission {
         target: TargetStage,
         priority: Priority,
         source: Option<std::sync::Arc<str>>,
+        file_kind: Option<FileKind>,
         sender: CompletionSender<RequestResult>,
         /// Removal epoch at submission time. If a tombstone exists with a
         /// higher epoch, this submission predates the removal and is rejected.

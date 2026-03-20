@@ -861,9 +861,13 @@ export interface AccordionRootEmits {
 }
 "#;
 
-    let resolved =
-        resolve_external_type_with_companion("AccordionRootEmits", dep, &FxHashMap::default(), &alloc)
-            .expect("interface emits shape should resolve");
+    let resolved = resolve_external_type_with_companion(
+        "AccordionRootEmits",
+        dep,
+        &FxHashMap::default(),
+        &alloc,
+    )
+    .expect("interface emits shape should resolve");
 
     assert_eq!(resolved.emits.len(), 1, "expected one resolved emit");
     assert_eq!(resolved.emits[0].name, "openChange");

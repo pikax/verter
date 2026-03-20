@@ -992,7 +992,7 @@ impl WasmMetaProject {
         catch_panic(AssertUnwindSafe(|| {
             self.inner
                 .upsert_base(canonical_id, source)
-                .map_err(|e| ffi_err(e))
+                .map_err(ffi_err)
         }))?
     }
 
@@ -1000,7 +1000,7 @@ impl WasmMetaProject {
     #[wasm_bindgen(js_name = "openSession")]
     pub fn open_session(&self) -> Result<WasmMetaSession, JsValue> {
         catch_panic(AssertUnwindSafe(|| {
-            let session = self.inner.open_session().map_err(|e| ffi_err(e))?;
+            let session = self.inner.open_session().map_err(ffi_err)?;
             Ok(WasmMetaSession {
                 inner: Some(session),
             })
@@ -1011,7 +1011,7 @@ impl WasmMetaProject {
     #[wasm_bindgen(js_name = "clearCaches")]
     pub fn clear_caches(&self) -> Result<(), JsValue> {
         catch_panic(AssertUnwindSafe(|| {
-            self.inner.clear_caches().map_err(|e| ffi_err(e))
+            self.inner.clear_caches().map_err(ffi_err)
         }))?
     }
 
@@ -1058,7 +1058,7 @@ impl WasmMetaSession {
         catch_panic(AssertUnwindSafe(|| {
             session
                 .upsert(canonical_id, source.to_string())
-                .map_err(|e| ffi_err(e))
+                .map_err(ffi_err)
         }))?
     }
 
@@ -1066,7 +1066,7 @@ impl WasmMetaSession {
     pub fn delete(&self, canonical_id: &str) -> Result<(), JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            session.delete(canonical_id).map_err(|e| ffi_err(e))
+            session.delete(canonical_id).map_err(ffi_err)
         }))?
     }
 
@@ -1075,9 +1075,7 @@ impl WasmMetaSession {
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            let result = session
-                .get_analysis(canonical_or_alias)
-                .map_err(|e| ffi_err(e))?;
+            let result = session.get_analysis(canonical_or_alias).map_err(ffi_err)?;
             match result {
                 Some(snapshot) => to_wasm_value(&snapshot),
                 None => Ok(JsValue::NULL),
@@ -1092,7 +1090,7 @@ impl WasmMetaSession {
         catch_panic(AssertUnwindSafe(|| {
             let types = session
                 .resolve_imported_types(canonical_or_alias)
-                .map_err(|e| ffi_err(e))?;
+                .map_err(ffi_err)?;
             if types.is_empty() {
                 Ok(JsValue::NULL)
             } else {
@@ -1108,7 +1106,7 @@ impl WasmMetaSession {
         catch_panic(AssertUnwindSafe(|| {
             let result = session
                 .get_effective_source(canonical_id)
-                .map_err(|e| ffi_err(e))?;
+                .map_err(ffi_err)?;
             match result {
                 Some(src) => Ok(JsValue::from_str(&src)),
                 None => Ok(JsValue::NULL),
@@ -1121,7 +1119,7 @@ impl WasmMetaSession {
     pub fn has_file(&self, canonical_id: &str) -> Result<bool, JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            session.has_file(canonical_id).map_err(|e| ffi_err(e))
+            session.has_file(canonical_id).map_err(ffi_err)
         }))?
     }
 
@@ -1135,6 +1133,6 @@ impl WasmMetaSession {
     /// Whether this session has been closed.
     #[wasm_bindgen(js_name = "isClosed", getter)]
     pub fn is_closed(&self) -> bool {
-        self.inner.as_ref().map_or(true, |s| s.is_closed())
+        self.inner.as_ref().is_none_or(|s| s.is_closed())
     }
 }

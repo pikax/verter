@@ -205,6 +205,64 @@ impl VerterHost {
         Ok(resolved)
     }
 
+    /// Read dependency source for `resolve_imported_types`, extracting script
+    /// content for Vue SFCs. Handles scheduler/non-scheduler paths and extension
+    /// fallbacks internally.
+    ///
+    /// Unlike [`read_dep_source_for_type_resolution`], this method does NOT
+    /// fall through to the VFS workspace and is NOT profile-aware. This matches
+    /// the original `resolve_imported_types` behavior (component-meta surface).
+    pub(crate) fn read_dep_source_for_resolve(&self, dep_canonical: &str) -> Option<String> {
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+
+            if let Some(snap) = self.scheduler.try_get_source(dep_canonical) {
+                let source = snap.source.as_ref();
+                let host_data = snap.downcast_data::<HostSourceData>();
+                let is_vue = host_data
+                    .as_ref()
+                    .map(|hd| hd.file_kind == FileKind::VueSfc)
+                    .unwrap_or_else(|| dep_canonical.ends_with(".vue"));
+                if is_vue {
+                    let cached = host_data.and_then(|hd| hd.cached_parse.as_deref());
+                    return extract_vue_script_content(source, cached);
+                } else {
+                    return Some(source.to_string());
+                }
+            }
+            // Extension fallbacks — none of these suffixes produce .vue paths,
+            // so no Vue extraction is needed in this loop.
+            for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
+                let with_ext = format!("{dep_canonical}{ext}");
+                if let Some(snap) = self.scheduler.try_get_source(&with_ext) {
+                    return Some(snap.source.to_string());
+                }
+            }
+        }
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = crate::shared::read_lock(&self.files);
+            if let Some(entry) = files.get(dep_canonical) {
+                if entry.file_kind == FileKind::VueSfc {
+                    return extract_vue_script_content(
+                        &entry.source,
+                        entry.cached_parse.as_deref(),
+                    );
+                } else {
+                    return Some(entry.source.to_string());
+                }
+            }
+            for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
+                let with_ext = format!("{dep_canonical}{ext}");
+                if let Some(entry) = files.get(&*with_ext) {
+                    return Some(entry.source.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Read the effective source for a dependency file for type resolution.
     ///
     /// On the scheduler path, tries the scheduler's source snapshot first.
@@ -222,7 +280,7 @@ impl VerterHost {
             if let Some(efs) = self.effective_file_state(dep_canonical, _profile_hash) {
                 let source = efs.source.as_ref();
                 if dep_canonical.ends_with(".vue") {
-                    return extract_script_from_raw_source(source);
+                    return extract_vue_script_content(source, efs.cached_parse.as_deref());
                 } else {
                     return Some(source.to_string());
                 }
@@ -230,12 +288,21 @@ impl VerterHost {
         }
         #[cfg(not(feature = "scheduler"))]
         {
-            let files = crate::shared::read_lock(&self.files);
-            if let Some(dep_entry) = files.get(dep_canonical) {
-                if dep_entry.file_kind == FileKind::VueSfc {
-                    return extract_vue_script_content_from_entry(dep_entry);
+            let file_kind = {
+                let files = crate::shared::read_lock(&self.files);
+                files.get(dep_canonical).map(|entry| entry.file_kind)
+            };
+            if let (Some(file_kind), Some(efs)) = (
+                file_kind,
+                self.effective_file_state(dep_canonical, _profile_hash),
+            ) {
+                if file_kind == FileKind::VueSfc {
+                    return extract_vue_script_content(
+                        efs.source.as_ref(),
+                        efs.cached_parse.as_deref(),
+                    );
                 } else {
-                    return Some(dep_entry.source.to_string());
+                    return Some(efs.source.to_string());
                 }
             }
         }
@@ -244,7 +311,7 @@ impl VerterHost {
         let ws = self.ws();
         let source = ws.read_file(dep_canonical)?;
         if dep_canonical.ends_with(".vue") {
-            extract_script_from_raw_source(&source)
+            extract_vue_script_content(&source, None)
         } else {
             Some(source.to_string())
         }
@@ -672,7 +739,7 @@ impl VerterHost {
                 let coh = entry
                     .content_overrides
                     .get(&profile_hash)
-                    .map(|o| o.hash)
+                    .map(|o| o.layer.hash)
                     .unwrap_or(0);
 
                 if let Some(slot) = entry.compile_slots.get(&profile_hash) {
@@ -708,22 +775,30 @@ impl VerterHost {
                     .compile_slots
                     .get(&profile_hash)
                     .and_then(|slot| slot.last_good_outputs.clone());
+                let efs = self
+                    .effective_file_state(&canonical_id, Some(profile_hash))
+                    .ok_or_else(|| HostError::MissingSource {
+                        canonical_id: canonical_id.clone(),
+                    })?;
 
                 CacheMiss {
                     compile_input: CompileInput {
                         canonical_id: entry.canonical_id.clone(),
-                        source: entry.source.clone(),
-                        meta: entry.meta.clone(),
+                        source: efs.source,
+                        meta: efs.meta.clone(),
                         parse_diagnostics: entry.parse_diagnostics.clone(),
                         src_blocks: entry.src_blocks.clone(),
                         external_requests: entry.external_requests.clone(),
                         style_override_layer: entry.style_overrides.get(&profile_hash).cloned(),
-                        content_override_layer: entry.content_overrides.get(&profile_hash).cloned(),
-                        macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
-                        script_imports: entry.script_analysis.imports.clone(),
-                        script_macros: entry.script_analysis.macros.clone(),
-                        script_bindings: entry.script_analysis.bindings.clone(),
-                        cached_parse: entry.cached_parse.clone(),
+                        content_override_layer: entry
+                            .content_overrides
+                            .get(&profile_hash)
+                            .map(|o| o.layer.clone()),
+                        macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
+                        script_imports: efs.script_analysis.imports.clone(),
+                        script_macros: efs.script_analysis.macros.clone(),
+                        script_bindings: efs.script_analysis.bindings.clone(),
+                        cached_parse: efs.cached_parse,
                         style_v_bind_vars: entry
                             .style_analyses
                             .iter()
@@ -739,7 +814,7 @@ impl VerterHost {
                             .collect(),
                     },
                     fallback_last_good,
-                    meta: entry.meta.clone(),
+                    meta: efs.meta,
                     semantic_hash: entry.semantic_hash,
                 }
             }
@@ -1029,15 +1104,27 @@ impl VerterHost {
         };
 
         #[cfg(not(feature = "scheduler"))]
-        let (source, file_kind, macro_type_deps, script_imports, cached_extract) = {
-            let files = read_lock(&self.files);
-            let entry = files.get(&canonical)?;
+        let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
+            let (file_kind, cached_extract) = {
+                let files = read_lock(&self.files);
+                let entry = files.get(&canonical)?;
+                (entry.file_kind, entry.cached_tsc_extract.clone())
+            };
+            let efs = self.effective_file_state(&canonical, profile_hash)?;
+            let cached_extract = cached_extract.and_then(|(hash, extract)| {
+                if hash == efs.whole_hash {
+                    Some(extract)
+                } else {
+                    None
+                }
+            });
             (
-                entry.source.clone(),
-                entry.file_kind,
-                entry.script_analysis.macro_type_deps.clone(),
-                entry.script_analysis.imports.clone(),
-                entry.cached_tsc_extract.clone(),
+                efs.source,
+                file_kind,
+                efs.script_analysis.macro_type_deps.clone(),
+                efs.script_analysis.imports.clone(),
+                cached_extract,
+                efs.whole_hash,
             )
         };
         if file_kind != FileKind::VueSfc {
@@ -1085,7 +1172,7 @@ impl VerterHost {
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {
-                    entry.cached_tsc_extract = Some(Arc::clone(&arc));
+                    entry.cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
                 }
             }
             arc
@@ -1509,62 +1596,181 @@ pub(crate) fn template_converter_inputs(
     (all_imports, unions, props_binding_name)
 }
 
-/// Extract concatenated script content from raw Vue SFC source text.
-/// Used as workspace-read fallback when the file is not in the host cache.
-fn extract_script_from_raw_source(source: &str) -> Option<String> {
-    let parsed = verter_core::compile::parse_sfc(source, None, None);
-    let mut combined = String::new();
-    for script in [parsed.script_setup(), parsed.script()]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(span) = script.content {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(&source[span.start as usize..span.end as usize]);
-        }
-    }
-    if combined.is_empty() {
-        None
-    } else {
-        Some(combined)
+/// Extract concatenated script content from a Vue SFC source string.
+///
+/// Cached parse spans are used when they agree with a raw-source scan. If the
+/// parser produced lossy spans for forgiving SFC input, fall back to the raw
+/// scan so type resolution still sees the original script text.
+pub(crate) fn extract_vue_script_content(
+    source: &str,
+    cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+) -> Option<String> {
+    let scanned = extract_vue_script_content_from_source(source);
+    let parsed =
+        cached_parse.and_then(|parsed| extract_vue_script_content_from_parsed(source, parsed));
+
+    match (parsed, scanned) {
+        (Some(parsed), Some(scanned)) if parsed == scanned => Some(parsed),
+        (_, Some(scanned)) => Some(scanned),
+        (Some(parsed), None) => Some(parsed),
+        (None, None) => None,
     }
 }
 
-/// Extract concatenated script content from a Vue SFC FileEntry.
-/// Uses `cached_parse` (populated during upsert) to locate `<script>` and
-/// `<script setup>` content spans, then slices the original source.
-#[cfg(not(feature = "scheduler"))]
-fn extract_vue_script_content_from_entry(entry: &FileEntry) -> Option<String> {
-    let source = entry.source.as_ref();
-    let parsed = entry
-        .cached_parse
-        .as_deref()
-        .map(std::borrow::Cow::Borrowed)
-        .unwrap_or_else(|| {
-            std::borrow::Cow::Owned(verter_core::compile::parse_sfc(source, None, None))
-        });
-
-    let mut combined = String::new();
-    // Concatenate both blocks (setup first, then companion).
-    // Order doesn't matter — type/interface collection is by name.
-    for script in [parsed.script_setup(), parsed.script()]
+fn extract_vue_script_content_from_parsed(
+    source: &str,
+    parsed: &verter_core::parser::types::ParsedSfc,
+) -> Option<String> {
+    let mut script_blocks: Vec<(u32, u32)> = [parsed.script(), parsed.script_setup()]
         .into_iter()
         .flatten()
-    {
-        if let Some(span) = script.content {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(&source[span.start as usize..span.end as usize]);
+        .filter_map(|script| script.content.map(|span| (span.start, span.end)))
+        .collect();
+    script_blocks.sort_by_key(|(start, _)| *start);
+
+    let mut combined = String::new();
+    for (start, end) in script_blocks {
+        let Some(content) = source.get(start as usize..end as usize) else {
+            continue;
+        };
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(content);
+    }
+
+    (!combined.is_empty()).then_some(combined)
+}
+
+fn extract_vue_script_content_from_source(source: &str) -> Option<String> {
+    const SCRIPT_OPEN: &[u8] = b"<script";
+    const SCRIPT_CLOSE: &[u8] = b"</script>";
+
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut combined = String::new();
+
+    while let Some(open_start) = find_ascii_tag(bytes, SCRIPT_OPEN, cursor) {
+        let Some(tag_end) = find_tag_end(bytes, open_start) else {
+            break;
+        };
+        if is_self_closing_tag(bytes, tag_end) {
+            cursor = tag_end.saturating_add(1);
+            continue;
+        }
+
+        let content_start = tag_end.saturating_add(1);
+        let boundary = find_next_known_root_block(bytes, content_start).unwrap_or(bytes.len());
+        let Some(close_start) = find_last_ascii_tag(bytes, SCRIPT_CLOSE, content_start, boundary)
+        else {
+            cursor = content_start;
+            continue;
+        };
+
+        let Some(content) = source.get(content_start..close_start) else {
+            cursor = close_start.saturating_add(SCRIPT_CLOSE.len());
+            continue;
+        };
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(content);
+        cursor = close_start.saturating_add(SCRIPT_CLOSE.len());
+    }
+
+    (!combined.is_empty()).then_some(combined)
+}
+
+fn find_ascii_tag(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || bytes.len() < needle.len() || from >= bytes.len() {
+        return None;
+    }
+
+    let last_start = bytes.len() - needle.len();
+    let mut idx = from;
+    while idx <= last_start {
+        if bytes[idx..idx + needle.len()].eq_ignore_ascii_case(needle)
+            && matches!(
+                bytes.get(idx + needle.len()),
+                None | Some(b'>')
+                    | Some(b'/')
+                    | Some(b' ')
+                    | Some(b'\t')
+                    | Some(b'\n')
+                    | Some(b'\r')
+            )
+        {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn find_last_ascii_tag(bytes: &[u8], needle: &[u8], from: usize, to: usize) -> Option<usize> {
+    if needle.is_empty() || from >= to || bytes.len() < needle.len() {
+        return None;
+    }
+
+    let search_end = to.min(bytes.len());
+    let mut last = None;
+    let mut cursor = from;
+    while let Some(idx) = find_ascii_tag(bytes, needle, cursor) {
+        if idx >= search_end {
+            break;
+        }
+        last = Some(idx);
+        cursor = idx.saturating_add(needle.len());
+    }
+    last
+}
+
+fn find_tag_end(bytes: &[u8], open_start: usize) -> Option<usize> {
+    let mut idx = open_start.saturating_add(1);
+    let mut quote = None;
+
+    while idx < bytes.len() {
+        let ch = bytes[idx];
+        match quote {
+            Some(active) if ch == active => quote = None,
+            Some(_) => {}
+            None if ch == b'\'' || ch == b'"' => quote = Some(ch),
+            None if ch == b'>' => return Some(idx),
+            None => {}
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn is_self_closing_tag(bytes: &[u8], tag_end: usize) -> bool {
+    if tag_end == 0 {
+        return false;
+    }
+
+    let mut idx = tag_end;
+    while idx > 0 {
+        idx -= 1;
+        match bytes[idx] {
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            b'/' => return true,
+            _ => return false,
         }
     }
-    if combined.is_empty() {
-        None
-    } else {
-        Some(combined)
-    }
+
+    false
+}
+
+fn find_next_known_root_block(bytes: &[u8], from: usize) -> Option<usize> {
+    [
+        b"<script".as_slice(),
+        b"<template".as_slice(),
+        b"<style".as_slice(),
+    ]
+    .into_iter()
+    .filter_map(|needle| find_ascii_tag(bytes, needle, from))
+    .min()
 }
 
 #[cfg(test)]

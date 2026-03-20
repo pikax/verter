@@ -1083,7 +1083,7 @@ pub(crate) struct FileEntry {
     // ── Compilation cache ─────────────────────────────────────────────
     pub(crate) style_overrides: FxHashMap<u64, StyleOverrideLayer>,
     /// Per-profile content overrides for preprocessed template/script blocks.
-    pub(crate) content_overrides: FxHashMap<u64, ContentOverrideLayer>,
+    pub(crate) content_overrides: FxHashMap<u64, ContentOverrideWithParse>,
     pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
     /// Monotonic counter incremented on every write to `latest_diagnostics`.
@@ -1095,7 +1095,7 @@ pub(crate) struct FileEntry {
     /// Cached intermediate TSC extract state. Populated on first `get_public_api_with_mode`
     /// call and reused for subsequent calls with different external types or modes.
     /// Cleared on source change (semantic_hash mismatch during upsert).
-    pub(crate) cached_tsc_extract: Option<Arc<verter_core::tsc::ExtractedTscState>>,
+    pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
     /// Cached component-meta type evaluation for this file content.
     pub(crate) cached_evaluated_types: Option<(
         Hash16,
@@ -1195,7 +1195,6 @@ pub(crate) struct CompileCacheEntry {
 ///
 /// Contains either the raw scheduler data or the content override's synthetic
 /// data, depending on whether a block override exists for the requested profile.
-#[cfg(feature = "scheduler")]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields read progressively as accessors migrate
 pub(crate) struct EffectiveFileState {
@@ -1211,7 +1210,6 @@ pub(crate) struct EffectiveFileState {
 /// When a preprocessor (e.g. Pug → HTML) overrides a block, the host builds a
 /// synthetic SFC source, re-parses it, and stores the result here. The scheduler's
 /// raw source/analysis are never modified by overrides.
-#[cfg(feature = "scheduler")]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Used in Phase 2a: apply_block_overrides
 pub(crate) struct ContentOverrideWithParse {

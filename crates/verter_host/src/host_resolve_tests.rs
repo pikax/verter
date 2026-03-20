@@ -2359,6 +2359,111 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
     assert!(
         resolved.emits.iter().any(|emit| emit.name == "openChange"),
         "emit entries should resolve from the declaration companion: {:?}",
-        resolved.emits.iter().map(|emit| emit.name.clone()).collect::<Vec<_>>()
+        resolved
+            .emits
+            .iter()
+            .map(|emit| emit.name.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn extract_vue_script_content_preserves_source_order() {
+    let source = r#"<script lang="ts">
+const COMPANION_MARKER = 1;
+</script>
+<script setup lang="ts">
+const SETUP_MARKER = 2;
+</script>
+<template><div /></template>"#;
+
+    let parsed = verter_core::compile::parse_sfc(source, None, None);
+    let result = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
+    assert!(result.is_some(), "should extract script content from SFC");
+    let content = result.unwrap();
+    assert!(
+        content.contains("COMPANION_MARKER"),
+        "should contain COMPANION_MARKER, got: {content}"
+    );
+    assert!(
+        content.contains("SETUP_MARKER"),
+        "should contain SETUP_MARKER, got: {content}"
+    );
+    let companion_pos = content.find("COMPANION_MARKER").unwrap();
+    let setup_pos = content.find("SETUP_MARKER").unwrap();
+    assert!(
+        companion_pos < setup_pos,
+        "COMPANION_MARKER (pos {companion_pos}) should appear before SETUP_MARKER (pos {setup_pos}) — source order must be preserved"
+    );
+    assert!(
+        !content.contains("<template>"),
+        "extracted content must NOT contain '<template>', got: {content}"
+    );
+    assert!(
+        !content.contains("<script"),
+        "extracted content must NOT contain '<script' tags, got: {content}"
+    );
+}
+
+#[test]
+fn extract_vue_script_content_without_cached_parse_matches_cached() {
+    let source = r#"<script lang="ts">
+const COMPANION = 1;
+</script>
+<script setup lang="ts">
+const SETUP = 2;
+</script>
+<template><div /></template>"#;
+
+    let parsed = verter_core::compile::parse_sfc(source, None, None);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
+    let without_cache = crate::host_resolve::extract_vue_script_content(source, None);
+    assert_eq!(
+        with_cache, without_cache,
+        "cached and non-cached paths must produce identical output"
+    );
+    // Also verify the non-cached path produces correct output on its own
+    let content = without_cache.unwrap();
+    assert!(content.contains("COMPANION"), "should contain COMPANION");
+    assert!(content.contains("SETUP"), "should contain SETUP");
+    assert!(!content.contains("<template>"), "must not contain template");
+}
+
+#[test]
+fn extract_vue_script_content_handles_script_end_literal_in_string() {
+    let source = r#"<script lang="ts">
+const html = "</script><div>kept</div>";
+const BEFORE_CLOSE = true;
+</script>
+<script setup lang="ts">
+const AFTER_CLOSE = 1;
+</script>
+<template><div /></template>"#;
+
+    let parsed = verter_core::compile::parse_sfc(source, None, None);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
+        .expect("cached extraction should succeed");
+    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
+        .expect("non-cached extraction should succeed");
+
+    assert_eq!(
+        with_cache, without_cache,
+        "cached and non-cached extraction must agree for script-end literals",
+    );
+    assert!(
+        with_cache.contains(r#"const html = "</script><div>kept</div>";"#),
+        "script-end literal should be preserved, got: {with_cache}"
+    );
+    assert!(
+        with_cache.contains("const BEFORE_CLOSE = true;"),
+        "content after the literal inside the same block must be preserved, got: {with_cache}"
+    );
+    assert!(
+        with_cache.contains("const AFTER_CLOSE = 1;"),
+        "later script blocks must still be included, got: {with_cache}"
+    );
+    assert!(
+        !with_cache.contains("<template>"),
+        "template content must not leak into extracted script content, got: {with_cache}"
     );
 }

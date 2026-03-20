@@ -89,6 +89,10 @@ impl VerterHost {
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: Some(req.source.clone()),
+                file_kind: Some(match req.file_kind {
+                    FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
+                    FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
+                }),
             });
 
         // Wait for scheduler to commit Source + Analysis snapshots
@@ -1134,7 +1138,7 @@ impl VerterHost {
             let previous_hash = entry
                 .content_overrides
                 .get(&profile_hash)
-                .map(|o| o.hash)
+                .map(|o| o.layer.hash)
                 .unwrap_or(0);
 
             if override_hash == previous_hash {
@@ -1151,36 +1155,29 @@ impl VerterHost {
             );
             let (new_snapshot, new_parsed) =
                 parse_vue_snapshot(&canonical, &synthetic_source, self.config.effective_scope());
-
-            entry.meta = new_snapshot.meta;
-            entry.slices = new_snapshot.slices;
-            entry.descriptor = new_snapshot.descriptor;
-            entry.semantic_hash = new_snapshot.semantic_hash;
-            entry.whole_hash = new_snapshot.whole_hash;
-            entry.source = Arc::from(synthetic_source);
-            entry.parse_diagnostics = new_snapshot.parse_diagnostics;
-            entry.script_analysis = new_snapshot.script_analysis;
-            entry.arc_script_cache = ScriptAnalysisArcs::from_analysis(&entry.script_analysis);
-            entry.style_analyses = Arc::new(new_snapshot.style_analyses);
-            entry.cached_parse = Some(Arc::new(new_parsed));
-            entry.template_analysis = None;
-            entry.cached_evaluated_types = None;
+            let synthetic_arc: Arc<str> = Arc::from(synthetic_source.as_str());
+            let layer = ContentOverrideLayer {
+                hash: override_hash,
+                template: template_override,
+                script: script_override,
+            };
             entry.content_overrides.insert(
                 profile_hash,
-                ContentOverrideLayer {
-                    hash: override_hash,
-                    template: template_override,
-                    script: script_override,
+                ContentOverrideWithParse {
+                    layer: layer.clone(),
+                    parse: new_snapshot.clone(),
+                    cached_parse: Some(Arc::new(new_parsed)),
+                    source: synthetic_arc,
                 },
             );
             entry.compile_slots.remove(&profile_hash);
 
             let mut changed_nodes = Vec::new();
-            if entry.meta.has_template {
+            if new_snapshot.meta.has_template {
                 changed_nodes.push(VirtualNodeKind::Main);
                 changed_nodes.push(VirtualNodeKind::Template);
             }
-            if entry.meta.has_script {
+            if new_snapshot.meta.has_script {
                 changed_nodes.push(VirtualNodeKind::Script);
             }
             changed_nodes = sorted_nodes(changed_nodes);
@@ -1188,7 +1185,7 @@ impl VerterHost {
             let mut changed_virtual_ids = Vec::new();
             let mut changed_lsp_ids = Vec::new();
             for node in &changed_nodes {
-                let (b, l) = render_ids(&canonical, node, &entry.meta);
+                let (b, l) = render_ids(&canonical, node, &new_snapshot.meta);
                 changed_virtual_ids.push(b);
                 changed_lsp_ids.push(l);
             }

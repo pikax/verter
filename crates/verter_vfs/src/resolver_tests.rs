@@ -1747,7 +1747,9 @@ fn type_import_codegen_blocker_falls_back_to_manifest_types_when_exports_lack_ty
                 phase: ResolvePhase::CodegenBlocker,
             },
         )
-        .expect("TypeImport should honor package.json types before falling back to runtime exports");
+        .expect(
+            "TypeImport should honor package.json types before falling back to runtime exports",
+        );
 
     assert_eq!(
         result.source_id,
@@ -1763,11 +1765,19 @@ fn type_import_relative_js_specifier_prefers_declaration_companion() {
         Some("/workspace/tsconfig.json"),
         ProjectMembership::MatchAll,
     )]);
-    let reader = TestReader::with_files(&[
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/fancy/package.json",
         "/workspace/node_modules/fancy/dist/index.d.ts",
         "/workspace/node_modules/fancy/dist/index3.d.ts",
         "/workspace/node_modules/fancy/dist/index3.js",
     ]);
+    reader.add_file(
+        "/workspace/node_modules/fancy/package.json",
+        r#"{
+            "name": "fancy",
+            "types": "./dist/index.d.ts"
+        }"#,
+    );
 
     let result = resolver
         .resolve_with_reader(
@@ -1784,6 +1794,36 @@ fn type_import_relative_js_specifier_prefers_declaration_companion() {
     assert_eq!(
         result.source_id,
         "/workspace/node_modules/fancy/dist/index3.d.ts"
+    );
+}
+
+#[test]
+fn type_import_relative_package_follow_requires_package_manifest_confirmation() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&[
+        "/workspace/node_modules/fancy/dist/index.d.ts",
+        "/workspace/node_modules/fancy/dist/index3.d.ts",
+        "/workspace/node_modules/fancy/dist/index3.js",
+    ]);
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+            specifier: "./index3.js".to_string(),
+            kind: ResolveRequestKind::TypeImport,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+
+    assert!(
+        result.is_none(),
+        "package-internal follow-on imports should not resolve without confirming the package via package.json"
     );
 }
 
