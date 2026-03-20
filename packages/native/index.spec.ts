@@ -3,6 +3,7 @@
  * Verifies that VerterHost and processStyle work correctly with both string and Buffer inputs.
  */
 import { basename, sep } from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import { VerterHost, processStyle } from "./index.js";
 
@@ -224,6 +225,31 @@ defineExpose({ count })
     expect(testingApi?.code).toContain("hidden: typeof hidden");
     expect(testingApi?.code).not.toContain("ref: typeof ref");
     expect(publicApi?.code).not.toContain("hidden: typeof hidden");
+  });
+
+  it("close lets repeated native hosts exit promptly", { timeout: 10000 }, () => {
+    const nativeEntry = require.resolve("./index.js");
+    const script = `
+      const { VerterHost } = require(${JSON.stringify(nativeEntry)});
+      const source = ${JSON.stringify(SFC_INPUT)};
+      for (let i = 0; i < 8; i++) {
+        const host = new VerterHost();
+        host.upsert({ inputId: \`Timed-\${i}.vue\`, source });
+        host.close();
+      }
+      process.stdout.write("closed");
+    `;
+
+    const started = Date.now();
+    const output = execFileSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      timeout: 4000,
+    });
+    const elapsedMs = Date.now() - started;
+
+    expect(output).toBe("closed");
+    expect(elapsedMs).toBeLessThan(4000);
+    expect(elapsedMs).not.toBeGreaterThanOrEqual(4000);
   });
 });
 

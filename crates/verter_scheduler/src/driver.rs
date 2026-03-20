@@ -10,6 +10,8 @@ use crate::stage::{Priority, TargetStage, TaskKind};
 
 /// A submission to the scheduler inbox.
 pub enum Submission {
+    /// Wake the driver so it can observe shutdown/reset immediately.
+    Wake,
     /// A new request from a caller.
     NewRequest {
         file_id: String,

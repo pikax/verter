@@ -199,6 +199,7 @@ export class ComponentMetaChecker {
   private trackedFiles: Map<string, string> = new Map();
   private projectRoot: string;
   private workspace: CheckerWorkspace;
+  private disposed = false;
 
   constructor(
     workspace: CheckerWorkspace,
@@ -216,6 +217,7 @@ export class ComponentMetaChecker {
    * Get component metadata in Volar-compatible shape.
    */
   async getComponentMeta(filePath: string, _exportName?: string): Promise<VolarComponentMeta> {
+    this.ensureActive();
     const absPath = resolve(this.projectRoot, filePath);
     await this.ensureFile(absPath);
     // getAnalysis now enriches macros with cross-file type resolution
@@ -270,6 +272,7 @@ export class ComponentMetaChecker {
    * For Vue SFCs, this typically returns `["default"]`.
    */
   async getExportNames(_filePath: string): Promise<string[]> {
+    this.ensureActive();
     // Vue SFCs always have a default export
     return ["default"];
   }
@@ -278,6 +281,7 @@ export class ComponentMetaChecker {
    * Update (or create) a file in the host.
    */
   updateFile(filePath: string, content: string): void {
+    this.ensureActive();
     const absPath = resolve(this.projectRoot, filePath);
     this.trackedFiles.set(absPath, content);
     this.adapter.upsert({ inputId: absPath, source: content });
@@ -287,6 +291,7 @@ export class ComponentMetaChecker {
    * Delete a file from the host (upsert empty string).
    */
   deleteFile(filePath: string): void {
+    this.ensureActive();
     const absPath = resolve(this.projectRoot, filePath);
     this.trackedFiles.delete(absPath);
     this.adapter.upsert({ inputId: absPath, source: "" });
@@ -296,8 +301,10 @@ export class ComponentMetaChecker {
    * Reload all tracked files from disk.
    */
   async reload(): Promise<void> {
+    this.ensureActive();
     for (const [absPath] of this.trackedFiles) {
       const content = await readFileSafe(absPath, this.workspace);
+      this.ensureActive();
       if (content !== null) {
         this.trackedFiles.set(absPath, content);
         this.adapter.upsert({ inputId: absPath, source: content });
@@ -312,7 +319,23 @@ export class ComponentMetaChecker {
    * Alias for `reload()`.
    */
   async clearCache(): Promise<void> {
+    this.ensureActive();
     await this.reload();
+  }
+
+  /**
+   * Release the underlying host and clear tracked in-memory state.
+   *
+   * After disposal, further checker operations throw.
+   */
+  dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+
+    this.disposed = true;
+    this.trackedFiles.clear();
+    this.adapter.close?.();
   }
 
   /**
@@ -320,18 +343,27 @@ export class ComponentMetaChecker {
    * @throws Always throws.
    */
   getProgram(): never {
+    this.ensureActive();
     throw new Error(
       "getProgram() is not supported by Verter. Verter does not use a TypeScript Program.",
     );
   }
 
   private async ensureFile(absPath: string): Promise<void> {
+    this.ensureActive();
     if (!this.trackedFiles.has(absPath)) {
       const content = await readFileSafe(absPath, this.workspace);
+      this.ensureActive();
       if (content !== null) {
         this.trackedFiles.set(absPath, content);
         this.adapter.upsert({ inputId: absPath, source: content });
       }
+    }
+  }
+
+  private ensureActive(): void {
+    if (this.disposed) {
+      throw new Error("ComponentMetaChecker has been disposed.");
     }
   }
 }

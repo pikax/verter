@@ -285,6 +285,7 @@ impl Scheduler {
     pub fn reset(&self) {
         // 1. Stop the driver thread.
         self.shutdown.store(true, Ordering::Release);
+        let _ = self.inbox.sender.send(Submission::Wake);
         if let Some(handle) = self.driver_handle.lock().take() {
             let _ = handle.join();
         }
@@ -647,6 +648,7 @@ impl Scheduler {
     /// Process a single submission.
     fn process_submission(&self, submission: Submission) {
         match submission {
+            Submission::Wake => {}
             Submission::NewRequest {
                 file_id,
                 target,
@@ -1384,6 +1386,7 @@ impl Drop for Scheduler {
     fn drop(&mut self) {
         // Set shutdown flag
         self.shutdown.store(true, Ordering::Release);
+        let _ = self.inbox.sender.send(Submission::Wake);
 
         // Close inbox (causes driver recv to return Disconnected)
         // Drop the sender to close the channel

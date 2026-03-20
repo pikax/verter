@@ -151,35 +151,39 @@ That's it — the API surface is identical.
 import { createChecker } from "@verter/component-meta/compat";
 
 // Create a checker from your tsconfig.json — discovers and loads all .vue files
-const checker = createChecker("./tsconfig.json");
+const checker = await createChecker("./tsconfig.json");
 
-// Get component metadata in Volar-compatible shape
-const meta = checker.getComponentMeta("./src/MyButton.vue");
+try {
+  // Get component metadata in Volar-compatible shape
+  const meta = await checker.getComponentMeta("./src/MyButton.vue");
 
-// PropertyMeta[] — same shape as Volar
-for (const prop of meta.props) {
-  console.log(prop.name);        // "label"
-  console.log(prop.type);        // "string" (human-readable string)
-  console.log(prop.required);    // true
-  console.log(prop.description); // "Button label text." (from JSDoc)
-  console.log(prop.tags);        // [{ name: "default", text: "\"Submit\"" }]
-  console.log(prop.schema);      // "string" or { kind: "enum", type: "...", schema: [...] }
-}
+  // PropertyMeta[] — same shape as Volar
+  for (const prop of meta.props) {
+    console.log(prop.name);        // "label"
+    console.log(prop.type);        // "string" (human-readable string)
+    console.log(prop.required);    // true
+    console.log(prop.description); // "Button label text." (from JSDoc)
+    console.log(prop.tags);        // [{ name: "default", text: "\"Submit\"" }]
+    console.log(prop.schema);      // "string" or { kind: "enum", type: "...", schema: [...] }
+  }
 
-// Events, slots, exposed — all PropertyMeta[]
-meta.events;  // [{ name: "click", type: "(payload: MouseEvent) => void", ... }]
-meta.slots;   // [{ name: "default", type: "{}", ... }]
-meta.exposed; // [{ name: "focus", type: "() => void", ... }]
+  // Events, slots, exposed — all PropertyMeta[]
+  meta.events;  // [{ name: "click", type: "(payload: MouseEvent) => void", ... }]
+  meta.slots;   // [{ name: "default", type: "{}", ... }]
+  meta.exposed; // [{ name: "focus", type: "() => void", ... }]
 
-// Verter extension — full native metadata (opt-in)
-if (meta._verter) {
-  meta._verter.models;       // defineModel declarations (not in Volar)
-  meta._verter.components;   // child component usage analysis
-  meta._verter.templateRefs; // template ref analysis
-  meta._verter.styles;       // CSS class/selector/specificity analysis
-  meta._verter.flags;        // { hasReactiveState, hasComputed, ... }
-  meta._verter.bindings;     // script bindings with reactivity classification
-  meta._verter.vueApiCalls;  // lifecycle hook / watcher / provide call sites
+  // Verter extension — full native metadata (opt-in)
+  if (meta._verter) {
+    meta._verter.models;       // defineModel declarations (not in Volar)
+    meta._verter.components;   // child component usage analysis
+    meta._verter.templateRefs; // template ref analysis
+    meta._verter.styles;       // CSS class/selector/specificity analysis
+    meta._verter.flags;        // { hasReactiveState, hasComputed, ... }
+    meta._verter.bindings;     // script bindings with reactivity classification
+    meta._verter.vueApiCalls;  // lifecycle hook / watcher / provide call sites
+  }
+} finally {
+  checker.dispose();
 }
 ```
 
@@ -197,6 +201,9 @@ checker.reload();
 
 // Clear internal caches (alias for reload)
 checker.clearCache();
+
+// Release host-backed resources when done with the checker
+checker.dispose();
 
 // Get export names (always ["default"] for SFCs)
 checker.getExportNames("./src/MyButton.vue"); // ["default"]

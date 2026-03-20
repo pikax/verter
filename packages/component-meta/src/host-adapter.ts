@@ -30,6 +30,8 @@ export interface VerterHostAdapter {
   upsert(request: HostUpsertRequest): unknown;
   /** Retrieve the analysis snapshot for a file, or `null` if not found. */
   getAnalysis(canonicalOrAlias: string): unknown | null;
+  /** Release host-backed resources when the backend exposes lifecycle control. */
+  close?(): void;
   /** Resolve imported types for a file's macro type dependencies. Returns JSON or null. */
   resolveImportedTypes?(canonicalOrAlias: string): string | null;
   /** Configure project-scoped path alias resolution (optional). */
@@ -53,10 +55,11 @@ export interface VerterHostAdapter {
 export function wrapNapiHost(host: {
   upsert(request: HostUpsertRequest): unknown;
   getAnalysis(canonicalOrAlias: string): string | null;
+  close?(): void;
   resolveImportedTypes?(canonicalOrAlias: string): string | null;
   configureProjects?(projects: unknown[]): void;
 }): VerterHostAdapter {
-  return {
+  const adapter: VerterHostAdapter = {
     upsert(request) {
       return host.upsert(request);
     },
@@ -72,6 +75,12 @@ export function wrapNapiHost(host: {
       host.configureProjects?.(projects);
     },
   };
+
+  if (host.close) {
+    adapter.close = () => host.close?.();
+  }
+
+  return adapter;
 }
 
 /**
@@ -81,8 +90,9 @@ export function wrapNapiHost(host: {
 export function wrapWasmHost(host: {
   upsert(request: HostUpsertRequest): unknown;
   getAnalysis(canonicalOrAlias: string): unknown | null;
+  close?(): void;
 }): VerterHostAdapter {
-  return {
+  const adapter: VerterHostAdapter = {
     upsert(request) {
       return host.upsert(request);
     },
@@ -90,6 +100,12 @@ export function wrapWasmHost(host: {
       return host.getAnalysis(canonicalOrAlias);
     },
   };
+
+  if (host.close) {
+    adapter.close = () => host.close?.();
+  }
+
+  return adapter;
 }
 
 /**
