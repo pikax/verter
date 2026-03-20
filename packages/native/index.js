@@ -120,7 +120,14 @@ function toBuffer(v) {
   return typeof v === "string" ? Buffer.from(v) : v;
 }
 
-const { processStyle: _processStyle, compileBatch, VerterHost, Workspace } = nativeBinding;
+const {
+  processStyle: _processStyle,
+  compileBatch,
+  VerterHost,
+  Workspace,
+  MetaProject,
+  MetaSession,
+} = nativeBinding;
 
 function processStyle(css, options) {
   return _processStyle(toBuffer(css), options);
@@ -147,7 +154,23 @@ VerterHost.prototype.applyBlockOverrides = function (request) {
   return _applyBlockOverrides.call(this, request);
 };
 
+if (MetaProject) {
+  const _upsertBase = MetaProject.prototype.upsertBase;
+  MetaProject.prototype.upsertBase = function (canonicalId, source) {
+    return _upsertBase.call(this, canonicalId, toBuffer(source));
+  };
+}
+
+if (MetaSession) {
+  const _sessionUpsert = MetaSession.prototype.upsert;
+  MetaSession.prototype.upsert = function (canonicalId, source) {
+    return _sessionUpsert.call(this, canonicalId, toBuffer(source));
+  };
+}
+
 module.exports.processStyle = processStyle;
 module.exports.compileBatch = compileBatch;
 module.exports.VerterHost = VerterHost;
 module.exports.Workspace = Workspace;
+module.exports.MetaProject = MetaProject;
+module.exports.MetaSession = MetaSession;

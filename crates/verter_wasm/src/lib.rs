@@ -954,3 +954,187 @@ mod tests {
         assert!(out[0].tags.is_empty());
     }
 }
+
+// =============================================================================
+// MetaProject / MetaSession — pooled runtime for component-meta (WASM)
+// =============================================================================
+
+/// A shared, long-lived project wrapping one native host (WASM variant).
+///
+/// Multiple sessions can be opened against the same project.
+#[wasm_bindgen(js_name = MetaProject)]
+pub struct WasmMetaProject {
+    inner: std::sync::Arc<host::meta::MetaProject>,
+}
+
+#[wasm_bindgen(js_class = MetaProject)]
+impl WasmMetaProject {
+    /// Create a new MetaProject with the given host configuration.
+    #[wasm_bindgen(constructor)]
+    pub fn new(config: JsValue) -> Result<WasmMetaProject, JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            let ffi_config: FfiHostConfig = if config.is_null() || config.is_undefined() {
+                FfiHostConfig::default()
+            } else {
+                parse_wasm_input(config)?
+            };
+            let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+            let host = host::VerterHost::new_standalone(host_config);
+            Ok(WasmMetaProject {
+                inner: host::meta::MetaProject::new(host),
+            })
+        }))?
+    }
+
+    /// Load a file into the base project.
+    #[wasm_bindgen(js_name = "upsertBase")]
+    pub fn upsert_base(&self, canonical_id: &str, source: &str) -> Result<(), JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            self.inner
+                .upsert_base(canonical_id, source)
+                .map_err(|e| ffi_err(e))
+        }))?
+    }
+
+    /// Open a new isolated session against this project.
+    #[wasm_bindgen(js_name = "openSession")]
+    pub fn open_session(&self) -> Result<WasmMetaSession, JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            let session = self.inner.open_session().map_err(|e| ffi_err(e))?;
+            Ok(WasmMetaSession {
+                inner: Some(session),
+            })
+        }))?
+    }
+
+    /// Clear shared analysis caches without shutting down.
+    #[wasm_bindgen(js_name = "clearCaches")]
+    pub fn clear_caches(&self) -> Result<(), JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            self.inner.clear_caches().map_err(|e| ffi_err(e))
+        }))?
+    }
+
+    /// Terminal shutdown.
+    pub fn shutdown(&self) -> Result<(), JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            self.inner.shutdown();
+            Ok(())
+        }))?
+    }
+
+    /// Whether this project has been shut down.
+    #[wasm_bindgen(js_name = "isShutdown", getter)]
+    pub fn is_shutdown(&self) -> bool {
+        self.inner.is_shutdown()
+    }
+
+    /// Number of active sessions.
+    #[wasm_bindgen(js_name = "sessionCount", getter)]
+    pub fn session_count(&self) -> u32 {
+        self.inner.session_count() as u32
+    }
+}
+
+/// A lightweight session handle with isolated file overlays (WASM variant).
+#[wasm_bindgen(js_name = MetaSession)]
+pub struct WasmMetaSession {
+    inner: Option<host::meta::MetaSession>,
+}
+
+impl WasmMetaSession {
+    fn session(&self) -> Result<&host::meta::MetaSession, JsValue> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("session is closed"))
+    }
+}
+
+#[wasm_bindgen(js_class = MetaSession)]
+impl WasmMetaSession {
+    /// Store a file overlay in this session.
+    pub fn upsert(&self, canonical_id: &str, source: &str) -> Result<(), JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            session
+                .upsert(canonical_id, source.to_string())
+                .map_err(|e| ffi_err(e))
+        }))?
+    }
+
+    /// Tombstone a file in this session.
+    pub fn delete(&self, canonical_id: &str) -> Result<(), JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            session.delete(canonical_id).map_err(|e| ffi_err(e))
+        }))?
+    }
+
+    /// Get the analysis snapshot for a file (JS object).
+    #[wasm_bindgen(js_name = "getAnalysis")]
+    pub fn get_analysis(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let result = session
+                .get_analysis(canonical_or_alias)
+                .map_err(|e| ffi_err(e))?;
+            match result {
+                Some(snapshot) => to_wasm_value(&snapshot),
+                None => Ok(JsValue::NULL),
+            }
+        }))?
+    }
+
+    /// Resolve imported types for a file.
+    #[wasm_bindgen(js_name = "resolveImportedTypes")]
+    pub fn resolve_imported_types(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let types = session
+                .resolve_imported_types(canonical_or_alias)
+                .map_err(|e| ffi_err(e))?;
+            if types.is_empty() {
+                Ok(JsValue::NULL)
+            } else {
+                to_wasm_value(&types)
+            }
+        }))?
+    }
+
+    /// Get effective source for a file (overlay → base).
+    #[wasm_bindgen(js_name = "getEffectiveSource")]
+    pub fn get_effective_source(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let result = session
+                .get_effective_source(canonical_id)
+                .map_err(|e| ffi_err(e))?;
+            match result {
+                Some(src) => Ok(JsValue::from_str(&src)),
+                None => Ok(JsValue::NULL),
+            }
+        }))?
+    }
+
+    /// Check if a file is visible in this session.
+    #[wasm_bindgen(js_name = "hasFile")]
+    pub fn has_file(&self, canonical_id: &str) -> Result<bool, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            session.has_file(canonical_id).map_err(|e| ffi_err(e))
+        }))?
+    }
+
+    /// Close the session. Idempotent.
+    pub fn close(&mut self) {
+        if let Some(session) = self.inner.take() {
+            session.close();
+        }
+    }
+
+    /// Whether this session has been closed.
+    #[wasm_bindgen(js_name = "isClosed", getter)]
+    pub fn is_closed(&self) -> bool {
+        self.inner.as_ref().map_or(true, |s| s.is_closed())
+    }
+}

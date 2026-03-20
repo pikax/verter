@@ -23,6 +23,18 @@ pub enum FileKind {
     NonSfc,
 }
 
+impl FileKind {
+    /// Infer file kind from a file path's extension.
+    /// Files ending in `.vue` are `VueSfc`; everything else is `NonSfc`.
+    pub fn from_path(path: &str) -> Self {
+        if path.ends_with(".vue") {
+            Self::VueSfc
+        } else {
+            Self::NonSfc
+        }
+    }
+}
+
 /// Hot Module Replacement strategy injected into the assembled main module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HmrStrategy {

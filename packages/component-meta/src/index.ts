@@ -80,3 +80,7 @@ export {
 
 // Extractor
 export { extractComponentMeta, snapshotToMeta } from "./extractor.js";
+
+// Pooled project API
+export { MetaProject, openMetaProject, evictMetaProject, shutdownMetaRuntime } from "./project.js";
+export type { MetaProjectConfig } from "./project.js";

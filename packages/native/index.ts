@@ -404,4 +404,100 @@ export declare class VerterHost {
   resolveImport(importer: string, specifier: string, phase?: string, kind?: string): string | null;
 }
 
+// =============================================================================
+// MetaProject / MetaSession — pooled runtime for component-meta
+// =============================================================================
+
+/**
+ * A shared, long-lived project wrapping one native host.
+ *
+ * Multiple sessions can be opened against the same project. The project
+ * owns the host, base file caches, and session management. Create one
+ * per tsconfig / project root and reuse it across checkers.
+ */
+export declare class MetaProject {
+  constructor(config?: import("./host-types").HostConfig);
+
+  /**
+   * Create a MetaProject backed by an existing Workspace.
+   */
+  static withWorkspace(
+    config: import("./host-types").HostConfig | undefined,
+    workspace: Workspace,
+  ): MetaProject;
+
+  /** Load a file into the base project (shared across all sessions). */
+  upsertBase(canonicalId: string, source: string | Buffer): void;
+
+  /** Configure project-scoped path alias resolution. */
+  configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
+
+  /** Open a new isolated session against this project. */
+  openSession(): MetaSession;
+
+  /** Clear shared analysis caches without shutting down. */
+  clearCaches(): void;
+
+  /** Terminal shutdown. Stops the host and invalidates all sessions. */
+  shutdown(): void;
+
+  /** Whether this project has been shut down. */
+  readonly isShutdown: boolean;
+
+  /** Number of active sessions. */
+  readonly sessionCount: number;
+
+  /** Returns canonical IDs in the base file index. */
+  baseFileIds(): string[];
+}
+
+/**
+ * A lightweight session handle with isolated file overlays.
+ *
+ * Overlays are private to this session. `upsert()` and `delete()`
+ * in one session never affect another session's view. Queries resolve
+ * through `session overlay → shared base`.
+ */
+export declare class MetaSession {
+  /** Store a file overlay in this session. */
+  upsert(canonicalId: string, source: string | Buffer): void;
+
+  /** Tombstone a file in this session (mark as deleted). */
+  delete(canonicalId: string): void;
+
+  /**
+   * Get the analysis snapshot for a file (JSON string).
+   * Resolves through this session's overlay → shared base.
+   * Returns null if the file doesn't exist or is tombstoned.
+   */
+  getAnalysis(canonicalOrAlias: string): string | null;
+
+  /**
+   * Resolve imported type definitions for a file's macro type dependencies.
+   * Returns a JSON array of `{ name, expanded }` entries, or null if empty.
+   */
+  resolveImportedTypes(canonicalOrAlias: string): string | null;
+
+  /**
+   * Get effective source for a file (overlay → base).
+   * Returns null for tombstoned or non-existent files.
+   */
+  getEffectiveSource(canonicalId: string): string | null;
+
+  /** Check if a file is visible in this session (not tombstoned). */
+  hasFile(canonicalId: string): boolean;
+
+  /** Returns canonical IDs of all files visible to this session. */
+  trackedFileIds(): string[];
+
+  /** Close the session, releasing the overlay and lease. Idempotent. */
+  close(): void;
+
+  /** Whether this session has been closed. */
+  readonly isClosed: boolean;
+
+  /** The overlay generation counter for this session. */
+  readonly overlayGeneration: number;
+}
+
 export {};

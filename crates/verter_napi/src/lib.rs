@@ -33,6 +33,8 @@ use verter_ffi::convert::*;
 use verter_ffi::types::*;
 use verter_host as host;
 
+mod meta;
+
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};
 use verter_diagnostics::rules::RuleRegistry;
@@ -1044,8 +1046,6 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 // - NAPI-only: processStyle (requires Node.js), getTsc, compileBatch, getMetrics
 // =============================================================================
 
-/// In-memory virtual file host for Vue SFC compilation.
-///
 // ═══════════════════════════════════════════════════════════════════════════
 // Workspace
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1064,6 +1064,13 @@ pub struct NapiDirEntry {
 #[napi(js_name = "Workspace")]
 pub struct NapiWorkspace {
     inner: std::sync::Arc<verter_vfs::FilesystemWorkspace>,
+}
+
+impl NapiWorkspace {
+    /// Get the underlying workspace as a trait object.
+    pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_vfs::WorkspaceAccess> {
+        std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_vfs::WorkspaceAccess>
+    }
 }
 
 #[napi]

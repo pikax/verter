@@ -59,6 +59,7 @@ mod host_manage;
 mod host_resolve;
 mod host_upsert;
 mod id;
+pub mod meta;
 mod parse;
 #[cfg(feature = "scheduler")]
 pub mod scheduler_shim;
@@ -429,6 +430,32 @@ impl VerterHost {
         }
 
         Some(meta)
+    }
+
+    /// Clear compile caches (compile slots, template analysis, type hashes)
+    /// without removing files from the scheduler or alias maps.
+    ///
+    /// This is a lighter operation than [`close`](Self::close) — parsed source
+    /// and analysis snapshots are preserved, only per-profile compile results
+    /// are flushed. Useful for invalidating stale compile results while keeping
+    /// the file set intact.
+    pub fn clear_compile_cache(&self) {
+        #[cfg(feature = "scheduler")]
+        {
+            for mut entry in self.compile_cache.iter_mut() {
+                entry.compile_slots.clear();
+                entry.raw_template_analysis = None;
+                entry.cached_tsc_extract = None;
+            }
+        }
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut files = crate::shared::write_lock(&self.files);
+            for entry in files.values_mut() {
+                entry.compile_slots.clear();
+                entry.template_analysis = None;
+            }
+        }
     }
 
     /// Release all cached data (files, aliases, dependency graph).

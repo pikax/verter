@@ -3,19 +3,8 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { ComponentMetaChecker, type CheckerWorkspace } from "./checker.js";
+import { ComponentMetaChecker } from "./checker.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
-
-function createWorkspaceStub(): CheckerWorkspace {
-  return {
-    readFile: vi.fn(async () => null),
-    fileExists: vi.fn(async () => false),
-    isDir: vi.fn(async () => false),
-    readDir: vi.fn(async () => []),
-    walk: vi.fn(async () => []),
-    configureProjects: vi.fn(),
-  };
-}
 
 function createAdapterStub(overrides: Partial<VerterHostAdapter> = {}): VerterHostAdapter {
   return {
@@ -31,14 +20,12 @@ describe("ComponentMetaChecker.dispose", () => {
     const getAnalysis = vi.fn(() => null);
     const close = vi.fn();
     const checker = new ComponentMetaChecker(
-      createWorkspaceStub(),
       createAdapterStub({ upsert, getAnalysis, close }),
       "/project",
     );
 
     checker.updateFile("Component.vue", "<template />");
     expect(upsert).toHaveBeenCalledTimes(1);
-    expect(upsert).not.toHaveBeenCalledTimes(0);
 
     checker.dispose();
     checker.dispose();
@@ -52,11 +39,7 @@ describe("ComponentMetaChecker.dispose", () => {
   });
 
   it("is safe when the adapter does not expose close()", () => {
-    const checker = new ComponentMetaChecker(
-      createWorkspaceStub(),
-      createAdapterStub(),
-      "/project",
-    );
+    const checker = new ComponentMetaChecker(createAdapterStub(), "/project");
 
     expect(() => checker.dispose()).not.toThrow();
     expect(() => checker.dispose()).not.toThrow();

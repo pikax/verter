@@ -28,6 +28,8 @@ export interface HostUpsertRequest {
 export interface VerterHostAdapter {
   /** Compile or update a file. */
   upsert(request: HostUpsertRequest): unknown;
+  /** Remove a file from the host when the backend supports true deletion. */
+  remove?(canonicalOrAlias: string): unknown;
   /** Retrieve the analysis snapshot for a file, or `null` if not found. */
   getAnalysis(canonicalOrAlias: string): unknown | null;
   /** Release host-backed resources when the backend exposes lifecycle control. */
@@ -54,6 +56,7 @@ export interface VerterHostAdapter {
  */
 export function wrapNapiHost(host: {
   upsert(request: HostUpsertRequest): unknown;
+  remove?(canonicalOrAlias: string): unknown;
   getAnalysis(canonicalOrAlias: string): string | null;
   close?(): void;
   resolveImportedTypes?(canonicalOrAlias: string): string | null;
@@ -62,6 +65,9 @@ export function wrapNapiHost(host: {
   const adapter: VerterHostAdapter = {
     upsert(request) {
       return host.upsert(request);
+    },
+    remove(canonicalOrAlias) {
+      return host.remove?.(canonicalOrAlias);
     },
     getAnalysis(canonicalOrAlias) {
       const result = host.getAnalysis(canonicalOrAlias);
@@ -89,12 +95,16 @@ export function wrapNapiHost(host: {
  */
 export function wrapWasmHost(host: {
   upsert(request: HostUpsertRequest): unknown;
+  remove?(canonicalOrAlias: string): unknown;
   getAnalysis(canonicalOrAlias: string): unknown | null;
   close?(): void;
 }): VerterHostAdapter {
   const adapter: VerterHostAdapter = {
     upsert(request) {
       return host.upsert(request);
+    },
+    remove(canonicalOrAlias) {
+      return host.remove?.(canonicalOrAlias);
     },
     getAnalysis(canonicalOrAlias) {
       return host.getAnalysis(canonicalOrAlias);

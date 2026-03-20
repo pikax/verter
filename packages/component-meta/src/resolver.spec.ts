@@ -288,12 +288,18 @@ describe("parseType", () => {
 
   // ── Complex / fallback ──────────────────────────────────────
 
+  // @ai-generated - Ensures unsupported conditional syntax falls back cleanly
+  // instead of returning a partial ref that prevents the TS fallback path.
   it("falls back to unknown for conditional types", () => {
     const result = parseType("T extends string ? A : B");
-    // This is too complex — should produce an unknown-like fallback
-    // (the parser will likely produce a ref to "T" or something partial)
-    // Just verify it doesn't throw
-    expect(result).toBeDefined();
+    expect(result).toEqual({ kind: "unknown", rawType: "T extends string ? A : B" });
+  });
+
+  // @ai-generated - Template literal types should be rejected by the lightweight
+  // parser so higher-level metadata extraction can hand them to TypeScript.
+  it("falls back to unknown for template literal types", () => {
+    const result = parseType("`${number}px`");
+    expect(result).toEqual({ kind: "unknown", rawType: "`${number}px`" });
   });
 
   it("falls back to unknown for empty input", () => {

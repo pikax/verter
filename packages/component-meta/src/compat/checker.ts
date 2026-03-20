@@ -11,12 +11,28 @@
 
 import { resolve, dirname } from "node:path";
 import { createRequire } from "node:module";
-import { createNapiAdapter } from "../host-adapter.js";
 import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
 import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
+import {
+  getMetaRuntime,
+  computeEngineKey,
+  normalizePath as runtimeNormalizePath,
+  stableHash,
+  getWorkspaceIdentity,
+  parseTsconfig,
+  extractPathAliases,
+  discoverVueFiles as runtimeDiscoverVueFiles,
+} from "../runtime/index.js";
+import type {
+  EngineKeyInput,
+  NativeMetaProject,
+  BootstrapFn,
+  ProjectSession,
+  MetaRuntimeImpl,
+} from "../runtime/index.js";
 
 /**
  * Minimal workspace interface used by the checker.
@@ -197,20 +213,28 @@ export class ComponentMetaChecker {
   private adapter: VerterHostAdapter;
   private options: MetaCheckerOptions;
   private trackedFiles: Map<string, string> = new Map();
+  private deletedFiles = new Set<string>();
   private projectRoot: string;
-  private workspace: CheckerWorkspace;
+  private workspace: CheckerWorkspace | undefined;
   private disposed = false;
+  /** Runtime session backing this checker. */
+  private _session: ProjectSession | null = null;
+  private _runtime: MetaRuntimeImpl | null = null;
 
   constructor(
-    workspace: CheckerWorkspace,
     adapter: VerterHostAdapter,
     projectRoot: string,
     options?: MetaCheckerOptions,
+    session?: ProjectSession,
+    workspace?: CheckerWorkspace,
+    runtime?: MetaRuntimeImpl,
   ) {
     this.adapter = adapter;
     this.projectRoot = projectRoot;
     this.options = options ?? {};
     this.workspace = workspace;
+    this._session = session ?? null;
+    this._runtime = runtime ?? null;
   }
 
   /**
@@ -283,6 +307,7 @@ export class ComponentMetaChecker {
   updateFile(filePath: string, content: string): void {
     this.ensureActive();
     const absPath = resolve(this.projectRoot, filePath);
+    this.deletedFiles.delete(absPath);
     this.trackedFiles.set(absPath, content);
     this.adapter.upsert({ inputId: absPath, source: content });
   }
@@ -294,6 +319,15 @@ export class ComponentMetaChecker {
     this.ensureActive();
     const absPath = resolve(this.projectRoot, filePath);
     this.trackedFiles.delete(absPath);
+    this.deletedFiles.add(absPath);
+    if (this._session) {
+      this._session.delete(absPath);
+      return;
+    }
+    if (this.adapter.remove) {
+      this.adapter.remove(absPath);
+      return;
+    }
     this.adapter.upsert({ inputId: absPath, source: "" });
   }
 
@@ -302,14 +336,22 @@ export class ComponentMetaChecker {
    */
   async reload(): Promise<void> {
     this.ensureActive();
-    for (const [absPath] of this.trackedFiles) {
+    if (!this.workspace) return;
+    for (const absPath of new Set([...this.trackedFiles.keys(), ...this.deletedFiles])) {
       const content = await readFileSafe(absPath, this.workspace);
       this.ensureActive();
       if (content !== null) {
+        this.deletedFiles.delete(absPath);
         this.trackedFiles.set(absPath, content);
         this.adapter.upsert({ inputId: absPath, source: content });
       } else {
         this.trackedFiles.delete(absPath);
+        this.deletedFiles.add(absPath);
+        if (this._session) {
+          this._session.delete(absPath);
+        } else {
+          this.adapter.remove?.(absPath);
+        }
       }
     }
   }
@@ -324,18 +366,38 @@ export class ComponentMetaChecker {
   }
 
   /**
-   * Release the underlying host and clear tracked in-memory state.
+   * Release the session and clear tracked in-memory state.
+   * Optional — resources are pooled and will be reclaimed automatically.
    *
-   * After disposal, further checker operations throw.
+   * After close, further checker operations throw.
    */
-  dispose(): void {
-    if (this.disposed) {
-      return;
-    }
-
+  close(): void {
+    if (this.disposed) return;
     this.disposed = true;
     this.trackedFiles.clear();
+    this.deletedFiles.clear();
+    if (this._session) {
+      if (this._runtime) {
+        this._runtime.closeSession(this._session);
+      } else {
+        this._session.close();
+      }
+      this._session = null;
+    }
     this.adapter.close?.();
+  }
+
+  /**
+   * Alias for `close()`. Kept for backward compatibility.
+   */
+  dispose(): void {
+    this.close();
+  }
+
+  /** @internal */
+  rememberTrackedFile(absPath: string, content: string): void {
+    this.deletedFiles.delete(absPath);
+    this.trackedFiles.set(absPath, content);
   }
 
   /**
@@ -351,12 +413,25 @@ export class ComponentMetaChecker {
 
   private async ensureFile(absPath: string): Promise<void> {
     this.ensureActive();
+    if (this.deletedFiles.has(absPath)) {
+      return;
+    }
     if (!this.trackedFiles.has(absPath)) {
-      const content = await readFileSafe(absPath, this.workspace);
-      this.ensureActive();
-      if (content !== null) {
-        this.trackedFiles.set(absPath, content);
-        this.adapter.upsert({ inputId: absPath, source: content });
+      // Try session source first, then fall back to workspace
+      if (this._session) {
+        const src = this._session.getEffectiveSource(absPath);
+        if (src !== undefined) {
+          this.trackedFiles.set(absPath, src);
+          return;
+        }
+      }
+      if (this.workspace) {
+        const content = await readFileSafe(absPath, this.workspace);
+        this.ensureActive();
+        if (content !== null) {
+          this.trackedFiles.set(absPath, content);
+          this.adapter.upsert({ inputId: absPath, source: content });
+        }
       }
     }
   }
@@ -364,6 +439,9 @@ export class ComponentMetaChecker {
   private ensureActive(): void {
     if (this.disposed) {
       throw new Error("ComponentMetaChecker has been disposed.");
+    }
+    if (this._session && (this._session.closed || this._session.engine.state !== "active")) {
+      throw new Error("ComponentMetaChecker is closed.");
     }
   }
 }
@@ -421,117 +499,6 @@ function extractLocalInterfaces(sfcContent: string, registry: Map<string, string
 }
 
 /**
- * Parse tsconfig.json and discover .vue files.
- */
-async function discoverVueFiles(tsconfigPath: string, ws: CheckerWorkspace): Promise<string[]> {
-  const absPath = resolve(tsconfigPath);
-  const dir = dirname(absPath);
-
-  try {
-    const raw = await readFileSafe(absPath, ws);
-    if (!raw) return [];
-    // Strip JSON comments (// and /* */) for tsconfig.json compat
-    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    const config = JSON.parse(stripped);
-    const include: string[] = config.include ?? ["**/*.vue"];
-
-    // Simple glob expansion for .vue files
-    const files: string[] = [];
-    for (const pattern of include) {
-      if (pattern.includes("*.vue") || pattern === "**/*") {
-        // Walk the directory for .vue files (lazy — we don't need exhaustive discovery)
-        await collectVueFiles(dir, files, ws);
-        break;
-      }
-    }
-
-    // Also include explicit files
-    if (config.files) {
-      for (const f of config.files) {
-        const fp = resolve(dir, f);
-        if (fp.endsWith(".vue")) files.push(fp);
-      }
-    }
-
-    return [...new Set(files)];
-  } catch {
-    return [];
-  }
-}
-
-async function collectVueFiles(
-  dir: string,
-  files: string[],
-  ws: CheckerWorkspace,
-  depth = 0,
-): Promise<void> {
-  if (depth > 10) return; // Prevent infinite recursion
-  try {
-    const entries = await ws.readDir(normalizePath(dir));
-    for (const entry of entries) {
-      const name = entry.path.split("/").pop() ?? "";
-      if (name.startsWith(".") || name === "node_modules") continue;
-      const full = entry.path;
-      if (entry.isDir) {
-        await collectVueFiles(full, files, ws, depth + 1);
-      } else if (name.endsWith(".vue")) {
-        files.push(full);
-      }
-    }
-  } catch {
-    // Directory not readable
-  }
-}
-
-/**
- * Parse tsconfig compilerOptions and configure the adapter's project resolver.
- */
-async function configureProjectFromTsconfig(
-  ws: CheckerWorkspace,
-  adapter: VerterHostAdapter,
-  tsconfigPath: string,
-  projectRoot: string,
-): Promise<void> {
-  const raw = await readFileSafe(tsconfigPath, ws);
-  if (!raw) return;
-  try {
-    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    const config = JSON.parse(stripped) as Record<string, unknown>;
-    configureProjectFromConfigJson(ws, adapter, projectRoot, config);
-  } catch {
-    // tsconfig not readable or invalid — skip project configuration
-  }
-}
-
-/**
- * Configure the adapter's project resolver from an inline config JSON object.
- */
-function configureProjectFromConfigJson(
-  ws: CheckerWorkspace,
-  adapter: VerterHostAdapter,
-  projectRoot: string,
-  config: Record<string, unknown>,
-): void {
-  const compilerOptions = (config.compilerOptions ?? {}) as Record<string, unknown>;
-  const rawPaths = (compilerOptions.paths ?? {}) as Record<string, string[]>;
-
-  const paths: { pattern: string; targets: string[] }[] = Object.entries(rawPaths).map(
-    ([pattern, targets]) => ({ pattern, targets }),
-  );
-
-  const project = {
-    root: projectRoot,
-    workspaceRoot: projectRoot,
-    compilerOptions: {
-      baseUrl: (compilerOptions.baseUrl as string) ?? undefined,
-      paths: paths.length > 0 ? paths : undefined,
-    },
-  };
-
-  ws.configureProjects([project]);
-}
-
-/**
  * Create a Volar-compatible checker from a tsconfig.json path.
  *
  * @param tsconfigPath Path to tsconfig.json
@@ -544,76 +511,87 @@ export async function createChecker(
 ): Promise<ComponentMetaChecker> {
   const absPath = resolve(tsconfigPath);
   const projectRoot = dirname(absPath);
-  const adapter = createNapiAdapter(workspace);
+  const parsed = await parseTsconfig(absPath, workspace);
 
-  // Configure project resolver with tsconfig paths so aliased imports resolve
-  await configureProjectFromTsconfig(workspace, adapter, absPath, projectRoot);
+  // Build engine key for pooling
+  const wsIdentity = getWorkspaceIdentity(workspace);
+  const input: EngineKeyInput = {
+    backend: "napi",
+    root: runtimeNormalizePath(projectRoot),
+    configKind: "tsconfig",
+    tsconfigPath: runtimeNormalizePath(absPath),
+    configHash: stableHash(parsed?.config ?? { tsconfigPath: runtimeNormalizePath(absPath) }),
+    workspaceIdentity: wsIdentity,
+    nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+  };
 
-  // Discover and bulk-upsert .vue files
-  const vueFiles = await discoverVueFiles(absPath, workspace);
-  for (const filePath of vueFiles) {
-    const content = await readFileSafe(filePath, workspace);
-    if (content !== null) {
-      adapter.upsert({ inputId: filePath, source: content });
+  const runtime = getMetaRuntime();
+
+  const bootstrap: BootstrapFn = async () => {
+    const _require = typeof require === "function" ? require : createRequire(import.meta.url);
+    const native = _require("@verter/native");
+    const config = { devMode: false, analysisLevel: "full", deepMacroResolutionType: true };
+    const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
+
+    // Configure project resolver
+    if (parsed) {
+      const aliases = extractPathAliases(parsed.config, runtimeNormalizePath(projectRoot));
+      workspace.configureProjects([aliases]);
     }
-  }
 
-  const checker = new ComponentMetaChecker(workspace, adapter, projectRoot, options);
+    // Discover and bulk-load .vue files
+    const vueFiles = await runtimeDiscoverVueFiles(dirname(absPath), workspace);
+    for (const filePath of vueFiles) {
+      const content = await readFileSafe(filePath, workspace);
+      if (content !== null) {
+        nativeProject.upsertBase(filePath, content);
+      }
+    }
 
-  // Track discovered files
-  for (const filePath of vueFiles) {
-    const content = await readFileSafe(filePath, workspace);
-    if (content !== null) {
-      (checker as any).trackedFiles.set(filePath, content);
+    return { nativeProject, baseFileIds: vueFiles };
+  };
+
+  const engine = await runtime.getOrCreateEngine(input, bootstrap);
+  const session = runtime.openSession(engine);
+
+  // Create session-backed adapter
+  const adapter: VerterHostAdapter = {
+    upsert(request) {
+      session.upsert(request.inputId, request.source);
+    },
+    remove(canonicalOrAlias) {
+      session.delete(canonicalOrAlias);
+    },
+    getAnalysis(canonicalOrAlias) {
+      return session.getAnalysis(canonicalOrAlias);
+    },
+    resolveImportedTypes(canonicalOrAlias) {
+      return session.resolveImportedTypes(canonicalOrAlias);
+    },
+    configureProjects(projects) {
+      workspace.configureProjects(projects);
+    },
+  };
+
+  const checker = new ComponentMetaChecker(
+    adapter,
+    projectRoot,
+    options,
+    session,
+    workspace,
+    runtime,
+  );
+
+  // Pre-track discovered files
+  const baseIds = engine.nativeProject.baseFileIds();
+  for (const filePath of baseIds) {
+    const content = session.getEffectiveSource(filePath);
+    if (content !== undefined) {
+      checker.rememberTrackedFile(filePath, content);
     }
   }
 
   return checker;
-}
-
-/**
- * Resolve files from tsconfig-style include patterns.
- * Handles specific file paths and `dir/**\/*` glob patterns.
- */
-async function resolveIncludePatterns(
-  rootDir: string,
-  include: string[],
-  ws: CheckerWorkspace,
-): Promise<string[]> {
-  const files: string[] = [];
-
-  for (const pattern of include) {
-    const absPattern = resolve(rootDir, pattern);
-
-    // Check if it's a specific file path (has a file extension)
-    if (/\.\w+$/.test(pattern) && !pattern.includes("*")) {
-      if (await ws.fileExists(normalizePath(absPattern))) {
-        files.push(absPattern);
-      }
-      continue;
-    }
-
-    // Handle glob patterns like "dir/**/*" — walk the directory part
-    const globIndex = pattern.indexOf("*");
-    if (globIndex !== -1) {
-      const dirPart = pattern.substring(0, globIndex).replace(/[/\\]+$/, "");
-      const absDir = resolve(rootDir, dirPart);
-      if ((await ws.fileExists(normalizePath(absDir))) && (await ws.isDir(normalizePath(absDir)))) {
-        await collectVueFiles(absDir, files, ws);
-      }
-      continue;
-    }
-
-    // Plain directory path — walk it
-    if (
-      (await ws.fileExists(normalizePath(absPattern))) &&
-      (await ws.isDir(normalizePath(absPattern)))
-    ) {
-      await collectVueFiles(absPattern, files, ws);
-    }
-  }
-
-  return [...new Set(files)];
 }
 
 /**
@@ -631,35 +609,73 @@ export async function createCheckerByJson(
   options?: MetaCheckerOptions,
 ): Promise<ComponentMetaChecker> {
   const absRoot = resolve(projectRoot);
-  const workspace = createWorkspace(absRoot);
-  const adapter = createNapiAdapter(workspace);
   const config = configJson as Record<string, unknown>;
+  const workspace = createWorkspace(absRoot);
 
-  // Configure project resolver with inline compilerOptions
-  configureProjectFromConfigJson(workspace, adapter, absRoot, config);
+  const input: EngineKeyInput = {
+    backend: "napi",
+    root: runtimeNormalizePath(absRoot),
+    configKind: "inline",
+    configHash: stableHash(config),
+    nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+  };
 
-  // Resolve files from include patterns if available, otherwise walk project root
-  let vueFiles: string[];
-  const include = config.include as string[] | undefined;
-  if (include && include.length > 0) {
-    vueFiles = await resolveIncludePatterns(absRoot, include, workspace);
-  } else {
-    vueFiles = [];
-    await collectVueFiles(absRoot, vueFiles, workspace);
-  }
+  const runtime = getMetaRuntime();
 
-  for (const filePath of vueFiles) {
-    const content = await readFileSafe(filePath, workspace);
-    if (content !== null) {
-      adapter.upsert({ inputId: filePath, source: content });
+  const bootstrap: BootstrapFn = async () => {
+    const _require = typeof require === "function" ? require : createRequire(import.meta.url);
+    const native = _require("@verter/native");
+    const hostConfig = { devMode: false, analysisLevel: "full", deepMacroResolutionType: true };
+    const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
+      hostConfig,
+      workspace,
+    );
+
+    // Configure project resolver
+    const aliases = extractPathAliases(config, runtimeNormalizePath(absRoot));
+    workspace.configureProjects([aliases]);
+
+    // Discover .vue files
+    const include = config.include as string[] | undefined;
+    const vueFiles = await runtimeDiscoverVueFiles(absRoot, workspace, include);
+    for (const filePath of vueFiles) {
+      const content = await readFileSafe(filePath, workspace);
+      if (content !== null) {
+        nativeProject.upsertBase(filePath, content);
+      }
     }
-  }
 
-  const checker = new ComponentMetaChecker(workspace, adapter, absRoot, options);
-  for (const filePath of vueFiles) {
-    const content = await readFileSafe(filePath, workspace);
-    if (content !== null) {
-      (checker as any).trackedFiles.set(filePath, content);
+    return { nativeProject, baseFileIds: vueFiles };
+  };
+
+  const engine = await runtime.getOrCreateEngine(input, bootstrap);
+  const session = runtime.openSession(engine);
+
+  const adapter: VerterHostAdapter = {
+    upsert(request) {
+      session.upsert(request.inputId, request.source);
+    },
+    remove(canonicalOrAlias) {
+      session.delete(canonicalOrAlias);
+    },
+    getAnalysis(canonicalOrAlias) {
+      return session.getAnalysis(canonicalOrAlias);
+    },
+    resolveImportedTypes(canonicalOrAlias) {
+      return session.resolveImportedTypes(canonicalOrAlias);
+    },
+    configureProjects(projects) {
+      workspace.configureProjects(projects);
+    },
+  };
+
+  const checker = new ComponentMetaChecker(adapter, absRoot, options, session, workspace, runtime);
+
+  const baseIds = engine.nativeProject.baseFileIds();
+  for (const filePath of baseIds) {
+    const content = session.getEffectiveSource(filePath);
+    if (content !== undefined) {
+      checker.rememberTrackedFile(filePath, content);
     }
   }
 
