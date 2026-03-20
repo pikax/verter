@@ -12,6 +12,8 @@
 import { resolve, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
+import { parseType } from "../resolver.js";
+import type { TypeDescriptor } from "../type-ir.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
@@ -89,7 +91,7 @@ function normalizePath(p: string): string {
 export function mapPropMeta(
   prop: PropMeta,
   options?: MetaCheckerOptions,
-  typeRegistry?: Map<string, string>,
+  typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
   return {
     name: prop.name,
@@ -192,7 +194,7 @@ export function mapExposedMeta(exposed: ExposedMeta, options?: MetaCheckerOption
 export function mapComponentMeta(
   meta: ComponentMeta,
   options?: MetaCheckerOptions,
-  typeRegistry?: Map<string, string>,
+  typeRegistry?: Map<string, TypeDescriptor>,
 ): VolarComponentMeta {
   return {
     type: 0,
@@ -262,23 +264,42 @@ export class ComponentMetaChecker {
             expanded: string;
           }>) {
             if (!typeRegistry.has(rlt.name)) {
-              typeRegistry.set(rlt.name, rlt.expanded);
+              typeRegistry.set(rlt.name, parseType(rlt.expanded));
             }
           }
         } catch {
           // Ignore parse errors
         }
       }
-      // Extract locally-defined interfaces/types from SFC content for
-      // schema expansion of local types referenced by runtime-style defineProps.
-      // The Rust analyzer handles type-based macros, but runtime-style props
-      // with PropType<T> references need the JS fallback.
+      // Legacy: extract locally-defined interfaces/types from SFC content via
+      // regex for schema expansion of PropType<T> references in Options API.
+      // The native evaluator handles type-based macros; this is retained only
+      // as a fallback for runtime-style props. Can be removed once native
+      // evaluation covers all Options API prop type annotations.
       const sfcContent = this.trackedFiles.get(absPath);
       if (sfcContent) {
         extractLocalInterfaces(sfcContent, typeRegistry);
       }
     }
-    const meta = extractComponentMeta(this.adapter, absPath, absPath);
+    // Use native lightweight type evaluation (session or adapter)
+    let evaluatedTypes = null;
+    try {
+      if (this._session) {
+        evaluatedTypes = this._session.evaluateTypes(absPath);
+      } else if (this.adapter.evaluateTypes) {
+        const json = this.adapter.evaluateTypes(absPath);
+        evaluatedTypes = json ? JSON.parse(json) : null;
+      }
+    } catch {
+      // Graceful fallback — evaluation is optional
+    }
+
+    const meta = extractComponentMeta(
+      this.adapter,
+      absPath,
+      absPath,
+      evaluatedTypes as import("../type-expr-bridge.js").NativeEvaluatedTypes | null,
+    );
     if (!meta) {
       return {
         type: 0,
@@ -452,7 +473,7 @@ export class ComponentMetaChecker {
  *
  * Does NOT overwrite existing registry entries.
  */
-function extractLocalInterfaces(sfcContent: string, registry: Map<string, string>): void {
+function extractLocalInterfaces(sfcContent: string, registry: Map<string, TypeDescriptor>): void {
   const scriptBlocks = sfcContent.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g);
   for (const match of scriptBlocks) {
     const script = match[1];
@@ -471,7 +492,7 @@ function extractLocalInterfaces(sfcContent: string, registry: Map<string, string
         i++;
       }
       if (depth === 0) {
-        registry.set(name, script.slice(startIdx, i));
+        registry.set(name, parseType(script.slice(startIdx, i)));
       }
     }
     // Match type alias declarations
@@ -492,7 +513,7 @@ function extractLocalInterfaces(sfcContent: string, registry: Map<string, string
       }
       const value = script.slice(startIdx, i).trim();
       if (value) {
-        registry.set(name, value);
+        registry.set(name, parseType(value));
       }
     }
   }

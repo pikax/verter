@@ -1537,6 +1537,27 @@ impl NapiVerterHost {
         })
     }
 
+    /// Evaluate type annotations for a file's component metadata using the
+    /// lightweight native evaluator.
+    ///
+    /// Returns JSON `{ props, emits, slotBindings, bindings }` or `null`.
+    #[napi(js_name = "evaluateTypes")]
+    pub fn evaluate_types(&self, canonical_or_alias: String) -> Result<Option<String>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let result = self.inner.evaluate_types(&canonical_or_alias);
+            let Some(result) = result else {
+                return Ok(None);
+            };
+            let json = serde_json::to_string(&result).map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("type evaluation serialization error: {e}"),
+                )
+            })?;
+            Ok(Some(json))
+        }))?
+    }
+
     /// Returns all exports of a file, following re-export chains to their ultimate source.
     ///
     /// For barrel files like `export { default as Button } from './Button.vue'`, this

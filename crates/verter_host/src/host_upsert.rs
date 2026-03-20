@@ -216,11 +216,13 @@ impl VerterHost {
                 cc.content_overrides.clear();
                 cc.style_overrides.clear();
                 cc.cached_tsc_extract = None;
+                cc.cached_evaluated_types = None;
             }
             if changes.changed && changes.semantic_changed {
                 cc.compile_slots.clear();
                 cc.latest_diagnostics.clear();
                 cc.diagnostics_generation += 1;
+                cc.cached_evaluated_types = None;
             }
             if changes.changed
                 && (changes.slice_changes.script_changed
@@ -229,6 +231,7 @@ impl VerterHost {
                     || changes.slice_changes.descriptor_changed)
             {
                 cc.cached_tsc_extract = None;
+                cc.cached_evaluated_types = None;
             }
             if whole_hash_changed || changes.semantic_changed {
                 cc.raw_template_analysis = None;
@@ -508,6 +511,7 @@ impl VerterHost {
                     generation: 0,
                     cached_parse: None,
                     cached_tsc_extract: None,
+                    cached_evaluated_types: None,
                 });
 
             entry.file_kind = req.file_kind;
@@ -532,6 +536,7 @@ impl VerterHost {
                     || changes.slice_changes.descriptor_changed)
             {
                 entry.cached_tsc_extract = None;
+                entry.cached_evaluated_types = None;
             }
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();
@@ -1159,6 +1164,7 @@ impl VerterHost {
             entry.style_analyses = Arc::new(new_snapshot.style_analyses);
             entry.cached_parse = Some(Arc::new(new_parsed));
             entry.template_analysis = None;
+            entry.cached_evaluated_types = None;
             entry.content_overrides.insert(
                 profile_hash,
                 ContentOverrideLayer {

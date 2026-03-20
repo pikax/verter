@@ -81,13 +81,27 @@ export function typeToZodString(type: TypeDescriptor): string {
     }
 
     case "object": {
-      if (type.properties.length === 0) return "z.object({})";
+      const stringIndexSignature = type.indexSignatures?.find(
+        (signature) =>
+          signature.keyType.kind === "primitive" &&
+          (signature.keyType.name === "string" || signature.keyType.name === "number"),
+      );
+      if (type.properties.length === 0) {
+        if (stringIndexSignature) {
+          return `z.record(${typeToZodString(stringIndexSignature.valueType)})`;
+        }
+        return "z.object({})";
+      }
       const props = type.properties.map((p) => {
         const schema = typeToZodString(p.type);
         const optSuffix = p.optional ? ".optional()" : "";
         return `  ${JSON.stringify(p.name)}: ${schema}${optSuffix}`;
       });
-      return `z.object({\n${props.join(",\n")}\n})`;
+      const base = `z.object({\n${props.join(",\n")}\n})`;
+      if (stringIndexSignature) {
+        return `${base}.catchall(${typeToZodString(stringIndexSignature.valueType)})`;
+      }
+      return base;
     }
 
     case "function":
@@ -227,6 +241,17 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
     }
 
     case "object": {
+      const stringIndexSignature = type.indexSignatures?.find(
+        (signature) =>
+          signature.keyType.kind === "primitive" &&
+          (signature.keyType.name === "string" || signature.keyType.name === "number"),
+      );
+      if (type.properties.length === 0) {
+        if (stringIndexSignature) {
+          return z.record(buildZodSchema(z, stringIndexSignature.valueType) as any);
+        }
+        return z.object({});
+      }
       const shape: Record<string, any> = {};
       for (const prop of type.properties) {
         let schema = buildZodSchema(z, prop.type);
@@ -235,7 +260,11 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
         }
         shape[prop.name] = schema;
       }
-      return z.object(shape);
+      const base = z.object(shape);
+      if (stringIndexSignature) {
+        return base.catchall(buildZodSchema(z, stringIndexSignature.valueType) as any);
+      }
+      return base;
     }
 
     case "function":

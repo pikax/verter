@@ -36,6 +36,8 @@ export interface VerterHostAdapter {
   close?(): void;
   /** Resolve imported types for a file's macro type dependencies. Returns JSON or null. */
   resolveImportedTypes?(canonicalOrAlias: string): string | null;
+  /** Evaluate type annotations using the native lightweight evaluator. Returns JSON or null. */
+  evaluateTypes?(canonicalOrAlias: string): string | null;
   /** Configure project-scoped path alias resolution (optional). */
   configureProjects?(
     projects: {
@@ -60,6 +62,7 @@ export function wrapNapiHost(host: {
   getAnalysis(canonicalOrAlias: string): string | null;
   close?(): void;
   resolveImportedTypes?(canonicalOrAlias: string): string | null;
+  evaluateTypes?(canonicalOrAlias: string): string | null;
   configureProjects?(projects: unknown[]): void;
 }): VerterHostAdapter {
   const adapter: VerterHostAdapter = {
@@ -82,6 +85,10 @@ export function wrapNapiHost(host: {
     },
   };
 
+  if (host.evaluateTypes) {
+    adapter.evaluateTypes = (id) => host.evaluateTypes!(id);
+  }
+
   if (host.close) {
     adapter.close = () => host.close?.();
   }
@@ -97,6 +104,8 @@ export function wrapWasmHost(host: {
   upsert(request: HostUpsertRequest): unknown;
   remove?(canonicalOrAlias: string): unknown;
   getAnalysis(canonicalOrAlias: string): unknown | null;
+  resolveImportedTypes?(canonicalOrAlias: string): string | null;
+  evaluateTypes?(canonicalOrAlias: string): string | null;
   close?(): void;
 }): VerterHostAdapter {
   const adapter: VerterHostAdapter = {
@@ -110,6 +119,14 @@ export function wrapWasmHost(host: {
       return host.getAnalysis(canonicalOrAlias);
     },
   };
+
+  if (host.resolveImportedTypes) {
+    adapter.resolveImportedTypes = (id) => host.resolveImportedTypes!(id) ?? null;
+  }
+
+  if (host.evaluateTypes) {
+    adapter.evaluateTypes = (id) => host.evaluateTypes!(id) ?? null;
+  }
 
   if (host.close) {
     adapter.close = () => host.close?.();

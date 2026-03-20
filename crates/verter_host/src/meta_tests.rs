@@ -2,6 +2,8 @@ use super::*;
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::Arc;
+use verter_analysis::type_eval_build::EvaluatedComponentTypes;
+use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
 fn make_project() -> Arc<MetaProject> {
     let host = VerterHost::new_standalone(HostConfig {
@@ -30,6 +32,15 @@ fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
         .flat_map(|m| m.prop_fields.iter())
         .map(|f| f.name.clone())
         .collect()
+}
+
+fn evaluated_prop_type<'a>(types: &'a EvaluatedComponentTypes, name: &str) -> &'a TypeExpr {
+    &types
+        .props
+        .iter()
+        .find(|field| field.name == name)
+        .unwrap_or_else(|| panic!("missing evaluated prop {name}"))
+        .r#type
 }
 
 // ---------------------------------------------------------------------------
@@ -430,4 +441,137 @@ fn concurrent_sessions_on_different_files() {
         "s2 should see base A (not s1's overlay), got: {:?}",
         names_a2
     );
+}
+
+// ---------------------------------------------------------------------------
+// Native type evaluation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evaluate_types_combines_all_cached_script_blocks() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "Comp.vue",
+            r#"<script lang="ts">
+function makeLabel() {
+  return "cached" as string
+}
+</script>
+
+<script setup lang="ts">
+defineProps<{
+  label: ReturnType<typeof makeLabel>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
+
+    assert_eq!(
+        evaluated_prop_type(&evaluated, "label"),
+        &TypeExpr::Primitive(PrimitiveName::String)
+    );
+    assert!(
+        evaluated.props.iter().all(|field| field.name != "missing"),
+        "evaluation should only include actual props"
+    );
+}
+
+#[test]
+fn evaluate_types_reuses_cached_results_until_the_file_changes() {
+    let project = make_project();
+    project
+        .upsert_base("Comp.vue", &sfc("count: number"))
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let first = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    assert_eq!(
+        evaluated_prop_type(&first, "count"),
+        &TypeExpr::Primitive(PrimitiveName::Number)
+    );
+
+    let first_cache = project
+        .host()
+        .compile_cache
+        .get("Comp.vue")
+        .and_then(|entry| entry.cached_evaluated_types.clone())
+        .expect("first evaluation should populate the cache");
+
+    let second = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    let second_cache = project
+        .host()
+        .compile_cache
+        .get("Comp.vue")
+        .and_then(|entry| entry.cached_evaluated_types.clone())
+        .expect("second evaluation should reuse the cache");
+
+    assert_eq!(first.props.len(), second.props.len());
+    assert!(Arc::ptr_eq(&first_cache.1, &second_cache.1));
+
+    session
+        .upsert("Comp.vue", sfc("count: number; label: string"))
+        .unwrap();
+    let third = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    let third_cache = project
+        .host()
+        .compile_cache
+        .get("Comp.vue")
+        .and_then(|entry| entry.cached_evaluated_types.clone())
+        .expect("updated file should repopulate the cache");
+
+    assert!(third.props.iter().any(|field| field.name == "label"));
+    assert!(!Arc::ptr_eq(&second_cache.1, &third_cache.1));
+}
+
+#[test]
+fn evaluate_types_resolves_imported_types_before_running_utilities() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "types.ts",
+            r#"export interface ImportedUser {
+  id: number
+  name: string
+  password: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+import type { ImportedUser } from './types'
+
+defineProps<{
+  user: Pick<ImportedUser, 'id' | 'name'>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
+
+    match evaluated_prop_type(&evaluated, "user") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"id"));
+            assert!(names.contains(&"name"));
+            assert!(!names.contains(&"password"));
+        }
+        other => panic!("expected imported utility to resolve to an object, got {other:?}"),
+    }
 }

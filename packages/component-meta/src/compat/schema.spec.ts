@@ -53,6 +53,22 @@ describe("typeDescriptorToString", () => {
     ).toBe("object");
   });
 
+  it("renders index-signature objects with literal TS syntax", () => {
+    expect(
+      typeDescriptorToString(
+        object([], {
+          indexSignatures: [
+            {
+              keyName: "key",
+              keyType: primitive("string"),
+              valueType: primitive("any"),
+            },
+          ],
+        }),
+      ),
+    ).toBe("{ [key: string]: any; }");
+  });
+
   it("converts functions to 'function'", () => {
     expect(
       typeDescriptorToString(
@@ -139,6 +155,25 @@ describe("typeDescriptorToSchema", () => {
           schema: "string",
         },
       },
+    });
+  });
+
+  it("preserves index signatures in object schema type strings", () => {
+    const schema = typeDescriptorToSchema(
+      object([], {
+        indexSignatures: [
+          {
+            keyName: "key",
+            keyType: primitive("string"),
+            valueType: primitive("any"),
+          },
+        ],
+      }),
+    );
+    expect(schema).toEqual({
+      kind: "object",
+      type: "{ [key: string]: any; }",
+      schema: {},
     });
   });
 

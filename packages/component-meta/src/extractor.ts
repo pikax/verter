@@ -27,6 +27,8 @@ import type {
 } from "./types.js";
 import type { VerterHostAdapter } from "./host-adapter.js";
 import { parseType, runtimeTypeToDescriptor } from "./resolver.js";
+import type { NativeEvaluatedTypes } from "./type-expr-bridge.js";
+import { buildEvaluatedTypeMap } from "./type-expr-bridge.js";
 
 // ── Raw snapshot interfaces (matching Rust serde output) ─────────
 
@@ -289,22 +291,23 @@ export function extractComponentMeta(
   adapter: VerterHostAdapter,
   fileId: string,
   filePath?: string,
+  evaluatedTypes?: NativeEvaluatedTypes | null,
 ): ComponentMeta | null {
   const raw = adapter.getAnalysis(fileId) as RawSnapshot | null;
   if (!raw) return null;
-  return snapshotToMeta(raw, filePath ?? fileId);
+  return snapshotToMeta(raw, filePath ?? fileId, evaluatedTypes);
 }
 
 /**
  * Build a type registry mapping type names to their expanded text.
  * Used by the schema layer to resolve `ref` types.
  */
-export function buildTypeRegistry(snapshot: unknown): Map<string, string> {
+export function buildTypeRegistry(snapshot: unknown): Map<string, TypeDescriptor> {
   const raw = snapshot as RawSnapshot;
-  const registry = new Map<string, string>();
+  const registry = new Map<string, TypeDescriptor>();
   for (const macro of raw.macros) {
     for (const rlt of macro.resolvedLocalTypes ?? []) {
-      registry.set(rlt.name, rlt.expanded);
+      registry.set(rlt.name, parseType(rlt.expanded));
     }
   }
   return registry;
@@ -314,10 +317,20 @@ export function buildTypeRegistry(snapshot: unknown): Map<string, string> {
  * Extract from a pre-fetched analysis snapshot (useful when you already have
  * the snapshot from an unplugin pipeline or test).
  */
-export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMeta {
+export function snapshotToMeta(
+  snapshot: unknown,
+  filePath: string,
+  evaluatedTypes?: NativeEvaluatedTypes | null,
+): ComponentMeta {
   const raw = snapshot as RawSnapshot;
   const optionsApi = detectOptionsApi(raw);
   const componentName = deriveComponentName(filePath);
+
+  // Build lookup maps from native evaluated types (if available)
+  const evalPropMap = buildEvaluatedTypeMap(evaluatedTypes?.props);
+  const evalEmitMap = buildEvaluatedTypeMap(evaluatedTypes?.emits);
+  const evalSlotBindingMap = buildEvaluatedTypeMap(evaluatedTypes?.slotBindings);
+  const evalBindingMap = buildEvaluatedTypeMap(evaluatedTypes?.bindings);
 
   let props: PropMeta[];
   let events: EventMeta[];
@@ -326,17 +339,17 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
   let exposed: ExposedMeta[];
 
   if (optionsApi && !hasCompositionMacros(raw)) {
-    props = extractOptionsProps(raw.optionsApi);
-    events = extractOptionsEmits(raw.optionsApi, raw.template);
-    slots = extractSlots(raw.template, raw.macros, raw.bindings);
+    props = extractOptionsProps(raw.optionsApi, evalPropMap);
+    events = extractOptionsEmits(raw.optionsApi, raw.template, evalEmitMap);
+    slots = extractSlots(raw.template, raw.macros, raw.bindings, evalSlotBindingMap);
     models = [];
     exposed = extractOptionsExpose(raw.optionsApi);
   } else {
-    props = extractCompositionProps(raw.macros, raw.template);
-    events = extractCompositionEmits(raw.macros, raw.template);
-    slots = extractSlots(raw.template, raw.macros, raw.bindings);
-    models = extractModels(raw.macros);
-    exposed = extractExpose(raw.macros, raw.bindings);
+    props = extractCompositionProps(raw.macros, raw.template, evalPropMap);
+    events = extractCompositionEmits(raw.macros, raw.template, evalEmitMap);
+    slots = extractSlots(raw.template, raw.macros, raw.bindings, evalSlotBindingMap);
+    models = extractModels(raw.macros, evalPropMap);
+    exposed = extractExpose(raw.macros, raw.bindings, evalBindingMap);
 
     // Synthesize implicit props and events from defineModel macros
     const modelMacros = raw.macros.filter((m) => m.kind === "DefineModel");
@@ -349,14 +362,14 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
         const hasDefault = (m.defaultKeys ?? []).includes(modelName);
         const isModelOptional = hasDefault;
         const finalRawType = isModelOptional && rawType ? `${rawType} | undefined` : rawType;
+        const baseModelType =
+          evalPropMap.get(modelName) ?? (rawType ? parseType(rawType) : unknown("unknown"));
         props.push({
           name: modelName,
           type:
-            isModelOptional && rawType
-              ? union([parseType(rawType), primitive("undefined")])
-              : rawType
-                ? parseType(rawType)
-                : unknown("unknown"),
+            isModelOptional && baseModelType.kind !== "unknown"
+              ? union([baseModelType, primitive("undefined")])
+              : baseModelType,
           required: !hasDefault,
           hasDefault,
           ...(finalRawType && { rawType: finalRawType }),
@@ -368,9 +381,12 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
         const propField = m.propFields?.[0];
         const rawType = propField?.typeAnnotation ?? undefined;
         const tupleSignature = rawType ? `[value: ${rawType}]` : undefined;
+        const eventPayload =
+          evalEmitMap.get(updateEventName) ??
+          (tupleSignature ? parseType(tupleSignature) : unknown("unknown"));
         events.push({
           name: updateEventName,
-          payload: tupleSignature ? parseType(tupleSignature) : unknown("unknown"),
+          payload: eventPayload,
           hasValidator: false,
           isDeclared: true,
           ...(tupleSignature && { rawSignature: tupleSignature }),
@@ -430,7 +446,11 @@ function deriveComponentName(filePath: string): string {
 
 // ── Composition API extraction ───────────────────────────────────
 
-function extractCompositionProps(macros: RawMacro[], template: RawTemplate | null): PropMeta[] {
+function extractCompositionProps(
+  macros: RawMacro[],
+  template: RawTemplate | null,
+  evalTypeMap?: Map<string, TypeDescriptor>,
+): PropMeta[] {
   const defineProps = macros.find((m) => m.kind === "DefineProps");
   if (!defineProps) return [];
 
@@ -464,7 +484,9 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
     const baseRawType = field.typeAnnotation ?? templateDef?.typeAnnotation ?? undefined;
     const isOptional = field.isOptional ?? false;
     const rawType = isOptional && baseRawType ? `${baseRawType} | undefined` : baseRawType;
-    const baseType = baseRawType ? parseType(baseRawType) : unknown("unknown");
+    // Use native evaluated type if available, fall back to JS parseType
+    const baseType =
+      evalTypeMap?.get(field.name) ?? (baseRawType ? parseType(baseRawType) : unknown("unknown"));
     const type =
       isOptional && baseType.kind !== "unknown"
         ? union([baseType, primitive("undefined")])
@@ -497,7 +519,11 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
   });
 }
 
-function extractCompositionEmits(macros: RawMacro[], template: RawTemplate | null): EventMeta[] {
+function extractCompositionEmits(
+  macros: RawMacro[],
+  template: RawTemplate | null,
+  evalTypeMap?: Map<string, TypeDescriptor>,
+): EventMeta[] {
   const defineEmits = macros.find((m) => m.kind === "DefineEmits");
   if (!defineEmits) return [];
 
@@ -513,7 +539,9 @@ function extractCompositionEmits(macros: RawMacro[], template: RawTemplate | nul
     const templateDef = defMap.get(field.name);
     const description = field.description ?? undefined;
     const rawPayload = field.payloadType ?? undefined;
-    const payload = rawPayload ? parseType(rawPayload) : unknown("unknown");
+    // Use native evaluated type if available, fall back to JS parseType
+    const payload =
+      evalTypeMap?.get(field.name) ?? (rawPayload ? parseType(rawPayload) : unknown("unknown"));
     const tags = field.tags?.map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
@@ -534,6 +562,7 @@ function extractSlots(
   template: RawTemplate | null,
   macros: RawMacro[],
   scriptBindings?: RawBinding[],
+  evalSlotMap?: Map<string, TypeDescriptor>,
 ): SlotMeta[] {
   // If template has no <slot> tags but defineSlots exists, use it as primary source
   if (!template?.definedSlots || template.definedSlots.length === 0) {
@@ -544,9 +573,10 @@ function extractSlots(
       return defineSlotsM.slotFields.map((sf): SlotMeta => {
         const bindings: SlotBinding[] = (sf.bindings ?? []).map((b): SlotBinding => {
           const rawType = b.typeAnnotation ?? undefined;
+          const slotKey = `${sf.name}.${b.name}`;
           return {
             name: b.name,
-            type: rawType ? parseType(rawType) : unknown("unknown"),
+            type: evalSlotMap?.get(slotKey) ?? (rawType ? parseType(rawType) : unknown("unknown")),
             ...(rawType && { rawType }),
           };
         });
@@ -631,7 +661,8 @@ function extractSlots(
         rawType = scriptBindingTypes.get(expression) ?? undefined;
       }
 
-      const type = rawType ? parseType(rawType) : unknown("unknown");
+      const slotKey = `${slot.name}.${name}`;
+      const type = evalSlotMap?.get(slotKey) ?? (rawType ? parseType(rawType) : unknown("unknown"));
 
       return {
         name,
@@ -654,22 +685,25 @@ function extractSlots(
   });
 }
 
-function extractModels(macros: RawMacro[]): ModelMeta[] {
+function extractModels(macros: RawMacro[], evalTypeMap?: Map<string, TypeDescriptor>): ModelMeta[] {
   return macros
     .filter((m) => m.kind === "DefineModel")
     .map((m): ModelMeta => {
       const name = m.modelName ?? "modelValue";
-      // Model type from propFields if present
       const propField = m.propFields?.[0];
       const rawType = propField?.typeAnnotation;
       return {
         name,
-        type: rawType ? parseType(rawType) : unknown("unknown"),
+        type: evalTypeMap?.get(name) ?? (rawType ? parseType(rawType) : unknown("unknown")),
       };
     });
 }
 
-function extractExpose(macros: RawMacro[], bindings: RawBinding[]): ExposedMeta[] {
+function extractExpose(
+  macros: RawMacro[],
+  bindings: RawBinding[],
+  evalTypeMap?: Map<string, TypeDescriptor>,
+): ExposedMeta[] {
   const defineExpose = macros.find((m) => m.kind === "DefineExpose");
   if (!defineExpose) return [];
 
@@ -686,7 +720,7 @@ function extractExpose(macros: RawMacro[], bindings: RawBinding[]): ExposedMeta[
       const rawType = bindingTypes.get(field.name);
       return {
         name: field.name,
-        type: rawType ? parseType(rawType) : unknown("unknown"),
+        type: evalTypeMap?.get(field.name) ?? (rawType ? parseType(rawType) : unknown("unknown")),
       };
     });
   }
@@ -696,15 +730,19 @@ function extractExpose(macros: RawMacro[], bindings: RawBinding[]): ExposedMeta[
 
 // ── Options API extraction ───────────────────────────────────────
 
-function extractOptionsProps(optionsApi: RawOptionsApi | null | undefined): PropMeta[] {
+function extractOptionsProps(
+  optionsApi: RawOptionsApi | null | undefined,
+  evalTypeMap?: Map<string, TypeDescriptor>,
+): PropMeta[] {
   if (!optionsApi?.props) return [];
 
   return optionsApi.props.map((prop): PropMeta => {
     let type: TypeDescriptor;
     const runtimeTypes: string[] = [];
 
-    if (prop.typeAnnotation) {
-      // Use PropType<T> annotation if available (e.g., `Object as PropType<HTMLCanvasElement>`)
+    if (evalTypeMap?.has(prop.name)) {
+      type = evalTypeMap.get(prop.name)!;
+    } else if (prop.typeAnnotation) {
       type = parseType(prop.typeAnnotation);
     } else if (prop.typeConstructor) {
       runtimeTypes.push(prop.typeConstructor);
@@ -736,6 +774,7 @@ function extractOptionsProps(optionsApi: RawOptionsApi | null | undefined): Prop
 function extractOptionsEmits(
   optionsApi: RawOptionsApi | null | undefined,
   template: RawTemplate | null,
+  evalTypeMap?: Map<string, TypeDescriptor>,
 ): EventMeta[] {
   if (!optionsApi?.emits) return [];
 
@@ -748,7 +787,8 @@ function extractOptionsEmits(
   return optionsApi.emits.map((field): EventMeta => {
     const templateDef = defMap.get(field.name);
     const rawPayload = field.payloadType ?? undefined;
-    const payload = rawPayload ? parseType(rawPayload) : unknown("unknown");
+    const payload =
+      evalTypeMap?.get(field.name) ?? (rawPayload ? parseType(rawPayload) : unknown("unknown"));
     return {
       name: field.name,
       payload,

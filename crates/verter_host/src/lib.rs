@@ -446,6 +446,7 @@ impl VerterHost {
                 entry.compile_slots.clear();
                 entry.raw_template_analysis = None;
                 entry.cached_tsc_extract = None;
+                entry.cached_evaluated_types = None;
             }
         }
         #[cfg(not(feature = "scheduler"))]
@@ -454,6 +455,7 @@ impl VerterHost {
             for entry in files.values_mut() {
                 entry.compile_slots.clear();
                 entry.template_analysis = None;
+                entry.cached_evaluated_types = None;
             }
         }
     }
@@ -696,6 +698,7 @@ impl VerterHost {
             cc.latest_diagnostics.clear();
             cc.cached_tsc_extract = None;
             cc.raw_template_analysis = None;
+            cc.cached_evaluated_types = None;
         }
     }
 

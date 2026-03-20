@@ -116,6 +116,26 @@ describe("typeToJsonSchema", () => {
     expect(schema.required).not.toContain("age");
   });
 
+  it("converts string index signatures to additionalProperties", () => {
+    const schema = typeToJsonSchema({
+      kind: "object",
+      properties: [],
+      indexSignatures: [
+        {
+          keyName: "key",
+          keyType: { kind: "primitive", name: "string" },
+          valueType: { kind: "primitive", name: "number" },
+        },
+      ],
+    });
+    expect(schema).toEqual({
+      type: "object",
+      properties: {},
+      additionalProperties: { type: "number" },
+    });
+    expect(schema).not.toHaveProperty("required");
+  });
+
   it("converts intersection to allOf", () => {
     const schema = typeToJsonSchema({
       kind: "intersection",

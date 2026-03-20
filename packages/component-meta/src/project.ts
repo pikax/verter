@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { extractComponentMeta, buildTypeRegistry } from "./extractor.js";
+import { parseType } from "./resolver.js";
 import { mapComponentMeta } from "./compat/checker.js";
 import type { CheckerWorkspace } from "./compat/checker.js";
 import type { MetaCheckerOptions, VolarComponentMeta } from "./compat/types.js";
@@ -142,7 +143,7 @@ export class MetaProject {
         try {
           for (const rlt of JSON.parse(importedJson) as Array<{ name: string; expanded: string }>) {
             if (!typeRegistry.has(rlt.name)) {
-              typeRegistry.set(rlt.name, rlt.expanded);
+              typeRegistry.set(rlt.name, parseType(rlt.expanded));
             }
           }
         } catch {
@@ -157,7 +158,15 @@ export class MetaProject {
       resolveImportedTypes: (id: string) => this._session.resolveImportedTypes(id),
     };
 
-    const meta = extractComponentMeta(sessionAdapter, abs, abs);
+    // Request native type evaluation (opt-in, returns null if unavailable)
+    const evaluatedTypes = this._session.evaluateTypes(abs);
+
+    const meta = extractComponentMeta(
+      sessionAdapter,
+      abs,
+      abs,
+      evaluatedTypes as import("./type-expr-bridge.js").NativeEvaluatedTypes | null,
+    );
     if (!meta) {
       return { type: 0, props: [], events: [], slots: [], exposed: [] };
     }

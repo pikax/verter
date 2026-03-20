@@ -74,6 +74,22 @@ describe("typeToZodString (codegen)", () => {
     expect(result).toContain('"age": z.number().optional()');
   });
 
+  it("converts index-signature objects to z.record()", () => {
+    const result = typeToZodString({
+      kind: "object",
+      properties: [],
+      indexSignatures: [
+        {
+          keyName: "key",
+          keyType: { kind: "primitive", name: "string" },
+          valueType: { kind: "primitive", name: "number" },
+        },
+      ],
+    });
+    expect(result).toBe("z.record(z.number())");
+    expect(result).not.toContain("z.object({})");
+  });
+
   it("converts function", () => {
     expect(
       typeToZodString({
@@ -190,6 +206,22 @@ describe("typeToZodSchema (runtime)", () => {
     }) as z.ZodArray<any>;
     expect(schema.parse(["a", "b"])).toEqual(["a", "b"]);
     expect(() => schema.parse([1, 2])).toThrow();
+  });
+
+  it("creates record schemas for string index signatures", () => {
+    const schema = typeToZodSchema({
+      kind: "object",
+      properties: [],
+      indexSignatures: [
+        {
+          keyName: "key",
+          keyType: { kind: "primitive", name: "string" },
+          valueType: { kind: "primitive", name: "number" },
+        },
+      ],
+    }) as z.ZodRecord<any, any>;
+    expect(schema.parse({ a: 1, b: 2 })).toEqual({ a: 1, b: 2 });
+    expect(() => schema.parse({ a: "nope" })).toThrow();
   });
 });
 

@@ -365,6 +365,7 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
                 workspace,
             ) {
                 file.compile_slots.clear();
+                file.cached_evaluated_types = None;
             }
         }
     }
@@ -411,6 +412,7 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
         if let Some(mut cc) = compile_cache.get_mut(&owner) {
             if should_clear {
                 cc.compile_slots.clear();
+                cc.cached_evaluated_types = None;
             }
             cc.resolved_type_hashes = view.resolved_type_hashes;
         }
@@ -520,6 +522,7 @@ pub(crate) fn smart_invalidate_dependents(
                 workspace,
             ) {
                 file.compile_slots.clear();
+                file.cached_evaluated_types = None;
             }
         }
     }

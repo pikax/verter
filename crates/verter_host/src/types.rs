@@ -1096,6 +1096,11 @@ pub(crate) struct FileEntry {
     /// call and reused for subsequent calls with different external types or modes.
     /// Cleared on source change (semantic_hash mismatch during upsert).
     pub(crate) cached_tsc_extract: Option<Arc<verter_core::tsc::ExtractedTscState>>,
+    /// Cached component-meta type evaluation for this file content.
+    pub(crate) cached_evaluated_types: Option<(
+        Hash16,
+        Arc<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
+    )>,
 }
 
 impl FileMeta {
@@ -1157,6 +1162,11 @@ pub(crate) struct CompileCacheEntry {
     /// Cached TSC extract keyed by whole_hash. On read: stored hash must match
     /// effective_file_state().whole_hash. Cleared on upsert when whole_hash changes.
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
+    /// Cached lightweight type evaluation keyed by whole_hash.
+    pub(crate) cached_evaluated_types: Option<(
+        Hash16,
+        Arc<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
+    )>,
 
     /// Raw template analysis (source-derived, profileless).
     /// Computed by compute_template_analysis_if_missing() from raw scheduler data.

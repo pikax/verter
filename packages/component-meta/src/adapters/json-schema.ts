@@ -81,10 +81,19 @@ export function typeToJsonSchema(type: TypeDescriptor): JSONSchema {
         }
       }
 
+      const stringIndexSignature = type.indexSignatures?.find(
+        (signature) =>
+          signature.keyType.kind === "primitive" &&
+          (signature.keyType.name === "string" || signature.keyType.name === "number"),
+      );
+
       return {
         type: "object",
         properties,
         ...(required.length > 0 && { required }),
+        ...(stringIndexSignature
+          ? { additionalProperties: typeToJsonSchema(stringIndexSignature.valueType) }
+          : {}),
       };
     }
 

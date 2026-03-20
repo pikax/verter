@@ -44,6 +44,7 @@ export type {
   TupleType,
   ObjectType,
   ObjectProperty,
+  ObjectIndexSignature,
   FunctionType,
   FunctionParameter,
   EnumType,
@@ -65,8 +66,16 @@ export {
   unknown,
 } from "./type-ir.js";
 
-// Resolver
+// Resolver (legacy — native evaluator is preferred when available)
 export { parseType, runtimeTypeToDescriptor } from "./resolver.js";
+
+// Native type evaluation bridge
+export { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";
+export type {
+  NativeEvaluatedTypes,
+  NativeEvaluatedField,
+  NativeTypeExpr,
+} from "./type-expr-bridge.js";
 
 // Host adapter
 export type { VerterHostAdapter, HostUpsertRequest } from "./host-adapter.js";

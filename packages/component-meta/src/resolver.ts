@@ -1,10 +1,15 @@
 /**
- * Lightweight recursive-descent parser for TypeScript type annotation strings.
+ * Legacy JS-based type annotation parser.
  *
- * Converts type annotation strings (from `AnalyzedPropField.typeAnnotation`)
- * into TypeDescriptor trees. Handles the common subset appearing in Vue
- * component APIs:
+ * @deprecated Prefer the native lightweight evaluator (`evaluateTypes()` on
+ * MetaSession) which handles the full TypeScript type syntax including
+ * conditional types, mapped types, template literals, utility types
+ * (Partial, Pick, Omit, Record, etc.), keyof, typeof, and generic
+ * instantiation. This JS parser is retained as a fallback for environments
+ * where the native module is unavailable (WASM/browser) and for the
+ * schema.ts type registry expansion path.
  *
+ * Handles the common subset:
  * - Primitives, string/number/boolean literals
  * - Unions (`|`), intersections (`&`)
  * - Arrays (`T[]`, `Array<T>`), tuples (`[A, B]`)

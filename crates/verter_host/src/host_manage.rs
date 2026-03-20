@@ -12,6 +12,233 @@ use crate::types::*;
 use crate::VerterHost;
 
 impl VerterHost {
+    fn build_eval_script_source(
+        source: &str,
+        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+    ) -> String {
+        let Some(parsed) = cached_parse else {
+            return source.to_string();
+        };
+
+        let mut script_blocks = [parsed.script(), parsed.script_setup()]
+            .into_iter()
+            .flatten()
+            .filter_map(|script| script.content.map(|span| (span.start, span.end)))
+            .collect::<Vec<_>>();
+        script_blocks.sort_by_key(|(start, _)| *start);
+
+        let mut combined = String::new();
+        for (start, end) in script_blocks {
+            let Some(content) = source.get(start as usize..end as usize) else {
+                continue;
+            };
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(content);
+        }
+
+        if combined.is_empty() {
+            source.to_string()
+        } else {
+            combined
+        }
+    }
+
+    fn is_evaluated_types_empty(
+        result: &verter_analysis::type_eval_build::EvaluatedComponentTypes,
+    ) -> bool {
+        result.props.is_empty()
+            && result.emits.is_empty()
+            && result.slot_bindings.is_empty()
+            && result.bindings.is_empty()
+    }
+
+    fn current_eval_state(
+        &self,
+        canonical_id: &str,
+    ) -> Option<(
+        Arc<str>,
+        Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        Hash16,
+    )> {
+        #[cfg(feature = "scheduler")]
+        {
+            let state = self.effective_file_state(canonical_id, None)?;
+            Some((state.source, state.cached_parse, state.whole_hash))
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(canonical_id)?;
+            Some((
+                Arc::clone(&entry.source),
+                entry.cached_parse.clone(),
+                entry.whole_hash,
+            ))
+        }
+    }
+
+    fn dependency_resolutions_for_eval(
+        &self,
+        canonical_id: &str,
+    ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
+        #[cfg(feature = "scheduler")]
+        {
+            self.compile_cache
+                .get(canonical_id)
+                .map(|entry| entry.dependency_resolutions.clone())
+                .unwrap_or_default()
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            files
+                .get(canonical_id)
+                .map(|entry| entry.dependency_resolutions.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    fn current_source_with_fallback(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.get_source(canonical_id).or_else(|| {
+            for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
+                let with_ext = format!("{canonical_id}{ext}");
+                if let Some(source) = self.get_source(&with_ext) {
+                    return Some(source);
+                }
+            }
+            None
+        })
+    }
+
+    fn imported_eval_inputs(
+        &self,
+        owner_canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+    ) -> Vec<(Arc<str>, Option<Arc<verter_core::parser::types::ParsedSfc>>)> {
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut inputs = Vec::new();
+
+        for dep in snapshot.macro_type_deps.iter() {
+            let dep_canonical = if dep.import_source.starts_with('.') {
+                Some(crate::id::resolve_external(
+                    owner_canonical_id,
+                    &dep.import_source,
+                ))
+            } else if let Some(import) = snapshot
+                .imports
+                .iter()
+                .find(|import| import.source == dep.import_source)
+            {
+                import.resolved_canonical_id.clone()
+            } else {
+                dep_resolutions
+                    .get(&dep.import_source)
+                    .and_then(|resolution| resolution.resolved_canonical_id.clone())
+            };
+
+            let Some(dep_canonical) = dep_canonical else {
+                continue;
+            };
+            if !seen.insert(dep_canonical.clone()) {
+                continue;
+            }
+
+            let Some((source, cached_parse, _)) = self.current_eval_state(&dep_canonical) else {
+                let Some(source) = self.current_source_with_fallback(&dep_canonical) else {
+                    continue;
+                };
+                inputs.push((source, None));
+                continue;
+            };
+            inputs.push((source, cached_parse));
+        }
+
+        inputs
+    }
+
+    pub fn evaluate_types(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Option<verter_analysis::type_eval_build::EvaluatedComponentTypes> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let (source, cached_parse, whole_hash) = self.current_eval_state(&canonical)?;
+
+        #[cfg(feature = "scheduler")]
+        if let Some(entry) = self.compile_cache.get(&canonical) {
+            if let Some((cached_hash, cached)) = &entry.cached_evaluated_types {
+                if *cached_hash == whole_hash {
+                    let result = cached.as_ref().clone();
+                    return if Self::is_evaluated_types_empty(&result) {
+                        None
+                    } else {
+                        Some(result)
+                    };
+                }
+            }
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            if let Some(entry) = files.get(&canonical) {
+                if let Some((cached_hash, cached)) = &entry.cached_evaluated_types {
+                    if *cached_hash == whole_hash {
+                        let result = cached.as_ref().clone();
+                        return if Self::is_evaluated_types_empty(&result) {
+                            None
+                        } else {
+                            Some(result)
+                        };
+                    }
+                }
+            }
+        }
+
+        let snapshot = self.get_analysis(&canonical)?;
+        let mut env = verter_analysis::type_eval_build::parse_and_build_env(
+            &Self::build_eval_script_source(&source, cached_parse.as_deref()),
+        );
+        let dep_resolutions = self.dependency_resolutions_for_eval(&canonical);
+        for (dep_source, dep_parse) in
+            self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions)
+        {
+            let script_source = Self::build_eval_script_source(&dep_source, dep_parse.as_deref());
+            env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
+                &script_source,
+            ));
+        }
+
+        let result = verter_analysis::type_eval_build::evaluate_macro_types_with_env(
+            snapshot.macros.as_ref(),
+            &mut env,
+        );
+        let cached_result = Arc::new(result.clone());
+
+        #[cfg(feature = "scheduler")]
+        if let Some(mut entry) = self.compile_cache.get_mut(&canonical) {
+            entry.cached_evaluated_types = Some((whole_hash, cached_result));
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(&canonical) {
+                entry.cached_evaluated_types = Some((whole_hash, cached_result));
+            }
+        }
+
+        if Self::is_evaluated_types_empty(&result) {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
     fn parse_dependency_set_for_file(
         &self,
         canonical_id: &str,
@@ -1579,6 +1806,7 @@ impl VerterHost {
         #[cfg(feature = "scheduler")]
         if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
             cc.compile_slots.clear();
+            cc.cached_evaluated_types = None;
         }
 
         #[cfg(not(feature = "scheduler"))]
@@ -1586,6 +1814,7 @@ impl VerterHost {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
                 entry.compile_slots.clear();
+                entry.cached_evaluated_types = None;
             }
         }
     }
@@ -1641,6 +1870,7 @@ impl VerterHost {
             for owner in &dependents {
                 if let Some(mut cc) = self.compile_cache.get_mut(owner) {
                     cc.compile_slots.clear();
+                    cc.cached_evaluated_types = None;
                 }
             }
 
@@ -1690,6 +1920,7 @@ impl VerterHost {
                 for owner in &dependents {
                     if let Some(file) = files.get_mut(owner) {
                         file.compile_slots.clear();
+                        file.cached_evaluated_types = None;
                     }
                 }
             }

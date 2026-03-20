@@ -34,7 +34,23 @@ pub mod scope;
 pub mod selector_match;
 pub mod style;
 pub mod template;
+pub mod type_eval;
+pub mod type_eval_build;
+pub mod type_expr;
+pub mod type_expr_lower;
 pub mod types;
+
+#[cfg(test)]
+#[path = "type_expr_tests.rs"]
+mod type_expr_tests;
+
+#[cfg(test)]
+#[path = "type_eval_tests.rs"]
+mod type_eval_tests;
+
+#[cfg(test)]
+#[path = "type_eval_build_tests.rs"]
+mod type_eval_build_tests;
 
 pub use analysis::{
     build_export_signatures, build_script_analysis, build_script_analysis_with_scope,

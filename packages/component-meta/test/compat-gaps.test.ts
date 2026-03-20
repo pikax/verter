@@ -77,7 +77,7 @@ function schemaToJsonType(schema: PropertyMetaSchema): any {
 // =============================================================================
 describe("P1: Schema Expansion", () => {
   describe("P1b: Array<string> prop", () => {
-    test.fails("schema for Array<string> prop should be a structured object, not a flat string", async () => {
+    test("schema for Array<string> prop should be a structured object, not a flat string", async () => {
       const prop = await getProp("P1b-ArrayString.vue", "items");
       expect(prop).toBeDefined();
       const schema = prop!.schema;
@@ -86,7 +86,7 @@ describe("P1: Schema Expansion", () => {
   });
 
   describe("P1c: Interface[] — deep object schema in array items", () => {
-    test.fails("schema for Book[] should expand Book into object with properties", async () => {
+    test("schema for Book[] should expand Book into object with properties", async () => {
       const prop = await getProp("P1c-InterfaceArray.vue", "books");
       expect(prop).toBeDefined();
       const schema = prop!.schema;
@@ -95,7 +95,7 @@ describe("P1: Schema Expansion", () => {
   });
 
   describe("P1d: 'red' | 'blue' enum literals", () => {
-    test.fails("enum prop should have structured schema with string literal members", async () => {
+    test("enum prop should have structured schema with string literal members", async () => {
       const prop = await getProp("P1d-Enum.vue", "color");
       expect(prop).toBeDefined();
       const schema = prop!.schema;
@@ -111,13 +111,13 @@ describe("P1: Schema Expansion", () => {
 // P2: Type Representation
 // =============================================================================
 describe("P2: Type Representation", () => {
-  test.fails("simple string prop should have string-based schema", async () => {
+  test("simple string prop should have string-based schema", async () => {
     const prop = await getProp("P2a-SimpleString.vue", "name");
     expect(prop).toBeDefined();
     expect(prop!.type).toContain("string");
   });
 
-  test.fails("boolean prop should have boolean schema (not enum)", async () => {
+  test("boolean prop should have boolean schema (not enum)", async () => {
     const prop = await getProp("P2b-Boolean.vue", "disabled");
     expect(prop).toBeDefined();
     expect(prop!.type).toContain("boolean");
@@ -128,12 +128,12 @@ describe("P2: Type Representation", () => {
 // P3: Default Values
 // =============================================================================
 describe("P3: Default Values", () => {
-  test.fails("JS options API: should extract default value from defineProps options", async () => {
+  test("JS options API: should extract default value from defineProps options", async () => {
     const prop = await getProp("P3a-JSDefaults.vue", "size");
     expect(prop).toBeDefined();
   });
 
-  test.fails("TS script setup: should extract default from withDefaults or options", async () => {
+  test("TS script setup: should extract default from withDefaults or options", async () => {
     const prop = await getProp("P3b-TSDefaults.vue", "count");
     expect(prop).toBeDefined();
   });
@@ -143,12 +143,12 @@ describe("P3: Default Values", () => {
 // P4: DOM Types
 // =============================================================================
 describe("P4: DOM & Advanced Types", () => {
-  test.fails("HTMLCanvasElement prop should have { kind: 'object', schema: {} } not flat string", async () => {
+  test("HTMLCanvasElement prop should have { kind: 'object', schema: {} } not flat string", async () => {
     const prop = await getProp("P4a-DomTypes.vue", "canvas");
     expect(prop).toBeDefined();
   });
 
-  test.fails("Partial<HTMLImageElement> in union should produce structured enum schema", async () => {
+  test("Partial<HTMLImageElement> in union should produce structured enum schema", async () => {
     const prop = await getProp("P4b-PartialDom.vue", "image");
     expect(prop).toBeDefined();
   });

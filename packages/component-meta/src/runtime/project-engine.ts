@@ -41,6 +41,8 @@ export interface NativeMetaSession {
   close(): void;
   readonly isClosed: boolean;
   readonly overlayGeneration: number;
+  /** Evaluate type annotations using the native lightweight evaluator. Optional. */
+  evaluateTypes?(canonicalOrAlias: string): string | null;
 }
 
 export class ProjectEngine {

@@ -422,6 +422,15 @@ impl MetaSession {
         self.with_overlay_context(|host| host.get_analysis(canonical_or_alias))
     }
 
+    /// Evaluate component metadata types through this session's overlay view.
+    pub fn evaluate_types(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<Option<verter_analysis::type_eval_build::EvaluatedComponentTypes>, MetaError> {
+        self.check_alive()?;
+        self.with_overlay_context(|host| host.evaluate_types(canonical_or_alias))
+    }
+
     /// Resolve imported types for a file, through this session's overlay.
     pub fn resolve_imported_types(
         &self,

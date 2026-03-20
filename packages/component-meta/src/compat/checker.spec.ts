@@ -428,9 +428,8 @@ defineProps<ButtonProps>()
     expect(meta.props.some((p) => p.name === "ButtonProps")).toBe(false);
   });
 
-  // @ai-generated - Utility types like ReturnType should be expanded by a TS-backed
-  // resolver rather than degrading to an opaque ref/object shell.
-  it.fails("expands ReturnType utility props into structured object schema", async () => {
+  // ReturnType<typeof fn> resolved by native evaluator via body inference.
+  it("expands ReturnType utility props into structured object schema", async () => {
     const adapter = createNapiAdapter();
     const checker = new ComponentMetaChecker(adapter, "/tmp", {});
 
@@ -464,9 +463,8 @@ defineProps<{
     );
   });
 
-  // @ai-generated - Pick/Omit are a good boundary case: simple enough for TS to
-  // resolve precisely, but not worth teaching to the lightweight parser.
-  it.fails("expands Pick and Omit utility props into narrowed object schemas", async () => {
+  // Pick/Omit resolved by the native lightweight evaluator.
+  it("expands Pick and Omit utility props into narrowed object schemas", async () => {
     const adapter = createNapiAdapter();
     const checker = new ComponentMetaChecker(adapter, "/tmp", {});
 
@@ -517,6 +515,90 @@ defineProps<{
       }),
     );
     expect(safeProp!.schema.schema).not.toHaveProperty("password");
+  });
+
+  it("expands utilities that target imported types", async () => {
+    const adapter = createNapiAdapter();
+    const projectRoot = resolve(process.env.TEMP ?? "/tmp", "verter-test-imported-utilities");
+    const checker = new ComponentMetaChecker(adapter, projectRoot, {});
+
+    const typesPath = resolve(projectRoot, "types.ts");
+    adapter.upsert({
+      inputId: typesPath,
+      source: `export interface ImportedUser {
+  id: number
+  name: string
+  password: string
+}`,
+      fileKind: "non_sfc",
+    });
+
+    checker.updateFile(
+      "ImportedPick.vue",
+      `<script setup lang="ts">
+import type { ImportedUser } from './types'
+
+defineProps<{
+  user: Pick<ImportedUser, 'id' | 'name'>
+}>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("ImportedPick.vue");
+    const userProp = meta.props.find((p) => p.name === "user");
+
+    expect(userProp).toBeDefined();
+    expect(typeof userProp!.schema).not.toBe("string");
+    if (typeof userProp!.schema === "string") return;
+
+    expect(userProp!.schema.kind).toBe("object");
+    expect(userProp!.schema.schema).toEqual(
+      expect.objectContaining({
+        id: expect.any(Object),
+        name: expect.any(Object),
+      }),
+    );
+    expect(userProp!.schema.schema).not.toHaveProperty("password");
+  });
+
+  it("preserves index signature text inside intersection schemas", async () => {
+    const adapter = createNapiAdapter();
+    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+
+    checker.updateFile(
+      "Typed.vue",
+      `<script setup lang="ts">
+defineProps<{
+  partialImage: string | (Partial<HTMLImageElement> & { [key: string]: any })
+}>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("Typed.vue");
+    const partialImage = meta.props.find((p) => p.name === "partialImage");
+
+    expect(partialImage).toBeDefined();
+    expect(typeof partialImage!.schema).not.toBe("string");
+    if (typeof partialImage!.schema === "string") return;
+
+    expect(partialImage!.schema.kind).toBe("enum");
+    const objectArm = (partialImage!.schema.schema as any[]).find(
+      (entry) =>
+        typeof entry !== "string" && entry?.kind === "object" && Array.isArray(entry?.schema),
+    );
+    expect(objectArm).toBeDefined();
+    expect(objectArm.schema).toEqual([
+      expect.objectContaining({
+        kind: "object",
+        type: "Partial<HTMLImageElement>",
+      }),
+      expect.objectContaining({
+        kind: "object",
+        type: "{ [key: string]: any; }",
+      }),
+    ]);
   });
 
   it("Options API props preserve JSDoc descriptions and tags", async () => {

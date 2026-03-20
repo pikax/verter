@@ -162,6 +162,16 @@ impl NapiMetaSession {
 
 #[napi]
 impl NapiMetaSession {
+    /// MetaSession instances are created via `MetaProject.openSession()`.
+    /// This constructor exists only for NAPI-RS class registration.
+    #[napi(constructor)]
+    pub fn new() -> Result<Self> {
+        Err(Error::new(
+            Status::GenericFailure,
+            "MetaSession cannot be constructed directly. Use MetaProject.openSession().",
+        ))
+    }
+
     /// Store a file overlay in this session.
     #[napi]
     pub fn upsert(&self, canonical_id: String, source: Buffer) -> Result<()> {
@@ -249,6 +259,31 @@ impl NapiMetaSession {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             session.has_file(&canonical_id).map_err(meta_err)
+        }))?
+    }
+
+    /// Evaluate type annotations for a file's component metadata.
+    ///
+    /// Returns a JSON object with `props`, `emits`, and `slotBindings` arrays,
+    /// each containing `{ name, type }` entries with structured type data.
+    /// Returns `null` if the file has no analysis or no evaluable type annotations.
+    #[napi(js_name = "evaluateTypes")]
+    pub fn evaluate_types(&self, canonical_or_alias: String) -> Result<Option<String>> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let result = session
+                .evaluate_types(&canonical_or_alias)
+                .map_err(meta_err)?;
+            let Some(result) = result else {
+                return Ok(None);
+            };
+            let json = serde_json::to_string(&result).map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("type evaluation serialization error: {e}"),
+                )
+            })?;
+            Ok(Some(json))
         }))?
     }
 

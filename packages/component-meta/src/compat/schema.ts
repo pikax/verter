@@ -5,7 +5,6 @@
  */
 
 import type { TypeDescriptor } from "../type-ir.js";
-import { parseType } from "../resolver.js";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 
 /**
@@ -18,7 +17,7 @@ import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 export function typeDescriptorToSchema(
   td: TypeDescriptor,
   options?: MetaCheckerOptions,
-  typeRegistry?: Map<string, string>,
+  typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMetaSchema {
   if (options?.schema === false) {
     return "unknown";
@@ -32,7 +31,7 @@ export function typeDescriptorToSchema(
 function convertType(
   td: TypeDescriptor,
   ignore?: (type: string) => boolean,
-  typeRegistry?: Map<string, string>,
+  typeRegistry?: Map<string, TypeDescriptor>,
   visited?: Set<string>,
 ): PropertyMetaSchema {
   switch (td.kind) {
@@ -92,10 +91,7 @@ function convertType(
     }
 
     case "object": {
-      // Use typeDescriptorToSafeString for property types to avoid including literal
-      // quotes in the type string — downstream consumers (nuxt-component-meta) can
-      // falsely detect objects as enums if the type string contains `"` and `|`.
-      const type = `{ ${td.properties.map((p) => `${p.name}${p.optional ? "?" : ""}: ${typeDescriptorToSafeString(p.type)}`).join("; ")} }`;
+      const type = objectDescriptorToString(td, true);
       if (ignore?.(type)) return type;
       // Volar uses Record<string, PropertyMeta-like> with property names as keys.
       // Each value includes name, required, type, description, tags, global, schema.
@@ -142,12 +138,11 @@ function convertType(
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
         : td.name;
       if (ignore?.(name)) return name;
-      // Try to resolve from type registry
+      // Try to resolve from type registry (pre-parsed TypeDescriptor)
       if (typeRegistry && !visited?.has(td.name)) {
-        const expanded = typeRegistry.get(td.name);
-        if (expanded) {
+        const resolved = typeRegistry.get(td.name);
+        if (resolved) {
           visited?.add(td.name);
-          const resolved = parseType(expanded);
           const result = convertType(resolved, ignore, typeRegistry, visited);
           visited?.delete(td.name);
           return result;
@@ -182,7 +177,14 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
     case "tuple":
       return `[${td.elements.map(typeDescriptorToString).join(", ")}]`;
     case "object":
-      return "object";
+      if (
+        (td.indexSignatures?.length ?? 0) === 0 &&
+        (td.callSignatures?.length ?? 0) === 0 &&
+        (td.constructSignatures?.length ?? 0) === 0
+      ) {
+        return "object";
+      }
+      return objectDescriptorToString(td, false);
     case "function":
       return "function";
     case "ref":
@@ -212,6 +214,58 @@ function typeDescriptorToSafeString(td: TypeDescriptor): string {
     default:
       return typeDescriptorToString(td);
   }
+}
+
+function objectDescriptorToString(
+  td: Extract<TypeDescriptor, { kind: "object" }>,
+  safeValues: boolean,
+): string {
+  const members: string[] = [];
+  let needsTrailingSemicolon = false;
+
+  for (const prop of td.properties) {
+    const renderValue = safeValues
+      ? typeDescriptorToSafeString(prop.type)
+      : typeDescriptorToString(prop.type);
+    members.push(`${prop.name}${prop.optional ? "?" : ""}: ${renderValue}`);
+  }
+
+  for (const indexSignature of td.indexSignatures ?? []) {
+    const renderValue = safeValues
+      ? typeDescriptorToSafeString(indexSignature.valueType)
+      : typeDescriptorToString(indexSignature.valueType);
+    members.push(
+      `${indexSignature.readonly ? "readonly " : ""}[${indexSignature.keyName}: ${typeDescriptorToString(indexSignature.keyType)}]: ${renderValue}`,
+    );
+    needsTrailingSemicolon = true;
+  }
+
+  for (const signature of td.callSignatures ?? []) {
+    members.push(functionSignatureToString(signature, "call"));
+    needsTrailingSemicolon = true;
+  }
+
+  for (const signature of td.constructSignatures ?? []) {
+    members.push(functionSignatureToString(signature, "construct"));
+    needsTrailingSemicolon = true;
+  }
+
+  if (members.length === 0) {
+    return "{}";
+  }
+
+  return `{ ${members.join("; ")}${needsTrailingSemicolon ? ";" : ""} }`;
+}
+
+function functionSignatureToString(
+  td: Extract<TypeDescriptor, { kind: "function" }>,
+  mode: "call" | "construct",
+): string {
+  const params = td.parameters
+    .map((p) => `${p.name}${p.optional ? "?" : ""}: ${typeDescriptorToString(p.type)}`)
+    .join(", ");
+  const prefix = mode === "construct" ? "new " : "";
+  return `${prefix}(${params}): ${typeDescriptorToString(td.returnType)}`;
 }
 
 /**

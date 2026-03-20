@@ -269,6 +269,7 @@ mod tests {
             generation: 0,
             cached_parse: None,
             cached_tsc_extract: None,
+            cached_evaluated_types: None,
         };
         for i in 0..n_slots {
             entry.compile_slots.insert(

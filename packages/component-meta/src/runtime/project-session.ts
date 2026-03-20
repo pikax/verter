@@ -74,6 +74,19 @@ export class ProjectSession {
     return this._nativeSession.resolveImportedTypes(canonicalId);
   }
 
+  /**
+   * Evaluate type annotations for a file using the native lightweight evaluator.
+   * Returns parsed JSON or null if no evaluable types.
+   */
+  evaluateTypes(canonicalId: string): unknown | null {
+    this.ensureOpen();
+    this.engine.markActivity();
+    if (typeof this._nativeSession.evaluateTypes !== "function") return null;
+    const json = this._nativeSession.evaluateTypes(canonicalId);
+    if (json === null || json === undefined) return null;
+    return JSON.parse(json);
+  }
+
   getEffectiveSource(canonicalId: string): string | undefined {
     this.ensureOpen();
     // Check session overlay first (in-memory)

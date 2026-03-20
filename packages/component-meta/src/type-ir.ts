@@ -66,9 +66,19 @@ export interface ObjectProperty {
   optional: boolean;
 }
 
+export interface ObjectIndexSignature {
+  keyName: string;
+  keyType: TypeDescriptor;
+  valueType: TypeDescriptor;
+  readonly?: boolean;
+}
+
 export interface ObjectType {
   kind: "object";
   properties: ObjectProperty[];
+  indexSignatures?: ObjectIndexSignature[];
+  callSignatures?: FunctionType[];
+  constructSignatures?: FunctionType[];
 }
 
 // ── Function ─────────────────────────────────────────────────────
@@ -156,8 +166,23 @@ export function tuple(elements: TypeDescriptor[]): TupleType {
   return { kind: "tuple", elements };
 }
 
-export function object(properties: ObjectProperty[]): ObjectType {
-  return { kind: "object", properties };
+export function object(
+  properties: ObjectProperty[],
+  options?: {
+    indexSignatures?: ObjectIndexSignature[];
+    callSignatures?: FunctionType[];
+    constructSignatures?: FunctionType[];
+  },
+): ObjectType {
+  return {
+    kind: "object",
+    properties,
+    ...(options?.indexSignatures?.length ? { indexSignatures: options.indexSignatures } : {}),
+    ...(options?.callSignatures?.length ? { callSignatures: options.callSignatures } : {}),
+    ...(options?.constructSignatures?.length
+      ? { constructSignatures: options.constructSignatures }
+      : {}),
+  };
 }
 
 export function func(parameters: FunctionParameter[], returnType: TypeDescriptor): FunctionType {
