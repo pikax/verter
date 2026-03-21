@@ -86,6 +86,10 @@ pub use id::resolve_external;
 use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
 
+const DEEP_EXPANSION_INHERIT_CONFIG: u8 = 0;
+const DEEP_EXPANSION_DISABLED: u8 = 1;
+const DEEP_EXPANSION_ENABLED: u8 = 2;
+
 /// Central file store and compile cache for Vue SFC compilation.
 ///
 /// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
@@ -125,6 +129,20 @@ pub struct VerterHost {
     /// Scheduler owns raw source + analysis; this cache owns per-profile state.
     #[cfg(feature = "scheduler")]
     pub(crate) compile_cache: dashmap::DashMap<String, CompileCacheEntry>,
+    /// Provenance counters for component-meta observability.
+    /// Shared with sessions via `Arc`.
+    pub(crate) provenance: Arc<MetaProvenance>,
+    /// Runtime override for `deep_macro_resolution_type`.
+    /// Allows the LSP to override deep expansion after host construction
+    /// (the setting arrives via initializationOptions, after the host is created).
+    /// Encoded as inherit/disabled/enabled so runtime config can override
+    /// the static host config in both directions.
+    pub(crate) deep_expansion_override: std::sync::atomic::AtomicU8,
+    /// Host-level shared resolved external type cache.
+    /// Keyed by (dep_canonical_id, dep_source_hash, type_name, resolve_kind).
+    /// Bounded to RESOLVED_TYPE_CACHE_CAP entries; cleared on close/clear_compile_cache.
+    pub(crate) resolved_type_cache:
+        parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -171,6 +189,11 @@ impl VerterHost {
             scheduler,
             #[cfg(feature = "scheduler")]
             compile_cache: dashmap::DashMap::new(),
+            provenance: Arc::new(MetaProvenance::default()),
+            resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            deep_expansion_override: std::sync::atomic::AtomicU8::new(
+                DEEP_EXPANSION_INHERIT_CONFIG,
+            ),
         }
     }
 
@@ -190,6 +213,11 @@ impl VerterHost {
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
+            provenance: Arc::new(MetaProvenance::default()),
+            resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            deep_expansion_override: std::sync::atomic::AtomicU8::new(
+                DEEP_EXPANSION_INHERIT_CONFIG,
+            ),
         }
     }
 
@@ -223,6 +251,42 @@ impl VerterHost {
     /// automatically reads through the new workspace after this call.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) {
         *self.workspace.write() = workspace;
+    }
+
+    /// Access provenance counters for component-meta observability.
+    pub fn provenance(&self) -> &Arc<MetaProvenance> {
+        &self.provenance
+    }
+
+    /// Enable or disable deep component-meta type expansion at runtime.
+    ///
+    /// This override takes effect for subsequent `get_analysis()` and
+    /// `get_component_meta()` calls. It is an atomic flag, safe to call
+    /// from the LSP after host construction.
+    pub fn set_deep_expansion(&self, enabled: bool) {
+        self.deep_expansion_override.store(
+            if enabled {
+                DEEP_EXPANSION_ENABLED
+            } else {
+                DEEP_EXPANSION_DISABLED
+            },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Whether deep macro resolution / component-meta expansion is active.
+    ///
+    /// Runtime override wins when set; otherwise the static config applies.
+    pub(crate) fn deep_expansion_enabled(&self) -> bool {
+        match self
+            .deep_expansion_override
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            DEEP_EXPANSION_INHERIT_CONFIG => self.config.deep_macro_resolution_type,
+            DEEP_EXPANSION_DISABLED => false,
+            DEEP_EXPANSION_ENABLED => true,
+            _ => self.config.deep_macro_resolution_type,
+        }
     }
 
     /// Clone the workspace Arc for internal use.
@@ -475,6 +539,7 @@ impl VerterHost {
                 entry.raw_template_analysis = None;
                 entry.cached_tsc_extract = None;
                 entry.cached_evaluated_types = None;
+                entry.cached_enriched_analysis = None;
             }
         }
         #[cfg(not(feature = "scheduler"))]
@@ -484,8 +549,10 @@ impl VerterHost {
                 entry.compile_slots.clear();
                 entry.template_analysis = None;
                 entry.cached_evaluated_types = None;
+                entry.cached_enriched_analysis = None;
             }
         }
+        self.resolved_type_cache.lock().clear();
     }
 
     /// Release all cached data (files, aliases, dependency graph).
@@ -532,6 +599,8 @@ impl VerterHost {
             self.scheduler.reset();
             self.scheduler.restart_driver();
         }
+        self.resolved_type_cache.lock().clear();
+        self.provenance.reset();
     }
 
     /// Configure project-scoped path alias resolution.
@@ -727,6 +796,7 @@ impl VerterHost {
             cc.cached_tsc_extract = None;
             cc.raw_template_analysis = None;
             cc.cached_evaluated_types = None;
+            cc.cached_enriched_analysis = None;
         }
     }
 

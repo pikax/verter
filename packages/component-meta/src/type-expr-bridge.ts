@@ -24,6 +24,7 @@ import {
 /** Mirrors `EvaluatedComponentTypes` from Rust. */
 export interface NativeEvaluatedTypes {
   props?: NativeEvaluatedField[];
+  defineProps?: NativeEvaluatedMacroProps[];
   emits?: NativeEvaluatedField[];
   slotBindings?: NativeEvaluatedField[];
   bindings?: NativeEvaluatedField[];
@@ -32,6 +33,12 @@ export interface NativeEvaluatedTypes {
 export interface NativeEvaluatedField {
   name: string;
   type: NativeTypeExpr;
+  optional?: boolean;
+}
+
+export interface NativeEvaluatedMacroProps {
+  macroIndex: number;
+  fields: NativeEvaluatedField[];
 }
 
 /**

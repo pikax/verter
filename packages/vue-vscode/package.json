@@ -300,6 +300,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "**Experimental**: Enforce strict type checking for slot children. When a component defines typed slots via `defineSlots()`, only matching children types are accepted. See [RFC #733](https://github.com/vuejs/rfcs/discussions/733)."
+        },
+        "verter.experimental.deepComponentMetaExpansion": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Experimental**: Enable deep cross-file type expansion for component metadata. When enabled, `get_analysis()` enriches macro types by resolving imported type definitions through the workspace. Changing this setting restarts the language server."
         }
       }
     },

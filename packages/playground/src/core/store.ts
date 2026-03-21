@@ -89,6 +89,33 @@ export interface Store extends StoreState {
   requestRevealSpan(start: number, end: number): void;
 }
 
+function normalizeOutputMode(mode: string | undefined): OutputMode {
+  switch (mode) {
+    case "js":
+    case "css":
+    case "tsc":
+    case "types":
+      return "files";
+    case "componentMeta":
+      return "analysis";
+    case "preview":
+    case "ssr":
+    case "analysis":
+    case "lint":
+    case "outline":
+    case "files":
+    case "cssMatch":
+    case "map":
+    case "diagnostics":
+    case "templateAst":
+    case "cssVarFlow":
+    case "depGraph":
+      return mode;
+    default:
+      return "preview";
+  }
+}
+
 export function useStore(): Store {
   const files: Ref<Record<string, File>> = ref({});
   const activeFilename = ref("App.vue");
@@ -156,17 +183,7 @@ export function useStore(): Store {
         activeFilename.value = savedState.activeFile;
       }
       if (savedState.outputMode) {
-        // Redirect removed tabs from old URLs
-        if (
-          savedState.outputMode === "js" ||
-          savedState.outputMode === "css" ||
-          savedState.outputMode === "tsc" ||
-          savedState.outputMode === "types"
-        ) {
-          outputMode.value = "files";
-        } else {
-          outputMode.value = savedState.outputMode;
-        }
+        outputMode.value = normalizeOutputMode(savedState.outputMode);
       }
       if (savedState.compilerOptions) {
         Object.assign(compilerOptions, savedState.compilerOptions);
@@ -326,12 +343,7 @@ export function useStore(): Store {
   }
 
   function setOutputMode(mode: OutputMode) {
-    // Redirect removed tabs to files
-    if (mode === "js" || mode === "css" || mode === "tsc" || mode === "types") {
-      outputMode.value = "files";
-    } else {
-      outputMode.value = mode;
-    }
+    outputMode.value = normalizeOutputMode(mode);
   }
 
   function toggleDarkMode() {
@@ -423,7 +435,7 @@ export function useStore(): Store {
     } else {
       activeFilename.value = mainFile.value;
     }
-    if (state.outputMode) outputMode.value = state.outputMode;
+    outputMode.value = normalizeOutputMode(state.outputMode);
     if (state.compilerOptions) Object.assign(compilerOptions, state.compilerOptions);
     if (state.vueVersion) {
       const defaults = getDefaultImportMap(state.vueVersion);

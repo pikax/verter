@@ -1,16 +1,68 @@
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import {
   ComponentMetaChecker,
+  createChecker,
+  createCheckerByJson,
   mapPropMeta,
   mapEventMeta,
   mapSlotMeta,
   mapExposedMeta,
   mapComponentMeta,
 } from "./checker.js";
-import { createNapiAdapter } from "../host-adapter.js";
+import { openMetaProject } from "../project.js";
+import { getMetaRuntime, shutdownMetaRuntime } from "../runtime/index.js";
 import { primitive, unknown } from "../type-ir.js";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
+
+let nextProjectRootId = 1;
+
+async function createRuntimeChecker(name = "component-meta-checker"): Promise<ComponentMetaChecker> {
+  const projectRoot = resolve(
+    process.env.TEMP ?? "/tmp",
+    `${name}-${nextProjectRootId++}`,
+  );
+  return createCheckerByJson(projectRoot, {});
+}
+
+function nativeMetaPayload(filePath: string) {
+  return {
+    filePath,
+    optionsApi: false,
+    props: [
+      {
+        name: "label",
+        type: { kind: "primitive", name: "string" },
+        rawType: "string",
+        required: true,
+        hasDefault: false,
+      },
+    ],
+    events: [],
+    slots: [],
+    models: [],
+    exposed: [],
+    components: [],
+    templateRefs: [],
+    imports: [],
+    bindings: [],
+    vueApiCalls: [],
+    styles: [],
+    flags: {
+      asyncSetup: false,
+      hasReactiveState: false,
+      hasComputed: false,
+      hasWatchers: false,
+      hasLifecycleHooks: false,
+      hasProvide: false,
+      hasInject: false,
+      hasInheritAttrsFalse: false,
+      hasStoreUsage: false,
+    },
+  };
+}
 
 // ── Mapper unit tests ───────────────────────────────────────────────
 
@@ -165,45 +217,44 @@ describe("mapComponentMeta", () => {
 // ── Checker integration tests ───────────────────────────────────────
 
 describe("ComponentMetaChecker", () => {
-  it("reuses a single analysis snapshot within one getComponentMeta call", async () => {
-    const rawSnapshot = {
-      imports: [],
-      bindings: [],
-      macros: [
-        {
-          kind: "DefineProps",
-          isTypeBased: true,
-          typeReferences: ["Props"],
-          hasInheritAttrsFalse: false,
-          propFields: [
-            {
-              name: "label",
-              typeAnnotation: "string",
-              spanStart: 0,
-              spanEnd: 0,
-            },
-          ],
-          spanStart: 0,
-          spanEnd: 0,
-        },
-      ],
-      macroTypeDeps: [],
-      scriptFlags: 1 << 1,
-      styles: [],
-      template: null,
-      optionsApi: null,
-      vueApiCalls: [],
+  it("uses the native component-meta query instead of rebuilding from analysis snapshots", async () => {
+    const getAnalysis = vi.fn(() => {
+      throw new Error("legacy getAnalysis should not be called");
+    });
+    const resolveImportedTypes = vi.fn(() => {
+      throw new Error("legacy resolveImportedTypes should not be called");
+    });
+    const evaluateTypes = vi.fn(() => {
+      throw new Error("legacy evaluateTypes should not be called");
+    });
+    const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
+    const session = {
+      closed: false,
+      engine: { state: "active" as const },
+      upsert() {},
+      delete() {},
+      getComponentMeta,
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
     };
-    const getAnalysis = vi.fn(() => rawSnapshot);
     const checker = new ComponentMetaChecker(
       {
         upsert: vi.fn(),
         getAnalysis,
-        resolveImportedTypes: vi.fn(() => null),
-        evaluateTypes: vi.fn(() => null),
+        resolveImportedTypes,
+        evaluateTypes,
       },
       "/tmp",
       {},
+      session as any,
     );
 
     checker.updateFile(
@@ -213,12 +264,188 @@ describe("ComponentMetaChecker", () => {
     const meta = await checker.getComponentMeta("Single.vue");
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
-    expect(getAnalysis).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getAnalysis).not.toHaveBeenCalled();
+    expect(resolveImportedTypes).not.toHaveBeenCalled();
+    expect(evaluateTypes).not.toHaveBeenCalled();
+  });
+
+  it("createCheckerByJson reuses one pooled engine across include differences in selective-loading mode", async () => {
+    shutdownMetaRuntime();
+    const runtime = getMetaRuntime();
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `checker-pool-include-${nextProjectRootId++}`,
+    );
+
+    const checkerA = await createCheckerByJson(projectRoot, {
+      include: ["src/A.vue"],
+      compilerOptions: { baseUrl: "." },
+    });
+    const checkerB = await createCheckerByJson(projectRoot, {
+      include: ["src/B.vue"],
+      compilerOptions: { baseUrl: "." },
+    });
+
+    expect(runtime.engineCount).toBe(1);
+    expect(runtime.diagnostics.enginesCreated).toBe(1);
+    expect(runtime.diagnostics.enginesReused).toBe(1);
+
+    checkerA.close();
+    checkerB.close();
+    shutdownMetaRuntime();
+  });
+
+  it("createChecker reuses one pooled engine for repeated tsconfig opens", async () => {
+    shutdownMetaRuntime();
+    const runtime = getMetaRuntime();
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-pooled-"));
+    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "tsconfig.json"),
+      JSON.stringify({
+        include: ["src/**/*.vue"],
+        compilerOptions: { baseUrl: "." },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(projectRoot, "src", "App.vue"),
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+      "utf8",
+    );
+
+    const checkerA = await createChecker(resolve(projectRoot, "tsconfig.json"));
+    const checkerB = await createChecker(resolve(projectRoot, "tsconfig.json"));
+
+    expect(runtime.engineCount).toBe(1);
+    expect(runtime.diagnostics.enginesCreated).toBe(1);
+    expect(runtime.diagnostics.enginesReused).toBe(1);
+
+    checkerA.close();
+    checkerB.close();
+    shutdownMetaRuntime();
+  });
+
+  it("createChecker and openMetaProject share one pooled engine for the same tsconfig", async () => {
+    shutdownMetaRuntime();
+    const runtime = getMetaRuntime();
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-project-shared-"));
+    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "tsconfig.json"),
+      JSON.stringify({
+        include: ["src/**/*.vue"],
+        compilerOptions: { baseUrl: "." },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(projectRoot, "src", "App.vue"),
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+      "utf8",
+    );
+
+    const checker = await createChecker(resolve(projectRoot, "tsconfig.json"));
+    const project = await openMetaProject({
+      root: projectRoot,
+      tsconfig: resolve(projectRoot, "tsconfig.json"),
+    });
+
+    expect(runtime.engineCount).toBe(1);
+    expect(runtime.diagnostics.enginesCreated).toBe(1);
+    expect(runtime.diagnostics.enginesReused).toBe(1);
+
+    checker.close();
+    project.close();
+    shutdownMetaRuntime();
+  });
+
+  // @ai-generated - Verifies the public drop-in compat entrypoint creates its own workspace.
+  it("createChecker accepts a tsconfig path without an injected workspace", async () => {
+    shutdownMetaRuntime();
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-tsconfig-"));
+    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "tsconfig.json"),
+      JSON.stringify({
+        include: ["src/**/*.vue"],
+        compilerOptions: { baseUrl: "." },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(projectRoot, "src", "App.vue"),
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+      "utf8",
+    );
+
+    const checker = await createChecker(resolve(projectRoot, "tsconfig.json"));
+    const meta = await checker.getComponentMeta("./src/App.vue");
+
+    expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
+
+    checker.close();
+    shutdownMetaRuntime();
+  });
+
+  it("promotes lazy workspace files into the shared native project", async () => {
+    const canonicalId = resolve("/tmp", "Lazy.vue")
+      .replace(/\\/g, "/")
+      .replace(/^([A-Z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
+    const ensureBaseFile = vi.fn(() => true);
+    const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
+    const workspace = {
+      readFile: vi.fn(async () => {
+        throw new Error("JS workspace read should not be used for lazy native loading");
+      }),
+      fileExists: vi.fn(async () => true),
+      isDir: vi.fn(async () => false),
+      readDir: vi.fn(async () => []),
+      walk: vi.fn(async () => []),
+      configureProjects: vi.fn(),
+    };
+    const checker = new ComponentMetaChecker(
+      {
+        upsert: vi.fn(),
+        getAnalysis: vi.fn(),
+      },
+      "/tmp",
+      {},
+      {
+        closed: false,
+        engine: { state: "active" as const },
+        upsert: vi.fn(),
+        delete: vi.fn(),
+        ensureBaseFile,
+        getComponentMeta,
+        getEffectiveSource(id: string) {
+          if (id === canonicalId && ensureBaseFile.mock.calls.length > 0) {
+            return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+          }
+          return undefined;
+        },
+        hasFile() {
+          return false;
+        },
+        trackedFileIds() {
+          return [];
+        },
+        close() {},
+      } as any,
+      workspace as any,
+    );
+
+    const meta = await checker.getComponentMeta("Lazy.vue");
+
+    expect(ensureBaseFile).toHaveBeenCalledWith(canonicalId);
+    expect(workspace.readFile).not.toHaveBeenCalled();
+    expect(getComponentMeta).toHaveBeenCalledWith(canonicalId);
+    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
 
   it("getComponentMeta returns Volar-shaped output", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-volar-shape");
 
     const source = `<script setup lang="ts">
 /** The label text */
@@ -276,14 +503,12 @@ defineEmits<{
   });
 
   it("getExportNames returns ['default'] for SFC", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-export-names");
     expect(await checker.getExportNames("Test.vue")).toEqual(["default"]);
   });
 
   it("updateFile is reflected in next getComponentMeta", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-update-file");
 
     checker.updateFile(
       "Test.vue",
@@ -302,8 +527,7 @@ defineEmits<{
   });
 
   it("deleteFile clears metadata", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-delete-file");
 
     checker.updateFile(
       "Test.vue",
@@ -332,6 +556,9 @@ defineEmits<{
       engine: { state: "active" as const },
       upsert() {},
       delete() {},
+      getComponentMeta() {
+        return null;
+      },
       getAnalysis() {
         return null;
       },
@@ -372,14 +599,21 @@ defineEmits<{
   });
 
   it("getProgram throws", () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = new ComponentMetaChecker(
+      {
+        upsert() {},
+        getAnalysis() {
+          return null;
+        },
+      },
+      "/tmp",
+      {},
+    );
     expect(() => checker.getProgram()).toThrow();
   });
 
   it("runtime defineProps preserves JSDoc descriptions and tags", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-runtime-props");
 
     const source = `<script setup lang="ts">
 defineProps({
@@ -418,8 +652,7 @@ defineProps({
   });
 
   it("enum schema uses array format (Volar parity)", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-enum-schema");
 
     const source = `<script setup lang="ts">
 defineProps<{
@@ -443,18 +676,15 @@ defineProps<{
   });
 
   it("resolves imported type interfaces from dependency .ts files", async () => {
-    const adapter = createNapiAdapter();
     // Use resolve() to get consistent absolute paths on all platforms
-    const projectRoot = resolve(process.env.TEMP ?? "/tmp", "verter-test-crossfile");
-    const checker = new ComponentMetaChecker(adapter, projectRoot, {});
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-crossfile-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
 
     // Upsert the .ts dependency as non-SFC using resolved path
-    const typesPath = resolve(projectRoot, "types.ts");
-    adapter.upsert({
-      inputId: typesPath,
-      source: "export interface ButtonProps { label: string; size?: number }",
-      fileKind: "non_sfc",
-    });
+    checker.updateFile("types.ts", "export interface ButtonProps { label: string; size?: number }");
 
     // Upsert the .vue file that imports from the dependency
     checker.updateFile(
@@ -481,8 +711,7 @@ defineProps<ButtonProps>()
 
   // ReturnType<typeof fn> resolved by native evaluator via body inference.
   it("expands ReturnType utility props into structured object schema", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-return-type");
 
     checker.updateFile(
       "ReturnType.vue",
@@ -516,8 +745,7 @@ defineProps<{
 
   // Pick/Omit resolved by the native lightweight evaluator.
   it("expands Pick and Omit utility props into narrowed object schemas", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-pick-omit");
 
     checker.updateFile(
       "PickOmit.vue",
@@ -569,20 +797,20 @@ defineProps<{
   });
 
   it("expands utilities that target imported types", async () => {
-    const adapter = createNapiAdapter();
-    const projectRoot = resolve(process.env.TEMP ?? "/tmp", "verter-test-imported-utilities");
-    const checker = new ComponentMetaChecker(adapter, projectRoot, {});
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-imported-utilities-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
 
-    const typesPath = resolve(projectRoot, "types.ts");
-    adapter.upsert({
-      inputId: typesPath,
-      source: `export interface ImportedUser {
+    checker.updateFile(
+      "types.ts",
+      `export interface ImportedUser {
   id: number
   name: string
   password: string
 }`,
-      fileKind: "non_sfc",
-    });
+    );
 
     checker.updateFile(
       "ImportedPick.vue",
@@ -614,8 +842,7 @@ defineProps<{
   });
 
   it("preserves index signature text inside intersection schemas", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-index-signature");
 
     checker.updateFile(
       "Typed.vue",
@@ -653,8 +880,7 @@ defineProps<{
   });
 
   it("Options API props preserve JSDoc descriptions and tags", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("checker-options-api");
 
     const source = `<script>
 import { defineComponent } from 'vue'

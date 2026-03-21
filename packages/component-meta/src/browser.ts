@@ -1,9 +1,8 @@
 /**
  * Browser-safe entry point for @verter/component-meta.
  *
- * Excludes host-adapter (which depends on @verter/native) so this can be
- * used in browser contexts like the playground without pulling in Node.js
- * native bindings.
+ * Excludes Node.js runtime/session APIs so this can be used in browser
+ * contexts like the playground without pulling in native bindings.
  */
 
 // Core types
@@ -61,9 +60,6 @@ export {
   unknown,
 } from "./type-ir.js";
 
-// Resolver (legacy — native evaluator preferred when available)
-export { parseType, runtimeTypeToDescriptor } from "./resolver.js";
-
 // Native type evaluation bridge
 export { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";
 export type {
@@ -71,6 +67,3 @@ export type {
   NativeEvaluatedField,
   NativeTypeExpr,
 } from "./type-expr-bridge.js";
-
-// Extractor (snapshotToMeta only — no extractComponentMeta which needs adapter)
-export { snapshotToMeta } from "./extractor.js";

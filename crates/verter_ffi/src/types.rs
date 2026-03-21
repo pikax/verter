@@ -440,3 +440,214 @@ pub struct FfiElementMatch {
     /// Match result: "match", "maybe", or "no".
     pub result: String,
 }
+
+// =============================================================================
+// Component-meta result types (Rust → JS)
+// =============================================================================
+
+/// NAPI/WASM boundary DTO for component metadata.
+/// Derived from `ComponentMetaAnalysis` in `verter_analysis::component_meta`.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentMeta {
+    pub props: Vec<FfiPropMeta>,
+    pub events: Vec<FfiEventMeta>,
+    pub slots: Vec<FfiSlotMeta>,
+    pub models: Vec<FfiModelMeta>,
+    pub exposed: Vec<FfiExposedMeta>,
+    pub type_registry: Vec<FfiResolvedTypeMeta>,
+    pub components: Vec<FfiComponentUsage>,
+    pub template_refs: Vec<FfiTemplateRefMeta>,
+    pub imports: Vec<FfiImportMeta>,
+    pub bindings: Vec<FfiBindingMeta>,
+    pub vue_api_calls: Vec<FfiVueApiCallMeta>,
+    pub styles: Vec<FfiStyleMeta>,
+    pub flags: FfiComponentMetaFlags,
+    pub options_api: bool,
+    pub file_path: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPropMeta {
+    pub name: String,
+    /// Structured type IR (passes through unchanged — TypeExpr implements Serialize).
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
+    pub required: bool,
+    pub has_default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiEventMeta {
+    pub name: String,
+    pub payload: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiSlotMeta {
+    pub name: String,
+    pub is_scoped: bool,
+    pub bindings: Vec<FfiSlotBindingMeta>,
+    pub is_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiSlotBindingMeta {
+    pub name: String,
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiModelMeta {
+    pub name: String,
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiExposedMeta {
+    pub name: String,
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedTypeMeta {
+    pub name: String,
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentUsage {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_source: Option<String>,
+    pub is_dynamic: bool,
+    pub props: Vec<FfiComponentPropUsage>,
+    pub slots_used: Vec<String>,
+    pub static_classes: Vec<String>,
+    pub has_dynamic_class: bool,
+    pub v_models: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentPropUsage {
+    pub name: String,
+    pub is_bound: bool,
+    pub constness: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiTemplateRefMeta {
+    pub name: String,
+    pub is_dynamic: bool,
+    pub target_tag: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiImportMeta {
+    pub source: String,
+    pub is_type_only: bool,
+    pub bindings: Vec<FfiImportBindingMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiImportBindingMeta {
+    pub name: String,
+    pub is_type_only: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiBindingMeta {
+    pub name: String,
+    pub kind: String,
+    pub reactivity_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
+    pub used_in_template: bool,
+    pub used_in_style: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiVueApiCallMeta {
+    pub api: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arg_value: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiStyleMeta {
+    pub lang: String,
+    pub scoped: bool,
+    pub is_module: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_name: Option<String>,
+    pub classes: Vec<String>,
+    pub ids: Vec<String>,
+    pub custom_properties: Vec<String>,
+    pub v_binds: Vec<String>,
+    pub selectors: Vec<FfiSelectorMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiSelectorMeta {
+    pub text: String,
+    pub specificity: (u32, u32, u32),
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentMetaFlags {
+    pub async_setup: bool,
+    pub has_reactive_state: bool,
+    pub has_computed: bool,
+    pub has_watchers: bool,
+    pub has_lifecycle_hooks: bool,
+    pub has_provide: bool,
+    pub has_inject: bool,
+    pub has_inherit_attrs_false: bool,
+    pub has_store_usage: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiJsdocTag {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}

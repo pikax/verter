@@ -366,6 +366,7 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
             ) {
                 file.compile_slots.clear();
                 file.cached_evaluated_types = None;
+                file.cached_enriched_analysis = None;
             }
         }
     }
@@ -413,6 +414,7 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
             if should_clear {
                 cc.compile_slots.clear();
                 cc.cached_evaluated_types = None;
+                cc.cached_enriched_analysis = None;
             }
             cc.resolved_type_hashes = view.resolved_type_hashes;
         }
@@ -523,6 +525,7 @@ pub(crate) fn smart_invalidate_dependents(
             ) {
                 file.compile_slots.clear();
                 file.cached_evaluated_types = None;
+                file.cached_enriched_analysis = None;
             }
         }
     }

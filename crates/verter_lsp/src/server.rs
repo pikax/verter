@@ -3895,33 +3895,39 @@ impl LanguageServer for VerterLanguageServer {
                     if enabled { "enabled" } else { "disabled" }
                 );
             }
-            // Read experimental.conditionalRootNarrowing setting (default: false)
-            if let Some(enabled) = opts
-                .get("experimental")
-                .and_then(|v| v.get("conditionalRootNarrowing"))
-                .and_then(|v| v.as_bool())
-            {
-                self.documents
-                    .tsx_profile
-                    .write()
-                    .conditional_root_narrowing = enabled;
-                tracing::info!(
-                    "conditional root narrowing: {}",
-                    if enabled { "enabled" } else { "disabled" }
-                );
-            }
-            // Read experimental.strictSlots setting (default: false)
-            if let Some(enabled) = opts
-                .get("experimental")
-                .and_then(|v| v.get("strictSlots"))
-                .and_then(|v| v.as_bool())
-            {
-                self.documents.tsx_profile.write().strict_slots = enabled;
-                tracing::info!(
-                    "strict slots: {}",
-                    if enabled { "enabled" } else { "disabled" }
-                );
-            }
+            let experimental = crate::config::parse_experimental_init_options(opts);
+            self.documents
+                .tsx_profile
+                .write()
+                .conditional_root_narrowing = experimental.conditional_root_narrowing;
+            tracing::info!(
+                "conditional root narrowing: {}",
+                if experimental.conditional_root_narrowing {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            self.documents.tsx_profile.write().strict_slots = experimental.strict_slots;
+            tracing::info!(
+                "strict slots: {}",
+                if experimental.strict_slots {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            self.documents
+                .host()
+                .set_deep_expansion(experimental.deep_component_meta_expansion);
+            tracing::info!(
+                "deep component-meta expansion: {}",
+                if experimental.deep_component_meta_expansion {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
         }
 
         Ok(InitializeResult {

@@ -21,6 +21,8 @@ export function generateLeaseId(): LeaseId {
  */
 export interface NativeMetaProject {
   upsertBase(canonicalId: string, source: string | Buffer): void;
+  ensureLoaded(canonicalId: string): boolean;
+  refreshBase(canonicalId: string): boolean;
   configureProjects(projects: unknown[]): void;
   openSession(): NativeMetaSession;
   clearCaches(): void;
@@ -33,16 +35,16 @@ export interface NativeMetaProject {
 export interface NativeMetaSession {
   upsert(canonicalId: string, source: string | Buffer): void;
   delete(canonicalId: string): void;
-  getAnalysis(canonicalOrAlias: string): string | null;
-  resolveImportedTypes(canonicalOrAlias: string): string | null;
   getEffectiveSource(canonicalId: string): string | null;
   hasFile(canonicalId: string): boolean;
   trackedFileIds(): string[];
   close(): void;
   readonly isClosed: boolean;
   readonly overlayGeneration: number;
-  /** Evaluate type annotations using the native lightweight evaluator. Optional. */
-  evaluateTypes?(canonicalOrAlias: string): string | null;
+  /** Single native component-meta query — returns JSON with complete metadata. */
+  getComponentMeta(canonicalOrAlias: string): string | null;
+  /** Provenance counters for observability — returns JSON. */
+  getProvenance?(): string;
 }
 
 export class ProjectEngine {

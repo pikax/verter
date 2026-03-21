@@ -60,33 +60,6 @@ export class ProjectSession {
     this.engine.markActivity();
   }
 
-  getAnalysis(canonicalId: string): unknown | null {
-    this.ensureOpen();
-    this.engine.markActivity();
-    const json = this._nativeSession.getAnalysis(canonicalId);
-    if (json === null) return null;
-    return JSON.parse(json);
-  }
-
-  resolveImportedTypes(canonicalId: string): string | null {
-    this.ensureOpen();
-    this.engine.markActivity();
-    return this._nativeSession.resolveImportedTypes(canonicalId);
-  }
-
-  /**
-   * Evaluate type annotations for a file using the native lightweight evaluator.
-   * Returns parsed JSON or null if no evaluable types.
-   */
-  evaluateTypes(canonicalId: string): unknown | null {
-    this.ensureOpen();
-    this.engine.markActivity();
-    if (typeof this._nativeSession.evaluateTypes !== "function") return null;
-    const json = this._nativeSession.evaluateTypes(canonicalId);
-    if (json === null || json === undefined) return null;
-    return JSON.parse(json);
-  }
-
   getEffectiveSource(canonicalId: string): string | undefined {
     this.ensureOpen();
     // Check session overlay first (in-memory)
@@ -110,6 +83,48 @@ export class ProjectSession {
   trackedFileIds(): string[] {
     this.ensureOpen();
     return this._nativeSession.trackedFileIds();
+  }
+
+  /**
+   * Ensure a disk-backed file is loaded into the shared native base project.
+   */
+  ensureBaseFile(canonicalId: string): boolean {
+    this.ensureOpen();
+    this.engine.markActivity();
+    return this.engine.nativeProject.ensureLoaded(canonicalId);
+  }
+
+  /**
+   * Refresh a shared base file from the native workspace.
+   */
+  refreshBaseFile(canonicalId: string): boolean {
+    this.ensureOpen();
+    this.engine.markActivity();
+    return this.engine.nativeProject.refreshBase(canonicalId);
+  }
+
+  /**
+   * Single native component-meta query. Returns parsed JSON or null.
+   * Uses the native `getComponentMeta` method which combines enriched analysis
+   * + type evaluation in one call.
+   */
+  getComponentMeta(canonicalId: string): unknown | null {
+    this.ensureOpen();
+    this.engine.markActivity();
+    const json = this._nativeSession.getComponentMeta(canonicalId);
+    if (json === null || json === undefined) return null;
+    return JSON.parse(json);
+  }
+
+  /**
+   * Provenance counters for observability. Returns parsed JSON or null.
+   */
+  getProvenance(): Record<string, number> | null {
+    this.ensureOpen();
+    if (typeof this._nativeSession.getProvenance !== "function") return null;
+    const json = this._nativeSession.getProvenance();
+    if (!json) return null;
+    return JSON.parse(json);
   }
 
   /**

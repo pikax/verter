@@ -1483,10 +1483,13 @@ fn resolve_imported_type_from_dual_script_vue_dep() {
 #[test]
 fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
     let host = make_host();
+    // Use .vue extension so that VFS resolution can resolve the import.
+    // The test verifies that Vue SFC script extraction works for deps
+    // that are stored with VueSfc file kind.
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
-            input_id: "/types".to_string(),
+            input_id: "/types.vue".to_string(),
             source: Arc::from(
                 "<script setup lang=\"ts\">export interface Props { label: string }</script>\n<template><div /></template>",
             ),
@@ -1497,7 +1500,7 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
     upsert_vue(
         &host,
         "/Comp.vue",
-        "<script setup lang=\"ts\">\nimport type { Props } from './types'\ndefineProps<Props>()\n</script>\n<template><div /></template>",
+        "<script setup lang=\"ts\">\nimport type { Props } from './types.vue'\ndefineProps<Props>()\n</script>\n<template><div /></template>",
     );
 
     let types = host.resolve_imported_types("/Comp.vue");
@@ -1515,6 +1518,59 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
     assert!(
         !types[0].expanded.contains("<template>"),
         "expanded must NOT contain raw SFC markup, got: {}",
+        types[0].expanded
+    );
+}
+
+#[test]
+fn resolve_imported_types_uses_workspace_type_resolution_for_package_declarations() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/fancy/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+        Arc::from("export interface FancyProps { open: boolean; label?: string }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws);
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/Consumer.vue",
+        "<script setup lang=\"ts\">\nimport type { FancyProps } from 'fancy'\ndefineProps<FancyProps>()\n</script>\n<template><div /></template>",
+    );
+
+    let types = host.resolve_imported_types("/workspace/src/Consumer.vue");
+    assert_eq!(
+        types.len(),
+        1,
+        "resolve_imported_types should use the workspace/package resolver for package declarations, got: {types:?}"
+    );
+    assert_eq!(types[0].name, "FancyProps");
+    assert!(
+        types[0].expanded.contains("open"),
+        "expanded should contain fields from the package declaration entrypoint, got: {}",
+        types[0].expanded
+    );
+    assert!(
+        !types[0].expanded.contains("runtimeOnly"),
+        "expanded should come from the declaration entrypoint, not the runtime js file, got: {}",
         types[0].expanded
     );
 }

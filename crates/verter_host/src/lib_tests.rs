@@ -114,6 +114,7 @@ fn file_entry_from_snapshot(canonical_id: &str, src: &str, snap: &ParseSnapshot)
         cached_parse: None,
         cached_tsc_extract: None,
         cached_evaluated_types: None,
+        cached_enriched_analysis: None,
     }
 }
 
@@ -762,6 +763,7 @@ fn import_resolves_to_dep_non_relative_in_deps() {
         cached_parse: None,
         cached_tsc_extract: None,
         cached_evaluated_types: None,
+        cached_enriched_analysis: None,
     };
     let exts = vec![".ts".to_string()];
     assert!(import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -806,6 +808,7 @@ fn import_resolves_to_dep_non_relative_not_in_deps() {
         cached_parse: None,
         cached_tsc_extract: None,
         cached_evaluated_types: None,
+        cached_enriched_analysis: None,
     };
     let exts = vec![".ts".to_string()];
     assert!(!import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -844,6 +847,7 @@ fn import_resolves_to_dep_relative_exact() {
         cached_parse: None,
         cached_tsc_extract: None,
         cached_evaluated_types: None,
+        cached_enriched_analysis: None,
     };
     let exts = vec![".ts".to_string(), ".js".to_string()];
     assert!(import_resolves_to_dep(&entry, "./B", "/src/B", &exts));
@@ -886,6 +890,7 @@ fn import_resolves_to_dep_relative_extension_strip() {
         cached_parse: None,
         cached_tsc_extract: None,
         cached_evaluated_types: None,
+        cached_enriched_analysis: None,
     };
     let exts = vec![".ts".to_string(), ".js".to_string()];
     // ./types resolves to /src/types, dep is /src/types.ts

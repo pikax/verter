@@ -221,12 +221,17 @@ impl VerterHost {
                 cc.style_overrides.clear();
                 cc.cached_tsc_extract = None;
                 cc.cached_evaluated_types = None;
+                cc.cached_enriched_analysis = None;
+            }
+            if changes.changed {
+                cc.cached_enriched_analysis = None;
             }
             if changes.changed && changes.semantic_changed {
                 cc.compile_slots.clear();
                 cc.latest_diagnostics.clear();
                 cc.diagnostics_generation += 1;
                 cc.cached_evaluated_types = None;
+                cc.cached_enriched_analysis = None;
             }
             if changes.changed
                 && (changes.slice_changes.script_changed
@@ -236,6 +241,7 @@ impl VerterHost {
             {
                 cc.cached_tsc_extract = None;
                 cc.cached_evaluated_types = None;
+                cc.cached_enriched_analysis = None;
             }
             if whole_hash_changed || changes.semantic_changed {
                 cc.raw_template_analysis = None;
@@ -516,6 +522,7 @@ impl VerterHost {
                     cached_parse: None,
                     cached_tsc_extract: None,
                     cached_evaluated_types: None,
+                    cached_enriched_analysis: None,
                 });
 
             entry.file_kind = req.file_kind;
@@ -533,6 +540,9 @@ impl VerterHost {
             entry.export_signatures = new_export_signatures.clone();
             entry.style_analyses = Arc::new(snapshot.style_analyses);
             entry.cached_parse = cached_parse.map(Arc::new);
+            if changes.changed {
+                entry.cached_enriched_analysis = None;
+            }
             if changes.changed
                 && (changes.slice_changes.script_changed
                     || changes.slice_changes.structure_changed
@@ -541,6 +551,7 @@ impl VerterHost {
             {
                 entry.cached_tsc_extract = None;
                 entry.cached_evaluated_types = None;
+                entry.cached_enriched_analysis = None;
             }
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();

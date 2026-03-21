@@ -9,10 +9,7 @@ function mockNativeSession(): NativeMetaSession {
   return {
     upsert() {},
     delete() {},
-    getAnalysis() {
-      return null;
-    },
-    resolveImportedTypes() {
+    getComponentMeta() {
       return null;
     },
     getEffectiveSource() {
@@ -39,6 +36,12 @@ function mockNativeProject(): NativeMetaProject {
   let _shutdown = false;
   return {
     upsertBase() {},
+    ensureLoaded() {
+      return false;
+    },
+    refreshBase() {
+      return false;
+    },
     configureProjects() {},
     openSession: () => mockNativeSession(),
     clearCaches() {},
@@ -153,7 +156,7 @@ describe("MetaRuntime", () => {
 
     expect(() => session.upsert("test.vue", "source")).toThrow("Session is closed");
     expect(() => session.delete("test.vue")).toThrow("Session is closed");
-    expect(() => session.getAnalysis("test.vue")).toThrow("Session is closed");
+    expect(() => session.getComponentMeta("test.vue")).toThrow("Session is closed");
   });
 
   it("evictEngine shuts down and removes engine", async () => {

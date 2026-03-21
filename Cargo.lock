@@ -3510,6 +3510,7 @@ version = "0.0.1-beta.1"
 dependencies = [
  "serde",
  "verter_actions",
+ "verter_analysis",
  "verter_diagnostics",
  "verter_host",
  "verter_span",

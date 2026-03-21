@@ -1101,6 +1101,8 @@ pub(crate) struct FileEntry {
         Hash16,
         Arc<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
     )>,
+    /// Cached enriched analysis snapshot keyed by whole_hash.
+    pub(crate) cached_enriched_analysis: Option<(Hash16, Arc<FileAnalysisSnapshot>)>,
 }
 
 impl FileMeta {
@@ -1168,6 +1170,12 @@ pub(crate) struct CompileCacheEntry {
         Arc<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
     )>,
 
+    /// Cached enriched analysis snapshot keyed by whole_hash.
+    /// Populated by `get_analysis()` when `deep_macro_resolution_type` is enabled.
+    /// Reused by subsequent `get_analysis()` and `evaluate_types()` calls for the
+    /// same unchanged file to avoid redundant deep enrichment.
+    pub(crate) cached_enriched_analysis: Option<(Hash16, Arc<FileAnalysisSnapshot>)>,
+
     /// Raw template analysis (source-derived, profileless).
     /// Computed by compute_template_analysis_if_missing() from raw scheduler data.
     /// Always raw — never from overrides.
@@ -1233,6 +1241,175 @@ pub(crate) struct StyleOverrideWithAnalysis {
     /// Per-index: Some("css") for overridden blocks, None for raw.
     pub(crate) lang_overrides: Vec<Option<String>>,
     pub(crate) hash: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ResolvedExternalTypeCache — host-level shared resolved type cache
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Maximum entries in the host-level resolved external type cache.
+pub(crate) const RESOLVED_TYPE_CACHE_CAP: usize = 4096;
+
+/// Key for the host-level resolved external type cache.
+///
+/// Includes the dependency's source hash to guarantee freshness — when a
+/// dependency file changes, its hash changes and stale entries are never hit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedTypeCacheKey {
+    pub dep_canonical_id: String,
+    pub dep_source_hash: Hash16,
+    pub type_name: String,
+    pub resolve_kind: verter_vfs::ResolveRequestKind,
+}
+
+/// A resolved external type entry in the host-level cache.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedTypeCacheEntry {
+    pub resolved: Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MetaProvenance — per-host counters for component-meta observability
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Per-host provenance counters for component-meta observability.
+///
+/// AtomicU64 for thread-safe increment. Reset on host close. Not persisted.
+/// Host tests read counters directly via `host.provenance()`.
+pub struct MetaProvenance {
+    pub get_component_meta_calls: std::sync::atomic::AtomicU64,
+    pub component_meta_legacy_workflow_reentry: std::sync::atomic::AtomicU64,
+    pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,
+    pub get_analysis_calls: std::sync::atomic::AtomicU64,
+    pub get_analysis_deep_enrich_runs: std::sync::atomic::AtomicU64,
+    pub get_analysis_enriched_cache_hits: std::sync::atomic::AtomicU64,
+    pub evaluate_types_calls: std::sync::atomic::AtomicU64,
+    pub evaluate_types_reused_enriched_snapshot: std::sync::atomic::AtomicU64,
+    pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
+    pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
+}
+
+impl Default for MetaProvenance {
+    fn default() -> Self {
+        Self {
+            get_component_meta_calls: std::sync::atomic::AtomicU64::new(0),
+            component_meta_legacy_workflow_reentry: std::sync::atomic::AtomicU64::new(0),
+            component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64::new(0),
+            get_analysis_calls: std::sync::atomic::AtomicU64::new(0),
+            get_analysis_deep_enrich_runs: std::sync::atomic::AtomicU64::new(0),
+            get_analysis_enriched_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            evaluate_types_calls: std::sync::atomic::AtomicU64::new(0),
+            evaluate_types_reused_enriched_snapshot: std::sync::atomic::AtomicU64::new(0),
+            resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl std::fmt::Debug for MetaProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::sync::atomic::Ordering::Relaxed;
+        f.debug_struct("MetaProvenance")
+            .field(
+                "get_component_meta_calls",
+                &self.get_component_meta_calls.load(Relaxed),
+            )
+            .field(
+                "component_meta_legacy_workflow_reentry",
+                &self.component_meta_legacy_workflow_reentry.load(Relaxed),
+            )
+            .field(
+                "component_meta_resolved_state_recomputes",
+                &self.component_meta_resolved_state_recomputes.load(Relaxed),
+            )
+            .field("get_analysis_calls", &self.get_analysis_calls.load(Relaxed))
+            .field(
+                "get_analysis_deep_enrich_runs",
+                &self.get_analysis_deep_enrich_runs.load(Relaxed),
+            )
+            .field(
+                "get_analysis_enriched_cache_hits",
+                &self.get_analysis_enriched_cache_hits.load(Relaxed),
+            )
+            .field(
+                "evaluate_types_calls",
+                &self.evaluate_types_calls.load(Relaxed),
+            )
+            .field(
+                "evaluate_types_reused_enriched_snapshot",
+                &self.evaluate_types_reused_enriched_snapshot.load(Relaxed),
+            )
+            .field(
+                "resolved_external_type_cache_hits",
+                &self.resolved_external_type_cache_hits.load(Relaxed),
+            )
+            .field(
+                "resolved_external_type_cache_misses",
+                &self.resolved_external_type_cache_misses.load(Relaxed),
+            )
+            .finish()
+    }
+}
+
+impl MetaProvenance {
+    /// Return a point-in-time snapshot of all counters.
+    pub fn snapshot(&self) -> MetaProvenanceSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        MetaProvenanceSnapshot {
+            get_component_meta_calls: self.get_component_meta_calls.load(Relaxed),
+            component_meta_legacy_workflow_reentry: self
+                .component_meta_legacy_workflow_reentry
+                .load(Relaxed),
+            component_meta_resolved_state_recomputes: self
+                .component_meta_resolved_state_recomputes
+                .load(Relaxed),
+            get_analysis_calls: self.get_analysis_calls.load(Relaxed),
+            get_analysis_deep_enrich_runs: self.get_analysis_deep_enrich_runs.load(Relaxed),
+            get_analysis_enriched_cache_hits: self.get_analysis_enriched_cache_hits.load(Relaxed),
+            evaluate_types_calls: self.evaluate_types_calls.load(Relaxed),
+            evaluate_types_reused_enriched_snapshot: self
+                .evaluate_types_reused_enriched_snapshot
+                .load(Relaxed),
+            resolved_external_type_cache_hits: self.resolved_external_type_cache_hits.load(Relaxed),
+            resolved_external_type_cache_misses: self
+                .resolved_external_type_cache_misses
+                .load(Relaxed),
+        }
+    }
+
+    /// Reset all counters to zero.
+    pub fn reset(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.get_component_meta_calls.store(0, Relaxed);
+        self.component_meta_legacy_workflow_reentry
+            .store(0, Relaxed);
+        self.component_meta_resolved_state_recomputes
+            .store(0, Relaxed);
+        self.get_analysis_calls.store(0, Relaxed);
+        self.get_analysis_deep_enrich_runs.store(0, Relaxed);
+        self.get_analysis_enriched_cache_hits.store(0, Relaxed);
+        self.evaluate_types_calls.store(0, Relaxed);
+        self.evaluate_types_reused_enriched_snapshot
+            .store(0, Relaxed);
+        self.resolved_external_type_cache_hits.store(0, Relaxed);
+        self.resolved_external_type_cache_misses.store(0, Relaxed);
+    }
+}
+
+/// Serializable point-in-time snapshot of [`MetaProvenance`] counters.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaProvenanceSnapshot {
+    pub get_component_meta_calls: u64,
+    pub component_meta_legacy_workflow_reentry: u64,
+    pub component_meta_resolved_state_recomputes: u64,
+    pub get_analysis_calls: u64,
+    pub get_analysis_deep_enrich_runs: u64,
+    pub get_analysis_enriched_cache_hits: u64,
+    pub evaluate_types_calls: u64,
+    pub evaluate_types_reused_enriched_snapshot: u64,
+    pub resolved_external_type_cache_hits: u64,
+    pub resolved_external_type_cache_misses: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

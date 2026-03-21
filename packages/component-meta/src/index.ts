@@ -1,13 +1,13 @@
 /**
- * @verter/component-meta — Extract Vue component metadata with a generic Type IR.
+ * @verter/component-meta — session-backed Vue component metadata powered by native Verter.
  *
  * @example
  * ```ts
- * import { extractComponentMeta, createAdapter } from '@verter/component-meta'
+ * import { openMetaProject } from '@verter/component-meta'
  *
- * const adapter = createAdapter()
- * adapter.upsert({ inputId: 'MyComponent.vue', source: sfcSource })
- * const meta = extractComponentMeta(adapter, 'MyComponent.vue')
+ * const project = await openMetaProject({ root: '.', tsconfig: './tsconfig.json' })
+ * const meta = await project.getComponentMeta('./src/MyComponent.vue')
+ * project.close()
  * ```
  */
 
@@ -66,9 +66,6 @@ export {
   unknown,
 } from "./type-ir.js";
 
-// Resolver (legacy — native evaluator is preferred when available)
-export { parseType, runtimeTypeToDescriptor } from "./resolver.js";
-
 // Native type evaluation bridge
 export { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";
 export type {
@@ -76,19 +73,6 @@ export type {
   NativeEvaluatedField,
   NativeTypeExpr,
 } from "./type-expr-bridge.js";
-
-// Host adapter
-export type { VerterHostAdapter, HostUpsertRequest } from "./host-adapter.js";
-export {
-  wrapNapiHost,
-  wrapWasmHost,
-  createNapiAdapter,
-  createWasmAdapter,
-  createAdapter,
-} from "./host-adapter.js";
-
-// Extractor
-export { extractComponentMeta, snapshotToMeta } from "./extractor.js";
 
 // Pooled project API
 export { MetaProject, openMetaProject, evictMetaProject, shutdownMetaRuntime } from "./project.js";

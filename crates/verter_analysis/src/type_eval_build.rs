@@ -4,11 +4,11 @@
 //! symbol tables so the evaluator can resolve references.
 
 use oxc_ast::ast::{
-    ArrowFunctionExpression, BindingPattern, Class, ClassElement, Declaration,
-    ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinitionKind,
-    ObjectExpression, ObjectPropertyKind, Program, Statement, TSAccessibility,
-    TSInterfaceDeclaration, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
-    VariableDeclarationKind, VariableDeclarator,
+    Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement,
+    Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters, Function,
+    MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, Statement,
+    TSAccessibility, TSInterfaceDeclaration, TSSignature, TSTypeAliasDeclaration,
+    TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
 };
 
 use crate::type_eval::*;
@@ -681,6 +681,9 @@ pub struct EvaluatedComponentTypes {
     /// Evaluated prop types, keyed by prop name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub props: Vec<EvaluatedField>,
+    /// Evaluated full defineProps object shapes keyed by macro index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub define_props: Vec<EvaluatedMacroProps>,
     /// Evaluated emit payload types, keyed by event name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emits: Vec<EvaluatedField>,
@@ -700,6 +703,18 @@ pub struct EvaluatedField {
     pub name: String,
     /// The evaluated type expression.
     pub r#type: TypeExpr,
+    /// Whether the source field is optional.
+    #[serde(default)]
+    pub optional: bool,
+}
+
+/// Evaluated full prop object for a specific defineProps macro.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluatedMacroProps {
+    pub macro_index: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<EvaluatedField>,
 }
 
 /// Evaluate all type annotations in the given macros list.
@@ -713,7 +728,7 @@ pub fn evaluate_macro_types(
     source: &str,
 ) -> EvaluatedComponentTypes {
     let mut env = parse_and_build_env(source);
-    evaluate_macro_types_with_env(macros, &mut env)
+    evaluate_macro_types_with_env_and_source(macros, source, &mut env)
 }
 
 /// Evaluate all macro-backed type annotations with a caller-provided environment.
@@ -724,12 +739,34 @@ pub fn evaluate_macro_types_with_env(
     macros: &[crate::types::AnalyzedMacro],
     env: &mut EvalEnv,
 ) -> EvaluatedComponentTypes {
+    evaluate_macro_types_impl(macros, None, env)
+}
+
+/// Evaluate macro-backed type annotations and the full defineProps macro type.
+///
+/// Parses the source to recover each defineProps type parameter so callers can
+/// synthesize prop names even when `AnalyzedMacro.prop_fields` is empty or partial.
+pub fn evaluate_macro_types_with_env_and_source(
+    macros: &[crate::types::AnalyzedMacro],
+    source: &str,
+    env: &mut EvalEnv,
+) -> EvaluatedComponentTypes {
+    evaluate_macro_types_impl(macros, Some(source), env)
+}
+
+fn evaluate_macro_types_impl(
+    macros: &[crate::types::AnalyzedMacro],
+    source: Option<&str>,
+    env: &mut EvalEnv,
+) -> EvaluatedComponentTypes {
     use crate::type_eval::evaluate;
     use crate::type_expr_lower::parse_type_annotation;
 
     let mut result = EvaluatedComponentTypes::default();
+    let define_props_type_params = source.map(collect_define_props_type_params);
+    let mut define_props_index = 0usize;
 
-    for m in macros {
+    for (macro_index, m) in macros.iter().enumerate() {
         // Evaluate prop field types
         for field in &m.prop_fields {
             if let Some(ref type_ann) = field.type_annotation {
@@ -739,9 +776,37 @@ pub fn evaluate_macro_types_with_env(
                     result.props.push(EvaluatedField {
                         name: field.name.clone(),
                         r#type: evaluated,
+                        optional: field.is_optional,
                     });
                 }
             }
+        }
+
+        if m.kind == crate::types::AnalyzedMacroKind::DefineProps && m.is_type_based {
+            if let Some(type_params) = define_props_type_params.as_ref() {
+                if let Some(lowered) = type_params.get(define_props_index) {
+                    let evaluated = evaluate(lowered, env);
+                    if let TypeExpr::Object(obj) = evaluated {
+                        let mut fields = Vec::new();
+                        for member in obj.properties {
+                            if let ObjectMember::Property(prop) = member {
+                                fields.push(EvaluatedField {
+                                    name: prop.name.clone(),
+                                    r#type: prop.ty,
+                                    optional: prop.optional,
+                                });
+                            }
+                        }
+                        if !fields.is_empty() {
+                            result.define_props.push(EvaluatedMacroProps {
+                                macro_index,
+                                fields,
+                            });
+                        }
+                    }
+                }
+            }
+            define_props_index += 1;
         }
 
         // Evaluate emit payload types
@@ -753,6 +818,7 @@ pub fn evaluate_macro_types_with_env(
                     result.emits.push(EvaluatedField {
                         name: field.name.clone(),
                         r#type: evaluated,
+                        optional: false,
                     });
                 }
             }
@@ -768,6 +834,7 @@ pub fn evaluate_macro_types_with_env(
                         result.slot_bindings.push(EvaluatedField {
                             name: format!("{}.{}", slot.name, binding.name),
                             r#type: evaluated,
+                            optional: false,
                         });
                     }
                 }
@@ -790,9 +857,81 @@ pub fn evaluate_macro_types_with_env(
         result.bindings.push(EvaluatedField {
             name,
             r#type: evaluated,
+            optional: false,
         });
     }
 
+    result
+}
+
+fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn is_define_props_call(call: &CallExpression<'_>) -> bool {
+        matches!(&call.callee, Expression::Identifier(id) if id.name == "defineProps")
+    }
+
+    fn walk_expr(expr: &Expression<'_>, source: &str, result: &mut Vec<TypeExpr>) {
+        match expr {
+            Expression::CallExpression(call) => {
+                if is_define_props_call(call) {
+                    if let Some(type_args) = &call.type_arguments {
+                        if let Some(first) = type_args.params.first() {
+                            result.push(lower_ts_type(first, source));
+                        }
+                    }
+                }
+                walk_expr(&call.callee, source, result);
+                for arg in &call.arguments {
+                    if let Argument::SpreadElement(spread) = arg {
+                        walk_expr(&spread.argument, source, result);
+                    } else if let Some(inner) = arg.as_expression() {
+                        walk_expr(inner, source, result);
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(paren) => {
+                walk_expr(&paren.expression, source, result)
+            }
+            Expression::ConditionalExpression(cond) => {
+                walk_expr(&cond.test, source, result);
+                walk_expr(&cond.consequent, source, result);
+                walk_expr(&cond.alternate, source, result);
+            }
+            Expression::SequenceExpression(seq) => {
+                for inner in &seq.expressions {
+                    walk_expr(inner, source, result);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_stmt(stmt: &Statement<'_>, source: &str, result: &mut Vec<TypeExpr>) {
+        match stmt {
+            Statement::ExpressionStatement(expr_stmt) => {
+                walk_expr(&expr_stmt.expression, source, result)
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                for decl in &var_decl.declarations {
+                    if let Some(init) = &decl.init {
+                        walk_expr(init, source, result);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::ts();
+    let ret = Parser::new(&allocator, source, source_type).parse();
+    let mut result = Vec::new();
+    for stmt in &ret.program.body {
+        walk_stmt(stmt, source, &mut result);
+    }
     result
 }
 

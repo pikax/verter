@@ -24,6 +24,7 @@ vi.mock("./compiler", () => ({
 import { useStore, IMPORT_MAP_FILENAME, type Store } from "./store";
 import { relintFile } from "./compiler";
 import { File } from "./types";
+import { serializeToHash } from "./urlState";
 
 describe("store", () => {
   let store: Store;
@@ -232,6 +233,28 @@ describe("store", () => {
     it("redirects tsc to files", () => {
       store.setOutputMode("tsc");
       expect(store.outputMode).toBe("files");
+    });
+
+    it("redirects removed componentMeta to analysis", () => {
+      store.setOutputMode("componentMeta" as any);
+      expect(store.outputMode).toBe("analysis");
+      expect(store.outputMode).not.toBe("componentMeta");
+    });
+  });
+
+  describe("init", () => {
+    it("restores removed componentMeta output mode as analysis", async () => {
+      serializeToHash({
+        files: { "App.vue": "<template><div /></template>" },
+        activeFile: "App.vue",
+        outputMode: "componentMeta" as any,
+        compilerOptions: { isProduction: false, ssr: false, strictSlots: false },
+      });
+
+      await store.init();
+
+      expect(store.outputMode).toBe("analysis");
+      expect(store.outputMode).not.toBe("componentMeta");
     });
   });
 

@@ -56,6 +56,17 @@ fn log_snapshot_debug(
     ));
 }
 
+struct AnalysisSnapshotState {
+    snapshot: FileAnalysisSnapshot,
+    reused_enriched_snapshot: bool,
+}
+
+struct ResolvedComponentMetaState {
+    snapshot: FileAnalysisSnapshot,
+    evaluated_types: Option<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
+    reused_enriched_snapshot: bool,
+}
+
 impl VerterHost {
     fn build_eval_script_source(
         source: &str,
@@ -69,6 +80,7 @@ impl VerterHost {
         result: &verter_analysis::type_eval_build::EvaluatedComponentTypes,
     ) -> bool {
         result.props.is_empty()
+            && result.define_props.is_empty()
             && result.emits.is_empty()
             && result.slot_bindings.is_empty()
             && result.bindings.is_empty()
@@ -122,16 +134,25 @@ impl VerterHost {
         }
     }
 
-    fn current_source_with_fallback(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.get_source(canonical_id).or_else(|| {
-            for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
-                let with_ext = format!("{canonical_id}{ext}");
-                if let Some(source) = self.get_source(&with_ext) {
-                    return Some(source);
-                }
+    fn read_eval_dependency_source_with_fallback(&self, dep_canonical: &str) -> Option<String> {
+        if let Some(source) = self.read_dep_source_for_type_resolution(dep_canonical, None) {
+            return Some(source);
+        }
+
+        for candidate in [
+            format!("{dep_canonical}.d.ts"),
+            format!("{dep_canonical}.ts"),
+            format!("{dep_canonical}.tsx"),
+            format!("{dep_canonical}/index.d.ts"),
+            format!("{dep_canonical}/index.ts"),
+            format!("{dep_canonical}/index.tsx"),
+        ] {
+            if let Some(source) = self.read_dep_source_for_type_resolution(&candidate, None) {
+                return Some(source);
             }
-            None
-        })
+        }
+
+        None
     }
 
     fn imported_eval_inputs(
@@ -139,7 +160,7 @@ impl VerterHost {
         owner_canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-    ) -> Vec<(Arc<str>, Option<Arc<verter_core::parser::types::ParsedSfc>>)> {
+    ) -> Vec<String> {
         let mut seen = rustc_hash::FxHashSet::default();
         let mut inputs = Vec::new();
 
@@ -160,7 +181,6 @@ impl VerterHost {
                     .get(&dep.import_source)
                     .and_then(|resolution| resolution.resolved_canonical_id.clone())
             };
-
             let Some(dep_canonical) = dep_canonical else {
                 continue;
             };
@@ -168,36 +188,31 @@ impl VerterHost {
                 continue;
             }
 
-            let Some((source, cached_parse, _)) = self.current_eval_state(&dep_canonical) else {
-                let Some(source) = self.current_source_with_fallback(&dep_canonical) else {
-                    continue;
-                };
-                inputs.push((source, None));
+            let Some(source) = self.read_eval_dependency_source_with_fallback(&dep_canonical)
+            else {
                 continue;
             };
-            inputs.push((source, cached_parse));
+            inputs.push(source);
         }
 
         inputs
     }
 
-    pub fn evaluate_types(
+    fn try_get_cached_evaluated_types(
         &self,
-        canonical_or_alias: &str,
-    ) -> Option<verter_analysis::type_eval_build::EvaluatedComponentTypes> {
-        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let (source, cached_parse, whole_hash) = self.current_eval_state(&canonical)?;
-
+        canonical: &str,
+        whole_hash: Hash16,
+    ) -> Option<Option<verter_analysis::type_eval_build::EvaluatedComponentTypes>> {
         #[cfg(feature = "scheduler")]
-        if let Some(entry) = self.compile_cache.get(&canonical) {
+        if let Some(entry) = self.compile_cache.get(canonical) {
             if let Some((cached_hash, cached)) = &entry.cached_evaluated_types {
                 if *cached_hash == whole_hash {
                     let result = cached.as_ref().clone();
-                    return if Self::is_evaluated_types_empty(&result) {
+                    return Some(if Self::is_evaluated_types_empty(&result) {
                         None
                     } else {
                         Some(result)
-                    };
+                    });
                 }
             }
         }
@@ -205,49 +220,40 @@ impl VerterHost {
         #[cfg(not(feature = "scheduler"))]
         {
             let files = read_lock(&self.files);
-            if let Some(entry) = files.get(&canonical) {
+            if let Some(entry) = files.get(canonical) {
                 if let Some((cached_hash, cached)) = &entry.cached_evaluated_types {
                     if *cached_hash == whole_hash {
                         let result = cached.as_ref().clone();
-                        return if Self::is_evaluated_types_empty(&result) {
+                        return Some(if Self::is_evaluated_types_empty(&result) {
                             None
                         } else {
                             Some(result)
-                        };
+                        });
                     }
                 }
             }
         }
 
-        let snapshot = self.get_analysis(&canonical)?;
-        let mut env = verter_analysis::type_eval_build::parse_and_build_env(
-            &Self::build_eval_script_source(&source, cached_parse.as_deref()),
-        );
-        let dep_resolutions = self.dependency_resolutions_for_eval(&canonical);
-        for (dep_source, dep_parse) in
-            self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions)
-        {
-            let script_source = Self::build_eval_script_source(&dep_source, dep_parse.as_deref());
-            env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
-                &script_source,
-            ));
-        }
+        None
+    }
 
-        let result = verter_analysis::type_eval_build::evaluate_macro_types_with_env(
-            snapshot.macros.as_ref(),
-            &mut env,
-        );
+    fn store_cached_evaluated_types(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+        result: verter_analysis::type_eval_build::EvaluatedComponentTypes,
+    ) -> Option<verter_analysis::type_eval_build::EvaluatedComponentTypes> {
         let cached_result = Arc::new(result.clone());
 
         #[cfg(feature = "scheduler")]
-        if let Some(mut entry) = self.compile_cache.get_mut(&canonical) {
+        if let Some(mut entry) = self.compile_cache.get_mut(canonical) {
             entry.cached_evaluated_types = Some((whole_hash, cached_result));
         }
 
         #[cfg(not(feature = "scheduler"))]
         {
             let mut files = write_lock(&self.files);
-            if let Some(entry) = files.get_mut(&canonical) {
+            if let Some(entry) = files.get_mut(canonical) {
                 entry.cached_evaluated_types = Some((whole_hash, cached_result));
             }
         }
@@ -257,6 +263,98 @@ impl VerterHost {
         } else {
             Some(result)
         }
+    }
+
+    fn get_or_compute_evaluated_types(
+        &self,
+        canonical: &str,
+        snapshot: &FileAnalysisSnapshot,
+    ) -> Option<verter_analysis::type_eval_build::EvaluatedComponentTypes> {
+        let (source, cached_parse, whole_hash) = self.current_eval_state(canonical)?;
+        if let Some(cached) = self.try_get_cached_evaluated_types(canonical, whole_hash) {
+            return cached;
+        }
+
+        let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
+        let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
+        let dep_resolutions = self.dependency_resolutions_for_eval(canonical);
+        for dep_source in self.imported_eval_inputs(canonical, snapshot, &dep_resolutions) {
+            env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
+                &dep_source,
+            ));
+        }
+
+        let result = verter_analysis::type_eval_build::evaluate_macro_types_with_env_and_source(
+            snapshot.macros.as_ref(),
+            &eval_source,
+            &mut env,
+        );
+        self.store_cached_evaluated_types(canonical, whole_hash, result)
+    }
+
+    pub fn evaluate_types(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Option<verter_analysis::type_eval_build::EvaluatedComponentTypes> {
+        self.provenance
+            .evaluate_types_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let state = self.get_resolved_component_meta_state(&canonical)?;
+        if state.reused_enriched_snapshot {
+            self.provenance
+                .evaluate_types_reused_enriched_snapshot
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        state.evaluated_types
+    }
+
+    /// Single native component-meta query.
+    ///
+    /// Combines enriched analysis + type evaluation into one call, using the
+    /// shared resolved-state helpers (cached enriched analysis, cached evaluated
+    /// types). Does NOT re-enter `get_analysis()` / `evaluate_types()` public APIs
+    /// when the enriched snapshot is cached.
+    ///
+    /// Returns `None` if the file doesn't exist.
+    pub fn get_component_meta(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Option<verter_analysis::component_meta::ComponentMetaAnalysis> {
+        self.provenance
+            .get_component_meta_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let state = self.get_resolved_component_meta_state(&canonical)?;
+        let snapshot = state.snapshot;
+        let evaluated_types = state.evaluated_types;
+
+        // Build the input view for the analysis-owned extractor.
+        let features = verter_analysis::component_meta::ComponentMetaFeatures {
+            expanded_types: self.deep_expansion_enabled(),
+        };
+        let input = verter_analysis::component_meta::ComponentMetaInput {
+            macros: &snapshot.macros,
+            bindings: &snapshot.bindings,
+            imports: &snapshot.imports,
+            template: snapshot.template.as_deref(),
+            options_api: snapshot.options_api.as_ref(),
+            analysis_flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(
+                snapshot.script_flags,
+            ),
+            features,
+            styles: &snapshot.styles,
+            vue_api_calls: &snapshot.vue_api_calls,
+            store_usages: &snapshot.store_usages,
+            evaluated_types: evaluated_types.as_ref(),
+            file_path: &canonical,
+        };
+
+        // Extract component-meta using the analysis-owned pure function.
+        Some(verter_analysis::component_meta::extract_component_meta(
+            input,
+        ))
     }
 
     fn parse_dependency_set_for_file(
@@ -396,17 +494,17 @@ impl VerterHost {
     /// Resolve imported type definitions for a file's macro type dependencies.
     ///
     /// For each `MacroTypeDep` (e.g., `defineProps<ButtonProps>()` importing from `./types`),
-    /// resolves the type by reading the dependency source from the host cache and running
-    /// `resolve_external_type()`. Returns expanded type text suitable for the type registry.
+    /// resolves the type through the authoritative workspace-aware type-import resolver.
+    /// Returns expanded type text suitable for the type registry.
     pub fn resolve_imported_types(
         &self,
         canonical_or_alias: &str,
     ) -> Vec<verter_analysis::ResolvedLocalType> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        // Load macro type deps and dependency resolutions.
+        // Load macro type deps.
         #[cfg(feature = "scheduler")]
-        let (macro_type_deps, dep_resolutions) = {
+        let macro_type_deps = {
             use crate::host_executor::HostSourceData;
 
             let source_snap = match self.scheduler.try_get_source(&canonical) {
@@ -421,17 +519,12 @@ impl VerterHost {
             if deps.is_empty() {
                 return Vec::new();
             }
-            let resolutions = self
-                .compile_cache
-                .get(&canonical)
-                .map(|cc| cc.dependency_resolutions.clone())
-                .unwrap_or_default();
             drop(source_snap);
-            (deps, resolutions)
+            deps
         };
 
         #[cfg(not(feature = "scheduler"))]
-        let (macro_type_deps, dep_resolutions) = {
+        let macro_type_deps = {
             let files = read_lock(&self.files);
             let Some(entry) = files.get(&canonical) else {
                 return Vec::new();
@@ -440,38 +533,27 @@ impl VerterHost {
             if deps.is_empty() {
                 return Vec::new();
             }
-            let resolutions = entry.dependency_resolutions.clone();
-            (deps, resolutions)
+            deps
         };
 
         let mut result = Vec::new();
-        let alloc = oxc_allocator::Allocator::new();
+        let mut tracked_deps = std::collections::BTreeSet::new();
+        let mut cache = rustc_hash::FxHashMap::default();
+        let mut visiting = rustc_hash::FxHashSet::default();
 
         for dep in macro_type_deps.iter() {
-            let dep_canonical = if dep.import_source.starts_with('.') {
-                crate::id::resolve_external(&canonical, &dep.import_source)
-            } else if let Some(res) = dep_resolutions.get(&dep.import_source) {
-                if let Some(ref id) = res.resolved_canonical_id {
-                    id.clone()
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-
-            let Some(dep_source) = self.read_dep_source_for_resolve(&dep_canonical) else {
-                continue;
-            };
-
-            if let Some(resolved) =
-                verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
-                    &dep.type_name,
-                    &dep_source,
-                    &alloc,
-                )
-            {
-                let expanded = resolved_elements_to_expanded_text(&resolved, &dep_source);
+            if let Ok(Some(resolved)) = self.resolve_external_type_from_loaded_files(
+                &canonical,
+                &dep.import_source,
+                &dep.type_name,
+                &mut tracked_deps,
+                &mut cache,
+                &mut visiting,
+                false,
+                verter_vfs::ResolveRequestKind::TypeImport,
+                None,
+            ) {
+                let expanded = resolved_elements_to_expanded_text_via_type_text(&resolved);
                 result.push(verter_analysis::ResolvedLocalType {
                     name: dep.type_name.clone(),
                     expanded,
@@ -493,6 +575,9 @@ impl VerterHost {
         if snapshot.macro_type_deps.is_empty() {
             return;
         }
+        self.provenance
+            .get_analysis_deep_enrich_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let debug_enabled = component_meta_debug_enabled();
         let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
@@ -1146,16 +1231,44 @@ impl VerterHost {
     /// Import `resolved_canonical_id` fields are populated lazily using the host's
     /// file map, alias map, and parent dependency set.
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Option<FileAnalysisSnapshot> {
+        self.provenance
+            .get_analysis_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let analysis_started = component_meta_debug_enabled().then(Instant::now);
+        self.get_analysis_snapshot_internal(&canonical, analysis_started)
+            .map(|state| state.snapshot)
+    }
 
+    fn get_analysis_snapshot_internal(
+        &self,
+        canonical: &str,
+        analysis_started: Option<Instant>,
+    ) -> Option<AnalysisSnapshotState> {
         // Eviction gate (scheduler path)
         #[cfg(feature = "scheduler")]
         {
-            if let Some(cc) = self.compile_cache.get(&canonical) {
+            if let Some(cc) = self.compile_cache.get(canonical) {
                 if cc.evicted {
                     return None;
                 }
+            }
+        }
+
+        // Enriched-analysis cache: if deep_macro_resolution_type is on and we
+        // have a cached enriched snapshot whose hash matches, return it directly.
+        if self.deep_expansion_enabled() {
+            if let Some(cached) = self.try_get_cached_enriched_analysis(canonical) {
+                self.provenance
+                    .get_analysis_enriched_cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Some(started) = analysis_started {
+                    log_snapshot_debug("get_analysis (cached)", canonical, started, &cached);
+                }
+                return Some(AnalysisSnapshotState {
+                    snapshot: cached,
+                    reused_enriched_snapshot: true,
+                });
             }
         }
 
@@ -1163,7 +1276,7 @@ impl VerterHost {
         {
             use crate::host_executor::HostSourceData;
 
-            let source_snap = self.scheduler.try_get_source(&canonical)?;
+            let source_snap = self.scheduler.try_get_source(canonical)?;
             let hd = source_snap.downcast_data::<HostSourceData>()?;
             let file_kind = hd.file_kind;
             let source = source_snap.source.clone();
@@ -1176,7 +1289,7 @@ impl VerterHost {
                 let stored_script = hd.parse.script_analysis.clone();
                 let stored_styles = self
                     .scheduler
-                    .try_get_analysis(&canonical)
+                    .try_get_analysis(canonical)
                     .and_then(|a| {
                         a.downcast_data::<crate::host_executor::HostAnalysisData>()
                             .map(|ad| Arc::clone(&ad.style_analyses))
@@ -1184,11 +1297,11 @@ impl VerterHost {
                     .unwrap_or_else(|| Arc::new(Vec::new()));
                 let template = self
                     .compile_cache
-                    .get(&canonical)
+                    .get(canonical)
                     .and_then(|cc| cc.raw_template_analysis.clone());
                 let export_sigs = self
                     .scheduler
-                    .try_get_analysis(&canonical)
+                    .try_get_analysis(canonical)
                     .and_then(|a| {
                         a.downcast_data::<crate::host_executor::HostAnalysisData>()
                             .map(|ad| ad.export_signatures.clone())
@@ -1242,40 +1355,48 @@ impl VerterHost {
                     store_definitions: Arc::new(script_analysis.store_definitions),
                     is_typescript: script_analysis.is_typescript,
                 };
-                self.resolve_snapshot_imports(&canonical, &mut snapshot);
+                self.resolve_snapshot_imports(canonical, &mut snapshot);
                 self.enrich_destructured_bindings(&mut snapshot);
                 if scope.needs_template_analysis() {
-                    self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+                    self.compute_template_analysis_if_missing(canonical, &mut snapshot);
                 }
-                if self.config.deep_macro_resolution_type {
-                    self.enrich_imported_types(&canonical, &mut snapshot);
+                if self.deep_expansion_enabled() {
+                    self.enrich_imported_types(canonical, &mut snapshot);
+                    self.store_cached_enriched_analysis(canonical, &snapshot);
                 }
                 if let Some(started) = analysis_started {
-                    log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
+                    log_snapshot_debug("get_analysis", canonical, started, &snapshot);
                 }
-                return Some(snapshot);
+                return Some(AnalysisSnapshotState {
+                    snapshot,
+                    reused_enriched_snapshot: false,
+                });
             }
             drop(source_snap);
 
-            let mut snapshot = self.build_snapshot_from_scheduler(&canonical)?;
-            self.resolve_snapshot_imports(&canonical, &mut snapshot);
+            let mut snapshot = self.build_snapshot_from_scheduler(canonical)?;
+            self.resolve_snapshot_imports(canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.config.effective_scope().needs_template_analysis() {
-                self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+                self.compute_template_analysis_if_missing(canonical, &mut snapshot);
             }
-            if self.config.deep_macro_resolution_type {
-                self.enrich_imported_types(&canonical, &mut snapshot);
+            if self.deep_expansion_enabled() {
+                self.enrich_imported_types(canonical, &mut snapshot);
+                self.store_cached_enriched_analysis(canonical, &snapshot);
             }
             if let Some(started) = analysis_started {
-                log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
+                log_snapshot_debug("get_analysis", canonical, started, &snapshot);
             }
-            Some(snapshot)
+            Some(AnalysisSnapshotState {
+                snapshot,
+                reused_enriched_snapshot: false,
+            })
         }
 
         #[cfg(not(feature = "scheduler"))]
         {
             let files = read_lock(&self.files);
-            let entry = files.get(&canonical)?;
+            let entry = files.get(canonical)?;
 
             let scope = self.config.effective_scope();
             if entry.file_kind == FileKind::VueSfc
@@ -1335,34 +1456,138 @@ impl VerterHost {
                     store_definitions: Arc::new(script_analysis.store_definitions),
                     is_typescript: script_analysis.is_typescript,
                 };
-                self.resolve_snapshot_imports(&canonical, &mut snapshot);
+                self.resolve_snapshot_imports(canonical, &mut snapshot);
                 self.enrich_destructured_bindings(&mut snapshot);
                 if scope.needs_template_analysis() {
-                    self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+                    self.compute_template_analysis_if_missing(canonical, &mut snapshot);
                 }
-                if self.config.deep_macro_resolution_type {
-                    self.enrich_imported_types(&canonical, &mut snapshot);
+                if self.deep_expansion_enabled() {
+                    self.enrich_imported_types(canonical, &mut snapshot);
+                    self.store_cached_enriched_analysis(canonical, &snapshot);
                 }
                 if let Some(started) = analysis_started {
-                    log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
+                    log_snapshot_debug("get_analysis", canonical, started, &snapshot);
                 }
-                return Some(snapshot);
+                return Some(AnalysisSnapshotState {
+                    snapshot,
+                    reused_enriched_snapshot: false,
+                });
             }
 
             let mut snapshot = Self::build_snapshot_from_entry(entry);
             drop(files);
-            self.resolve_snapshot_imports(&canonical, &mut snapshot);
+            self.resolve_snapshot_imports(canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.config.effective_scope().needs_template_analysis() {
-                self.compute_template_analysis_if_missing(&canonical, &mut snapshot);
+                self.compute_template_analysis_if_missing(canonical, &mut snapshot);
             }
-            if self.config.deep_macro_resolution_type {
-                self.enrich_imported_types(&canonical, &mut snapshot);
+            if self.deep_expansion_enabled() {
+                self.enrich_imported_types(canonical, &mut snapshot);
+                self.store_cached_enriched_analysis(canonical, &snapshot);
             }
             if let Some(started) = analysis_started {
-                log_snapshot_debug("get_analysis", &canonical, started, &snapshot);
+                log_snapshot_debug("get_analysis", canonical, started, &snapshot);
             }
-            Some(snapshot)
+            Some(AnalysisSnapshotState {
+                snapshot,
+                reused_enriched_snapshot: false,
+            })
+        }
+    }
+
+    fn get_resolved_component_meta_state(
+        &self,
+        canonical: &str,
+    ) -> Option<ResolvedComponentMetaState> {
+        let analysis_state = self.get_analysis_snapshot_internal(canonical, None)?;
+        if !analysis_state.reused_enriched_snapshot {
+            self.provenance
+                .component_meta_resolved_state_recomputes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        let evaluated_types = if self.deep_expansion_enabled() {
+            self.get_or_compute_evaluated_types(canonical, &analysis_state.snapshot)
+        } else {
+            None
+        };
+
+        Some(ResolvedComponentMetaState {
+            snapshot: analysis_state.snapshot,
+            evaluated_types,
+            reused_enriched_snapshot: analysis_state.reused_enriched_snapshot,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Enriched-analysis cache helpers
+    // -----------------------------------------------------------------------
+
+    /// Try to read a cached enriched analysis for the given canonical ID.
+    /// Returns `Some(snapshot)` if the cache exists and its hash matches
+    /// the current whole_hash. Returns `None` on miss or hash mismatch.
+    fn try_get_cached_enriched_analysis(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
+        let whole_hash = self.get_whole_hash(canonical)?;
+
+        #[cfg(feature = "scheduler")]
+        {
+            let cc = self.compile_cache.get(canonical)?;
+            let (cached_hash, cached_snapshot) = cc.cached_enriched_analysis.as_ref()?;
+            if *cached_hash == whole_hash {
+                return Some(cached_snapshot.as_ref().clone());
+            }
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(canonical)?;
+            let (cached_hash, cached_snapshot) = entry.cached_enriched_analysis.as_ref()?;
+            if *cached_hash == whole_hash {
+                return Some(cached_snapshot.as_ref().clone());
+            }
+        }
+
+        None
+    }
+
+    /// Store the enriched analysis snapshot in the cache.
+    fn store_cached_enriched_analysis(&self, canonical: &str, snapshot: &FileAnalysisSnapshot) {
+        let Some(whole_hash) = self.get_whole_hash(canonical) else {
+            return;
+        };
+        let cached = Arc::new(snapshot.clone());
+
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(mut cc) = self.compile_cache.get_mut(canonical) {
+                cc.cached_enriched_analysis = Some((whole_hash, cached));
+            }
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(canonical) {
+                entry.cached_enriched_analysis = Some((whole_hash, cached));
+            }
+        }
+    }
+
+    /// Get the current whole_hash for a file.
+    fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+            let snap = self.scheduler.try_get_source(canonical)?;
+            let hd = snap.downcast_data::<HostSourceData>()?;
+            Some(hd.parse.whole_hash)
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let files = read_lock(&self.files);
+            files.get(canonical).map(|entry| entry.whole_hash)
         }
     }
 
@@ -1838,6 +2063,7 @@ impl VerterHost {
         if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
             cc.compile_slots.clear();
             cc.cached_evaluated_types = None;
+            cc.cached_enriched_analysis = None;
         }
 
         #[cfg(not(feature = "scheduler"))]
@@ -1846,6 +2072,7 @@ impl VerterHost {
             if let Some(entry) = files.get_mut(&canonical) {
                 entry.compile_slots.clear();
                 entry.cached_evaluated_types = None;
+                entry.cached_enriched_analysis = None;
             }
         }
     }
@@ -1902,6 +2129,7 @@ impl VerterHost {
                 if let Some(mut cc) = self.compile_cache.get_mut(owner) {
                     cc.compile_slots.clear();
                     cc.cached_evaluated_types = None;
+                    cc.cached_enriched_analysis = None;
                 }
             }
 
@@ -1952,6 +2180,7 @@ impl VerterHost {
                     if let Some(file) = files.get_mut(owner) {
                         file.compile_slots.clear();
                         file.cached_evaluated_types = None;
+                        file.cached_enriched_analysis = None;
                     }
                 }
             }
@@ -2910,43 +3139,6 @@ fn resolved_elements_to_expanded_text_via_type_text(
         let name = prop.key_name.as_deref().unwrap_or("unknown");
         let opt = if prop.optional { "?" } else { "" };
         let ty = prop.type_text.as_deref().unwrap_or("unknown");
-        parts.push(format!("{}{}: {}", name, opt, ty));
-    }
-    format!("{{ {} }}", parts.join("; "))
-}
-
-/// Convert `ResolvedElements` props to an expanded type text string.
-///
-/// Produces `"{ name: type; name2?: type2 }"` format matching `build_expanded_type_text`
-/// in `verter_analysis::macros`.
-fn resolved_elements_to_expanded_text(
-    resolved: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
-    source: &str,
-) -> String {
-    let source_bytes = source.as_bytes();
-    let mut parts = Vec::new();
-    for prop in &resolved.props {
-        let name = prop.key_name.as_deref().unwrap_or_else(|| {
-            let start = prop.key.start as usize;
-            let end = prop.key.end as usize;
-            if end <= source_bytes.len() {
-                std::str::from_utf8(&source_bytes[start..end]).unwrap_or("unknown")
-            } else {
-                "unknown"
-            }
-        });
-        let opt = if prop.optional { "?" } else { "" };
-        let ty = if let Some(type_span) = prop.type_span {
-            let start = type_span.start as usize;
-            let end = type_span.end as usize;
-            if end <= source_bytes.len() {
-                std::str::from_utf8(&source_bytes[start..end]).unwrap_or("unknown")
-            } else {
-                "unknown"
-            }
-        } else {
-            "unknown"
-        };
         parts.push(format!("{}{}: {}", name, opt, ty));
     }
     format!("{{ {} }}", parts.join("; "))

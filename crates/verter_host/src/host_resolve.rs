@@ -103,15 +103,15 @@ impl VerterHost {
         if let Some(cached) = cache.get(&cache_key) {
             return Ok(cached.clone());
         }
-        if !visiting.insert(cache_key.clone()) {
-            return Ok(None);
-        }
 
+        // Check host-level persistent resolved type cache.
+        // The key includes the dep's source hash, so stale entries are never hit.
+        // Skip host cache when profile_hash is set — overrides can change effective
+        // source without changing the raw hash.
         let effective_source: String =
             match self.read_dep_source_for_type_resolution(&dep_canonical, profile_hash) {
                 Some(s) => s,
                 None => {
-                    visiting.remove(&cache_key);
                     if dep_canonical.ends_with(".vue") {
                         cache.insert(cache_key, None);
                         return Ok(None);
@@ -119,6 +119,35 @@ impl VerterHost {
                     return if required_root_dep { Err(()) } else { Ok(None) };
                 }
             };
+        let dep_source_hash = if profile_hash.is_none() {
+            Some(crate::hash::hash_16(effective_source.as_bytes()))
+        } else {
+            None
+        };
+
+        if let Some(dep_hash) = dep_source_hash {
+            let host_key = crate::types::ResolvedTypeCacheKey {
+                dep_canonical_id: dep_canonical.clone(),
+                dep_source_hash: dep_hash,
+                type_name: type_name.to_string(),
+                resolve_kind: kind,
+            };
+            let host_hit = self.resolved_type_cache.lock().get(&host_key).cloned();
+            if let Some(entry) = host_hit {
+                self.provenance
+                    .resolved_external_type_cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                cache.insert(cache_key, entry.resolved.clone());
+                return Ok(entry.resolved);
+            }
+            self.provenance
+                .resolved_external_type_cache_misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        if !visiting.insert(cache_key.clone()) {
+            return Ok(None);
+        }
 
         let import_alloc = oxc_allocator::Allocator::new();
         let extracted = verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
@@ -147,6 +176,24 @@ impl VerterHost {
             )? {
                 visiting.remove(&cache_key);
                 cache.insert(cache_key, Some(resolved.clone()));
+                if let Some(dep_hash) = dep_source_hash {
+                    let host_key = crate::types::ResolvedTypeCacheKey {
+                        dep_canonical_id: dep_canonical.clone(),
+                        dep_source_hash: dep_hash,
+                        type_name: type_name.to_string(),
+                        resolve_kind: kind,
+                    };
+                    let mut host_cache = self.resolved_type_cache.lock();
+                    if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
+                        host_cache.clear();
+                    }
+                    host_cache.insert(
+                        host_key,
+                        crate::types::ResolvedTypeCacheEntry {
+                            resolved: Some(resolved.clone()),
+                        },
+                    );
+                }
                 return Ok(Some(resolved));
             }
         }
@@ -201,66 +248,30 @@ impl VerterHost {
         }
 
         visiting.remove(&cache_key);
+
+        // Store in host-level persistent cache (bounded).
+        // Skip when profile overrides are in play (hash is raw, not override-aware).
+        if let Some(dep_hash) = dep_source_hash {
+            let host_key = crate::types::ResolvedTypeCacheKey {
+                dep_canonical_id: cache_key.0.clone(),
+                dep_source_hash: dep_hash,
+                type_name: cache_key.1.clone(),
+                resolve_kind: kind,
+            };
+            let mut host_cache = self.resolved_type_cache.lock();
+            if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
+                host_cache.clear();
+            }
+            host_cache.insert(
+                host_key,
+                crate::types::ResolvedTypeCacheEntry {
+                    resolved: resolved.clone(),
+                },
+            );
+        }
+
         cache.insert(cache_key, resolved.clone());
         Ok(resolved)
-    }
-
-    /// Read dependency source for `resolve_imported_types`, extracting script
-    /// content for Vue SFCs. Handles scheduler/non-scheduler paths and extension
-    /// fallbacks internally.
-    ///
-    /// Unlike [`read_dep_source_for_type_resolution`], this method does NOT
-    /// fall through to the VFS workspace and is NOT profile-aware. This matches
-    /// the original `resolve_imported_types` behavior (component-meta surface).
-    pub(crate) fn read_dep_source_for_resolve(&self, dep_canonical: &str) -> Option<String> {
-        #[cfg(feature = "scheduler")]
-        {
-            use crate::host_executor::HostSourceData;
-
-            if let Some(snap) = self.scheduler.try_get_source(dep_canonical) {
-                let source = snap.source.as_ref();
-                let host_data = snap.downcast_data::<HostSourceData>();
-                let is_vue = host_data
-                    .as_ref()
-                    .map(|hd| hd.file_kind == FileKind::VueSfc)
-                    .unwrap_or_else(|| dep_canonical.ends_with(".vue"));
-                if is_vue {
-                    let cached = host_data.and_then(|hd| hd.cached_parse.as_deref());
-                    return extract_vue_script_content(source, cached);
-                } else {
-                    return Some(source.to_string());
-                }
-            }
-            // Extension fallbacks — none of these suffixes produce .vue paths,
-            // so no Vue extraction is needed in this loop.
-            for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
-                let with_ext = format!("{dep_canonical}{ext}");
-                if let Some(snap) = self.scheduler.try_get_source(&with_ext) {
-                    return Some(snap.source.to_string());
-                }
-            }
-        }
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let files = crate::shared::read_lock(&self.files);
-            if let Some(entry) = files.get(dep_canonical) {
-                if entry.file_kind == FileKind::VueSfc {
-                    return extract_vue_script_content(
-                        &entry.source,
-                        entry.cached_parse.as_deref(),
-                    );
-                } else {
-                    return Some(entry.source.to_string());
-                }
-            }
-            for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
-                let with_ext = format!("{dep_canonical}{ext}");
-                if let Some(entry) = files.get(&*with_ext) {
-                    return Some(entry.source.to_string());
-                }
-            }
-        }
-        None
     }
 
     /// Read the effective source for a dependency file for type resolution.
@@ -269,7 +280,7 @@ impl VerterHost {
     /// On the WASM path, tries `self.files` first.
     /// Both fall back to reading from the VFS workspace.
     /// For Vue SFCs, extracts only `<script>` / `<script setup>` content.
-    fn read_dep_source_for_type_resolution(
+    pub(crate) fn read_dep_source_for_type_resolution(
         &self,
         dep_canonical: &str,
         _profile_hash: Option<u64>,

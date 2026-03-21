@@ -457,6 +457,24 @@ defineProps<C>();
 }
 
 #[test]
+fn transitive_dep_interface_extends_pick_of_imported() {
+    let code = r#"
+import type { BaseProps } from './types';
+interface Local extends Pick<BaseProps, 'a' | 'b'> { own: string }
+defineProps<Local>();
+"#;
+    let result = analyze(code);
+    assert!(
+        result
+            .macro_type_deps
+            .iter()
+            .any(|d| d.type_name == "BaseProps" && d.import_source == "./types"),
+        "should discover BaseProps via utility heritage, got: {:?}",
+        result.macro_type_deps
+    );
+}
+
+#[test]
 fn async_setup_nested_await_in_call_arg() {
     let result = analyze("const data = bar(await fetchData());");
     assert!(

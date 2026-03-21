@@ -63,6 +63,7 @@ import { createActivationGate } from "./activationGate";
 import { readE2eEnv } from "./e2eEnv";
 import { shouldConfigureBuiltInTypeScriptPlugin } from "./startupOptimizations";
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
+import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
 
 type GetClient = () => PatchClient<LanguageClient>;
 type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
@@ -305,15 +306,7 @@ async function activateExtension(context: ExtensionContext) {
         void ensureTypeScriptPluginConfigured(undefined, true);
       }
 
-      const needsRestart =
-        e.affectsConfiguration("verter.server.logLevel") ||
-        e.affectsConfiguration("verter.typeProvider") ||
-        e.affectsConfiguration("verter.typescript.tsdk") ||
-        e.affectsConfiguration("verter.mcp.enabled") ||
-        e.affectsConfiguration("verter.mcp.port") ||
-        e.affectsConfiguration("verter.inlayHints.enabled") ||
-        e.affectsConfiguration("verter.viteConfig.enabled") ||
-        e.affectsConfiguration("verter.viteConfig.trustedFiles");
+      const needsRestart = shouldRestartLanguageServerForConfigurationChange(e);
       if (!needsRestart || !server) {
         return;
       }
@@ -499,6 +492,17 @@ export async function activateVueLanguageServer(
       },
       inlayHints: {
         enabled: workspace.getConfiguration("verter").get<boolean>("inlayHints.enabled", true),
+      },
+      experimental: {
+        conditionalRootNarrowing: workspace
+          .getConfiguration("verter.experimental")
+          .get<boolean>("conditionalRootNarrowing", false),
+        strictSlots: workspace
+          .getConfiguration("verter.experimental")
+          .get<boolean>("strictSlots", false),
+        deepComponentMetaExpansion: workspace
+          .getConfiguration("verter.experimental")
+          .get<boolean>("deepComponentMetaExpansion", false),
       },
     },
     outputChannel: log,

@@ -20,6 +20,45 @@ use crate::macros::{
 use crate::scope::AnalysisScope;
 use crate::types::*;
 
+fn is_builtin_heritage_utility(name: &str) -> bool {
+    matches!(
+        name,
+        "Pick"
+            | "Omit"
+            | "Partial"
+            | "Required"
+            | "Readonly"
+            | "Record"
+            | "Extract"
+            | "Exclude"
+            | "NonNullable"
+            | "ReturnType"
+            | "Parameters"
+            | "ConstructorParameters"
+            | "InstanceType"
+            | "Awaited"
+    )
+}
+
+fn collect_heritage_dependency_names(heritage: &TSInterfaceHeritage<'_>) -> Vec<String> {
+    let mut refs = Vec::new();
+
+    if let Expression::Identifier(id) = &heritage.expression {
+        let name = id.name.as_str();
+        if heritage.type_arguments.is_none() || !is_builtin_heritage_utility(name) {
+            refs.push(name.to_string());
+        }
+    }
+
+    if let Some(type_args) = &heritage.type_arguments {
+        for param in &type_args.params {
+            refs.extend(collect_type_references(param));
+        }
+    }
+
+    refs
+}
+
 /// O(1) lookup map from local binding name → (import source index, vue_api).
 /// The source index refers to the `imports` Vec for zero-copy source access.
 struct ImportBindingMap {
@@ -153,9 +192,7 @@ pub fn build_script_analysis_with_scope(
                         Declaration::TSInterfaceDeclaration(iface) => {
                             let mut bases = Vec::new();
                             for heritage in &iface.extends {
-                                if let Expression::Identifier(id) = &heritage.expression {
-                                    bases.push(id.name.to_string());
-                                }
+                                bases.extend(collect_heritage_dependency_names(heritage));
                             }
                             if !bases.is_empty() {
                                 local_type_deps.insert(iface.id.name.to_string(), bases);
@@ -405,9 +442,7 @@ pub fn build_script_analysis_with_scope(
             Statement::TSInterfaceDeclaration(iface) => {
                 let mut bases = Vec::new();
                 for heritage in &iface.extends {
-                    if let Expression::Identifier(id) = &heritage.expression {
-                        bases.push(id.name.to_string());
-                    }
+                    bases.extend(collect_heritage_dependency_names(heritage));
                 }
                 if !bases.is_empty() {
                     local_type_deps.insert(iface.id.name.to_string(), bases);

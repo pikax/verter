@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ComponentMetaChecker } from "./checker.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 
-function createAdapterStub(overrides: Partial<VerterHostAdapter> = {}): VerterHostAdapter {
+function createCheckerAdapterStub(overrides: Partial<VerterHostAdapter> = {}): VerterHostAdapter {
   return {
     upsert: vi.fn(),
     getAnalysis: vi.fn(() => null),
@@ -20,7 +20,7 @@ describe("ComponentMetaChecker.dispose", () => {
     const getAnalysis = vi.fn(() => null);
     const close = vi.fn();
     const checker = new ComponentMetaChecker(
-      createAdapterStub({ upsert, getAnalysis, close }),
+      createCheckerAdapterStub({ upsert, getAnalysis, close }),
       "/project",
     );
 
@@ -39,7 +39,7 @@ describe("ComponentMetaChecker.dispose", () => {
   });
 
   it("is safe when the adapter does not expose close()", () => {
-    const checker = new ComponentMetaChecker(createAdapterStub(), "/project");
+    const checker = new ComponentMetaChecker(createCheckerAdapterStub(), "/project");
 
     expect(() => checker.dispose()).not.toThrow();
     expect(() => checker.dispose()).not.toThrow();

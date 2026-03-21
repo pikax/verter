@@ -10,6 +10,237 @@ use verter_host as host;
 
 use crate::types::*;
 
+// ─── Component-meta analysis → FFI ─────────────────────────────────────────
+
+/// Convert an analysis-domain `ComponentMetaAnalysis` to the FFI boundary DTO.
+pub fn component_meta_analysis_to_ffi(
+    analysis: verter_analysis::component_meta::ComponentMetaAnalysis,
+) -> FfiComponentMeta {
+    FfiComponentMeta {
+        props: analysis
+            .props
+            .into_iter()
+            .map(|p| FfiPropMeta {
+                name: p.name,
+                r#type: p.type_expr,
+                raw_type: p.raw_type,
+                required: p.required,
+                has_default: p.has_default,
+                default_value: p.default_value,
+                description: p.description,
+                tags: p.tags.into_iter().map(jsdoc_to_ffi).collect(),
+            })
+            .collect(),
+        events: analysis
+            .events
+            .into_iter()
+            .map(|e| FfiEventMeta {
+                name: e.name,
+                payload: e.payload,
+                raw_signature: e.raw_signature,
+                description: e.description,
+                tags: e.tags.into_iter().map(jsdoc_to_ffi).collect(),
+            })
+            .collect(),
+        slots: analysis
+            .slots
+            .into_iter()
+            .map(|s| FfiSlotMeta {
+                name: s.name,
+                is_scoped: s.is_scoped,
+                bindings: s
+                    .bindings
+                    .into_iter()
+                    .map(|b| FfiSlotBindingMeta {
+                        name: b.name,
+                        r#type: b.type_expr,
+                        raw_type: b.raw_type,
+                    })
+                    .collect(),
+                is_required: s.is_required,
+                description: s.description,
+                tags: s.tags.into_iter().map(jsdoc_to_ffi).collect(),
+            })
+            .collect(),
+        models: analysis
+            .models
+            .into_iter()
+            .map(|m| FfiModelMeta {
+                name: m.name,
+                r#type: m.type_expr,
+            })
+            .collect(),
+        exposed: analysis
+            .exposed
+            .into_iter()
+            .map(|e| FfiExposedMeta {
+                name: e.name,
+                r#type: e.type_expr,
+                description: e.description,
+            })
+            .collect(),
+        type_registry: analysis
+            .type_registry
+            .into_iter()
+            .map(|entry| FfiResolvedTypeMeta {
+                name: entry.name,
+                r#type: entry.type_expr,
+            })
+            .collect(),
+        components: analysis
+            .components
+            .into_iter()
+            .map(|component| FfiComponentUsage {
+                name: component.name,
+                import_source: component.import_source,
+                is_dynamic: component.is_dynamic,
+                props: component
+                    .props
+                    .into_iter()
+                    .map(|prop| FfiComponentPropUsage {
+                        name: prop.name,
+                        is_bound: prop.is_bound,
+                        constness: component_prop_constness_to_string(prop.constness),
+                    })
+                    .collect(),
+                slots_used: component.slots_used,
+                static_classes: component.static_classes,
+                has_dynamic_class: component.has_dynamic_class,
+                v_models: component.v_models,
+            })
+            .collect(),
+        template_refs: analysis
+            .template_refs
+            .into_iter()
+            .map(|template_ref| FfiTemplateRefMeta {
+                name: template_ref.name,
+                is_dynamic: template_ref.is_dynamic,
+                target_tag: template_ref.target_tag,
+            })
+            .collect(),
+        imports: analysis
+            .imports
+            .into_iter()
+            .map(|import| FfiImportMeta {
+                source: import.source,
+                is_type_only: import.is_type_only,
+                bindings: import
+                    .bindings
+                    .into_iter()
+                    .map(|binding| FfiImportBindingMeta {
+                        name: binding.name,
+                        is_type_only: binding.is_type_only,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        bindings: analysis
+            .bindings
+            .into_iter()
+            .map(|binding| FfiBindingMeta {
+                name: binding.name,
+                kind: binding_kind_to_string(binding.kind),
+                reactivity_kind: reactivity_kind_to_string(binding.reactivity_kind),
+                type_annotation: binding.type_annotation,
+                used_in_template: binding.used_in_template,
+                used_in_style: binding.used_in_style,
+            })
+            .collect(),
+        vue_api_calls: analysis
+            .vue_api_calls
+            .into_iter()
+            .map(|call| FfiVueApiCallMeta {
+                api: vue_api_to_string(call.api),
+                arg_value: call.arg_value,
+            })
+            .collect(),
+        styles: analysis
+            .styles
+            .into_iter()
+            .map(|style| FfiStyleMeta {
+                lang: style_lang_to_string(style.lang),
+                scoped: style.scoped,
+                is_module: style.is_module,
+                module_name: style.module_name,
+                classes: style.classes,
+                ids: style.ids,
+                custom_properties: style.custom_properties,
+                v_binds: style.v_binds,
+                selectors: style
+                    .selectors
+                    .into_iter()
+                    .map(|selector| FfiSelectorMeta {
+                        text: selector.text,
+                        specificity: selector.specificity,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        flags: FfiComponentMetaFlags {
+            async_setup: analysis.flags.async_setup,
+            has_reactive_state: analysis.flags.has_reactive_state,
+            has_computed: analysis.flags.has_computed,
+            has_watchers: analysis.flags.has_watchers,
+            has_lifecycle_hooks: analysis.flags.has_lifecycle_hooks,
+            has_provide: analysis.flags.has_provide,
+            has_inject: analysis.flags.has_inject,
+            has_inherit_attrs_false: analysis.flags.has_inherit_attrs_false,
+            has_store_usage: analysis.flags.has_store_usage,
+        },
+        options_api: analysis.options_api,
+        file_path: analysis.file_path,
+    }
+}
+
+fn jsdoc_to_ffi(tag: verter_analysis::types::JsdocTag) -> FfiJsdocTag {
+    FfiJsdocTag {
+        name: tag.name,
+        text: tag.text,
+    }
+}
+
+fn component_prop_constness_to_string(
+    constness: verter_analysis::template::PropValueConstness,
+) -> String {
+    match constness {
+        verter_analysis::template::PropValueConstness::Const => "const".to_string(),
+        verter_analysis::template::PropValueConstness::Dynamic => "dynamic".to_string(),
+        verter_analysis::template::PropValueConstness::Unknown => "unknown".to_string(),
+    }
+}
+
+fn binding_kind_to_string(kind: verter_analysis::component_meta::BindingKindAnalysis) -> String {
+    match kind {
+        verter_analysis::component_meta::BindingKindAnalysis::Const => "const".to_string(),
+        verter_analysis::component_meta::BindingKindAnalysis::Let => "let".to_string(),
+        verter_analysis::component_meta::BindingKindAnalysis::Var => "var".to_string(),
+        verter_analysis::component_meta::BindingKindAnalysis::Function => "function".to_string(),
+        verter_analysis::component_meta::BindingKindAnalysis::AsyncFunction => {
+            "asyncFunction".to_string()
+        }
+        verter_analysis::component_meta::BindingKindAnalysis::Class => "class".to_string(),
+    }
+}
+
+fn reactivity_kind_to_string(kind: verter_analysis::types::ReactivityKind) -> String {
+    match kind {
+        verter_analysis::types::ReactivityKind::None => "none".to_string(),
+        verter_analysis::types::ReactivityKind::Ref => "ref".to_string(),
+        verter_analysis::types::ReactivityKind::Computed => "computed".to_string(),
+        verter_analysis::types::ReactivityKind::Reactive => "reactive".to_string(),
+        verter_analysis::types::ReactivityKind::MaybeRef => "maybeRef".to_string(),
+        verter_analysis::types::ReactivityKind::Mutable => "mutable".to_string(),
+    }
+}
+
+fn vue_api_to_string(api: verter_analysis::types::VueApiClassification) -> String {
+    format!("{api:?}")
+}
+
+fn style_lang_to_string(lang: verter_analysis::style::StyleAnalysisLang) -> String {
+    format!("{lang:?}")
+}
+
 /// Typed error for FFI → host conversion failures.
 #[derive(Debug, Clone)]
 pub enum FfiConversionError {

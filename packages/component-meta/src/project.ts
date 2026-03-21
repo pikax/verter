@@ -15,21 +15,23 @@
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
-import { extractComponentMeta, buildTypeRegistry } from "./extractor.js";
-import { parseType } from "./resolver.js";
+import { resolve } from "node:path";
 import { mapComponentMeta } from "./compat/checker.js";
 import type { CheckerWorkspace } from "./compat/checker.js";
 import type { MetaCheckerOptions, VolarComponentMeta } from "./compat/types.js";
 import {
+  nativeComponentMetaToComponentMeta,
+  nativeTypeRegistryToMap,
+} from "./native-component-meta.js";
+import {
   computeEngineKey,
-  discoverVueFiles,
   extractPathAliases,
   getMetaRuntime,
   normalizePath,
   parseTsconfig,
   shutdownMetaRuntime as _shutdownMetaRuntime,
   stableHash,
+  stableSelectiveConfigHash,
 } from "./runtime/index.js";
 import type {
   BootstrapFn,
@@ -50,6 +52,7 @@ export class MetaProject {
   private readonly _workspace: CheckerWorkspace | undefined;
   private readonly _runtime: MetaRuntimeImpl;
   private readonly _touchedFiles = new Set<string>();
+  private readonly _baseFiles = new Set<string>();
   private readonly _deletedFiles = new Set<string>();
   private _closed = false;
 
@@ -79,6 +82,7 @@ export class MetaProject {
     this.ensureOpen();
     const abs = normalizePath(resolve(this._root, filePath));
     this._touchedFiles.add(abs);
+    this._baseFiles.delete(abs);
     this._deletedFiles.delete(abs);
     this._session.upsert(abs, source);
   }
@@ -87,6 +91,7 @@ export class MetaProject {
     this.ensureOpen();
     const abs = normalizePath(resolve(this._root, filePath));
     this._touchedFiles.add(abs);
+    this._baseFiles.delete(abs);
     this._deletedFiles.add(abs);
     this._session.delete(abs);
   }
@@ -106,6 +111,14 @@ export class MetaProject {
         this._session.delete(fileId);
       }
     }
+
+    for (const fileId of Array.from(this._baseFiles)) {
+      const loaded = this._session.refreshBaseFile(fileId);
+      this.ensureOpen();
+      if (!loaded) {
+        this._baseFiles.delete(fileId);
+      }
+    }
   }
 
   clearCaches(): void {
@@ -121,57 +134,28 @@ export class MetaProject {
       return { type: 0, props: [], events: [], slots: [], exposed: [] };
     }
 
-    if (!this._session.hasFile(abs) && this._workspace) {
-      const content = await this._workspace.readFile(abs);
-      if (content !== null) {
-        this._touchedFiles.add(abs);
-        this._session.upsert(abs, content);
-      }
+    if (!this._session.hasFile(abs) && this._workspace && this._session.ensureBaseFile(abs)) {
+      this._baseFiles.add(abs);
     }
 
-    const source = this._session.getEffectiveSource(abs);
-    if (source === undefined) {
+    if (this._session.getEffectiveSource(abs) === undefined) {
       return { type: 0, props: [], events: [], slots: [], exposed: [] };
     }
 
-    const rawSnapshot = this._session.getAnalysis(abs);
-    const typeRegistry = rawSnapshot ? buildTypeRegistry(rawSnapshot) : undefined;
-
-    if (typeRegistry) {
-      const importedJson = this._session.resolveImportedTypes(abs);
-      if (importedJson) {
-        try {
-          for (const rlt of JSON.parse(importedJson) as Array<{ name: string; expanded: string }>) {
-            if (!typeRegistry.has(rlt.name)) {
-              typeRegistry.set(rlt.name, parseType(rlt.expanded));
-            }
-          }
-        } catch {
-          // Ignore parse errors from corrupted imported-type payloads.
-        }
-      }
+    const nativeMeta = this._session.getComponentMeta(abs);
+    if (!nativeMeta) {
+      return { type: 0, props: [], events: [], slots: [], exposed: [] };
     }
 
-    const sessionAdapter = {
-      upsert() {},
-      getAnalysis: (id: string) => this._session.getAnalysis(id),
-      resolveImportedTypes: (id: string) => this._session.resolveImportedTypes(id),
-    };
-
-    // Request native type evaluation (opt-in, returns null if unavailable)
-    const evaluatedTypes = this._session.evaluateTypes(abs);
-
-    const meta = extractComponentMeta(
-      sessionAdapter,
-      abs,
-      abs,
-      evaluatedTypes as import("./type-expr-bridge.js").NativeEvaluatedTypes | null,
+    return mapComponentMeta(
+      nativeComponentMetaToComponentMeta(
+        nativeMeta as import("./native-component-meta.js").NativeComponentMetaResult,
+      ),
+      this._options,
+      nativeTypeRegistryToMap(
+        nativeMeta as import("./native-component-meta.js").NativeComponentMetaResult,
+      ),
     );
-    if (!meta) {
-      return { type: 0, props: [], events: [], slots: [], exposed: [] };
-    }
-
-    return mapComponentMeta(meta, this._options, typeRegistry);
   }
 
   async getExportNames(_filePath: string): Promise<string[]> {
@@ -183,6 +167,7 @@ export class MetaProject {
     if (this._closed) return;
     this._closed = true;
     this._touchedFiles.clear();
+    this._baseFiles.clear();
     this._deletedFiles.clear();
     this._runtime.closeSession(this._session);
   }
@@ -197,7 +182,7 @@ function hashTsconfigConfig(tsconfigPath: string): string {
   try {
     const raw = readFileSync(tsconfigPath, "utf8");
     const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    return stableHash(JSON.parse(stripped));
+    return stableSelectiveConfigHash(JSON.parse(stripped));
   } catch {
     return stableHash({ tsconfigPath: normalizePath(resolve(tsconfigPath)) });
   }
@@ -213,7 +198,7 @@ function buildEngineKeyInput(options: MetaProjectConfig): EngineKeyInput {
     configKind: options.tsconfig ? "tsconfig" : "inline",
     tsconfigPath,
     configHash: options.config
-      ? stableHash(options.config)
+      ? stableSelectiveConfigHash(options.config)
       : hashTsconfigConfig(resolve(options.tsconfig)),
     nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
   };
@@ -250,17 +235,9 @@ export async function openMetaProject(
       workspace.configureProjects([aliases]);
     }
 
-    const tsconfigDir = options.tsconfig ? dirname(resolve(options.tsconfig)) : root;
-    const include = options.config ? (options.config as { include?: string[] }).include : undefined;
-    const vueFiles = await discoverVueFiles(tsconfigDir, workspace, include);
-    for (const filePath of vueFiles) {
-      const content = await workspace.readFile(normalizePath(filePath));
-      if (content !== null) {
-        nativeProject.upsertBase(filePath, content);
-      }
-    }
-
-    return { nativeProject, baseFileIds: vueFiles };
+    // Selective loading: no eager preload. Files are loaded on-demand
+    // in getComponentMeta() when the file is first requested.
+    return { nativeProject, baseFileIds: [] };
   };
 
   const engine = await runtime.getOrCreateEngine(input, bootstrap);

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { computeEngineKey, normalizePath, stableHash, getWorkspaceIdentity } from "./engine-key.js";
+import {
+  computeEngineKey,
+  normalizePath,
+  stableHash,
+  stableSelectiveConfigHash,
+} from "./engine-key.js";
 import type { EngineKeyInput } from "./engine-key.js";
 
 describe("normalizePath", () => {
@@ -83,28 +88,30 @@ describe("computeEngineKey", () => {
     };
     expect(computeEngineKey(base)).not.toBe(computeEngineKey(other));
   });
-
-  it("workspace identity is included when present", () => {
-    const withWs = { ...base, workspaceIdentity: "ws-1" };
-    const withWs2 = { ...base, workspaceIdentity: "ws-2" };
-    expect(computeEngineKey(withWs)).not.toBe(computeEngineKey(withWs2));
-  });
 });
 
-describe("getWorkspaceIdentity", () => {
-  it("returns same identity for same object", () => {
-    const ws = {};
-    expect(getWorkspaceIdentity(ws)).toBe(getWorkspaceIdentity(ws));
+describe("stableSelectiveConfigHash", () => {
+  it("ignores include when selective loading is the default", () => {
+    const hashA = stableSelectiveConfigHash({
+      include: ["src/A.vue"],
+      compilerOptions: { baseUrl: "." },
+    });
+    const hashB = stableSelectiveConfigHash({
+      include: ["src/B.vue"],
+      compilerOptions: { baseUrl: "." },
+    });
+
+    expect(hashA).toBe(hashB);
   });
 
-  it("returns different identity for different objects", () => {
-    const ws1 = {};
-    const ws2 = {};
-    expect(getWorkspaceIdentity(ws1)).not.toBe(getWorkspaceIdentity(ws2));
-  });
+  it("still changes when analysis-affecting config changes", () => {
+    const hashA = stableSelectiveConfigHash({
+      compilerOptions: { baseUrl: "." },
+    });
+    const hashB = stableSelectiveConfigHash({
+      compilerOptions: { baseUrl: "./src" },
+    });
 
-  it("identity format is ws-<number>", () => {
-    const ws = {};
-    expect(getWorkspaceIdentity(ws)).toMatch(/^ws-\d+$/);
+    expect(hashA).not.toBe(hashB);
   });
 });

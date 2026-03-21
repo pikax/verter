@@ -5,7 +5,12 @@
  * and compat layer, not by end users directly.
  */
 
-export { computeEngineKey, normalizePath, stableHash, getWorkspaceIdentity } from "./engine-key.js";
+export {
+  computeEngineKey,
+  normalizePath,
+  stableHash,
+  stableSelectiveConfigHash,
+} from "./engine-key.js";
 export type { EngineKeyInput } from "./engine-key.js";
 
 export { ProjectEngine, generateLeaseId } from "./project-engine.js";

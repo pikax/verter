@@ -5,7 +5,6 @@ import type { OutputMode } from "../core/types";
 import Preview from "./Preview.vue";
 import CodeOutput from "./CodeOutput.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
-import ComponentMetaPanel from "./ComponentMetaPanel.vue";
 import LintPanel from "./LintPanel.vue";
 import OutlinePanel from "./OutlinePanel.vue";
 import VirtualFilesPanel from "./VirtualFilesPanel.vue";
@@ -24,7 +23,6 @@ const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
   { mode: "files", label: "Files" },
   { mode: "analysis", label: "Analysis" },
-  { mode: "componentMeta", label: "Meta" },
   { mode: "lint", label: "Lint" },
   { mode: "outline", label: "Outline" },
   { mode: "cssMatch", label: "CSS Match" },
@@ -154,7 +152,6 @@ function isEditedMode(_mode: OutputMode): boolean {
     <div class="output-content">
       <Preview v-if="store.outputMode === 'preview'" :store="store" />
       <AnalysisPanel v-else-if="store.outputMode === 'analysis'" :store="store" />
-      <ComponentMetaPanel v-else-if="store.outputMode === 'componentMeta'" :store="store" />
       <LintPanel v-else-if="store.outputMode === 'lint'" :store="store" />
       <OutlinePanel v-else-if="store.outputMode === 'outline'" :store="store" />
       <VirtualFilesPanel v-else-if="store.outputMode === 'files'" :store="store" />

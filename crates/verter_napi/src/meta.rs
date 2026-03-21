@@ -75,6 +75,22 @@ impl NapiMetaProject {
         }))?
     }
 
+    /// Ensure a workspace-backed file is loaded into the shared base project.
+    #[napi(js_name = "ensureLoaded")]
+    pub fn ensure_loaded(&self, canonical_id: String) -> Result<bool> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.ensure_loaded(&canonical_id).map_err(meta_err)
+        }))?
+    }
+
+    /// Refresh a workspace-backed base file from the current native workspace.
+    #[napi(js_name = "refreshBase")]
+    pub fn refresh_base(&self, canonical_id: String) -> Result<bool> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.refresh_base(&canonical_id).map_err(meta_err)
+        }))?
+    }
+
     /// Configure project-scoped path alias resolution.
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
@@ -191,56 +207,6 @@ impl NapiMetaSession {
         }))?
     }
 
-    /// Get the analysis snapshot for a file (JSON string).
-    ///
-    /// Resolves through this session's overlay → shared base.
-    /// Returns `null` if the file doesn't exist or is tombstoned.
-    #[napi(js_name = "getAnalysis")]
-    pub fn get_analysis(&self, canonical_or_alias: String) -> Result<Option<String>> {
-        let session = self.session()?;
-        catch_panic(std::panic::AssertUnwindSafe(|| {
-            let result = session
-                .get_analysis(&canonical_or_alias)
-                .map_err(meta_err)?;
-            match result {
-                Some(snapshot) => {
-                    let json = serde_json::to_string(&snapshot).map_err(|e| {
-                        Error::new(
-                            Status::GenericFailure,
-                            format!("analysis serialization error: {e}"),
-                        )
-                    })?;
-                    Ok(Some(json))
-                }
-                None => Ok(None),
-            }
-        }))?
-    }
-
-    /// Resolve imported type definitions for a file's macro type dependencies.
-    ///
-    /// Returns a JSON array of `{ name, expanded }` entries, or `null` if empty.
-    #[napi(js_name = "resolveImportedTypes")]
-    pub fn resolve_imported_types(&self, canonical_or_alias: String) -> Result<Option<String>> {
-        let session = self.session()?;
-        catch_panic(std::panic::AssertUnwindSafe(|| {
-            let types = session
-                .resolve_imported_types(&canonical_or_alias)
-                .map_err(meta_err)?;
-            if types.is_empty() {
-                Ok(None)
-            } else {
-                let json = serde_json::to_string(&types).map_err(|e| {
-                    Error::new(
-                        Status::GenericFailure,
-                        format!("type serialization error: {e}"),
-                    )
-                })?;
-                Ok(Some(json))
-            }
-        }))?
-    }
-
     /// Get effective source for a file (overlay → base).
     /// Returns `null` for tombstoned or non-existent files.
     #[napi(js_name = "getEffectiveSource")]
@@ -262,28 +228,46 @@ impl NapiMetaSession {
         }))?
     }
 
-    /// Evaluate type annotations for a file's component metadata.
+    /// Single native component-meta query.
     ///
-    /// Returns a JSON object with `props`, `emits`, and `slotBindings` arrays,
-    /// each containing `{ name, type }` entries with structured type data.
-    /// Returns `null` if the file has no analysis or no evaluable type annotations.
-    #[napi(js_name = "evaluateTypes")]
-    pub fn evaluate_types(&self, canonical_or_alias: String) -> Result<Option<String>> {
+    /// Returns a JSON string containing the full component metadata (props,
+    /// events, slots, models, exposed, flags) with structured type IR.
+    /// Returns `null` if the file doesn't exist.
+    #[napi(js_name = "getComponentMeta")]
+    pub fn get_component_meta(&self, canonical_or_alias: String) -> Result<Option<String>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let result = session
-                .evaluate_types(&canonical_or_alias)
+                .get_component_meta(&canonical_or_alias)
                 .map_err(meta_err)?;
-            let Some(result) = result else {
-                return Ok(None);
-            };
-            let json = serde_json::to_string(&result).map_err(|e| {
+            match result {
+                Some(analysis) => {
+                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
+                    let json = serde_json::to_string(&ffi).map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("component-meta serialization error: {e}"),
+                        )
+                    })?;
+                    Ok(Some(json))
+                }
+                None => Ok(None),
+            }
+        }))?
+    }
+
+    /// Return provenance counters for observability.
+    #[napi(js_name = "getProvenance")]
+    pub fn get_provenance(&self) -> Result<String> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let snapshot = session.get_provenance().map_err(meta_err)?;
+            serde_json::to_string(&snapshot).map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
-                    format!("type evaluation serialization error: {e}"),
+                    format!("provenance serialization error: {e}"),
                 )
-            })?;
-            Ok(Some(json))
+            })
         }))?
     }
 

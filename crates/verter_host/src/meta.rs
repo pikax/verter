@@ -118,6 +118,34 @@ impl MetaProject {
         }
     }
 
+    fn remove_base_file(&self, canonical_id: &str) {
+        self.base_sources.write().remove(canonical_id);
+        self.base_file_ids.write().remove(canonical_id);
+    }
+
+    fn sync_base_file_from_host(&self, canonical_id: &str) -> bool {
+        let Some(source) = self.host.get_source(canonical_id) else {
+            self.remove_base_file(canonical_id);
+            return false;
+        };
+        self.base_sources
+            .write()
+            .insert(canonical_id.to_string(), source);
+        self.base_file_ids.write().insert(canonical_id.to_string());
+        true
+    }
+
+    fn enter_base_context(&self) -> Result<std::sync::MutexGuard<'_, OverlayState>, MetaError> {
+        let mut gate = self
+            .overlay_gate
+            .lock()
+            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
+        if let Some(prev_id) = gate.active_session.take() {
+            self.revert_session_overlays(prev_id);
+        }
+        Ok(gate)
+    }
+
     /// Load a file into the base project. This is the shared state that
     /// all sessions see when they don't have an overlay for the file.
     pub fn upsert_base(
@@ -126,6 +154,7 @@ impl MetaProject {
         source: &str,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
+        let _gate = self.enter_base_context()?;
         let req = UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
@@ -138,12 +167,52 @@ impl MetaProject {
             .upsert(req)
             .map_err(|e| MetaError::Host(e.to_string()))?;
 
-        // Cache source for overlay revert
         self.base_sources
             .write()
             .insert(canonical_id.to_string(), Arc::from(source));
         self.base_file_ids.write().insert(canonical_id.to_string());
         Ok(())
+    }
+
+    /// Ensure a workspace-backed file is loaded into the shared base project.
+    pub fn ensure_loaded(self: &Arc<Self>, canonical_id: &str) -> Result<bool, MetaError> {
+        self.check_alive()?;
+        let _gate = self.enter_base_context()?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let loaded = self.host.ensure_loaded(canonical_id);
+
+        #[cfg(target_arch = "wasm32")]
+        let loaded = self.host.get_source(canonical_id).is_some();
+
+        if !loaded {
+            self.remove_base_file(canonical_id);
+            return Ok(false);
+        }
+
+        Ok(self.sync_base_file_from_host(canonical_id))
+    }
+
+    /// Refresh a workspace-backed base file from the current native workspace.
+    pub fn refresh_base(self: &Arc<Self>, canonical_id: &str) -> Result<bool, MetaError> {
+        self.check_alive()?;
+        let _gate = self.enter_base_context()?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        self.host.evict(canonical_id);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let loaded = self.host.ensure_loaded(canonical_id);
+
+        #[cfg(target_arch = "wasm32")]
+        let loaded = self.host.get_source(canonical_id).is_some();
+
+        if !loaded {
+            self.remove_base_file(canonical_id);
+            return Ok(false);
+        }
+
+        Ok(self.sync_base_file_from_host(canonical_id))
     }
 
     /// Configure project-scoped path alias resolution.
@@ -152,6 +221,7 @@ impl MetaProject {
         projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
+        let _gate = self.enter_base_context()?;
         self.host.configure_projects(projects);
         Ok(())
     }
@@ -438,6 +508,24 @@ impl MetaSession {
     ) -> Result<Vec<verter_analysis::ResolvedLocalType>, MetaError> {
         self.check_alive()?;
         self.with_overlay_context(|host| host.resolve_imported_types(canonical_or_alias))
+    }
+
+    /// Single native component-meta query through this session's overlay view.
+    ///
+    /// Combines enriched analysis + type evaluation in one call.
+    /// Does NOT re-enter the legacy getAnalysis/evaluateTypes workflow.
+    pub fn get_component_meta(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<Option<verter_analysis::component_meta::ComponentMetaAnalysis>, MetaError> {
+        self.check_alive()?;
+        self.with_overlay_context(|host| host.get_component_meta(canonical_or_alias))
+    }
+
+    /// Return provenance counters for this session's host.
+    pub fn get_provenance(&self) -> Result<crate::types::MetaProvenanceSnapshot, MetaError> {
+        self.check_alive()?;
+        Ok(self.project.host.provenance().snapshot())
     }
 
     /// Get the effective source for a file (overlay → base).

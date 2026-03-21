@@ -14,7 +14,6 @@ export interface EngineKeyInput {
   configKind: "tsconfig" | "inline";
   tsconfigPath?: string;
   configHash: string;
-  workspaceIdentity?: string;
   nativeFlags: {
     analysisLevel: string;
     deepMacroResolutionType: boolean;
@@ -44,6 +43,21 @@ export function stableHash(input: unknown): string {
   return createHash("sha256").update(json).digest("hex").slice(0, 16);
 }
 
+/**
+ * Selective loading makes per-request discovery filters non-semantic for
+ * engine reuse. Strip those keys before hashing so engine identity stays
+ * stable across different `include` arrays for the same root/config.
+ */
+export function stableSelectiveConfigHash(input: unknown): string {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return stableHash(input);
+  }
+
+  const normalized = { ...(input as Record<string, unknown>) };
+  delete normalized.include;
+  return stableHash(normalized);
+}
+
 function stableSerialize(input: unknown): string {
   if (input === null || typeof input !== "object") {
     return JSON.stringify(input);
@@ -71,26 +85,8 @@ export function computeEngineKey(input: EngineKeyInput): string {
     input.configKind,
     input.tsconfigPath ? normalizePath(input.tsconfigPath) : "",
     input.configHash,
-    input.workspaceIdentity ?? "",
     input.nativeFlags.analysisLevel,
     input.nativeFlags.deepMacroResolutionType ? "1" : "0",
   ];
   return parts.join("|");
-}
-
-// Workspace identity tracking via WeakMap
-const workspaceIdentities = new WeakMap<object, string>();
-let nextWorkspaceId = 1;
-
-/**
- * Get or assign a stable identity string for a workspace object.
- * Uses a WeakMap so identity doesn't prevent GC of the workspace.
- */
-export function getWorkspaceIdentity(workspace: object): string {
-  let id = workspaceIdentities.get(workspace);
-  if (!id) {
-    id = `ws-${nextWorkspaceId++}`;
-    workspaceIdentities.set(workspace, id);
-  }
-  return id;
 }

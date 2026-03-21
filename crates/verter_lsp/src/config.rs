@@ -35,6 +35,33 @@ pub fn merge_init_options(resolved: &mut ResolvedLintConfig, init_options: &serd
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExperimentalInitOptions {
+    pub conditional_root_narrowing: bool,
+    pub strict_slots: bool,
+    pub deep_component_meta_expansion: bool,
+}
+
+pub fn parse_experimental_init_options(
+    init_options: &serde_json::Value,
+) -> ExperimentalInitOptions {
+    let experimental = init_options.get("experimental");
+    ExperimentalInitOptions {
+        conditional_root_narrowing: experimental
+            .and_then(|v| v.get("conditionalRootNarrowing"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        strict_slots: experimental
+            .and_then(|v| v.get("strictSlots"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        deep_component_meta_expansion: experimental
+            .and_then(|v| v.get("deepComponentMetaExpansion"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
 #[cfg(test)]
 mod config_migration_tests {
     use super::*;
@@ -101,6 +128,34 @@ mod config_migration_tests {
         assert_eq!(
             resolved.config.preset,
             verter_diagnostics::LintPreset::Strict
+        );
+    }
+
+    #[test]
+    fn parse_experimental_init_options_defaults_to_false() {
+        let opts = serde_json::json!({});
+        assert_eq!(
+            parse_experimental_init_options(&opts),
+            ExperimentalInitOptions::default()
+        );
+    }
+
+    #[test]
+    fn parse_experimental_init_options_reads_deep_component_meta_expansion() {
+        let opts = serde_json::json!({
+            "experimental": {
+                "conditionalRootNarrowing": true,
+                "strictSlots": true,
+                "deepComponentMetaExpansion": true
+            }
+        });
+        assert_eq!(
+            parse_experimental_init_options(&opts),
+            ExperimentalInitOptions {
+                conditional_root_narrowing: true,
+                strict_slots: true,
+                deep_component_meta_expansion: true,
+            }
         );
     }
 

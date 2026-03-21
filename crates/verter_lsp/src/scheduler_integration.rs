@@ -14,9 +14,10 @@
 
 use std::sync::Arc;
 
-use verter_host::VerterHost;
+use verter_host::{FileKind as HostFileKind, VerterHost};
 use verter_scheduler::node::SourceSnapshot;
 use verter_scheduler::scheduler::Request;
+use verter_scheduler::source_loader::FileKind as SchedulerFileKind;
 use verter_scheduler::stage::{Priority, TargetStage};
 
 /// Priority mapping for LSP operations.
@@ -56,6 +57,10 @@ pub fn submit_to_scheduler(host: &VerterHost, file_id: &str, source: Arc<str>, p
         target: TargetStage::Analysis,
         priority,
         source: Some(source),
+        file_kind: Some(match HostFileKind::from_path(file_id) {
+            HostFileKind::VueSfc => SchedulerFileKind::VueSfc,
+            HostFileKind::NonSfc => SchedulerFileKind::NonSfc,
+        }),
     });
     scheduler.drive_all();
 }

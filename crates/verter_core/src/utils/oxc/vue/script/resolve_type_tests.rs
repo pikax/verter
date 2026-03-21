@@ -1895,3 +1895,90 @@ type Test = Readonly<Base>
     assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
     assert_eq!(resolved.props.len(), 2);
 }
+
+// =========================================================================
+// Phase 8: interface extends Pick<Imported, ...> + generic wrappers
+// =========================================================================
+
+#[test]
+fn interface_extends_pick_of_imported_type_resolves_inherited_fields() {
+    let source = r#"
+interface BaseProps { a: string; b: number; c: boolean; d: object }
+interface MyProps extends Pick<BaseProps, 'a' | 'b'> { local: string }
+type Test = MyProps
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|p| &source[p.key.start as usize..p.key.end as usize])
+        .collect();
+
+    // Assert+: inherited + local fields are present
+    assert!(
+        names.contains(&"a"),
+        "should have 'a' from Pick, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"b"),
+        "should have 'b' from Pick, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"local"),
+        "should have 'local', got: {names:?}"
+    );
+
+    // Assert-: excluded fields must not be present
+    assert!(
+        !names.contains(&"c"),
+        "should NOT have 'c' (not in Pick), got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"d"),
+        "should NOT have 'd' (not in Pick), got: {names:?}"
+    );
+}
+
+#[test]
+fn generic_wrapper_over_utility_type_resolves_fields() {
+    let source = r#"
+interface BaseProps { a: string; b: number; c: boolean }
+type WithExtra<T> = Partial<T> & { extra: string }
+type Test = WithExtra<BaseProps>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|p| &source[p.key.start as usize..p.key.end as usize])
+        .collect();
+
+    // Assert+: all BaseProps + extra
+    assert!(
+        names.contains(&"a"),
+        "should have 'a' from Partial<BaseProps>, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"b"),
+        "should have 'b' from Partial<BaseProps>, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"c"),
+        "should have 'c' from Partial<BaseProps>, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"extra"),
+        "should have 'extra' from intersection, got: {names:?}"
+    );
+
+    // Assert-: no missing props
+    assert_eq!(
+        resolved.props.len(),
+        4,
+        "should have exactly 4 props (a, b, c, extra)"
+    );
+}

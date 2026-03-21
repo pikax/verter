@@ -429,6 +429,12 @@ export declare class MetaProject {
   /** Load a file into the base project (shared across all sessions). */
   upsertBase(canonicalId: string, source: string | Buffer): void;
 
+  /** Ensure a workspace-backed file is loaded into the shared base project. */
+  ensureLoaded(canonicalId: string): boolean;
+
+  /** Refresh a shared base file from the current workspace. */
+  refreshBase(canonicalId: string): boolean;
+
   /** Configure project-scoped path alias resolution. */
   configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
 
@@ -465,18 +471,8 @@ export declare class MetaSession {
   /** Tombstone a file in this session (mark as deleted). */
   delete(canonicalId: string): void;
 
-  /**
-   * Get the analysis snapshot for a file (JSON string).
-   * Resolves through this session's overlay → shared base.
-   * Returns null if the file doesn't exist or is tombstoned.
-   */
-  getAnalysis(canonicalOrAlias: string): string | null;
-
-  /**
-   * Resolve imported type definitions for a file's macro type dependencies.
-   * Returns a JSON array of `{ name, expanded }` entries, or null if empty.
-   */
-  resolveImportedTypes(canonicalOrAlias: string): string | null;
+  /** Single native component-meta query. Returns null if the file is missing. */
+  getComponentMeta(canonicalOrAlias: string): string | null;
 
   /**
    * Get effective source for a file (overlay → base).
@@ -489,6 +485,9 @@ export declare class MetaSession {
 
   /** Returns canonical IDs of all files visible to this session. */
   trackedFileIds(): string[];
+
+  /** Return provenance counters for observability. */
+  getProvenance(): string;
 
   /** Close the session, releasing the overlay and lease. Idempotent. */
   close(): void;

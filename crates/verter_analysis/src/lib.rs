@@ -22,6 +22,7 @@
 
 mod analysis;
 mod classify;
+pub mod component_meta;
 mod exports;
 pub mod file_usage;
 mod imports;

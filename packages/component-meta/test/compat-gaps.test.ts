@@ -153,3 +153,86 @@ describe("P4: DOM & Advanced Types", () => {
     expect(prop).toBeDefined();
   });
 });
+
+// =============================================================================
+// Phase 8: Correctness — interface extends, Pick/Omit, typeof, double script
+// =============================================================================
+describe("Phase 8: Correctness", () => {
+  test("interface extends resolves inherited fields", async () => {
+    const props = await getProps("InterfaceExtends.vue");
+    const userProp = props.find((p) => p.name === "user");
+    expect(userProp).toBeDefined();
+    expect(typeof userProp!.schema).not.toBe("string");
+    if (typeof userProp!.schema !== "string") {
+      expect(userProp!.schema.kind).toBe("object");
+      expect(Object.keys(userProp!.schema.schema ?? {})).toEqual(["id", "name", "email", "active"]);
+      expect(userProp!.schema.schema?.active).toMatchObject({
+        required: false,
+        type: "boolean",
+      });
+    }
+  });
+
+  test("Pick filters to only selected keys", async () => {
+    const props = await getProps("PickOmitProps.vue");
+    const displayProp = props.find((p) => p.name === "display");
+    expect(displayProp).toBeDefined();
+    expect(displayProp!.type).toContain("Pick<FullUser");
+    expect(typeof displayProp!.schema).not.toBe("string");
+    if (typeof displayProp!.schema !== "string") {
+      expect(displayProp!.schema.kind).toBe("object");
+      expect(Object.keys(displayProp!.schema.schema ?? {})).toEqual(["id", "name"]);
+    }
+  });
+
+  test("Omit excludes specified keys", async () => {
+    const props = await getProps("PickOmitProps.vue");
+    const safeProp = props.find((p) => p.name === "safe");
+    expect(safeProp).toBeDefined();
+    expect(safeProp!.type).toContain("Omit<FullUser");
+    expect(typeof safeProp!.schema).not.toBe("string");
+    if (typeof safeProp!.schema !== "string") {
+      expect(safeProp!.schema.kind).toBe("object");
+      expect(Object.keys(safeProp!.schema.schema ?? {})).toEqual(["id", "name", "email"]);
+    }
+  });
+
+  test("double script block: sibling script types are visible", async () => {
+    const props = await getProps("DoubleScript.vue");
+    const names = props.map((p) => p.name);
+
+    // Assert+: props from sibling script are resolved
+    expect(names).toContain("shared");
+    expect(names).toContain("count");
+
+    // Assert-: no extra props
+    expect(props.length).toBe(2);
+  });
+
+  test("local typeof resolves to object fields", async () => {
+    const props = await getProps("LocalTypeof.vue");
+    const names = props.map((p) => p.name);
+
+    // Assert+: typeof config should produce x and y
+    expect(names).toContain("x");
+    expect(names).toContain("y");
+
+    // Assert-: exactly 2 props
+    expect(props.length).toBe(2);
+    expect(props.find((p) => p.name === "x")?.type).toBe("1");
+    expect(props.find((p) => p.name === "y")?.type).toBe('"hello"');
+  });
+
+  test("ReturnType<typeof fn> resolves fields", async () => {
+    const props = await getProps("ReturnTypeProps.vue");
+    const configProp = props.find((p) => p.name === "config");
+    expect(configProp).toBeDefined();
+    expect(configProp!.type).toContain("ReturnType<typeof createConfig>");
+    expect(typeof configProp!.schema).not.toBe("string");
+    if (typeof configProp!.schema !== "string") {
+      expect(configProp!.schema.kind).toBe("object");
+      expect(Object.keys(configProp!.schema.schema ?? {})).toEqual(["theme", "debug"]);
+      expect(configProp!.schema.schema?.debug).toMatchObject({ type: "false" });
+    }
+  });
+});

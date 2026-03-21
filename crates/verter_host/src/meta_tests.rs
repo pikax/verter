@@ -14,6 +14,18 @@ fn make_project() -> Arc<MetaProject> {
     MetaProject::new(host)
 }
 
+fn make_workspace_project(ws: Arc<verter_vfs::MemoryWorkspace>) -> Arc<MetaProject> {
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            deep_macro_resolution_type: true,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    MetaProject::new(host)
+}
+
 fn sfc(props: &str) -> String {
     format!(
         r#"<script setup lang="ts">
@@ -65,6 +77,31 @@ fn cached_evaluated_types(
     }
 }
 
+fn cached_enriched_analysis(
+    project: &MetaProject,
+    canonical: &str,
+) -> Option<(
+    crate::types::Hash16,
+    Arc<crate::types::FileAnalysisSnapshot>,
+)> {
+    #[cfg(feature = "scheduler")]
+    {
+        project
+            .host()
+            .compile_cache
+            .get(canonical)
+            .and_then(|entry| entry.cached_enriched_analysis.clone())
+    }
+
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let files = crate::shared::read_lock(&project.host().files);
+        files
+            .get(canonical)
+            .and_then(|entry| entry.cached_enriched_analysis.clone())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Basic project lifecycle
 // ---------------------------------------------------------------------------
@@ -96,6 +133,62 @@ fn session_drop_auto_closes() {
         assert_eq!(project.session_count(), 1);
     }
     assert_eq!(project.session_count(), 0);
+}
+
+#[test]
+fn ensure_loaded_populates_shared_base_from_workspace() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file("/workspace/App.vue".to_string(), Arc::from(sfc("msg: string")));
+
+    let project = make_workspace_project(Arc::clone(&ws));
+
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "ensure_loaded should materialize the workspace file into the shared base project"
+    );
+    assert!(
+        project.base_file_ids().contains("/workspace/App.vue"),
+        "base index should include the loaded workspace file"
+    );
+
+    let session = project.open_session().unwrap();
+    assert!(session.has_file("/workspace/App.vue").unwrap());
+    let source = session
+        .get_effective_source("/workspace/App.vue")
+        .unwrap()
+        .expect("session should see the loaded base source");
+    assert!(source.contains("msg: string"));
+}
+
+#[test]
+fn refresh_base_reloads_workspace_source_into_shared_base() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file("/workspace/App.vue".to_string(), Arc::from(sfc("msg: string")));
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(project.ensure_loaded("/workspace/App.vue").unwrap());
+
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(sfc("count: number")),
+    );
+
+    assert!(
+        project.refresh_base("/workspace/App.vue").unwrap(),
+        "refresh_base should reload the latest workspace content into shared base state"
+    );
+
+    let session = project.open_session().unwrap();
+    let source = session
+        .get_effective_source("/workspace/App.vue")
+        .unwrap()
+        .expect("session should see the refreshed base source");
+    assert!(source.contains("count: number"));
+    assert!(!source.contains("msg: string"));
 }
 
 #[test]
@@ -364,10 +457,24 @@ fn clear_caches_preserves_base_files() {
         .upsert_base("Comp.vue", &sfc("msg: string"))
         .unwrap();
 
+    let s = project.open_session().unwrap();
+    let _ = s
+        .get_analysis("Comp.vue")
+        .unwrap()
+        .expect("analysis should exist before clearing caches");
+    assert!(
+        cached_enriched_analysis(&project, "Comp.vue").is_some(),
+        "clear_caches test should start with a populated enriched-analysis cache"
+    );
+
     project.clear_caches().unwrap();
 
+    assert!(
+        cached_enriched_analysis(&project, "Comp.vue").is_none(),
+        "clear_caches must flush the enriched-analysis cache",
+    );
+
     // Base file should still exist and be queryable
-    let s = project.open_session().unwrap();
     let analysis = s.get_analysis("Comp.vue").unwrap();
     assert!(
         analysis.is_some(),
@@ -805,4 +912,1338 @@ defineProps<{
         }
         other => panic!("expected imported interface to resolve to an object, got {other:?}"),
     }
+}
+
+// ===========================================================================
+// Phase 1: Provenance counters and enriched-analysis caching
+// ===========================================================================
+
+/// Helper to read the provenance counters from a MetaProject's host.
+fn provenance(project: &MetaProject) -> crate::types::MetaProvenanceSnapshot {
+    project.host().provenance().snapshot()
+}
+
+#[test]
+fn evaluate_types_records_resolved_state_recompute_when_enriched_snapshot_is_missing() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+
+    let _ = session
+        .evaluate_types("/App.vue")
+        .expect("evaluate_types should succeed");
+
+    let p = provenance(&project);
+    assert_eq!(p.evaluate_types_calls, 1);
+    assert_eq!(
+        p.component_meta_resolved_state_recomputes, 1,
+        "evaluate_types should record one resolved-state recompute when no enriched snapshot exists",
+    );
+    assert_eq!(
+        p.evaluate_types_reused_enriched_snapshot, 0,
+        "evaluate_types should not report enriched-snapshot reuse on a cold path",
+    );
+}
+
+#[test]
+fn evaluate_types_cold_path_does_not_call_public_get_analysis_workflow() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+
+    let _ = session
+        .evaluate_types("/App.vue")
+        .expect("evaluate_types should succeed on a cold path");
+
+    let p = provenance(&project);
+    assert_eq!(
+        p.get_analysis_calls, 0,
+        "evaluate_types should use the private resolved-state helper instead of the public get_analysis workflow",
+    );
+}
+
+#[test]
+fn evaluate_types_records_enriched_snapshot_reuse_after_get_analysis() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let _ = session
+        .get_analysis("/App.vue")
+        .unwrap()
+        .expect("get_analysis should populate enriched-analysis cache");
+
+    project.host().provenance().reset();
+
+    let _ = session
+        .evaluate_types("/App.vue")
+        .expect("evaluate_types should reuse the cached enriched snapshot");
+
+    let p = provenance(&project);
+    assert_eq!(p.evaluate_types_calls, 1);
+    assert_eq!(
+        p.component_meta_resolved_state_recomputes, 0,
+        "evaluate_types should not recompute resolved state when an enriched snapshot already exists",
+    );
+    assert_eq!(
+        p.evaluate_types_reused_enriched_snapshot, 1,
+        "evaluate_types should record enriched-snapshot reuse after get_analysis",
+    );
+}
+
+#[test]
+fn evaluate_types_does_not_trigger_second_deep_enrichment_for_unchanged_file() {
+    // Setup: dep file + SFC importing from it
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Reset counters after upsert
+    project.host().provenance().reset();
+
+    let session = project.open_session().unwrap();
+
+    // Act: call get_analysis() then evaluate_types() — the compat workflow
+    let _analysis = session.get_analysis("/App.vue").unwrap();
+    let _eval = session.evaluate_types("/App.vue").unwrap();
+
+    let p = provenance(&project);
+
+    // Assert+: get_analysis was called at least once
+    assert!(
+        p.get_analysis_calls >= 1,
+        "get_analysis should have been called, got: {}",
+        p.get_analysis_calls
+    );
+
+    // Assert+: deep enrichment ran exactly once (not twice)
+    assert_eq!(
+        p.get_analysis_deep_enrich_runs, 1,
+        "deep enrichment should run exactly once for the compat workflow, got: {}",
+        p.get_analysis_deep_enrich_runs
+    );
+
+    // Assert-: deep enrichment must NOT have run twice
+    assert!(
+        p.get_analysis_deep_enrich_runs != 2,
+        "deep enrichment must NOT run twice for one compat request"
+    );
+}
+
+#[test]
+fn deep_enriched_analysis_is_cached_for_unchanged_owner() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+
+    // First call triggers enrichment
+    let first = session.get_analysis("/App.vue").unwrap().unwrap();
+    let p1 = provenance(&project);
+    assert_eq!(
+        p1.get_analysis_deep_enrich_runs, 1,
+        "first call should trigger exactly one enrichment"
+    );
+
+    // Second call should hit the cache
+    let second = session.get_analysis("/App.vue").unwrap().unwrap();
+    let p2 = provenance(&project);
+
+    // Assert+: cache was hit on the second call
+    assert_eq!(
+        p2.get_analysis_enriched_cache_hits, 1,
+        "second call should hit the enriched-analysis cache, got: {}",
+        p2.get_analysis_enriched_cache_hits
+    );
+
+    // Assert+: both results have the same prop fields
+    let first_props = prop_names(&first);
+    let second_props = prop_names(&second);
+    assert_eq!(
+        first_props, second_props,
+        "both results should have identical prop fields"
+    );
+
+    // Assert-: deep enrichment should NOT have run again
+    assert_eq!(
+        p2.get_analysis_deep_enrich_runs, 1,
+        "deep enrichment should NOT run again for unchanged file, got: {}",
+        p2.get_analysis_deep_enrich_runs
+    );
+}
+
+#[test]
+fn deep_enriched_analysis_invalidates_on_owner_change() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    // First call populates the cache
+    let _first = session.get_analysis("/App.vue").unwrap().unwrap();
+
+    // Modify the owner SFC to add a local prop
+    session
+        .upsert(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+interface LocalProps extends Props { c: boolean }
+defineProps<LocalProps>()
+</script>
+<template><div /></template>"#
+                .into(),
+        )
+        .unwrap();
+
+    // Reset counters to measure the second call clearly
+    project.host().provenance().reset();
+    let second = session.get_analysis("/App.vue").unwrap().unwrap();
+    let p = provenance(&project);
+
+    // Assert+: result includes the new prop 'c'
+    let names = prop_names(&second);
+    assert!(
+        names.contains(&"c".to_string()),
+        "owner change should produce updated props including 'c', got: {:?}",
+        names
+    );
+
+    // Assert+: deep enrichment ran again (cache was invalidated)
+    assert_eq!(
+        p.get_analysis_deep_enrich_runs, 1,
+        "owner change should trigger a fresh deep enrichment, got: {}",
+        p.get_analysis_deep_enrich_runs
+    );
+
+    // Assert-: cache should NOT have been reused (hash changed)
+    assert_eq!(
+        p.get_analysis_enriched_cache_hits, 0,
+        "owner change should NOT reuse the enriched cache, got: {}",
+        p.get_analysis_enriched_cache_hits
+    );
+}
+
+#[test]
+fn deep_enriched_analysis_invalidates_on_dependency_change() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Manually register the import dependency so reverse-dep tracking works.
+    // In production, set_import_dependencies is called by the NAPI layer after
+    // the bundler resolves specifiers to canonical IDs with extensions.
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+
+    // First call populates the cache and enriches imported types
+    let first = session.get_analysis("/src/App.vue").unwrap().unwrap();
+    let first_names = prop_names(&first);
+    assert!(
+        first_names.contains(&"a".to_string()),
+        "first call should resolve props, got: {:?}",
+        first_names
+    );
+
+    // Modify the dependency to add prop 'c'
+    session
+        .upsert(
+            "/src/types.ts",
+            r#"export interface Props { a: string; b: number; c: boolean }"#.into(),
+        )
+        .unwrap();
+
+    // Reset counters
+    project.host().provenance().reset();
+    let second = session.get_analysis("/src/App.vue").unwrap().unwrap();
+    let p = provenance(&project);
+
+    // Assert+: result includes the new prop 'c'
+    let names = prop_names(&second);
+    assert!(
+        names.contains(&"c".to_string()),
+        "dependency change should produce updated props including 'c', got: {:?}",
+        names
+    );
+
+    // Assert+: deep enrichment re-ran (at least once)
+    assert!(
+        p.get_analysis_deep_enrich_runs >= 1,
+        "dependency change should trigger re-enrichment, got: {}",
+        p.get_analysis_deep_enrich_runs
+    );
+}
+
+#[test]
+fn invalidate_compile_slots_clears_enriched_analysis_cache() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let _ = session
+        .get_analysis("/App.vue")
+        .unwrap()
+        .expect("analysis should populate the enriched cache");
+    assert!(
+        cached_enriched_analysis(&project, "/App.vue").is_some(),
+        "enriched-analysis cache should be populated before invalidation"
+    );
+
+    project.host().invalidate_compile_slots("/App.vue");
+
+    assert!(
+        cached_enriched_analysis(&project, "/App.vue").is_none(),
+        "invalidate_compile_slots must clear the enriched-analysis cache",
+    );
+}
+
+#[test]
+fn removing_dependency_clears_enriched_analysis_cache_for_dependents() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let _ = session
+        .get_analysis("/src/App.vue")
+        .unwrap()
+        .expect("analysis should populate the dependent enriched cache");
+    assert!(
+        cached_enriched_analysis(&project, "/src/App.vue").is_some(),
+        "dependent should have a populated enriched-analysis cache before removal"
+    );
+
+    let _ = project.host().remove("/src/types.ts");
+
+    assert!(
+        cached_enriched_analysis(&project, "/src/App.vue").is_none(),
+        "removing a dependency must clear the dependent enriched-analysis cache",
+    );
+}
+
+#[cfg(not(feature = "scheduler"))]
+#[test]
+fn non_scheduler_upsert_clears_enriched_analysis_cache_immediately() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let _ = session
+        .get_analysis("/App.vue")
+        .unwrap()
+        .expect("analysis should populate the enriched cache");
+    assert!(
+        cached_enriched_analysis(&project, "/App.vue").is_some(),
+        "non-scheduler test should start with a populated enriched-analysis cache"
+    );
+
+    let updated = sfc("msg: string; count: number");
+    let _ = project
+        .host()
+        .upsert(crate::types::UpsertRequest {
+            canonical_id: Some("/App.vue".to_string()),
+            input_id: "/App.vue".to_string(),
+            source: Arc::from(updated.as_str()),
+            file_kind: crate::types::FileKind::from_path("/App.vue"),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    assert!(
+        cached_enriched_analysis(&project, "/App.vue").is_none(),
+        "non-scheduler upsert must clear the stale enriched-analysis cache immediately",
+    );
+}
+
+// ===========================================================================
+// Phase 3: Native get_component_meta query
+// ===========================================================================
+
+#[test]
+fn get_component_meta_returns_props_and_events() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ label: string; count?: number }>()
+defineEmits<{ change: [value: string] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+
+    // Assert+: props extracted
+    assert_eq!(meta.props.len(), 2, "should extract 2 props");
+    assert_eq!(meta.props[0].name, "label");
+    assert!(meta.props[0].required, "label should be required");
+    assert_eq!(meta.props[1].name, "count");
+    assert!(!meta.props[1].required, "count should be optional");
+
+    // Assert+: events extracted
+    assert_eq!(meta.events.len(), 1, "should extract 1 event");
+    assert_eq!(meta.events[0].name, "change");
+
+    // Assert-: no models, no exposed
+    assert!(meta.models.is_empty(), "no defineModel → no models");
+    assert!(meta.exposed.is_empty(), "no defineExpose → no exposed");
+}
+
+#[test]
+fn get_component_meta_uses_single_native_query_path() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .unwrap();
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+
+    let _meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let p = provenance(&project);
+
+    // Assert+: the new query was called
+    assert_eq!(
+        p.get_component_meta_calls, 1,
+        "get_component_meta should record one call"
+    );
+
+    // Assert+: deep enrichment ran at most once
+    assert!(
+        p.get_analysis_deep_enrich_runs <= 1,
+        "get_component_meta should perform at most one deep enrichment, got: {}",
+        p.get_analysis_deep_enrich_runs
+    );
+}
+
+#[test]
+fn get_component_meta_reuses_enriched_cache_on_second_call() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    // First call
+    let _first = session.get_component_meta("/App.vue").unwrap().unwrap();
+
+    project.host().provenance().reset();
+
+    // Second call — should reuse cached enriched analysis
+    let _second = session.get_component_meta("/App.vue").unwrap().unwrap();
+    let p = provenance(&project);
+
+    assert_eq!(
+        p.get_component_meta_calls, 1,
+        "second call should be counted"
+    );
+    assert_eq!(
+        p.get_analysis_enriched_cache_hits, 1,
+        "second call should hit the enriched-analysis cache"
+    );
+    assert_eq!(
+        p.get_analysis_deep_enrich_runs, 0,
+        "second call should NOT run deep enrichment"
+    );
+}
+
+#[test]
+fn get_component_meta_provenance_has_zero_legacy_reentry() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .unwrap();
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+
+    let _meta = session.get_component_meta("/App.vue").unwrap().unwrap();
+    let p = provenance(&project);
+
+    assert_eq!(
+        p.component_meta_legacy_workflow_reentry, 0,
+        "native get_component_meta must not trigger legacy workflow reentry"
+    );
+}
+
+#[test]
+fn get_component_meta_does_not_call_public_evaluate_types_workflow() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .unwrap();
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+
+    let _meta = session.get_component_meta("/App.vue").unwrap().unwrap();
+    let p = provenance(&project);
+
+    assert_eq!(
+        p.evaluate_types_calls, 0,
+        "native get_component_meta must not route through the public evaluate_types workflow"
+    );
+}
+
+#[test]
+fn get_component_meta_cold_path_does_not_call_public_get_analysis_workflow() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .unwrap();
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+
+    let _meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+    let p = provenance(&project);
+
+    assert_eq!(
+        p.get_analysis_calls, 0,
+        "native get_component_meta must not route through the public get_analysis workflow",
+    );
+}
+
+#[test]
+fn get_component_meta_prefers_declaration_entrypoints_for_package_type_imports() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/fancy/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js", "require": "./dist/index.cjs" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+        Arc::from(r#"import { FancyProps } from "./inner.js"; export type { FancyProps };"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/inner.d.ts".to_string(),
+        Arc::from("export interface FancyProps { open: boolean }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/inner.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            deep_macro_resolution_type: true,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    let project = MetaProject::new(host);
+    project
+        .upsert_base(
+            "/workspace/src/Consumer.vue",
+            r#"<script setup lang="ts">
+import type { FancyProps } from 'fancy'
+defineProps<FancyProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/workspace/src/Consumer.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+
+    assert_eq!(meta.props.len(), 1, "should extract the imported prop");
+    assert_eq!(meta.props[0].name, "open");
+    assert_eq!(meta.props[0].raw_type.as_deref(), Some("boolean"));
+    assert!(
+        matches!(
+            meta.props[0].type_expr,
+            TypeExpr::Primitive(PrimitiveName::Boolean)
+        ),
+        "expanded prop type should come from the declaration entrypoint, got: {:?}",
+        meta.props[0].type_expr
+    );
+}
+
+#[test]
+fn get_component_meta_returns_full_native_metadata_contract() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/FancyButton.vue",
+            r#"<script setup lang="ts">
+defineProps<{ label: string; modelValue: number }>()
+</script>
+<template><button><slot /></button></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import FancyButton from './FancyButton.vue'
+
+const count = ref(0)
+const accentColor = "red"
+const doubled = computed(() => count.value * 2)
+
+onMounted(() => {
+  console.log(count.value)
+})
+</script>
+<template>
+  <FancyButton
+    id="wrapper"
+    ref="button"
+    :label="`${doubled}`"
+    class="primary"
+    :class="{ active: count > 0 }"
+    v-model="count"
+  >
+    <template #default>{{ count }}</template>
+  </FancyButton>
+</template>
+<style scoped module="theme">
+#wrapper .primary {
+  color: v-bind(accentColor);
+  --accent: red;
+}
+</style>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+
+    assert_eq!(
+        meta.components.len(),
+        1,
+        "template component usage should be present"
+    );
+    assert_eq!(meta.components[0].name, "FancyButton");
+    assert_eq!(
+        meta.components[0].import_source.as_deref(),
+        Some("./FancyButton.vue")
+    );
+    assert!(meta.components[0].has_dynamic_class);
+    assert_eq!(meta.components[0].v_models, vec!["modelValue".to_string()]);
+
+    assert_eq!(
+        meta.template_refs.len(),
+        1,
+        "template refs should be present"
+    );
+    assert_eq!(meta.template_refs[0].name, "button");
+    assert_eq!(meta.template_refs[0].target_tag, "FancyButton");
+
+    assert!(
+        meta.imports.iter().any(|import| import.source == "vue"),
+        "script imports should be preserved"
+    );
+    assert!(
+        meta.bindings
+            .iter()
+            .any(|binding| binding.name == "count" && binding.used_in_template),
+        "bindings should preserve template usage information"
+    );
+    assert!(
+        meta.vue_api_calls.iter().any(|call| matches!(
+            call.api,
+            verter_analysis::types::VueApiClassification::OnMounted
+        )),
+        "Vue API calls should be preserved"
+    );
+    assert_eq!(meta.styles.len(), 1, "style metadata should be present");
+    assert_eq!(meta.styles[0].classes, vec!["primary".to_string()]);
+    assert_eq!(meta.styles[0].ids, vec!["wrapper".to_string()]);
+    assert_eq!(
+        meta.styles[0].custom_properties,
+        vec!["--accent".to_string()]
+    );
+    assert_eq!(meta.styles[0].v_binds, vec!["accentColor".to_string()]);
+    assert!(
+        meta.styles[0]
+            .selectors
+            .iter()
+            .any(|selector| selector.text == "#wrapper .primary"),
+        "style selectors should be preserved"
+    );
+}
+
+// ===========================================================================
+// Phase 6: Resolved external type cache
+// ===========================================================================
+
+#[test]
+fn resolved_type_cache_is_reused_across_different_owners() {
+    let project = make_project();
+
+    // Shared dependency
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface SharedProps { shared: string }"#,
+        )
+        .unwrap();
+
+    // Two different SFCs importing the same type from the same dep
+    project
+        .upsert_base(
+            "/src/A.vue",
+            r#"<script setup lang="ts">
+import { SharedProps } from './types'
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/B.vue",
+            r#"<script setup lang="ts">
+import { SharedProps } from './types'
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Set up dep resolution for both owners
+    project.host().set_import_dependencies(
+        "/src/A.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/B.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+
+    // First owner resolves the type (cache miss)
+    project.host().provenance().reset();
+    let meta_a = session.get_component_meta("/src/A.vue").unwrap().unwrap();
+    let p1 = provenance(&project);
+
+    assert!(
+        p1.resolved_external_type_cache_misses >= 1,
+        "first owner should miss the resolved type cache"
+    );
+    assert_eq!(meta_a.props.len(), 1, "A.vue should have the shared prop");
+
+    // Reset counters for second owner
+    project.host().provenance().reset();
+    let meta_b = session.get_component_meta("/src/B.vue").unwrap().unwrap();
+    let p2 = provenance(&project);
+
+    assert_eq!(meta_b.props.len(), 1, "B.vue should have the shared prop");
+    assert_eq!(meta_b.props[0].name, "shared");
+
+    // Assert+: second owner should hit the host-level cache
+    assert!(
+        p2.resolved_external_type_cache_hits >= 1,
+        "second owner importing the same type from the same unchanged dep should hit the host-level cache, got hits={} misses={}",
+        p2.resolved_external_type_cache_hits,
+        p2.resolved_external_type_cache_misses,
+    );
+}
+
+#[test]
+fn resolved_type_cache_is_reused_for_workspace_only_package_dependencies() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/fancy/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+        Arc::from("export interface SharedProps { shared: string }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            deep_macro_resolution_type: true,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    let project = MetaProject::new(host);
+    project
+        .configure_projects(vec![
+            verter_analysis::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.json".to_string()),
+            ),
+        ])
+        .unwrap();
+    project
+        .upsert_base(
+            "/workspace/src/A.vue",
+            r#"<script setup lang="ts">
+import type { SharedProps } from 'fancy'
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/workspace/src/B.vue",
+            r#"<script setup lang="ts">
+import type { SharedProps } from 'fancy'
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    project.host().provenance().reset();
+    let meta_a = session
+        .get_component_meta("/workspace/src/A.vue")
+        .unwrap()
+        .unwrap();
+    let p1 = provenance(&project);
+    assert_eq!(
+        meta_a.props.len(),
+        1,
+        "A.vue should resolve the package prop"
+    );
+    assert!(
+        p1.resolved_external_type_cache_misses >= 1,
+        "first owner should miss the resolved type cache for a workspace-only dep"
+    );
+
+    project.host().provenance().reset();
+    let meta_b = session
+        .get_component_meta("/workspace/src/B.vue")
+        .unwrap()
+        .unwrap();
+    let p2 = provenance(&project);
+    assert_eq!(
+        meta_b.props.len(),
+        1,
+        "B.vue should resolve the package prop"
+    );
+    assert_eq!(meta_b.props[0].name, "shared");
+    assert!(
+        p2.resolved_external_type_cache_hits >= 1,
+        "second owner should hit the host-level resolved type cache even when the dep only exists in the workspace, got hits={} misses={}",
+        p2.resolved_external_type_cache_hits,
+        p2.resolved_external_type_cache_misses,
+    );
+}
+
+#[test]
+fn resolved_type_cache_cleared_on_host_close() {
+    let project = make_project();
+    project
+        .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let _ = session.get_component_meta("/App.vue").unwrap();
+
+    // Verify cache is populated
+    assert!(
+        !project.host().resolved_type_cache.lock().is_empty(),
+        "cache should be populated after resolution"
+    );
+
+    // Clear caches
+    project.clear_caches().unwrap();
+
+    assert!(
+        project.host().resolved_type_cache.lock().is_empty(),
+        "clear_caches must flush the resolved type cache"
+    );
+}
+
+#[test]
+fn resolved_type_cache_is_bounded() {
+    // Verify that inserting beyond cap doesn't grow unbounded
+    let host = VerterHost::new_standalone(HostConfig {
+        deep_macro_resolution_type: true,
+        ..HostConfig::default()
+    });
+
+    {
+        let mut cache = host.resolved_type_cache.lock();
+        // Fill to cap
+        for i in 0..crate::types::RESOLVED_TYPE_CACHE_CAP {
+            cache.insert(
+                crate::types::ResolvedTypeCacheKey {
+                    dep_canonical_id: format!("/dep_{i}.ts"),
+                    dep_source_hash: [0u8; 16],
+                    type_name: "T".to_string(),
+                    resolve_kind: verter_vfs::ResolveRequestKind::TypeImport,
+                },
+                crate::types::ResolvedTypeCacheEntry { resolved: None },
+            );
+        }
+        assert_eq!(
+            cache.len(),
+            crate::types::RESOLVED_TYPE_CACHE_CAP,
+            "cache should be at cap"
+        );
+    }
+
+    // The eviction happens inside resolve_external_type_from_loaded_files,
+    // but we can verify the cap constant is reasonable.
+    assert!(
+        crate::types::RESOLVED_TYPE_CACHE_CAP >= 1024,
+        "cache cap should be at least 1024"
+    );
+    assert!(
+        crate::types::RESOLVED_TYPE_CACHE_CAP <= 16384,
+        "cache cap should not exceed 16384"
+    );
+}
+
+// ===========================================================================
+// Phase 8: Correctness — typeof, double script, interface extends imported
+// ===========================================================================
+
+#[test]
+fn local_typeof_resolves_in_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const config = { x: 1, y: 'hello' }
+defineProps<typeof config>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+
+    // Assert+: both fields from config
+    assert!(names.contains(&"x"), "should have 'x', got: {names:?}");
+    assert!(names.contains(&"y"), "should have 'y', got: {names:?}");
+
+    // Assert-: no extra fields
+    assert_eq!(meta.props.len(), 2, "should have exactly 2 props");
+}
+
+#[test]
+fn double_script_same_file_visibility_in_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script lang="ts">
+export interface SharedProps { shared: boolean }
+</script>
+<script setup lang="ts">
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    // Assert+: prop from sibling script block
+    assert_eq!(
+        meta.props.len(),
+        1,
+        "should have 1 prop from sibling script"
+    );
+    assert_eq!(meta.props[0].name, "shared");
+
+    // Assert-: no unresolved types or errors — prop should be fully resolved
+    assert!(
+        meta.props[0].raw_type.is_some(),
+        "shared prop should have a resolved raw type"
+    );
+}
+
+#[test]
+fn interface_extends_pick_of_imported_type_in_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface BaseProps { a: string; b: number; c: boolean; d: object }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import { BaseProps } from './base'
+interface MyProps extends Pick<BaseProps, 'a' | 'b'> { local: string }
+defineProps<MyProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./base".to_string(),
+            resolved_canonical_id: Some("/src/base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+
+    // Assert+: inherited + local
+    assert!(
+        names.contains(&"a"),
+        "should have 'a' from Pick, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"b"),
+        "should have 'b' from Pick, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"local"),
+        "should have 'local', got: {names:?}"
+    );
+
+    // Assert-: excluded fields
+    assert!(!names.contains(&"c"), "should NOT have 'c', got: {names:?}");
+    assert!(!names.contains(&"d"), "should NOT have 'd', got: {names:?}");
+}
+
+// ===========================================================================
+// Phase 9: LSP deep expansion config
+// ===========================================================================
+
+#[test]
+fn deep_expansion_disabled_by_default() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    assert!(
+        !host.deep_expansion_enabled(),
+        "default host should NOT have deep expansion enabled"
+    );
+}
+
+#[test]
+fn deep_expansion_enabled_via_runtime_override() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    assert!(!host.deep_expansion_enabled());
+
+    host.set_deep_expansion(true);
+    assert!(
+        host.deep_expansion_enabled(),
+        "set_deep_expansion(true) should enable deep expansion"
+    );
+
+    host.set_deep_expansion(false);
+    assert!(
+        !host.deep_expansion_enabled(),
+        "set_deep_expansion(false) should disable deep expansion"
+    );
+}
+
+#[test]
+fn deep_expansion_enabled_via_static_config() {
+    let host = VerterHost::new_standalone(HostConfig {
+        deep_macro_resolution_type: true,
+        ..HostConfig::default()
+    });
+    assert!(
+        host.deep_expansion_enabled(),
+        "static config deep_macro_resolution_type=true should enable deep expansion"
+    );
+}
+
+#[test]
+fn runtime_override_can_disable_static_deep_expansion_config() {
+    let host = VerterHost::new_standalone(HostConfig {
+        deep_macro_resolution_type: true,
+        ..HostConfig::default()
+    });
+    assert!(host.deep_expansion_enabled());
+
+    host.set_deep_expansion(false);
+    assert!(
+        !host.deep_expansion_enabled(),
+        "runtime override false should disable static deep expansion config"
+    );
+}
+
+#[test]
+fn get_analysis_uses_enriched_path_when_deep_expansion_override_set() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.set_deep_expansion(true);
+
+    let project = crate::meta::MetaProject::new(host);
+    project
+        .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    project.host().provenance().reset();
+    let session = project.open_session().unwrap();
+    let _analysis = session.get_analysis("/App.vue").unwrap();
+
+    let p = provenance(&project);
+    // When deep expansion is enabled via runtime override, get_analysis
+    // runs enrichment even though config.deep_macro_resolution_type was
+    // false at construction time.
+    assert_eq!(
+        p.get_analysis_deep_enrich_runs, 1,
+        "runtime deep expansion override should trigger enrichment"
+    );
+}
+
+#[test]
+fn default_lsp_host_does_not_enable_deep_expansion() {
+    // Simulate what the LSP does: HostConfig::default() with analysis_level Full
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    assert!(
+        !host.deep_expansion_enabled(),
+        "LSP-default host must NOT enable deep expansion"
+    );
 }

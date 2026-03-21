@@ -11,8 +11,10 @@
 
 import { resolve, dirname } from "node:path";
 import { createRequire } from "node:module";
-import { buildTypeRegistry, snapshotToMeta } from "../extractor.js";
-import { parseType } from "../resolver.js";
+import {
+  nativeComponentMetaToComponentMeta,
+  nativeTypeRegistryToMap,
+} from "../native-component-meta.js";
 import type { TypeDescriptor } from "../type-ir.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
@@ -22,11 +24,9 @@ import {
   getMetaRuntime,
   computeEngineKey,
   normalizePath as runtimeNormalizePath,
-  stableHash,
-  getWorkspaceIdentity,
+  stableSelectiveConfigHash,
   parseTsconfig,
   extractPathAliases,
-  discoverVueFiles as runtimeDiscoverVueFiles,
 } from "../runtime/index.js";
 import type {
   EngineKeyInput,
@@ -64,25 +64,14 @@ export interface CheckerWorkspace {
 function createWorkspace(rootDir: string): CheckerWorkspace {
   const _require = typeof require === "function" ? require : createRequire(import.meta.url);
   const native = _require("@verter/native");
-  return new native.Workspace([normalizePath(rootDir)]);
+  return new native.Workspace([runtimeNormalizePath(rootDir)]);
 }
 
 /**
  * Read a file using workspace. Workspace is required.
  */
 async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<string | null> {
-  return (await ws.readFile(normalizePath(absPath))) ?? null;
-}
-
-/**
- * Check if file exists using workspace. Workspace is required.
- */
-async function fileExistsSafe(absPath: string, ws: CheckerWorkspace): Promise<boolean> {
-  return ws.fileExists(normalizePath(absPath));
-}
-
-function normalizePath(p: string): string {
-  return p.replace(/\\/g, "/");
+  return (await ws.readFile(runtimeNormalizePath(absPath))) ?? null;
 }
 
 /**
@@ -215,6 +204,8 @@ export class ComponentMetaChecker {
   private adapter: VerterHostAdapter;
   private options: MetaCheckerOptions;
   private trackedFiles: Map<string, string> = new Map();
+  private baseFiles = new Set<string>();
+  private overlayFiles = new Set<string>();
   private deletedFiles = new Set<string>();
   private projectRoot: string;
   private workspace: CheckerWorkspace | undefined;
@@ -244,73 +235,33 @@ export class ComponentMetaChecker {
    */
   async getComponentMeta(filePath: string, _exportName?: string): Promise<VolarComponentMeta> {
     this.ensureActive();
-    const absPath = resolve(this.projectRoot, filePath);
+    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
     await this.ensureFile(absPath);
-    // getAnalysis now enriches macros with cross-file type resolution
-    // (prop_fields, emit_fields, slot_fields, resolved_local_types)
-    // when deepMacroResolutionType is enabled on the host config.
-    const rawSnapshot = this.adapter.getAnalysis(absPath);
-    const typeRegistry = rawSnapshot ? buildTypeRegistry(rawSnapshot) : undefined;
-    if (typeRegistry) {
-      // Safety net: enrich typeRegistry with resolved imported types from the host.
-      // No-op when Rust enrichment already populated resolved_local_types (which
-      // buildTypeRegistry picks up), but catches edge cases where enrichment
-      // fails or the host was configured without deepMacroResolutionType.
-      const importedJson = this.adapter.resolveImportedTypes?.(absPath);
-      if (importedJson) {
-        try {
-          for (const rlt of JSON.parse(importedJson) as Array<{
-            name: string;
-            expanded: string;
-          }>) {
-            if (!typeRegistry.has(rlt.name)) {
-              typeRegistry.set(rlt.name, parseType(rlt.expanded));
-            }
-          }
-        } catch {
-          // Ignore parse errors
-        }
+    if (this._session) {
+      const nativeMeta = this._session.getComponentMeta(absPath);
+      if (!nativeMeta) {
+        return {
+          type: 0,
+          props: [],
+          events: [],
+          slots: [],
+          exposed: [],
+        };
       }
-      // Legacy: extract locally-defined interfaces/types from SFC content via
-      // regex for schema expansion of PropType<T> references in Options API.
-      // The native evaluator handles type-based macros; this is retained only
-      // as a fallback for runtime-style props. Can be removed once native
-      // evaluation covers all Options API prop type annotations.
-      const sfcContent = this.trackedFiles.get(absPath);
-      if (sfcContent) {
-        extractLocalInterfaces(sfcContent, typeRegistry);
-      }
+      return mapComponentMeta(
+        nativeComponentMetaToComponentMeta(
+          nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
+        ),
+        this.options,
+        nativeTypeRegistryToMap(
+          nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
+        ),
+      );
     }
-    // Use native lightweight type evaluation (session or adapter)
-    let evaluatedTypes = null;
-    try {
-      if (this._session) {
-        evaluatedTypes = this._session.evaluateTypes(absPath);
-      } else if (this.adapter.evaluateTypes) {
-        const json = this.adapter.evaluateTypes(absPath);
-        evaluatedTypes = json ? JSON.parse(json) : null;
-      }
-    } catch {
-      // Graceful fallback — evaluation is optional
-    }
-
-    const meta = rawSnapshot
-      ? snapshotToMeta(
-          rawSnapshot,
-          absPath,
-          evaluatedTypes as import("../type-expr-bridge.js").NativeEvaluatedTypes | null,
-        )
-      : null;
-    if (!meta) {
-      return {
-        type: 0,
-        props: [],
-        events: [],
-        slots: [],
-        exposed: [],
-      };
-    }
-    return mapComponentMeta(meta, this.options, typeRegistry);
+    throw new Error(
+      "ComponentMetaChecker requires a runtime session-backed native component-meta query. " +
+        "Use createChecker() or createCheckerByJson().",
+    );
   }
 
   /**
@@ -328,7 +279,9 @@ export class ComponentMetaChecker {
    */
   updateFile(filePath: string, content: string): void {
     this.ensureActive();
-    const absPath = resolve(this.projectRoot, filePath);
+    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
+    this.overlayFiles.add(absPath);
+    this.baseFiles.delete(absPath);
     this.deletedFiles.delete(absPath);
     this.trackedFiles.set(absPath, content);
     this.adapter.upsert({ inputId: absPath, source: content });
@@ -339,7 +292,9 @@ export class ComponentMetaChecker {
    */
   deleteFile(filePath: string): void {
     this.ensureActive();
-    const absPath = resolve(this.projectRoot, filePath);
+    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
+    this.overlayFiles.add(absPath);
+    this.baseFiles.delete(absPath);
     this.trackedFiles.delete(absPath);
     this.deletedFiles.add(absPath);
     if (this._session) {
@@ -359,7 +314,7 @@ export class ComponentMetaChecker {
   async reload(): Promise<void> {
     this.ensureActive();
     if (!this.workspace) return;
-    for (const absPath of new Set([...this.trackedFiles.keys(), ...this.deletedFiles])) {
+    for (const absPath of new Set([...this.overlayFiles, ...this.deletedFiles])) {
       const content = await readFileSafe(absPath, this.workspace);
       this.ensureActive();
       if (content !== null) {
@@ -373,6 +328,22 @@ export class ComponentMetaChecker {
           this._session.delete(absPath);
         } else {
           this.adapter.remove?.(absPath);
+        }
+      }
+    }
+
+    if (this._session) {
+      for (const absPath of Array.from(this.baseFiles)) {
+        const loaded = this._session.refreshBaseFile(absPath);
+        this.ensureActive();
+        if (!loaded) {
+          this.baseFiles.delete(absPath);
+          this.trackedFiles.delete(absPath);
+          continue;
+        }
+        const content = this._session.getEffectiveSource(absPath);
+        if (content !== undefined) {
+          this.trackedFiles.set(absPath, content);
         }
       }
     }
@@ -397,6 +368,8 @@ export class ComponentMetaChecker {
     if (this.disposed) return;
     this.disposed = true;
     this.trackedFiles.clear();
+    this.baseFiles.clear();
+    this.overlayFiles.clear();
     this.deletedFiles.clear();
     if (this._session) {
       if (this._runtime) {
@@ -422,6 +395,13 @@ export class ComponentMetaChecker {
     this.trackedFiles.set(absPath, content);
   }
 
+  /** @internal */
+  rememberBaseFile(absPath: string, content: string): void {
+    this.deletedFiles.delete(absPath);
+    this.baseFiles.add(absPath);
+    this.trackedFiles.set(absPath, content);
+  }
+
   /**
    * Not supported — Verter does not expose a TypeScript Program.
    * @throws Always throws.
@@ -439,20 +419,19 @@ export class ComponentMetaChecker {
       return;
     }
     if (!this.trackedFiles.has(absPath)) {
-      // Try session source first, then fall back to workspace
       if (this._session) {
         const src = this._session.getEffectiveSource(absPath);
         if (src !== undefined) {
+          this.baseFiles.add(absPath);
           this.trackedFiles.set(absPath, src);
           return;
         }
-      }
-      if (this.workspace) {
-        const content = await readFileSafe(absPath, this.workspace);
-        this.ensureActive();
-        if (content !== null) {
-          this.trackedFiles.set(absPath, content);
-          this.adapter.upsert({ inputId: absPath, source: content });
+        if (this.workspace && this._session.ensureBaseFile(absPath)) {
+          const loaded = this._session.getEffectiveSource(absPath);
+          if (loaded !== undefined) {
+            this.baseFiles.add(absPath);
+            this.trackedFiles.set(absPath, loaded);
+          }
         }
       }
     }
@@ -469,81 +448,32 @@ export class ComponentMetaChecker {
 }
 
 /**
- * Extract locally-defined interface/type declarations from SFC content
- * and add them to the type registry.
- *
- * Does NOT overwrite existing registry entries.
- */
-function extractLocalInterfaces(sfcContent: string, registry: Map<string, TypeDescriptor>): void {
-  const scriptBlocks = sfcContent.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g);
-  for (const match of scriptBlocks) {
-    const script = match[1];
-    // Match interface declarations
-    const interfacePattern = /\binterface\s+(\w+)(?:\s+extends\s+[^{]+)?\s*\{/g;
-    let ifMatch;
-    while ((ifMatch = interfacePattern.exec(script)) !== null) {
-      const name = ifMatch[1];
-      if (registry.has(name)) continue;
-      const startIdx = ifMatch.index + ifMatch[0].length - 1;
-      let depth = 1;
-      let i = startIdx + 1;
-      while (i < script.length && depth > 0) {
-        if (script[i] === "{") depth++;
-        else if (script[i] === "}") depth--;
-        i++;
-      }
-      if (depth === 0) {
-        registry.set(name, parseType(script.slice(startIdx, i)));
-      }
-    }
-    // Match type alias declarations
-    const typePattern = /\btype\s+(\w+)(?:<[^>]*>)?\s*=\s*/g;
-    let typeMatch;
-    while ((typeMatch = typePattern.exec(script)) !== null) {
-      const name = typeMatch[1];
-      if (registry.has(name)) continue;
-      const startIdx = typeMatch.index + typeMatch[0].length;
-      let depth = 0;
-      let i = startIdx;
-      while (i < script.length) {
-        const ch = script[i];
-        if (ch === "{" || ch === "(" || ch === "<") depth++;
-        else if (ch === "}" || ch === ")" || ch === ">") depth--;
-        else if (depth === 0 && (ch === "\n" || ch === ";")) break;
-        i++;
-      }
-      const value = script.slice(startIdx, i).trim();
-      if (value) {
-        registry.set(name, parseType(value));
-      }
-    }
-  }
-}
-
-/**
  * Create a Volar-compatible checker from a tsconfig.json path.
+ *
+ * This is the supported drop-in vue-component-meta entrypoint. It creates its
+ * own native workspace rooted at the tsconfig directory.
  *
  * @param tsconfigPath Path to tsconfig.json
  * @param options      Checker options
  */
 export async function createChecker(
-  workspace: CheckerWorkspace,
   tsconfigPath: string,
   options?: MetaCheckerOptions,
 ): Promise<ComponentMetaChecker> {
   const absPath = resolve(tsconfigPath);
   const projectRoot = dirname(absPath);
+  const workspace = createWorkspace(projectRoot);
   const parsed = await parseTsconfig(absPath, workspace);
 
   // Build engine key for pooling
-  const wsIdentity = getWorkspaceIdentity(workspace);
   const input: EngineKeyInput = {
     backend: "napi",
     root: runtimeNormalizePath(projectRoot),
     configKind: "tsconfig",
     tsconfigPath: runtimeNormalizePath(absPath),
-    configHash: stableHash(parsed?.config ?? { tsconfigPath: runtimeNormalizePath(absPath) }),
-    workspaceIdentity: wsIdentity,
+    configHash: stableSelectiveConfigHash(
+      parsed?.config ?? { tsconfigPath: runtimeNormalizePath(absPath) },
+    ),
     nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
   };
 
@@ -561,16 +491,9 @@ export async function createChecker(
       workspace.configureProjects([aliases]);
     }
 
-    // Discover and bulk-load .vue files
-    const vueFiles = await runtimeDiscoverVueFiles(dirname(absPath), workspace);
-    for (const filePath of vueFiles) {
-      const content = await readFileSafe(filePath, workspace);
-      if (content !== null) {
-        nativeProject.upsertBase(filePath, content);
-      }
-    }
-
-    return { nativeProject, baseFileIds: vueFiles };
+    // Selective loading: no eager preload. Files are loaded on-demand
+    // via ensureFile() when getComponentMeta() first requests them.
+    return { nativeProject, baseFileIds: [] };
   };
 
   const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -584,11 +507,13 @@ export async function createChecker(
     remove(canonicalOrAlias) {
       session.delete(canonicalOrAlias);
     },
-    getAnalysis(canonicalOrAlias) {
-      return session.getAnalysis(canonicalOrAlias);
+    getAnalysis() {
+      throw new Error("Session-backed checker must use getComponentMeta(), not getAnalysis().");
     },
-    resolveImportedTypes(canonicalOrAlias) {
-      return session.resolveImportedTypes(canonicalOrAlias);
+    resolveImportedTypes() {
+      throw new Error(
+        "Session-backed checker must use getComponentMeta(), not resolveImportedTypes().",
+      );
     },
     configureProjects(projects) {
       workspace.configureProjects(projects);
@@ -609,7 +534,7 @@ export async function createChecker(
   for (const filePath of baseIds) {
     const content = session.getEffectiveSource(filePath);
     if (content !== undefined) {
-      checker.rememberTrackedFile(filePath, content);
+      checker.rememberBaseFile(filePath, content);
     }
   }
 
@@ -638,7 +563,7 @@ export async function createCheckerByJson(
     backend: "napi",
     root: runtimeNormalizePath(absRoot),
     configKind: "inline",
-    configHash: stableHash(config),
+    configHash: stableSelectiveConfigHash(config),
     nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
   };
 
@@ -657,17 +582,9 @@ export async function createCheckerByJson(
     const aliases = extractPathAliases(config, runtimeNormalizePath(absRoot));
     workspace.configureProjects([aliases]);
 
-    // Discover .vue files
-    const include = config.include as string[] | undefined;
-    const vueFiles = await runtimeDiscoverVueFiles(absRoot, workspace, include);
-    for (const filePath of vueFiles) {
-      const content = await readFileSafe(filePath, workspace);
-      if (content !== null) {
-        nativeProject.upsertBase(filePath, content);
-      }
-    }
-
-    return { nativeProject, baseFileIds: vueFiles };
+    // Selective loading: no eager preload. Files are loaded on-demand
+    // via ensureFile() when getComponentMeta() first requests them.
+    return { nativeProject, baseFileIds: [] };
   };
 
   const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -680,11 +597,13 @@ export async function createCheckerByJson(
     remove(canonicalOrAlias) {
       session.delete(canonicalOrAlias);
     },
-    getAnalysis(canonicalOrAlias) {
-      return session.getAnalysis(canonicalOrAlias);
+    getAnalysis() {
+      throw new Error("Session-backed checker must use getComponentMeta(), not getAnalysis().");
     },
-    resolveImportedTypes(canonicalOrAlias) {
-      return session.resolveImportedTypes(canonicalOrAlias);
+    resolveImportedTypes() {
+      throw new Error(
+        "Session-backed checker must use getComponentMeta(), not resolveImportedTypes().",
+      );
     },
     configureProjects(projects) {
       workspace.configureProjects(projects);
@@ -697,7 +616,7 @@ export async function createCheckerByJson(
   for (const filePath of baseIds) {
     const content = session.getEffectiveSource(filePath);
     if (content !== undefined) {
-      checker.rememberTrackedFile(filePath, content);
+      checker.rememberBaseFile(filePath, content);
     }
   }
 

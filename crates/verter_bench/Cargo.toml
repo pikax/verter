@@ -112,3 +112,7 @@ path = "examples/profile_host.rs"
 [[example]]
 name = "profile_host_synthetic"
 path = "examples/profile_host_synthetic.rs"
+
+[[example]]
+name = "profile_component_meta"
+path = "examples/profile_component_meta.rs"

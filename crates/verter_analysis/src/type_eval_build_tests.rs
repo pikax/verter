@@ -570,3 +570,48 @@ defineProps<{ count: number; label?: string }>()
         TypeExpr::Primitive(PrimitiveName::String)
     );
 }
+
+#[test]
+fn evaluate_macro_types_synthesizes_define_props_from_typeof() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+const config = { x: 1, y: "hello" }
+defineProps<typeof config>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    assert_eq!(result.define_props.len(), 1);
+    let fields = &result.define_props[0].fields;
+    let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert!(names.contains(&"x"));
+    assert!(names.contains(&"y"));
+}
+
+#[test]
+fn evaluate_macro_types_synthesizes_define_props_from_utility_heritage() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+interface BaseProps { a: string; b: number; c: boolean }
+interface MyProps extends Pick<BaseProps, 'a' | 'b'> { local: string }
+defineProps<MyProps>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    assert_eq!(result.define_props.len(), 1);
+    let fields = &result.define_props[0].fields;
+    let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert!(names.contains(&"a"));
+    assert!(names.contains(&"b"));
+    assert!(names.contains(&"local"));
+    assert!(!names.contains(&"c"));
+}

@@ -6,8 +6,17 @@
  * Requires @verter/native to be built.
  */
 import { describe, it, expect } from "vitest";
-import { ComponentMetaChecker } from "./compat/checker.js";
-import { createNapiAdapter } from "./host-adapter.js";
+import { resolve } from "node:path";
+import { createCheckerByJson } from "./compat/checker.js";
+
+let nextProjectRootId = 1;
+
+async function createRuntimeChecker(name = "native-eval") {
+  return createCheckerByJson(
+    resolve(process.env.TEMP ?? "/tmp", `${name}-${nextProjectRootId++}`),
+    {},
+  );
+}
 
 // =============================================================================
 // Native evaluator: basic prop types via checker
@@ -15,8 +24,7 @@ import { createNapiAdapter } from "./host-adapter.js";
 
 describe("native evaluator integration", () => {
   it("evaluates simple typed props", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("native-eval-basic");
 
     checker.updateFile(
       "Button.vue",
@@ -49,8 +57,7 @@ defineProps<{
   });
 
   it("evaluates union literal props with schema", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("native-eval-union");
 
     checker.updateFile(
       "Chip.vue",
@@ -72,8 +79,7 @@ defineProps<{
   });
 
   it("evaluates interface-backed props", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("native-eval-interface");
 
     checker.updateFile(
       "Form.vue",
@@ -102,8 +108,7 @@ defineProps<FormData>()
   });
 
   it("evaluates emit types", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("native-eval-emits");
 
     checker.updateFile(
       "Emitter.vue",
@@ -127,8 +132,7 @@ defineEmits<{
   });
 
   it("evaluates slot bindings", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("native-eval-slots");
 
     checker.updateFile(
       "List.vue",
@@ -148,8 +152,7 @@ defineSlots<{
   });
 
   it("evaluates defineModel types", async () => {
-    const adapter = createNapiAdapter();
-    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+    const checker = await createRuntimeChecker("native-eval-model");
 
     checker.updateFile(
       "Input.vue",

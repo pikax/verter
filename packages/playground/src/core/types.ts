@@ -87,7 +87,6 @@ export type OutputMode =
   | "types"
   | "tsc"
   | "analysis"
-  | "componentMeta"
   | "lint"
   | "outline"
   | "files"
