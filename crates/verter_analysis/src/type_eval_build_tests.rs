@@ -543,6 +543,50 @@ defineProps<Partial<Config>>()
 }
 
 #[test]
+fn evaluate_macro_types_keeps_complex_prop_annotations() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+interface User {
+  id: number
+  name: string
+  password: string
+}
+
+function createConfig() {
+  return { theme: "dark" as string, debug: false }
+}
+
+defineProps<{
+  user: Pick<User, 'id' | 'name'>
+  config: ReturnType<typeof createConfig>
+}>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    let user = result.props.iter().find(|p| p.name == "user");
+    assert!(user.is_some(), "should keep evaluated utility prop fields");
+    assert!(
+        matches!(user.unwrap().r#type, TypeExpr::Object(_)),
+        "Pick<User, ...> should evaluate to an object"
+    );
+
+    let config = result.props.iter().find(|p| p.name == "config");
+    assert!(
+        config.is_some(),
+        "should keep evaluated ReturnType prop fields"
+    );
+    assert!(
+        matches!(config.unwrap().r#type, TypeExpr::Object(_)),
+        "ReturnType<typeof createConfig> should evaluate to an object"
+    );
+}
+
+#[test]
 fn evaluate_macro_types_with_inline_props() {
     use super::analysis::build_script_analysis;
     use oxc_allocator::Allocator;
@@ -614,4 +658,213 @@ defineProps<MyProps>()
     assert!(names.contains(&"b"));
     assert!(names.contains(&"local"));
     assert!(!names.contains(&"c"));
+}
+
+#[test]
+fn evaluate_macro_types_synthesizes_define_props_from_union_object_variants() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+type FixedProps = {
+  layout?: 'fixed'
+  editor: string
+}
+
+type BubbleProps = {
+  layout?: 'bubble'
+  editor: string
+  floating?: boolean
+}
+
+type Props = FixedProps | BubbleProps
+defineProps<Props>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    assert_eq!(result.define_props.len(), 1);
+    let fields = &result.define_props[0].fields;
+    let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert!(names.contains(&"layout"));
+    assert!(names.contains(&"editor"));
+    assert!(names.contains(&"floating"));
+
+    let editor = fields
+        .iter()
+        .find(|field| field.name == "editor")
+        .expect("editor field should be synthesized");
+    assert!(
+        !editor.optional,
+        "editor should stay required when present in every variant"
+    );
+
+    let floating = fields
+        .iter()
+        .find(|field| field.name == "floating")
+        .expect("floating field should be synthesized");
+    assert!(
+        floating.optional,
+        "branch-specific props should be optional in synthesized union fields"
+    );
+}
+
+#[test]
+fn evaluate_macro_types_synthesizes_define_props_from_mixed_intersection() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+type Props = {
+  id?: string
+  disabled?: boolean
+} & Omit<FormHTMLAttributes, 'name'>
+
+defineProps<Props>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    assert_eq!(result.define_props.len(), 1);
+    let fields = &result.define_props[0].fields;
+    let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"disabled"));
+}
+
+#[test]
+fn evaluate_macro_types_skips_vue_ignore_intersection_branch() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+type HtmlAttrs = {
+  title?: string
+  name?: string
+}
+
+type Props = {
+  id?: string
+} & /** @vue-ignore */ Omit<HtmlAttrs, 'name'>
+
+defineProps<Props>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    assert_eq!(result.define_props.len(), 1);
+    let fields = &result.define_props[0].fields;
+    let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert!(
+        names.contains(&"id"),
+        "should keep local props, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"title"),
+        "should skip @vue-ignore branch props, got: {names:?}"
+    );
+}
+
+#[test]
+fn evaluate_macro_types_skips_vue_ignore_interface_extends() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+interface HtmlAttrs {
+  title?: string
+}
+
+interface Props extends /** @vue-ignore */ HtmlAttrs {
+  id?: string
+}
+
+defineProps<Props>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    assert_eq!(result.define_props.len(), 1);
+    let fields = &result.define_props[0].fields;
+    let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert!(
+        names.contains(&"id"),
+        "should keep local props, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"title"),
+        "should skip @vue-ignore extends props, got: {names:?}"
+    );
+}
+
+#[test]
+fn evaluate_macro_types_with_env_only_emits_local_bindings() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+const localLabel: string = 'hello'
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let local_env = parse_and_build_env(source);
+    let local_binding_names = local_env.value_symbols.keys().cloned().collect();
+    let mut env = local_env;
+    env.extend_missing(parse_and_build_env(
+        "export const importedLabel: string = 'world'",
+    ));
+
+    let result =
+        super::type_eval_build::evaluate_macro_types_with_env_and_source_and_local_bindings(
+            &snapshot.macros,
+            source,
+            &mut env,
+            &local_binding_names,
+        );
+
+    let names: Vec<&str> = result
+        .bindings
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"localLabel"),
+        "should keep local bindings, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"importedLabel"),
+        "should skip imported bindings, got: {names:?}"
+    );
+}
+
+#[test]
+fn evaluate_macro_types_skips_complex_slot_binding_types() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+type Button = { ui: string }
+
+defineSlots<{
+  default(props: { ui: Button['ui'] }): any
+}>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let result = evaluate_macro_types(&snapshot.macros, source);
+
+    assert!(
+        result.slot_bindings.is_empty(),
+        "complex slot binding types should remain raw"
+    );
 }

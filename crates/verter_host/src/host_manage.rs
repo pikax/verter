@@ -67,6 +67,11 @@ struct ResolvedComponentMetaState {
     reused_enriched_snapshot: bool,
 }
 
+struct ImportedEvalInputs {
+    sources: Vec<String>,
+    resolved_types: Vec<verter_analysis::ResolvedLocalType>,
+}
+
 impl VerterHost {
     fn build_eval_script_source(
         source: &str,
@@ -135,7 +140,19 @@ impl VerterHost {
     }
 
     fn read_eval_dependency_source_with_fallback(&self, dep_canonical: &str) -> Option<String> {
-        if let Some(source) = self.read_dep_source_for_type_resolution(dep_canonical, None) {
+        let read_candidate = |candidate: &str| -> Option<String> {
+            if let Some((source, cached_parse, _)) = self.current_eval_state(candidate) {
+                return Some(Self::build_eval_script_source(
+                    &source,
+                    cached_parse.as_deref(),
+                ));
+            }
+
+            self.read_dep_source_for_type_resolution(candidate, None)
+                .map(|source| Self::build_eval_script_source(&source, None))
+        };
+
+        if let Some(source) = read_candidate(dep_canonical) {
             return Some(source);
         }
 
@@ -147,7 +164,7 @@ impl VerterHost {
             format!("{dep_canonical}/index.ts"),
             format!("{dep_canonical}/index.tsx"),
         ] {
-            if let Some(source) = self.read_dep_source_for_type_resolution(&candidate, None) {
+            if let Some(source) = read_candidate(&candidate) {
                 return Some(source);
             }
         }
@@ -160,11 +177,58 @@ impl VerterHost {
         owner_canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-    ) -> Vec<String> {
+    ) -> ImportedEvalInputs {
         let mut seen = rustc_hash::FxHashSet::default();
         let mut inputs = Vec::new();
+        let mut resolved_type_names = rustc_hash::FxHashSet::default();
+        let mut resolved_types = Vec::new();
+        let mut cache = rustc_hash::FxHashMap::default();
+        let mut visiting = rustc_hash::FxHashSet::default();
 
         for dep in snapshot.macro_type_deps.iter() {
+            let mut tracked_deps = std::collections::BTreeSet::new();
+            let resolved = self.resolve_external_type_from_loaded_files(
+                owner_canonical_id,
+                &dep.import_source,
+                &dep.type_name,
+                &mut tracked_deps,
+                &mut cache,
+                &mut visiting,
+                false,
+                verter_vfs::ResolveRequestKind::TypeImport,
+                false,
+                None,
+            );
+            let mut pushed_tracked_source = false;
+
+            if let Ok(Some(resolved)) = &resolved {
+                if resolved_type_names.insert(dep.type_name.clone()) {
+                    resolved_types.push(verter_analysis::ResolvedLocalType {
+                        name: dep.type_name.clone(),
+                        expanded: resolved_elements_to_expanded_text_via_type_text(resolved),
+                        span: verter_span::Span::default(),
+                    });
+                }
+            }
+
+            if matches!(resolved, Ok(Some(_)) | Ok(None)) {
+                for tracked_dep in tracked_deps {
+                    if !seen.insert(tracked_dep.clone()) {
+                        continue;
+                    }
+                    let Some(source) = self.read_eval_dependency_source_with_fallback(&tracked_dep)
+                    else {
+                        continue;
+                    };
+                    pushed_tracked_source = true;
+                    inputs.push(source);
+                }
+            }
+
+            if pushed_tracked_source {
+                continue;
+            }
+
             let dep_canonical = if dep.import_source.starts_with('.') {
                 Some(crate::id::resolve_external(
                     owner_canonical_id,
@@ -195,7 +259,10 @@ impl VerterHost {
             inputs.push(source);
         }
 
-        inputs
+        ImportedEvalInputs {
+            sources: inputs,
+            resolved_types,
+        }
     }
 
     fn try_get_cached_evaluated_types(
@@ -277,17 +344,39 @@ impl VerterHost {
 
         let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
         let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
+        let local_binding_names: rustc_hash::FxHashSet<String> =
+            env.value_symbols.keys().cloned().collect();
         let dep_resolutions = self.dependency_resolutions_for_eval(canonical);
-        for dep_source in self.imported_eval_inputs(canonical, snapshot, &dep_resolutions) {
+        let imported_inputs = self.imported_eval_inputs(canonical, snapshot, &dep_resolutions);
+        for dep_source in &imported_inputs.sources {
             env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
-                &dep_source,
+                dep_source,
             ));
         }
+        for resolved in &imported_inputs.resolved_types {
+            if env.type_symbols.contains_key(&resolved.name) {
+                continue;
+            }
+            let body = verter_analysis::type_expr_lower::parse_type_annotation(&resolved.expanded);
+            if body.is_unknown() {
+                continue;
+            }
+            env.type_symbols.insert(
+                resolved.name.clone(),
+                verter_analysis::type_eval::TypeDeclInfo {
+                    name: resolved.name.clone(),
+                    kind: verter_analysis::type_eval::TypeDeclKind::Alias,
+                    type_parameters: Vec::new(),
+                    body,
+                },
+            );
+        }
 
-        let result = verter_analysis::type_eval_build::evaluate_macro_types_with_env_and_source(
+        let result = verter_analysis::type_eval_build::evaluate_macro_types_with_env_and_source_and_local_bindings(
             snapshot.macros.as_ref(),
             &eval_source,
             &mut env,
+            &local_binding_names,
         );
         self.store_cached_evaluated_types(canonical, whole_hash, result)
     }
@@ -551,6 +640,7 @@ impl VerterHost {
                 &mut visiting,
                 false,
                 verter_vfs::ResolveRequestKind::TypeImport,
+                true,
                 None,
             ) {
                 let expanded = resolved_elements_to_expanded_text_via_type_text(&resolved);
@@ -625,6 +715,7 @@ impl VerterHost {
                 &mut visiting,
                 false,
                 kind,
+                true,
                 None,
             ) {
                 Ok(Some(r)) => r,
@@ -815,6 +906,7 @@ impl VerterHost {
                             &mut visiting,
                             false,
                             kind,
+                            true,
                             None,
                         ) {
                             let expanded =

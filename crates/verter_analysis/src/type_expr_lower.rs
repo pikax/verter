@@ -60,6 +60,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
             let types: Vec<TypeExpr> = intersection
                 .types
                 .iter()
+                .filter(|t| !has_immediate_vue_ignore_comment(source, t.span().start))
                 .map(|t| lower_ts_type(t, source))
                 .collect();
             TypeExpr::intersection(types)
@@ -210,6 +211,22 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+pub(crate) fn has_immediate_vue_ignore_comment(source: &str, start: u32) -> bool {
+    let start = start as usize;
+    if start == 0 || start > source.len() {
+        return false;
+    }
+
+    let window_start = start.saturating_sub(160);
+    let prefix = source[window_start..start].trim_end();
+    if let Some(comment_start) = prefix.rfind("/*") {
+        let comment = &prefix[comment_start..];
+        return comment.ends_with("*/") && comment.contains("@vue-ignore");
+    }
+
+    false
+}
 
 fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExpr {
     use oxc_ast::ast::{Expression, TSLiteral};

@@ -3,6 +3,16 @@
 //! Contains [`VerterHost::resolve`], [`VerterHost::get_virtual_file`],
 //! [`VerterHost::list_virtual_files`], and the internal [`VerterHost::compile_entry`]
 //! helper that drives on-demand compilation.
+//!
+//! Cross-file component-meta / analysis rule: host-backed consumers share one
+//! resolver and one traversal policy.
+//! - `Type` mode resolves symbol identity + canonical source location only.
+//! - `Expanded` mode uses the same traversal, then materializes expanded shape.
+//! - Component-meta must use the shared expanded path for all macro-facing
+//!   surfaces, including Options API metadata.
+//! - Traversal only follows imports reachable from the requested declaration graph.
+//! - Barrel and `export *` hops must be cached once discovered because repeated
+//!   wildcard re-export scans are expensive.
 
 use std::sync::Arc;
 
@@ -38,6 +48,17 @@ type ExternalTypeCache = rustc_hash::FxHashMap<
     (String, String),
     Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
 >;
+
+fn external_type_debug_enabled() -> bool {
+    std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
+        || std::env::var_os("VERTER_META_DEBUG").is_some()
+}
+
+fn external_type_debug(message: impl AsRef<str>) {
+    if external_type_debug_enabled() {
+        eprintln!("[verter-meta] {}", message.as_ref());
+    }
+}
 
 impl VerterHost {
     /// Expand a relative import specifier into all candidate canonical IDs.
@@ -91,6 +112,7 @@ impl VerterHost {
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         required_root_dep: bool,
         kind: verter_vfs::ResolveRequestKind,
+        use_host_cache: bool,
         profile_hash: Option<u64>,
     ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, ()> {
         let Some(dep_canonical) =
@@ -98,9 +120,28 @@ impl VerterHost {
         else {
             return if required_root_dep { Err(()) } else { Ok(None) };
         };
+        let debug_enabled = external_type_debug_enabled();
         tracked_deps.insert(dep_canonical.clone());
         let cache_key = (dep_canonical.clone(), type_name.to_string());
+        if debug_enabled {
+            external_type_debug(format!(
+                "resolve_external_type enter depth={} owner={} import={} dep={} type={}",
+                visiting.len(),
+                owner_canonical,
+                import_source,
+                dep_canonical,
+                type_name,
+            ));
+        }
         if let Some(cached) = cache.get(&cache_key) {
+            if debug_enabled {
+                external_type_debug(format!(
+                    "resolve_external_type cache-hit dep={} type={} hit={}",
+                    dep_canonical,
+                    type_name,
+                    cached.is_some(),
+                ));
+            }
             return Ok(cached.clone());
         }
 
@@ -125,27 +166,35 @@ impl VerterHost {
             None
         };
 
-        if let Some(dep_hash) = dep_source_hash {
-            let host_key = crate::types::ResolvedTypeCacheKey {
-                dep_canonical_id: dep_canonical.clone(),
-                dep_source_hash: dep_hash,
-                type_name: type_name.to_string(),
-                resolve_kind: kind,
-            };
-            let host_hit = self.resolved_type_cache.lock().get(&host_key).cloned();
-            if let Some(entry) = host_hit {
+        if use_host_cache {
+            if let Some(dep_hash) = dep_source_hash {
+                let host_key = crate::types::ResolvedTypeCacheKey {
+                    dep_canonical_id: dep_canonical.clone(),
+                    dep_source_hash: dep_hash,
+                    type_name: type_name.to_string(),
+                    resolve_kind: kind,
+                };
+                let host_hit = self.resolved_type_cache.lock().get(&host_key).cloned();
+                if let Some(entry) = host_hit {
+                    self.provenance
+                        .resolved_external_type_cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    cache.insert(cache_key, entry.resolved.clone());
+                    return Ok(entry.resolved);
+                }
                 self.provenance
-                    .resolved_external_type_cache_hits
+                    .resolved_external_type_cache_misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                cache.insert(cache_key, entry.resolved.clone());
-                return Ok(entry.resolved);
             }
-            self.provenance
-                .resolved_external_type_cache_misses
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         if !visiting.insert(cache_key.clone()) {
+            if debug_enabled {
+                external_type_debug(format!(
+                    "resolve_external_type cycle dep={} type={}",
+                    dep_canonical, type_name
+                ));
+            }
             return Ok(None);
         }
 
@@ -154,15 +203,40 @@ impl VerterHost {
             &effective_source,
             &import_alloc,
         );
+        // Critical invariant: only imports reachable from the requested type's
+        // declaration graph are eligible companion deps. Unrelated file imports
+        // must not expand this traversal.
+        let required_import_names =
+            verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
+                type_name,
+                &effective_source,
+                &import_alloc,
+            );
+        if debug_enabled {
+            let mut required_list = required_import_names.iter().cloned().collect::<Vec<_>>();
+            required_list.sort();
+            external_type_debug(format!(
+                "resolve_external_type required-imports dep={} type={} imports=[{}]",
+                dep_canonical,
+                type_name,
+                required_list.join(", "),
+            ));
+        }
 
         // Optimization: if the target type is directly re-exported from this file,
         // follow the re-export chain immediately instead of resolving ALL bindings.
         // This avoids O(N) workspace reads for barrel files with many re-exports.
         let direct_reexport = extracted
-            .bindings
+            .reexport_bindings
             .iter()
             .find(|b| b.local_name == type_name);
         if let Some(target) = direct_reexport {
+            if debug_enabled {
+                external_type_debug(format!(
+                    "resolve_external_type direct-reexport dep={} type={} -> {}:{}",
+                    dep_canonical, type_name, target.source, target.imported_name
+                ));
+            }
             if let Some(resolved) = self.resolve_external_type_from_loaded_files(
                 &dep_canonical,
                 &target.source,
@@ -172,34 +246,51 @@ impl VerterHost {
                 visiting,
                 false,
                 kind,
+                use_host_cache,
                 profile_hash,
             )? {
                 visiting.remove(&cache_key);
                 cache.insert(cache_key, Some(resolved.clone()));
-                if let Some(dep_hash) = dep_source_hash {
-                    let host_key = crate::types::ResolvedTypeCacheKey {
-                        dep_canonical_id: dep_canonical.clone(),
-                        dep_source_hash: dep_hash,
-                        type_name: type_name.to_string(),
-                        resolve_kind: kind,
-                    };
-                    let mut host_cache = self.resolved_type_cache.lock();
-                    if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-                        host_cache.clear();
+                if use_host_cache {
+                    if let Some(dep_hash) = dep_source_hash {
+                        let host_key = crate::types::ResolvedTypeCacheKey {
+                            dep_canonical_id: dep_canonical.clone(),
+                            dep_source_hash: dep_hash,
+                            type_name: type_name.to_string(),
+                            resolve_kind: kind,
+                        };
+                        let mut host_cache = self.resolved_type_cache.lock();
+                        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
+                            host_cache.clear();
+                        }
+                        host_cache.insert(
+                            host_key,
+                            crate::types::ResolvedTypeCacheEntry {
+                                resolved: Some(resolved.clone()),
+                            },
+                        );
                     }
-                    host_cache.insert(
-                        host_key,
-                        crate::types::ResolvedTypeCacheEntry {
-                            resolved: Some(resolved.clone()),
-                        },
-                    );
                 }
                 return Ok(Some(resolved));
             }
         }
 
         let mut companion_types = rustc_hash::FxHashMap::default();
-        for binding in &extracted.bindings {
+        for binding in extracted
+            .bindings
+            .iter()
+            .filter(|binding| required_import_names.contains(&binding.local_name))
+        {
+            if debug_enabled {
+                external_type_debug(format!(
+                    "resolve_external_type companion-binding dep={} type={} binding={} -> {}:{}",
+                    dep_canonical,
+                    type_name,
+                    binding.local_name,
+                    binding.source,
+                    binding.imported_name,
+                ));
+            }
             if let Some(resolved) = self.resolve_external_type_from_loaded_files(
                 &dep_canonical,
                 &binding.source,
@@ -209,6 +300,7 @@ impl VerterHost {
                 visiting,
                 false,
                 kind,
+                use_host_cache,
                 profile_hash,
             )? {
                 companion_types
@@ -225,11 +317,26 @@ impl VerterHost {
                 &companion_types,
                 &resolve_alloc,
             );
+        if debug_enabled {
+            external_type_debug(format!(
+                "resolve_external_type local-eval dep={} type={} companion_keys={} resolved={}",
+                dep_canonical,
+                type_name,
+                companion_types.len(),
+                resolved.is_some(),
+            ));
+        }
 
         // If the type wasn't found directly, try `export * from` wildcard re-export sources.
         // This handles barrel files like `export * from './Drawer'`.
         if resolved.is_none() {
             for source in &extracted.wildcard_reexport_sources {
+                if debug_enabled {
+                    external_type_debug(format!(
+                        "resolve_external_type wildcard dep={} type={} -> {}",
+                        dep_canonical, type_name, source
+                    ));
+                }
                 if let Some(found) = self.resolve_external_type_from_loaded_files(
                     &dep_canonical,
                     source,
@@ -239,6 +346,7 @@ impl VerterHost {
                     visiting,
                     false,
                     kind,
+                    use_host_cache,
                     profile_hash,
                 )? {
                     resolved = Some(found);
@@ -248,26 +356,36 @@ impl VerterHost {
         }
 
         visiting.remove(&cache_key);
+        if debug_enabled {
+            external_type_debug(format!(
+                "resolve_external_type exit dep={} type={} resolved={}",
+                dep_canonical,
+                type_name,
+                resolved.is_some(),
+            ));
+        }
 
         // Store in host-level persistent cache (bounded).
         // Skip when profile overrides are in play (hash is raw, not override-aware).
-        if let Some(dep_hash) = dep_source_hash {
-            let host_key = crate::types::ResolvedTypeCacheKey {
-                dep_canonical_id: cache_key.0.clone(),
-                dep_source_hash: dep_hash,
-                type_name: cache_key.1.clone(),
-                resolve_kind: kind,
-            };
-            let mut host_cache = self.resolved_type_cache.lock();
-            if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-                host_cache.clear();
+        if use_host_cache {
+            if let Some(dep_hash) = dep_source_hash {
+                let host_key = crate::types::ResolvedTypeCacheKey {
+                    dep_canonical_id: cache_key.0.clone(),
+                    dep_source_hash: dep_hash,
+                    type_name: cache_key.1.clone(),
+                    resolve_kind: kind,
+                };
+                let mut host_cache = self.resolved_type_cache.lock();
+                if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
+                    host_cache.clear();
+                }
+                host_cache.insert(
+                    host_key,
+                    crate::types::ResolvedTypeCacheEntry {
+                        resolved: resolved.clone(),
+                    },
+                );
             }
-            host_cache.insert(
-                host_key,
-                crate::types::ResolvedTypeCacheEntry {
-                    resolved: resolved.clone(),
-                },
-            );
         }
 
         cache.insert(cache_key, resolved.clone());
@@ -355,6 +473,7 @@ impl VerterHost {
                 &mut visiting,
                 true,
                 verter_vfs::ResolveRequestKind::TypeImport,
+                true,
                 profile_hash,
             ) {
                 Ok(Some(elements)) => {

@@ -1555,6 +1555,174 @@ export interface Props extends Base { bar: number }
     );
 }
 
+#[test]
+fn barrel_export_star_ignores_imported_types_from_non_reexported_sfc_bindings() {
+    let host = strict_host();
+
+    let consumer_source = r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>consumer</div></template>"#;
+    upsert_vue(&host, "/src/Consumer.vue", consumer_source);
+
+    upsert_non_sfc(
+        &host,
+        "/src/types/index.ts",
+        "export * from '../components/A.vue'\nexport * from '../components/B.vue'\n",
+    );
+
+    upsert_vue(
+        &host,
+        "/src/components/A.vue",
+        r#"<script lang="ts">
+import type { Imported } from '../types'
+
+export interface Props extends Imported {
+  label: string
+}
+</script>
+<template><div>a</div></template>"#,
+    );
+
+    upsert_vue(
+        &host,
+        "/src/components/B.vue",
+        r#"<script lang="ts">
+export interface Imported {
+  id: string
+}
+</script>
+<template><div>b</div></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::DependencyResolution {
+                specifier: "../components/A.vue".to_string(),
+                resolved_canonical_id: Some("/src/components/A.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::DependencyResolution {
+                specifier: "../components/B.vue".to_string(),
+                resolved_canonical_id: Some("/src/components/B.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    host.set_import_dependencies(
+        "/src/components/A.vue",
+        vec![crate::DependencyResolution {
+            specifier: "../types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Consumer.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed through barrel cycle without stack overflow");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "barrel cycle should resolve Props without diagnostics: {:?}",
+        response.diagnostics
+    );
+    assert!(
+        response.code.contains("label"),
+        "resolved output should include the local prop: {}",
+        response.code
+    );
+    assert!(
+        response.code.contains("id"),
+        "resolved output should include the imported prop: {}",
+        response.code
+    );
+}
+
+#[test]
+fn imported_type_binding_is_not_treated_as_reexported_macro_type() {
+    let host = strict_host();
+
+    let consumer_source = r#"<script setup lang="ts">
+import type { Props } from './wrapper'
+defineProps<Props>()
+</script>
+<template><div>consumer</div></template>"#;
+    upsert_vue(&host, "/src/Consumer.vue", consumer_source);
+
+    upsert_non_sfc(
+        &host,
+        "/src/wrapper.ts",
+        "import type { Props } from './Base.vue'\nexport interface Wrapper { nested: Props }\n",
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Base.vue",
+        r#"<script lang="ts">
+export interface Props {
+  id: string
+}
+</script>
+<template><div>base</div></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./wrapper".to_string(),
+            resolved_canonical_id: Some("/src/wrapper.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/wrapper.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./Base.vue".to_string(),
+            resolved_canonical_id: Some("/src/Base.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let resolved = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./wrapper",
+            "Props",
+            &mut tracked_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+        )
+        .expect("external type resolution should complete without crashing");
+
+    assert!(
+        resolved.is_none(),
+        "plain imported type bindings must not masquerade as re-exported macro types"
+    );
+}
+
 /// Same barrel chain test but with default HostConfig (dev_mode=true,
 /// DevServeLastKnownGood) and Windows-style paths. This reproduces the
 /// conditions under the NAPI path that fails while strict_host tests pass.
@@ -2351,6 +2519,7 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             &mut visiting,
             true,
             verter_vfs::ResolveRequestKind::TypeImport,
+            true,
             None,
         )
         .expect("external type resolution should succeed")

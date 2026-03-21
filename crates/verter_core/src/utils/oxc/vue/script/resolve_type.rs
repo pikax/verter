@@ -17,7 +17,7 @@
 
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::common::Span;
 
@@ -801,6 +801,9 @@ fn resolve_type_elements_inner(
         // Intersection: Type1 & Type2
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
+                if has_immediate_vue_ignore_comment(source, ty.span().start) {
+                    continue;
+                }
                 resolve_type_elements_inner(ty, base_offset, result, source);
             }
             result.dedup_props();
@@ -849,6 +852,10 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
         // When a heritage clause has type arguments (e.g., `extends Pick<T, 'k'>`),
         // resolve through the utility type dispatch inline.
         if let Some(h) = heritage.get(i) {
+            if has_immediate_vue_ignore_comment(ctx.source, h.span().start) {
+                recursion_guard.pop();
+                continue;
+            }
             if let Some(type_args) = &h.type_arguments {
                 if !type_args.params.is_empty() {
                     let name_str = base_name.as_str();
@@ -970,6 +977,10 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
         // all TypeScript utility types (Pick, Omit, Partial, Required, Readonly,
         // Record, Extract, Exclude, etc.) in a single code path.
         if let Some(h) = heritage.get(i) {
+            if has_immediate_vue_ignore_comment(ctx.source, h.span().start) {
+                recursion_guard.pop();
+                continue;
+            }
             if let Some(type_args) = &h.type_arguments {
                 if !type_args.params.is_empty() {
                     // Resolve each type_argument through the normal pipeline.
@@ -1114,6 +1125,9 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
         // Intersection: Type1 & Type2
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
+                if has_immediate_vue_ignore_comment(ctx.source, ty.span().start) {
+                    continue;
+                }
                 resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx);
             }
             result.dedup_props();
@@ -1305,6 +1319,9 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
         // Intersection: Type1 & Type2
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
+                if has_immediate_vue_ignore_comment(ctx.source, ty.span().start) {
+                    continue;
+                }
                 resolve_type_elements_inner_with_ctx_ref(ty, base_offset, result, ctx);
             }
             result.dedup_props();
@@ -1611,6 +1628,26 @@ fn slice_source_span(source: &[u8], start: u32, end: u32) -> Option<String> {
     std::str::from_utf8(&source[start..end])
         .ok()
         .map(|s| s.trim().to_string())
+}
+
+fn has_immediate_vue_ignore_comment(source: &[u8], start: u32) -> bool {
+    let start = start as usize;
+    if start == 0 || start > source.len() {
+        return false;
+    }
+
+    let window_start = start.saturating_sub(160);
+    let prefix = match std::str::from_utf8(&source[window_start..start]) {
+        Ok(text) => text.trim_end(),
+        Err(_) => return false,
+    };
+
+    if let Some(comment_start) = prefix.rfind("/*") {
+        let comment = &prefix[comment_start..];
+        return comment.ends_with("*/") && comment.contains("@vue-ignore");
+    }
+
+    false
 }
 
 /// Resolve a property signature to a ResolvedProp.
@@ -2050,11 +2087,12 @@ pub struct ImportedTypeBinding {
 }
 
 /// Result of extracting type bindings from a dependency file.
-/// Includes both named bindings (from `import` and `export {} from`) and
+/// Includes named bindings (from `import` and `export {} from`) and
 /// wildcard re-export sources (from `export * from`).
 #[derive(Debug, Clone, Default)]
 pub struct ExtractedTypeBindings {
     pub bindings: Vec<ImportedTypeBinding>,
+    pub reexport_bindings: Vec<ImportedTypeBinding>,
     pub wildcard_reexport_sources: Vec<String>,
 }
 
@@ -2095,11 +2133,13 @@ pub fn extract_imported_type_bindings(
                 for specifier in &export_decl.specifiers {
                     let local_name = specifier.exported.name().to_string();
                     let imported_name = specifier.local.name().to_string();
-                    result.bindings.push(ImportedTypeBinding {
+                    let binding = ImportedTypeBinding {
                         local_name,
                         imported_name,
                         source: source.value.to_string(),
-                    });
+                    };
+                    result.bindings.push(binding.clone());
+                    result.reexport_bindings.push(binding);
                 }
             }
             Statement::ExportAllDeclaration(export_all) => {
@@ -2113,6 +2153,249 @@ pub fn extract_imported_type_bindings(
     }
 
     result
+}
+
+pub fn collect_required_import_names_for_external_type(
+    type_name: &str,
+    dep_source: &str,
+    allocator: &oxc_allocator::Allocator,
+) -> FxHashSet<String> {
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
+
+    if parsed.panicked {
+        return FxHashSet::default();
+    }
+
+    let source_bytes = dep_source.as_bytes();
+    let ctx = build_type_context(&parsed.program, source_bytes, 0);
+    let import_locals = collect_named_import_locals(&parsed.program);
+    let mut required_imports = FxHashSet::default();
+    let mut visited = FxHashSet::default();
+    let mut pending = vec![type_name.to_string()];
+
+    while let Some(current) = pending.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+
+        let current_bytes = current.as_bytes();
+        if let Some((ts_type, _)) = ctx.find_type_alias(current_bytes) {
+            let mut refs = FxHashSet::default();
+            collect_type_reference_names(ts_type, &mut refs);
+            enqueue_required_import_refs(
+                refs,
+                &import_locals,
+                &mut required_imports,
+                &mut pending,
+                &visited,
+            );
+            continue;
+        }
+
+        if let Some((members, extends, heritage, _)) = ctx.find_interface(current_bytes) {
+            let mut refs = FxHashSet::default();
+            for parent in extends {
+                refs.insert(parent.clone());
+            }
+            collect_interface_reference_names(members, heritage, &mut refs);
+            enqueue_required_import_refs(
+                refs,
+                &import_locals,
+                &mut required_imports,
+                &mut pending,
+                &visited,
+            );
+        }
+    }
+
+    required_imports
+}
+
+fn collect_named_import_locals(program: &Program<'_>) -> FxHashSet<String> {
+    let mut locals = FxHashSet::default();
+    for stmt in &program.body {
+        let Statement::ImportDeclaration(import_decl) = stmt else {
+            continue;
+        };
+        let Some(specifiers) = &import_decl.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            let ImportDeclarationSpecifier::ImportSpecifier(import_spec) = specifier else {
+                continue;
+            };
+            locals.insert(import_spec.local.name.to_string());
+        }
+    }
+    locals
+}
+
+fn enqueue_required_import_refs(
+    refs: FxHashSet<String>,
+    import_locals: &FxHashSet<String>,
+    required_imports: &mut FxHashSet<String>,
+    pending: &mut Vec<String>,
+    visited: &FxHashSet<String>,
+) {
+    for reference in refs {
+        let root = reference
+            .split('.')
+            .next()
+            .map(str::to_string)
+            .unwrap_or(reference);
+        if import_locals.contains(&root) {
+            required_imports.insert(root);
+        } else if !visited.contains(&root) {
+            pending.push(root);
+        }
+    }
+}
+
+fn collect_interface_reference_names(
+    members: &[TSSignature],
+    heritage: &[TSInterfaceHeritage],
+    refs: &mut FxHashSet<String>,
+) {
+    for h in heritage {
+        if let Expression::Identifier(id) = &h.expression {
+            refs.insert(id.name.to_string());
+        }
+        if let Some(type_arguments) = &h.type_arguments {
+            for param in &type_arguments.params {
+                collect_type_reference_names(param, refs);
+            }
+        }
+    }
+
+    for member in members {
+        match member {
+            TSSignature::TSPropertySignature(prop) => {
+                if let Some(type_annotation) = &prop.type_annotation {
+                    collect_type_reference_names(&type_annotation.type_annotation, refs);
+                }
+            }
+            TSSignature::TSMethodSignature(method) => {
+                if let Some(return_type) = &method.return_type {
+                    collect_type_reference_names(&return_type.type_annotation, refs);
+                }
+                for param in &method.params.items {
+                    if let Some(type_annotation) = &param.type_annotation {
+                        collect_type_reference_names(&type_annotation.type_annotation, refs);
+                    }
+                }
+            }
+            TSSignature::TSCallSignatureDeclaration(call) => {
+                if let Some(return_type) = &call.return_type {
+                    collect_type_reference_names(&return_type.type_annotation, refs);
+                }
+                for param in &call.params.items {
+                    if let Some(type_annotation) = &param.type_annotation {
+                        collect_type_reference_names(&type_annotation.type_annotation, refs);
+                    }
+                }
+            }
+            TSSignature::TSIndexSignature(index) => {
+                collect_type_reference_names(&index.type_annotation.type_annotation, refs);
+            }
+            TSSignature::TSConstructSignatureDeclaration(_) => {}
+        }
+    }
+}
+
+fn collect_type_reference_names(ts_type: &TSType<'_>, refs: &mut FxHashSet<String>) {
+    match ts_type {
+        TSType::TSTypeReference(type_ref) => {
+            refs.insert(get_type_reference_name(&type_ref.type_name));
+            if let Some(params) = &type_ref.type_arguments {
+                for param in &params.params {
+                    collect_type_reference_names(param, refs);
+                }
+            }
+        }
+        TSType::TSUnionType(union) => {
+            for ty in &union.types {
+                collect_type_reference_names(ty, refs);
+            }
+        }
+        TSType::TSIntersectionType(intersection) => {
+            for ty in &intersection.types {
+                collect_type_reference_names(ty, refs);
+            }
+        }
+        TSType::TSTypeLiteral(literal) => {
+            collect_interface_reference_names(&literal.members, &[], refs);
+        }
+        TSType::TSArrayType(array) => {
+            collect_type_reference_names(&array.element_type, refs);
+        }
+        TSType::TSTupleType(tuple) => {
+            for element in &tuple.element_types {
+                match element {
+                    TSTupleElement::TSOptionalType(optional) => {
+                        collect_type_reference_names(&optional.type_annotation, refs);
+                    }
+                    TSTupleElement::TSRestType(rest) => {
+                        collect_type_reference_names(&rest.type_annotation, refs);
+                    }
+                    TSTupleElement::TSNamedTupleMember(named) => {
+                        if let Some(ts_type) = named.element_type.as_ts_type() {
+                            collect_type_reference_names(ts_type, refs);
+                        }
+                    }
+                    _ => {
+                        if let Some(ts_type) = element.as_ts_type() {
+                            collect_type_reference_names(ts_type, refs);
+                        }
+                    }
+                }
+            }
+        }
+        TSType::TSConditionalType(cond) => {
+            collect_type_reference_names(&cond.check_type, refs);
+            collect_type_reference_names(&cond.extends_type, refs);
+            collect_type_reference_names(&cond.true_type, refs);
+            collect_type_reference_names(&cond.false_type, refs);
+        }
+        TSType::TSMappedType(mapped) => {
+            collect_type_reference_names(&mapped.constraint, refs);
+            if let Some(type_annotation) = &mapped.type_annotation {
+                collect_type_reference_names(type_annotation, refs);
+            }
+        }
+        TSType::TSIndexedAccessType(indexed) => {
+            collect_type_reference_names(&indexed.object_type, refs);
+            collect_type_reference_names(&indexed.index_type, refs);
+        }
+        TSType::TSTypeOperatorType(operator) => {
+            collect_type_reference_names(&operator.type_annotation, refs);
+        }
+        TSType::TSParenthesizedType(paren) => {
+            collect_type_reference_names(&paren.type_annotation, refs);
+        }
+        TSType::TSTemplateLiteralType(template) => {
+            for ty in &template.types {
+                collect_type_reference_names(ty, refs);
+            }
+        }
+        TSType::TSFunctionType(function) => {
+            collect_type_reference_names(&function.return_type.type_annotation, refs);
+            for param in &function.params.items {
+                if let Some(type_annotation) = &param.type_annotation {
+                    collect_type_reference_names(&type_annotation.type_annotation, refs);
+                }
+            }
+        }
+        TSType::TSConstructorType(constructor) => {
+            collect_type_reference_names(&constructor.return_type.type_annotation, refs);
+        }
+        TSType::TSTypeQuery(query) => {
+            if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
+                refs.insert(ident.name.to_string());
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn resolve_external_type_with_companion(
@@ -2169,14 +2452,6 @@ pub fn resolve_external_type_with_companion(
     // or non-exported `const X: { prop: Type } = ...` (for `typeof X`)
     if result.is_none() {
         result = resolve_value_declaration_type(type_name, &parsed.program, source_bytes, 0, &ctx);
-    }
-
-    // Try companion types directly — handles `export { X } from './y'` re-exports
-    // where X is not defined in this file but was resolved from the import source.
-    if result.is_none() {
-        if let Some(companion) = companion_types.get(type_name) {
-            result = Some(companion.clone());
-        }
     }
 
     // Populate key_name on all props since spans reference the external file,

@@ -80,6 +80,8 @@ pub struct EvalEnv {
     pub type_symbols: FxHashMap<String, TypeDeclInfo>,
     /// Value declarations: functions, constants, classes.
     pub value_symbols: FxHashMap<String, ValueDeclInfo>,
+    /// Memoized evaluations for non-generic type references.
+    resolved_refs: FxHashMap<String, TypeExpr>,
     /// Generic type parameter bindings for the current instantiation.
     pub type_bindings: FxHashMap<String, TypeExpr>,
     /// Currently being evaluated (cycle detection).
@@ -114,6 +116,7 @@ impl EvalEnv {
         Self {
             type_symbols: FxHashMap::default(),
             value_symbols: FxHashMap::default(),
+            resolved_refs: FxHashMap::default(),
             type_bindings: FxHashMap::default(),
             active: FxHashSet::default(),
             limits: EvalLimits::default(),
@@ -155,6 +158,14 @@ impl Default for EvalEnv {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn ref_cache_key(name: &str, args: &[TypeExpr]) -> String {
+    if args.is_empty() {
+        return name.to_string();
+    }
+
+    format!("{name}::{args:?}")
 }
 
 // ---------------------------------------------------------------------------
@@ -315,8 +326,18 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
         }
     }
 
+    let evaluated_args = if type_arguments.is_empty() {
+        Vec::new()
+    } else {
+        type_arguments.iter().map(|a| evaluate(a, env)).collect()
+    };
+    let cache_key = ref_cache_key(name, &evaluated_args);
+    if let Some(cached) = env.resolved_refs.get(&cache_key).cloned() {
+        return cached;
+    }
+
     // Try built-in utility types
-    if let Some(result) = try_builtin_utility(name, type_arguments, env) {
+    if let Some(result) = try_builtin_utility(name, &evaluated_args, env) {
         return result;
     }
 
@@ -329,20 +350,17 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
         env.active.insert(name.to_string());
 
         let result = if !decl.type_parameters.is_empty() {
-            // Generic instantiation (uses defaults for missing args)
-            let evaluated_args: Vec<TypeExpr> =
-                type_arguments.iter().map(|a| evaluate(a, env)).collect();
             instantiate_generic(&decl, &evaluated_args, env)
         } else {
             evaluate(&decl.body, env)
         };
 
         env.active.remove(name);
+        env.resolved_refs.insert(cache_key, result.clone());
         return result;
     }
 
     // Unresolved — return as-is with evaluated type arguments
-    let evaluated_args: Vec<TypeExpr> = type_arguments.iter().map(|a| evaluate(a, env)).collect();
     if evaluated_args.is_empty() {
         TypeExpr::named(name)
     } else {
@@ -462,123 +480,118 @@ fn try_builtin_utility(
 // -- Partial<T> --
 
 fn apply_partial(ty: &TypeExpr) -> TypeExpr {
-    match ty {
-        TypeExpr::Object(obj) => {
-            let properties = obj
-                .properties
-                .iter()
-                .map(|m| match m {
-                    ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
-                        optional: true,
-                        ..p.clone()
-                    }),
-                    other => other.clone(),
-                })
-                .collect();
-            TypeExpr::Object(ObjectExpr { properties })
-        }
-        _ => TypeExpr::named_with_args("Partial", vec![ty.clone()]),
+    if let Some(obj) = extract_object_shape(ty) {
+        let properties = obj
+            .properties
+            .iter()
+            .map(|m| match m {
+                ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
+                    optional: true,
+                    ..p.clone()
+                }),
+                other => other.clone(),
+            })
+            .collect();
+        TypeExpr::Object(ObjectExpr { properties })
+    } else {
+        TypeExpr::named_with_args("Partial", vec![ty.clone()])
     }
 }
 
 // -- Required<T> --
 
 fn apply_required(ty: &TypeExpr) -> TypeExpr {
-    match ty {
-        TypeExpr::Object(obj) => {
-            let properties = obj
-                .properties
-                .iter()
-                .map(|m| match m {
-                    ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
-                        optional: false,
-                        ..p.clone()
-                    }),
-                    other => other.clone(),
-                })
-                .collect();
-            TypeExpr::Object(ObjectExpr { properties })
-        }
-        _ => TypeExpr::named_with_args("Required", vec![ty.clone()]),
+    if let Some(obj) = extract_object_shape(ty) {
+        let properties = obj
+            .properties
+            .iter()
+            .map(|m| match m {
+                ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
+                    optional: false,
+                    ..p.clone()
+                }),
+                other => other.clone(),
+            })
+            .collect();
+        TypeExpr::Object(ObjectExpr { properties })
+    } else {
+        TypeExpr::named_with_args("Required", vec![ty.clone()])
     }
 }
 
 // -- Readonly<T> --
 
 fn apply_readonly(ty: &TypeExpr) -> TypeExpr {
-    match ty {
-        TypeExpr::Object(obj) => {
-            let properties = obj
-                .properties
-                .iter()
-                .map(|m| match m {
-                    ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
-                        readonly: true,
-                        ..p.clone()
-                    }),
-                    other => other.clone(),
-                })
-                .collect();
-            TypeExpr::Object(ObjectExpr { properties })
-        }
-        _ => TypeExpr::named_with_args("Readonly", vec![ty.clone()]),
+    if let Some(obj) = extract_object_shape(ty) {
+        let properties = obj
+            .properties
+            .iter()
+            .map(|m| match m {
+                ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
+                    readonly: true,
+                    ..p.clone()
+                }),
+                other => other.clone(),
+            })
+            .collect();
+        TypeExpr::Object(ObjectExpr { properties })
+    } else {
+        TypeExpr::named_with_args("Readonly", vec![ty.clone()])
     }
 }
 
 // -- Pick<T, K> --
 
 fn apply_pick(ty: &TypeExpr, keys: &TypeExpr) -> TypeExpr {
-    let key_set = extract_string_keys(keys);
+    let key_set = extract_string_keys_recursive(keys);
     if key_set.is_empty() {
         return TypeExpr::named_with_args("Pick", vec![ty.clone(), keys.clone()]);
     }
 
-    match ty {
-        TypeExpr::Object(obj) => {
-            let properties = obj
-                .properties
-                .iter()
-                .filter(|m| match m {
-                    ObjectMember::Property(p) => key_set.contains(&p.name),
-                    _ => false,
-                })
-                .cloned()
-                .collect();
-            TypeExpr::Object(ObjectExpr { properties })
-        }
-        _ => TypeExpr::named_with_args("Pick", vec![ty.clone(), keys.clone()]),
+    if let Some(obj) = extract_object_shape(ty) {
+        let properties = obj
+            .properties
+            .iter()
+            .filter(|m| match m {
+                ObjectMember::Property(p) => key_set.contains(&p.name),
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        TypeExpr::Object(ObjectExpr { properties })
+    } else {
+        TypeExpr::named_with_args("Pick", vec![ty.clone(), keys.clone()])
     }
 }
 
 // -- Omit<T, K> --
 
 fn apply_omit(ty: &TypeExpr, keys: &TypeExpr) -> TypeExpr {
-    let key_set = extract_string_keys(keys);
+    let key_set = extract_string_keys_recursive(keys);
     if key_set.is_empty() {
         return TypeExpr::named_with_args("Omit", vec![ty.clone(), keys.clone()]);
     }
 
-    match ty {
-        TypeExpr::Object(obj) => {
-            let properties = obj
-                .properties
-                .iter()
-                .filter(|m| match m {
-                    ObjectMember::Property(p) => !key_set.contains(&p.name),
-                    _ => true, // Keep index signatures, methods, etc.
-                })
-                .cloned()
-                .collect();
-            TypeExpr::Object(ObjectExpr { properties })
-        }
-        _ => TypeExpr::named_with_args("Omit", vec![ty.clone(), keys.clone()]),
+    if let Some(obj) = extract_object_shape(ty) {
+        let properties = obj
+            .properties
+            .iter()
+            .filter(|m| match m {
+                ObjectMember::Property(p) => !key_set.contains(&p.name),
+                _ => true, // Keep index signatures, methods, etc.
+            })
+            .cloned()
+            .collect();
+        TypeExpr::Object(ObjectExpr { properties })
+    } else {
+        TypeExpr::named_with_args("Omit", vec![ty.clone(), keys.clone()])
     }
 }
 
 // -- Record<K, V> --
 
 fn apply_record(keys: &TypeExpr, value: &TypeExpr) -> TypeExpr {
-    let key_set = extract_string_keys(keys);
+    let key_set = extract_string_keys_recursive(keys);
     if !key_set.is_empty() {
         // Finite key set → object with named properties
         let properties = key_set
@@ -966,7 +979,7 @@ fn evaluate_mapped(
     env: &mut EvalEnv,
 ) -> TypeExpr {
     let resolved_source = evaluate(source, env);
-    let keys = extract_string_keys(&resolved_source);
+    let keys = extract_string_keys_recursive(&resolved_source);
 
     if keys.is_empty() || keys.len() > env.limits.max_mapped_keys {
         return TypeExpr::Mapped {
@@ -1108,7 +1121,7 @@ fn extract_source_property_modifiers(
         TypeExpr::KeyOf(inner) => evaluate(inner, env),
         _ => return result,
     };
-    if let TypeExpr::Object(obj_expr) = &obj {
+    if let Some(obj_expr) = extract_object_shape(&obj) {
         for member in &obj_expr.properties {
             if let ObjectMember::Property(p) = member {
                 result.insert(p.name.clone(), (p.optional, p.readonly));
@@ -1116,6 +1129,42 @@ fn extract_source_property_modifiers(
         }
     }
     result
+}
+
+pub(crate) fn extract_object_shape(ty: &TypeExpr) -> Option<ObjectExpr> {
+    match ty {
+        TypeExpr::Object(obj) => Some(obj.clone()),
+        TypeExpr::Parenthesized(inner) => extract_object_shape(inner),
+        TypeExpr::Intersection(types) => merge_object_branches(
+            types
+                .iter()
+                .filter_map(extract_object_shape)
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    }
+}
+
+fn merge_object_branches(objects: Vec<ObjectExpr>) -> Option<ObjectExpr> {
+    if objects.is_empty() {
+        return None;
+    }
+
+    let mut merged = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for obj in objects {
+        for member in obj.properties {
+            if let ObjectMember::Property(ref p) = member {
+                if seen.insert(p.name.clone()) {
+                    merged.push(member);
+                }
+            } else {
+                merged.push(member);
+            }
+        }
+    }
+
+    Some(ObjectExpr { properties: merged })
 }
 
 /// Merge an intersection of types. If all branches are objects, merge their
@@ -1170,6 +1219,7 @@ fn evaluate_function(func: &FunctionExpr, env: &mut EvalEnv) -> FunctionExpr {
     }
 }
 
+#[allow(dead_code)]
 /// Extract string literal keys from a type expression.
 fn extract_string_keys(ty: &TypeExpr) -> Vec<String> {
     match ty {
@@ -1185,6 +1235,27 @@ fn extract_string_keys(ty: &TypeExpr) -> Vec<String> {
             keys
         }
         _ => Vec::new(),
+    }
+}
+
+fn extract_string_keys_recursive(ty: &TypeExpr) -> Vec<String> {
+    fn collect_keys(ty: &TypeExpr, keys: &mut Vec<String>) -> bool {
+        match ty {
+            TypeExpr::Literal(LiteralValue::String(s)) => {
+                keys.push(s.clone());
+                true
+            }
+            TypeExpr::Union(types) => types.iter().all(|ty| collect_keys(ty, keys)),
+            TypeExpr::Parenthesized(inner) => collect_keys(inner, keys),
+            _ => false,
+        }
+    }
+
+    let mut keys = Vec::new();
+    if collect_keys(ty, &mut keys) {
+        keys
+    } else {
+        Vec::new()
     }
 }
 

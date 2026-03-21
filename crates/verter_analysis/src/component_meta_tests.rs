@@ -249,6 +249,35 @@ fn with_defaults_marks_props_as_having_defaults() {
     assert!(!count.has_default, "count should NOT have a default");
 }
 
+#[test]
+fn runtime_define_props_defaults_are_preserved() {
+    let define_props = AnalyzedMacro {
+        default_keys: vec!["hello".to_string()],
+        default_values: vec![crate::types::AnalyzedDefaultValue {
+            key: "hello".to_string(),
+            value: "\"Hello\"".to_string(),
+            span: verter_span::Span::default(),
+        }],
+        prop_fields: vec![make_prop("hello", Some("string"), false)],
+        ..make_define_props(vec![])
+    };
+    let macros = vec![define_props];
+
+    let result = extract_component_meta(empty_input(&macros));
+
+    assert_eq!(result.props.len(), 1);
+    let hello = result.props.iter().find(|p| p.name == "hello").unwrap();
+    assert!(
+        hello.has_default,
+        "runtime defineProps default should be preserved"
+    );
+    assert!(
+        !hello.required,
+        "runtime defineProps default should make the prop optional in compat metadata"
+    );
+    assert_eq!(hello.default_value.as_deref(), Some("\"Hello\""));
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -440,6 +469,52 @@ fn options_api_props_used_when_no_composition_props() {
         result.props[0].type_expr,
         TypeExpr::Primitive(PrimitiveName::String),
         "String runtime type should map to Primitive(String)"
+    );
+}
+
+#[test]
+fn options_api_prop_type_annotation_is_preserved() {
+    let opts = AnalyzedOptionsApi {
+        props: vec![crate::types::AnalyzedOptionsProp {
+            name: "canvas".to_string(),
+            type_constructor: Some("Object".to_string()),
+            is_required: true,
+            has_default: false,
+            default_value: None,
+            type_annotation: Some("HTMLCanvasElement".to_string()),
+            description: None,
+            tags: Vec::new(),
+            span: verter_span::Span::default(),
+        }],
+        ..Default::default()
+    };
+    let input = ComponentMetaInput {
+        macros: &[],
+        bindings: &[],
+        imports: &[],
+        template: None,
+        options_api: Some(&opts),
+        analysis_flags: crate::types::AnalysisFlags::HAS_OPTIONS_API,
+        features: ComponentMetaFeatures::default(),
+        styles: &[],
+        vue_api_calls: &[],
+        store_usages: &[],
+        evaluated_types: None,
+        file_path: "/App.vue",
+    };
+
+    let result = extract_component_meta(input);
+
+    assert_eq!(result.props.len(), 1);
+    assert_eq!(
+        result.props[0].type_expr,
+        unknown_type("HTMLCanvasElement".to_string()),
+        "PropType<T> annotation should survive Options API extraction"
+    );
+    assert_eq!(
+        result.props[0].raw_type.as_deref(),
+        Some("HTMLCanvasElement"),
+        "raw_type should preserve the PropType<T> annotation for compat consumers"
     );
 }
 

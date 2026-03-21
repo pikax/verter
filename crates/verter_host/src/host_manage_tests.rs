@@ -80,6 +80,300 @@ defineProps<Props>()
 }
 
 #[test]
+fn imported_eval_inputs_parse_vue_dependency_key_aliases() {
+    let host = make_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types/index.ts".to_string(),
+            source: Arc::from("export * from '../Link.vue'\nexport * from '../Button.vue'"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    upsert_vue(
+        &host,
+        "/src/Link.vue",
+        r#"<script lang="ts">
+interface RouterLinkOptions {
+  replace?: boolean
+  activeClass?: string
+  ariaCurrentValue?: string
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  custom?: boolean
+}
+
+export interface LinkProps extends RouterLinkProps {
+  href?: string
+  raw?: boolean
+}
+
+export type LinkPropsKeys = 'to' | 'replace' | 'activeClass' | 'ariaCurrentValue'
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface ButtonProps extends Omit<LinkProps, 'raw' | 'custom'> {
+  loading?: boolean
+  label?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'loading'> {
+  status?: string
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../Link.vue".to_string(),
+                resolved_canonical_id: Some("/src/Link.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../Button.vue".to_string(),
+                resolved_canonical_id: Some("/src/Button.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist")
+        .snapshot;
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+
+    assert!(
+        inputs
+            .sources
+            .iter()
+            .any(|source| source.contains("export type LinkPropsKeys")),
+        "tracked eval sources should include extracted LinkPropsKeys alias, got: {:?}",
+        inputs.sources
+    );
+
+    let mut env = verter_analysis::type_eval_build::parse_and_build_env("");
+    for dep_source in &inputs.sources {
+        env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
+            dep_source,
+        ));
+    }
+    let link_keys = env
+        .type_symbols
+        .get("LinkPropsKeys")
+        .expect("eval env should contain LinkPropsKeys");
+    assert!(
+        matches!(
+            link_keys.body,
+            verter_analysis::type_expr::TypeExpr::Union(_)
+        ),
+        "LinkPropsKeys should lower to a literal union, got: {:?}",
+        link_keys.body
+    );
+}
+
+#[test]
+fn evaluated_child_props_preserve_inherited_omit_fields_from_imported_key_aliases() {
+    let host = make_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types/index.ts".to_string(),
+            source: Arc::from("export * from '../Link.vue'\nexport * from '../Button.vue'"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    upsert_vue(
+        &host,
+        "/src/Link.vue",
+        r#"<script lang="ts">
+interface RouterLinkOptions {
+  replace?: boolean
+  activeClass?: string
+  ariaCurrentValue?: string
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  custom?: boolean
+}
+
+export interface LinkProps extends RouterLinkProps {
+  href?: string
+  raw?: boolean
+}
+
+export type LinkPropsKeys = 'replace' | 'activeClass' | 'ariaCurrentValue'
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'icon' | 'color'> {
+  status?: string
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../Link.vue".to_string(),
+                resolved_canonical_id: Some("/src/Link.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../Button.vue".to_string(),
+                resolved_canonical_id: Some("/src/Button.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let (source, cached_parse, _) = host
+        .current_eval_state("/src/App.vue")
+        .expect("App eval state should exist");
+    let eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+    let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist")
+        .snapshot;
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    for dep_source in &inputs.sources {
+        env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
+            dep_source,
+        ));
+    }
+
+    let child = env
+        .type_symbols
+        .get("ChildProps")
+        .expect("ChildProps should exist")
+        .body
+        .clone();
+    let evaluated = verter_analysis::type_eval::evaluate(&child, &mut env);
+    let child_shape = match evaluated {
+        verter_analysis::type_expr::TypeExpr::Object(obj) => obj,
+        other => panic!("ChildProps should evaluate to an object, got: {other:?}"),
+    };
+    let names: Vec<String> = child_shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_analysis::type_expr::ObjectMember::Property(prop) => Some(prop.name.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "loading"),
+        "evaluated ChildProps should include inherited icon props, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "label"),
+        "evaluated ChildProps should include inherited button props, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "href"),
+        "evaluated ChildProps should include remaining link props, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "status"),
+        "evaluated ChildProps should keep local props, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "icon"),
+        "evaluated ChildProps should omit icon props, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "replace"),
+        "evaluated ChildProps should omit imported key alias members, got: {names:?}"
+    );
+}
+
+#[test]
 fn raw_template_analysis_extracts_css_var_names() {
     let host = make_host();
     upsert_vue(

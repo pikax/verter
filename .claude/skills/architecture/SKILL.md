@@ -47,6 +47,8 @@ When a bug or slowdown shows up in one product surface, prefer fixing it in the 
 - When another plugin modifies the file before `transform()`, the host detects the content change via internal hashing and recompiles
 - Third-party `.vue` files in `node_modules` compile on-demand during `transform()` — no pre-compilation overhead
 
+**Macro type resolution invariant:** cross-file macro type resolution must only follow imports reachable from the requested type's local declaration graph. Unrelated imports in the same file are out of scope for that traversal, and plain imports are not implicit re-exports.
+
 ## Core TS Transformation Pipeline (`packages/core/src/v5/`)
 
 ```
@@ -397,6 +399,18 @@ External types for macros like `defineProps<ExternalType>()` are pre-resolved by
 4. `script/process.rs` merges external types with companion `<script>` types
 
 The Rust compiler never does file I/O — all external resolution is the host's responsibility.
+
+**Resolver ownership rule:** host-backed component-meta and analysis must share one cross-file resolver. Do not build separate resolver logic for script-setup macros, Options API metadata, compat wrappers, or consumer-specific adapters.
+
+**Resolver modes:**
+- `Type` mode: resolve the requested symbol and its canonical source location only. This is for tracking identity and navigation, not shape expansion.
+- `Expanded` mode: use the same traversal and the same caches, then materialize the expanded shape / expanded text for metadata consumers.
+
+**Component-meta rule:** all metadata-producing macro and Options API surfaces must go through the shared resolver in `Expanded` mode. That includes props, emits, slots, data, computed, and expose-style members.
+
+**Traversal rule:** only follow the import graph reachable from the requested type's declaration graph. Unrelated imports in the same file are out of scope.
+
+**Caching rule:** when parsing a `.ts` / `.js` / declaration file for type resolution, cache discovered symbol name → canonical location mappings. Cache direct re-exports, barrelled exports, and any discovered `export *` hops as well, because repeated wildcard-barrel scanning is expensive.
 
 ## CompileTarget (Selective Pipeline)
 

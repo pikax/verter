@@ -337,6 +337,37 @@ fn eval_omit() {
     }
 }
 
+#[test]
+fn eval_omit_with_nested_literal_union_keys() {
+    let mut env = env_with_user_type();
+    env.add_type(TypeDeclInfo {
+        name: "SensitiveKeys".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Union(vec![
+            TypeExpr::Literal(LiteralValue::String("email".to_string())),
+            TypeExpr::Literal(LiteralValue::String("password".to_string())),
+        ]),
+    });
+
+    let expr = parse_type_annotation("Omit<User, SensitiveKeys | \"name\">");
+    let result = evaluate(&expr, &mut env);
+    match &result {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|m| match m {
+                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(names, vec!["id"], "nested union keys should be flattened");
+        }
+        _ => panic!("expected object, got {result:?}"),
+    }
+}
+
 // =============================================================================
 // Record<K, V>
 // =============================================================================

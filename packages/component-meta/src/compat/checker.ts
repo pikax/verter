@@ -21,20 +21,13 @@ import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
 import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
 import {
-  getMetaRuntime,
-  computeEngineKey,
   normalizePath as runtimeNormalizePath,
-  stableSelectiveConfigHash,
   parseTsconfig,
   extractPathAliases,
-} from "../runtime/index.js";
-import type {
-  EngineKeyInput,
-  NativeMetaProject,
-  BootstrapFn,
+  ProjectEngine,
   ProjectSession,
-  MetaRuntimeImpl,
 } from "../runtime/index.js";
+import type { NativeMetaProject, MetaRuntimeImpl } from "../runtime/index.js";
 
 /**
  * Minimal workspace interface used by the checker.
@@ -61,10 +54,97 @@ export interface CheckerWorkspace {
 /**
  * Create a workspace from @verter/native for the given root directory.
  */
-function createWorkspace(rootDir: string): CheckerWorkspace {
+function loadNative(): any {
   const _require = typeof require === "function" ? require : createRequire(import.meta.url);
-  const native = _require("@verter/native");
+  return _require("@verter/native");
+}
+
+function createWorkspace(rootDir: string): CheckerWorkspace {
+  const native = loadNative();
   return new native.Workspace([runtimeNormalizePath(rootDir)]);
+}
+
+let nextCompatEngineId = 1;
+
+type OwnedCompatResourceState = {
+  session: ProjectSession;
+  engine: ProjectEngine;
+  adapterClose?: (() => void) | undefined;
+  released: boolean;
+};
+
+function releaseOwnedCompatResources(state: OwnedCompatResourceState): void {
+  if (state.released) return;
+  state.released = true;
+  try {
+    state.session.close();
+  } catch {
+    // Best-effort cleanup for abandoned checkers.
+  }
+  try {
+    state.engine.shutdownNow(true);
+  } catch {
+    // Best-effort cleanup for abandoned checkers.
+  }
+  try {
+    state.adapterClose?.();
+  } catch {
+    // Best-effort cleanup for abandoned checkers.
+  }
+}
+
+const ownedCompatResourceFinalizer =
+  typeof FinalizationRegistry !== "undefined"
+    ? new FinalizationRegistry<OwnedCompatResourceState>((state) => {
+        releaseOwnedCompatResources(state);
+      })
+    : undefined;
+
+class OwnedCompatResources {
+  readonly unregisterToken = {};
+  private readonly state: OwnedCompatResourceState;
+
+  constructor(session: ProjectSession, engine: ProjectEngine, adapterClose?: () => void) {
+    this.state = {
+      session,
+      engine,
+      adapterClose,
+      released: false,
+    };
+  }
+
+  register(target: object): void {
+    ownedCompatResourceFinalizer?.register(target, this.state, this.unregisterToken);
+  }
+
+  unregister(): void {
+    ownedCompatResourceFinalizer?.unregister(this.unregisterToken);
+  }
+
+  release(): void {
+    releaseOwnedCompatResources(this.state);
+  }
+}
+
+function createDedicatedSession(
+  rootDir: string,
+  workspace: CheckerWorkspace,
+  configureWorkspace: () => void,
+): { engine: ProjectEngine; session: ProjectSession } {
+  const native = loadNative();
+  const hostConfig = { devMode: false, analysisLevel: "full", deepMacroResolutionType: true };
+  const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(hostConfig, workspace);
+  configureWorkspace();
+
+  const engine = new ProjectEngine(
+    `compat-${nextCompatEngineId++}`,
+    runtimeNormalizePath(rootDir),
+    nativeProject,
+    workspace,
+  );
+  const leaseId = engine.acquireLease();
+  const session = new ProjectSession(engine, leaseId, nativeProject.openSession());
+  return { engine, session };
 }
 
 /**
@@ -213,6 +293,8 @@ export class ComponentMetaChecker {
   /** Runtime session backing this checker. */
   private _session: ProjectSession | null = null;
   private _runtime: MetaRuntimeImpl | null = null;
+  private _ownedEngine: ProjectEngine | null = null;
+  private _ownedResources: OwnedCompatResources | null = null;
 
   constructor(
     adapter: VerterHostAdapter,
@@ -221,6 +303,7 @@ export class ComponentMetaChecker {
     session?: ProjectSession,
     workspace?: CheckerWorkspace,
     runtime?: MetaRuntimeImpl,
+    ownedEngine?: ProjectEngine,
   ) {
     this.adapter = adapter;
     this.projectRoot = projectRoot;
@@ -228,6 +311,15 @@ export class ComponentMetaChecker {
     this.workspace = workspace;
     this._session = session ?? null;
     this._runtime = runtime ?? null;
+    this._ownedEngine = ownedEngine ?? null;
+    if (session && ownedEngine && !runtime) {
+      this._ownedResources = new OwnedCompatResources(
+        session,
+        ownedEngine,
+        adapter.close?.bind(adapter),
+      );
+      this._ownedResources.register(this);
+    }
   }
 
   /**
@@ -371,13 +463,29 @@ export class ComponentMetaChecker {
     this.baseFiles.clear();
     this.overlayFiles.clear();
     this.deletedFiles.clear();
-    if (this._session) {
-      if (this._runtime) {
-        this._runtime.closeSession(this._session);
+    this.workspace = undefined;
+    const ownedResources = this._ownedResources;
+    this._ownedResources = null;
+    ownedResources?.unregister();
+    const session = this._session;
+    this._session = null;
+    const runtime = this._runtime;
+    this._runtime = null;
+    const ownedEngine = this._ownedEngine;
+    this._ownedEngine = null;
+    if (ownedResources) {
+      ownedResources.release();
+      return;
+    }
+    if (session) {
+      if (runtime) {
+        runtime.closeSession(session);
       } else {
-        this._session.close();
+        session.close();
       }
-      this._session = null;
+    }
+    if (ownedEngine) {
+      ownedEngine.shutdownNow(true);
     }
     this.adapter.close?.();
   }
@@ -464,40 +572,12 @@ export async function createChecker(
   const projectRoot = dirname(absPath);
   const workspace = createWorkspace(projectRoot);
   const parsed = await parseTsconfig(absPath, workspace);
-
-  // Build engine key for pooling
-  const input: EngineKeyInput = {
-    backend: "napi",
-    root: runtimeNormalizePath(projectRoot),
-    configKind: "tsconfig",
-    tsconfigPath: runtimeNormalizePath(absPath),
-    configHash: stableSelectiveConfigHash(
-      parsed?.config ?? { tsconfigPath: runtimeNormalizePath(absPath) },
-    ),
-    nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
-  };
-
-  const runtime = getMetaRuntime();
-
-  const bootstrap: BootstrapFn = async () => {
-    const _require = typeof require === "function" ? require : createRequire(import.meta.url);
-    const native = _require("@verter/native");
-    const config = { devMode: false, analysisLevel: "full", deepMacroResolutionType: true };
-    const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
-
-    // Configure project resolver
+  const { engine, session } = createDedicatedSession(projectRoot, workspace, () => {
     if (parsed) {
       const aliases = extractPathAliases(parsed.config, runtimeNormalizePath(projectRoot));
       workspace.configureProjects([aliases]);
     }
-
-    // Selective loading: no eager preload. Files are loaded on-demand
-    // via ensureFile() when getComponentMeta() first requests them.
-    return { nativeProject, baseFileIds: [] };
-  };
-
-  const engine = await runtime.getOrCreateEngine(input, bootstrap);
-  const session = runtime.openSession(engine);
+  });
 
   // Create session-backed adapter
   const adapter: VerterHostAdapter = {
@@ -526,7 +606,8 @@ export async function createChecker(
     options,
     session,
     workspace,
-    runtime,
+    undefined,
+    engine,
   );
 
   // Pre-track discovered files
@@ -558,37 +639,10 @@ export async function createCheckerByJson(
   const absRoot = resolve(projectRoot);
   const config = configJson as Record<string, unknown>;
   const workspace = createWorkspace(absRoot);
-
-  const input: EngineKeyInput = {
-    backend: "napi",
-    root: runtimeNormalizePath(absRoot),
-    configKind: "inline",
-    configHash: stableSelectiveConfigHash(config),
-    nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
-  };
-
-  const runtime = getMetaRuntime();
-
-  const bootstrap: BootstrapFn = async () => {
-    const _require = typeof require === "function" ? require : createRequire(import.meta.url);
-    const native = _require("@verter/native");
-    const hostConfig = { devMode: false, analysisLevel: "full", deepMacroResolutionType: true };
-    const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
-      hostConfig,
-      workspace,
-    );
-
-    // Configure project resolver
+  const { engine, session } = createDedicatedSession(absRoot, workspace, () => {
     const aliases = extractPathAliases(config, runtimeNormalizePath(absRoot));
     workspace.configureProjects([aliases]);
-
-    // Selective loading: no eager preload. Files are loaded on-demand
-    // via ensureFile() when getComponentMeta() first requests them.
-    return { nativeProject, baseFileIds: [] };
-  };
-
-  const engine = await runtime.getOrCreateEngine(input, bootstrap);
-  const session = runtime.openSession(engine);
+  });
 
   const adapter: VerterHostAdapter = {
     upsert(request) {
@@ -610,7 +664,15 @@ export async function createCheckerByJson(
     },
   };
 
-  const checker = new ComponentMetaChecker(adapter, absRoot, options, session, workspace, runtime);
+  const checker = new ComponentMetaChecker(
+    adapter,
+    absRoot,
+    options,
+    session,
+    workspace,
+    undefined,
+    engine,
+  );
 
   const baseIds = engine.nativeProject.baseFileIds();
   for (const filePath of baseIds) {

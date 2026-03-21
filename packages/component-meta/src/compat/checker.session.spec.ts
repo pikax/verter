@@ -40,31 +40,31 @@ describe("ComponentMetaChecker session requirement", () => {
 
   it("normalizes session-backed canonical ids before querying native metadata", async () => {
     const getComponentMeta = vi.fn(() => ({
-        filePath: "C:/project/src/App.vue",
-        optionsApi: false,
-        props: [],
-        events: [],
-        slots: [],
-        models: [],
-        exposed: [],
-        components: [],
-        templateRefs: [],
-        imports: [],
-        bindings: [],
-        vueApiCalls: [],
-        styles: [],
-        flags: {
-          asyncSetup: false,
-          hasReactiveState: false,
-          hasComputed: false,
-          hasWatchers: false,
-          hasLifecycleHooks: false,
-          hasProvide: false,
-          hasInject: false,
-          hasInheritAttrsFalse: false,
-          hasStoreUsage: false,
-        },
-      }));
+      filePath: "C:/project/src/App.vue",
+      optionsApi: false,
+      props: [],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+    }));
 
     const checker = new ComponentMetaChecker(
       {
@@ -98,6 +98,6 @@ describe("ComponentMetaChecker session requirement", () => {
     );
     await checker.getComponentMeta("src\\App.vue");
 
-    expect(getComponentMeta).toHaveBeenCalledWith("C:/project/src/App.vue");
+    expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 });

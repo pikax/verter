@@ -10,13 +10,14 @@ use oxc_ast::ast::{
     TSAccessibility, TSInterfaceDeclaration, TSSignature, TSTypeAliasDeclaration,
     TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
 };
+use oxc_span::GetSpan;
 
 use crate::type_eval::*;
 use crate::type_expr::{
     self, FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
     PrimitiveName, TypeExpr, TypeParam,
 };
-use crate::type_expr_lower::{lower_ts_type, property_key_name};
+use crate::type_expr_lower::{has_immediate_vue_ignore_comment, lower_ts_type, property_key_name};
 
 /// Build an evaluation environment from an OXC program AST.
 ///
@@ -140,6 +141,9 @@ fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut 
     if !decl.extends.is_empty() {
         let mut parts = Vec::new();
         for heritage in &decl.extends {
+            if has_immediate_vue_ignore_comment(source, heritage.span().start) {
+                continue;
+            }
             let base_name = match &heritage.expression {
                 Expression::Identifier(id) => id.name.to_string(),
                 _ => continue,
@@ -739,7 +743,7 @@ pub fn evaluate_macro_types_with_env(
     macros: &[crate::types::AnalyzedMacro],
     env: &mut EvalEnv,
 ) -> EvaluatedComponentTypes {
-    evaluate_macro_types_impl(macros, None, env)
+    evaluate_macro_types_impl(macros, None, env, None)
 }
 
 /// Evaluate macro-backed type annotations and the full defineProps macro type.
@@ -751,13 +755,23 @@ pub fn evaluate_macro_types_with_env_and_source(
     source: &str,
     env: &mut EvalEnv,
 ) -> EvaluatedComponentTypes {
-    evaluate_macro_types_impl(macros, Some(source), env)
+    evaluate_macro_types_impl(macros, Some(source), env, None)
+}
+
+pub fn evaluate_macro_types_with_env_and_source_and_local_bindings(
+    macros: &[crate::types::AnalyzedMacro],
+    source: &str,
+    env: &mut EvalEnv,
+    local_binding_names: &rustc_hash::FxHashSet<String>,
+) -> EvaluatedComponentTypes {
+    evaluate_macro_types_impl(macros, Some(source), env, Some(local_binding_names))
 }
 
 fn evaluate_macro_types_impl(
     macros: &[crate::types::AnalyzedMacro],
     source: Option<&str>,
     env: &mut EvalEnv,
+    local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
 ) -> EvaluatedComponentTypes {
     use crate::type_eval::evaluate;
     use crate::type_expr_lower::parse_type_annotation;
@@ -785,24 +799,16 @@ fn evaluate_macro_types_impl(
         if m.kind == crate::types::AnalyzedMacroKind::DefineProps && m.is_type_based {
             if let Some(type_params) = define_props_type_params.as_ref() {
                 if let Some(lowered) = type_params.get(define_props_index) {
+                    let saved_max_depth = env.limits.max_depth;
+                    env.limits.max_depth = env.limits.max_depth.min(8);
                     let evaluated = evaluate(lowered, env);
-                    if let TypeExpr::Object(obj) = evaluated {
-                        let mut fields = Vec::new();
-                        for member in obj.properties {
-                            if let ObjectMember::Property(prop) = member {
-                                fields.push(EvaluatedField {
-                                    name: prop.name.clone(),
-                                    r#type: prop.ty,
-                                    optional: prop.optional,
-                                });
-                            }
-                        }
-                        if !fields.is_empty() {
-                            result.define_props.push(EvaluatedMacroProps {
-                                macro_index,
-                                fields,
-                            });
-                        }
+                    env.limits.max_depth = saved_max_depth;
+                    let fields = collect_define_props_fields(&evaluated);
+                    if !fields.is_empty() {
+                        result.define_props.push(EvaluatedMacroProps {
+                            macro_index,
+                            fields,
+                        });
                     }
                 }
             }
@@ -829,7 +835,7 @@ fn evaluate_macro_types_impl(
             for binding in &slot.bindings {
                 if let Some(ref type_ann) = binding.type_annotation {
                     let parsed = parse_type_annotation(type_ann);
-                    if !parsed.is_unknown() {
+                    if !parsed.is_unknown() && should_evaluate_slot_binding_type(&parsed) {
                         let evaluated = evaluate(&parsed, env);
                         result.slot_bindings.push(EvaluatedField {
                             name: format!("{}.{}", slot.name, binding.name),
@@ -846,6 +852,11 @@ fn evaluate_macro_types_impl(
     let binding_entries: Vec<(String, TypeExpr)> = env
         .value_symbols
         .iter()
+        .filter(|(name, _)| {
+            local_binding_names
+                .map(|names| names.contains(name.as_str()))
+                .unwrap_or(true)
+        })
         .filter_map(|(name, decl)| {
             decl.type_annotation
                 .as_ref()
@@ -862,6 +873,132 @@ fn evaluate_macro_types_impl(
     }
 
     result
+}
+
+fn should_evaluate_slot_binding_type(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => true,
+        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
+            should_evaluate_slot_binding_type(inner)
+        }
+        TypeExpr::Array { element, .. } => should_evaluate_slot_binding_type(element),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .all(|element| should_evaluate_slot_binding_type(&element.ty)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types.iter().all(should_evaluate_slot_binding_type)
+        }
+        TypeExpr::Object(obj) => obj.properties.iter().all(|member| match member {
+            ObjectMember::Property(prop) => should_evaluate_slot_binding_type(&prop.ty),
+            ObjectMember::Method(method) => {
+                method
+                    .function
+                    .parameters
+                    .iter()
+                    .all(|param| should_evaluate_slot_binding_type(&param.ty))
+                    && method
+                        .function
+                        .return_type
+                        .as_ref()
+                        .map(|ret| should_evaluate_slot_binding_type(ret))
+                        .unwrap_or(true)
+            }
+            ObjectMember::IndexSignature(sig) => {
+                should_evaluate_slot_binding_type(&sig.key_type)
+                    && should_evaluate_slot_binding_type(&sig.value_type)
+            }
+            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                func.parameters
+                    .iter()
+                    .all(|param| should_evaluate_slot_binding_type(&param.ty))
+                    && func
+                        .return_type
+                        .as_ref()
+                        .map(|ret| should_evaluate_slot_binding_type(ret))
+                        .unwrap_or(true)
+            }
+        }),
+        TypeExpr::Function(func) => {
+            func.parameters
+                .iter()
+                .all(|param| should_evaluate_slot_binding_type(&param.ty))
+                && func
+                    .return_type
+                    .as_ref()
+                    .map(|ret| should_evaluate_slot_binding_type(ret))
+                    .unwrap_or(true)
+        }
+        TypeExpr::Ref { .. }
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TemplateLiteral { .. }
+        | TypeExpr::Infer { .. } => false,
+    }
+}
+
+fn collect_define_props_fields(ty: &TypeExpr) -> Vec<EvaluatedField> {
+    let variants = collect_define_props_variants(ty);
+    if variants.is_empty() {
+        return Vec::new();
+    }
+
+    #[derive(Default)]
+    struct FieldState {
+        present_in: usize,
+        optional: bool,
+        types: Vec<TypeExpr>,
+    }
+
+    let mut order = Vec::<String>::new();
+    let mut states = std::collections::HashMap::<String, FieldState>::new();
+
+    for variant in &variants {
+        let mut seen_in_variant = std::collections::HashSet::<String>::new();
+        for member in &variant.properties {
+            let ObjectMember::Property(prop) = member else {
+                continue;
+            };
+
+            let state = states.entry(prop.name.clone()).or_insert_with(|| {
+                order.push(prop.name.clone());
+                FieldState::default()
+            });
+            if seen_in_variant.insert(prop.name.clone()) {
+                state.present_in += 1;
+            }
+            state.optional |= prop.optional;
+            if !state.types.iter().any(|existing| existing == &prop.ty) {
+                state.types.push(prop.ty.clone());
+            }
+        }
+    }
+
+    let variant_count = variants.len();
+    order
+        .into_iter()
+        .filter_map(|name| {
+            let state = states.remove(&name)?;
+            Some(EvaluatedField {
+                name,
+                r#type: TypeExpr::union(state.types),
+                optional: state.optional || state.present_in < variant_count,
+            })
+        })
+        .collect()
+}
+
+fn collect_define_props_variants(ty: &TypeExpr) -> Vec<ObjectExpr> {
+    match ty {
+        TypeExpr::Union(types) => types
+            .iter()
+            .flat_map(collect_define_props_variants)
+            .collect(),
+        TypeExpr::Parenthesized(inner) => collect_define_props_variants(inner),
+        _ => extract_object_shape(ty).into_iter().collect(),
+    }
 }
 
 fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {

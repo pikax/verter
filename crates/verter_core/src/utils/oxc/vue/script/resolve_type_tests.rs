@@ -816,6 +816,40 @@ export interface Props extends LocalBase {
         .any(|prop| prop.key_name.as_deref() == Some("label")));
 }
 
+/// @ai-generated - imported companion aliases should support extends but must not
+/// be treated as exports of the current file.
+#[test]
+fn resolve_external_type_with_companion_does_not_export_imported_alias() {
+    let alloc = Allocator::default();
+    let dep = r#"
+import type { BaseAction as LocalBase } from './base'
+
+export interface Props extends LocalBase {
+  label: string
+}
+"#;
+    let mut companion_types = rustc_hash::FxHashMap::default();
+    let mut base = ResolvedElements::default();
+    base.props.push(ResolvedProp {
+        span: Span::new(0, 0),
+        key: Span::new(0, 0),
+        key_name: Some("id".to_string()),
+        optional: false,
+        types: vec![RuntimeType::String],
+        type_span: None,
+        type_text: None,
+        map_local: false,
+        span_is_absolute: false,
+    });
+    companion_types.insert("LocalBase".to_string(), base);
+
+    let resolved = resolve_external_type_with_companion("LocalBase", dep, &companion_types, &alloc);
+    assert!(
+        resolved.is_none(),
+        "imported companion aliases are not exported declarations of this file"
+    );
+}
+
 /// @ai-generated - resolve_external_type_with_companion supports transitive imported emits shapes.
 #[test]
 fn resolve_external_type_with_companion_transitive_emits_shape() {
@@ -1123,6 +1157,10 @@ fn extract_bindings_handles_export_star_and_named_reexports() {
     let source1 = "export * from './Drawer'";
     let result1 = extract_imported_type_bindings(source1, &allocator);
     assert!(result1.bindings.is_empty(), "no named bindings");
+    assert!(
+        result1.reexport_bindings.is_empty(),
+        "wildcard export should not fabricate named re-exports"
+    );
     assert_eq!(
         result1.wildcard_reexport_sources,
         vec!["./Drawer"],
@@ -1137,6 +1175,11 @@ fn extract_bindings_handles_export_star_and_named_reexports() {
         result2.bindings.len(),
         2,
         "should have 2 named re-export bindings"
+    );
+    assert_eq!(
+        result2.reexport_bindings.len(),
+        2,
+        "named re-export bindings should be tracked separately"
     );
     assert_eq!(result2.bindings[0].local_name, "DrawerEmits");
     assert_eq!(result2.bindings[0].imported_name, "DrawerEmits");
@@ -1153,15 +1196,91 @@ fn extract_bindings_handles_export_star_and_named_reexports() {
         "import { Base } from './base';\nexport * from './utils';\nexport { Foo } from './foo';";
     let result3 = extract_imported_type_bindings(source3, &allocator3);
     assert_eq!(result3.bindings.len(), 2, "Base import + Foo re-export");
+    assert_eq!(
+        result3.reexport_bindings.len(),
+        1,
+        "plain imports must not be treated as direct re-exports"
+    );
     assert_eq!(result3.bindings[0].local_name, "Base");
     assert_eq!(result3.bindings[0].source, "./base");
     assert_eq!(result3.bindings[1].local_name, "Foo");
     assert_eq!(result3.bindings[1].source, "./foo");
+    assert_eq!(result3.reexport_bindings[0].local_name, "Foo");
+    assert_eq!(result3.reexport_bindings[0].source, "./foo");
     assert_eq!(
         result3.wildcard_reexport_sources,
         vec!["./utils"],
         "should have one wildcard"
     );
+}
+
+#[test]
+fn collect_required_import_names_for_external_type_is_targeted() {
+    let allocator = Allocator::new();
+    let source = r#"
+import { computed, toValue } from 'vue'
+import type { MaybeRefOrGetter } from 'vue'
+import { useAppConfig } from '#imports'
+import type { AvatarProps, IconProps } from '../types'
+
+export interface UseComponentIconsProps {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+}
+
+export function useComponentIcons(componentProps: MaybeRefOrGetter<UseComponentIconsProps>) {
+  const appConfig = useAppConfig()
+  const props = computed(() => toValue(componentProps))
+  return { appConfig, props }
+}
+"#;
+
+    let required = collect_required_import_names_for_external_type(
+        "UseComponentIconsProps",
+        source,
+        &allocator,
+    );
+
+    assert_eq!(
+        required.len(),
+        2,
+        "only the exported interface's imports should be followed"
+    );
+    assert!(required.contains("AvatarProps"));
+    assert!(required.contains("IconProps"));
+    assert!(!required.contains("computed"));
+    assert!(!required.contains("toValue"));
+    assert!(!required.contains("MaybeRefOrGetter"));
+    assert!(!required.contains("useAppConfig"));
+}
+
+#[test]
+fn collect_required_import_names_for_external_type_follows_local_alias_chain() {
+    let allocator = Allocator::new();
+    let source = r#"
+import type { Base } from './base'
+import { computed } from 'vue'
+
+type Local = Base & { label: string }
+
+export interface Props extends Local {
+  id: string
+}
+
+export function setup() {
+  return computed(() => 1)
+}
+"#;
+
+    let required = collect_required_import_names_for_external_type("Props", source, &allocator);
+
+    assert_eq!(
+        required.len(),
+        1,
+        "only the import used through the local alias chain should be followed"
+    );
+    assert!(required.contains("Base"));
+    assert!(!required.contains("computed"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1980,5 +2099,35 @@ type Test = WithExtra<BaseProps>
         resolved.props.len(),
         4,
         "should have exactly 4 props (a, b, c, extra)"
+    );
+}
+
+#[test]
+fn resolve_external_type_skips_vue_ignore_interface_extends() {
+    let alloc = Allocator::default();
+    let dep = r#"
+interface HtmlAttrs {
+  title?: string
+}
+
+export interface Props extends /** @vue-ignore */ HtmlAttrs {
+  id?: string
+}
+"#;
+
+    let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|p| p.key_name.as_deref().unwrap_or(""))
+        .collect();
+
+    assert!(
+        names.contains(&"id"),
+        "should keep local props, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"title"),
+        "should skip @vue-ignore extends props, got: {names:?}"
     );
 }

@@ -475,6 +475,34 @@ defineProps<Local>();
 }
 
 #[test]
+fn transitive_dep_interface_extends_omit_of_imported_with_imported_keys() {
+    let code = r#"
+import type { ButtonProps, LinkPropsKeys } from './types';
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'icon' | 'color' | 'variant'> {
+  status?: string
+}
+defineProps<ChildProps>();
+"#;
+    let result = analyze(code);
+    assert!(
+        result
+            .macro_type_deps
+            .iter()
+            .any(|d| d.type_name == "ButtonProps" && d.import_source == "./types"),
+        "should discover ButtonProps via utility heritage, got: {:?}",
+        result.macro_type_deps
+    );
+    assert!(
+        result
+            .macro_type_deps
+            .iter()
+            .any(|d| d.type_name == "LinkPropsKeys" && d.import_source == "./types"),
+        "should discover LinkPropsKeys via utility heritage, got: {:?}",
+        result.macro_type_deps
+    );
+}
+
+#[test]
 fn async_setup_nested_await_in_call_arg() {
     let result = analyze("const data = bar(await fetchData());");
     assert!(

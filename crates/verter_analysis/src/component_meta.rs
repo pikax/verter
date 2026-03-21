@@ -275,19 +275,30 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
     let mut models = Vec::new();
     let mut exposed = Vec::new();
 
-    // Collect default keys from WithDefaults macro
+    // Collect defaults from all prop-bearing macro forms.
     let default_keys: std::collections::HashSet<&str> = input
         .macros
         .iter()
-        .filter(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+        .filter(|m| {
+            matches!(
+                m.kind,
+                AnalyzedMacroKind::WithDefaults | AnalyzedMacroKind::DefineProps
+            )
+        })
         .flat_map(|m| m.default_keys.iter().map(|k| k.as_str()))
         .collect();
 
-    // Collect default values from WithDefaults macro
+    // Runtime defineProps({ ... default }) stores defaults on the DefineProps macro
+    // itself, while withDefaults() stores them on the WithDefaults wrapper.
     let default_values: std::collections::HashMap<&str, &str> = input
         .macros
         .iter()
-        .filter(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+        .filter(|m| {
+            matches!(
+                m.kind,
+                AnalyzedMacroKind::WithDefaults | AnalyzedMacroKind::DefineProps
+            )
+        })
         .flat_map(|m| {
             m.default_values
                 .iter()
@@ -715,22 +726,29 @@ fn resolve_exposed_type(
 
 fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnalysis>) {
     for prop in &opts.props {
+        let raw_type = prop
+            .type_annotation
+            .clone()
+            .or_else(|| prop.type_constructor.clone());
         out.push(PropAnalysis {
             name: prop.name.clone(),
             type_expr: prop
-                .type_constructor
+                .type_annotation
                 .as_ref()
-                .map(|rt| match rt.as_str() {
-                    "String" => TypeExpr::Primitive(crate::type_expr::PrimitiveName::String),
-                    "Number" => TypeExpr::Primitive(crate::type_expr::PrimitiveName::Number),
-                    "Boolean" => TypeExpr::Primitive(crate::type_expr::PrimitiveName::Boolean),
-                    "Function" => unknown_type("Function".to_string()),
-                    "Array" => unknown_type("Array".to_string()),
-                    "Object" => unknown_type("Object".to_string()),
-                    other => unknown_type(other.to_string()),
+                .map(|raw| unknown_type(raw.clone()))
+                .or_else(|| {
+                    prop.type_constructor.as_ref().map(|rt| match rt.as_str() {
+                        "String" => TypeExpr::Primitive(crate::type_expr::PrimitiveName::String),
+                        "Number" => TypeExpr::Primitive(crate::type_expr::PrimitiveName::Number),
+                        "Boolean" => TypeExpr::Primitive(crate::type_expr::PrimitiveName::Boolean),
+                        "Function" => unknown_type("Function".to_string()),
+                        "Array" => unknown_type("Array".to_string()),
+                        "Object" => unknown_type("Object".to_string()),
+                        other => unknown_type(other.to_string()),
+                    })
                 })
                 .unwrap_or_else(|| unknown_type("unknown".to_string())),
-            raw_type: prop.type_constructor.clone(),
+            raw_type,
             required: prop.is_required,
             has_default: prop.has_default,
             default_value: prop.default_value.clone(),

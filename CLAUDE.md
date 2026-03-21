@@ -21,6 +21,23 @@ Architectural consequence:
 - A performance or correctness fix discovered in one surface should be implemented in the shared owner layer whenever that behavior is reusable.
 - Consumer-local wrappers should stay thin and should not bypass shared parsing, analysis, resolution, or cache ownership.
 
+### Macro Type Traversal Rule (CRITICAL)
+
+When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph.
+
+- There is one shared cross-file type resolver for host-backed component-meta and analysis work. Do not add consumer-specific resolver forks.
+- That resolver has exactly two modes:
+  - `Type`: resolve the requested symbol identity and canonical source location only. Do not expand the shape.
+  - `Expanded`: resolve the same symbol through the same traversal, then materialize the expanded shape / expanded text.
+- Component-meta uses the shared resolver in `Expanded` mode for every macro-facing surface. This includes all script-setup macros and all Options API surfaces that contribute metadata, such as props, data, computed, emits, slots, and expose-like members.
+- Do not walk unrelated imports from the same file.
+- Do not treat plain imports as implicit exports.
+- Keep direct re-exports (`export { X } from`, `export * from`) as an explicit separate path.
+- Parsing a `.ts`/`.js`/declaration file for type resolution must cache discovered symbol name → canonical location mappings.
+- Re-exported names and barrel hops must also be cached once discovered. If traversal follows `export * from './foo'`, cache that result so later lookups do not rescan the same barrel chain.
+
+If a file imports 20 modules but the requested macro type only references `AvatarProps` and `IconProps`, external resolution must only traverse those reachable dependencies.
+
 ### Package Dependency Graph
 
 ```

@@ -140,7 +140,10 @@ fn ensure_loaded_populates_shared_base_from_workspace() {
     let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
         verter_vfs::MemoryOptions::default(),
     ));
-    ws.inject_file("/workspace/App.vue".to_string(), Arc::from(sfc("msg: string")));
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(sfc("msg: string")),
+    );
 
     let project = make_workspace_project(Arc::clone(&ws));
 
@@ -167,7 +170,10 @@ fn refresh_base_reloads_workspace_source_into_shared_base() {
     let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
         verter_vfs::MemoryOptions::default(),
     ));
-    ws.inject_file("/workspace/App.vue".to_string(), Arc::from(sfc("msg: string")));
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(sfc("msg: string")),
+    );
 
     let project = make_workspace_project(Arc::clone(&ws));
     assert!(project.ensure_loaded("/workspace/App.vue").unwrap());
@@ -2133,6 +2139,455 @@ defineProps<MyProps>()
     // Assert-: excluded fields
     assert!(!names.contains(&"c"), "should NOT have 'c', got: {names:?}");
     assert!(!names.contains(&"d"), "should NOT have 'd', got: {names:?}");
+}
+
+#[test]
+fn union_object_variants_synthesize_component_meta_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+type FixedProps = {
+  layout?: 'fixed'
+  editor: string
+}
+
+type BubbleProps = {
+  layout?: 'bubble'
+  editor: string
+  floating?: boolean
+}
+
+type Props = FixedProps | BubbleProps
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&"layout"),
+        "should have 'layout', got: {names:?}"
+    );
+    assert!(
+        names.contains(&"editor"),
+        "should have 'editor', got: {names:?}"
+    );
+    assert!(
+        names.contains(&"floating"),
+        "should have union branch props, got: {names:?}"
+    );
+}
+
+#[test]
+fn mixed_intersection_retains_local_component_meta_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+type Props = {
+  id?: string
+  disabled?: boolean
+} & Omit<FormHTMLAttributes, 'name'>
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(names.contains(&"id"), "should have 'id', got: {names:?}");
+    assert!(
+        names.contains(&"disabled"),
+        "should have 'disabled', got: {names:?}"
+    );
+}
+
+#[test]
+fn imported_barrel_types_are_available_to_define_props_evaluation() {
+    let project = make_project();
+    project
+        .upsert_base("/src/types/index.ts", r#"export * from '../Button.vue'"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+export interface IconProps {
+  icon?: string
+}
+
+export interface ButtonProps extends IconProps {
+  label?: string
+  color?: string
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+
+type Props = Omit<ButtonProps, 'color'> & {
+  status?: string
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/types/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "../Button.vue".to_string(),
+            resolved_canonical_id: Some("/src/Button.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&"icon"),
+        "should have 'icon', got: {names:?}"
+    );
+    assert!(
+        names.contains(&"label"),
+        "should have 'label', got: {names:?}"
+    );
+    assert!(
+        names.contains(&"status"),
+        "should keep local props, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"color"),
+        "should omit 'color', got: {names:?}"
+    );
+}
+
+#[test]
+fn imported_barrel_cycles_still_resolve_nested_omit_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/index.ts",
+            r#"export * from '../Link.vue'
+export * from '../Button.vue'"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+interface RouterLinkOptions {
+  replace?: boolean
+  activeClass?: string
+  ariaCurrentValue?: string
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  custom?: boolean
+  exactActiveClass?: string
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: string
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  as?: any
+  class?: any
+  raw?: boolean
+}
+
+export type LinkPropsKeys = 'to' | 'replace' | 'activeClass' | 'ariaCurrentValue'
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+  variant?: string
+  size?: string
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'icon' | 'color' | 'variant'> {
+  status?: string
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../Link.vue".to_string(),
+                resolved_canonical_id: Some("/src/Link.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../Button.vue".to_string(),
+                resolved_canonical_id: Some("/src/Button.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&"loading"),
+        "should include inherited icon props, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"label"),
+        "should include inherited button props, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"size"),
+        "should include inherited button props, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"href"),
+        "should include inherited link props, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"status"),
+        "should keep local props, got: {names:?}"
+    );
+    assert!(!names.contains(&"icon"), "should omit icon, got: {names:?}");
+    assert!(
+        !names.contains(&"color"),
+        "should omit color, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"variant"),
+        "should omit variant, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"to"),
+        "should omit link keys, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"replace"),
+        "should omit router link keys, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"activeClass"),
+        "should omit router link keys, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"ariaCurrentValue"),
+        "should omit router link keys, got: {names:?}"
+    );
+}
+
+#[test]
+fn resolve_imported_types_handles_barrel_cycle_utility_heritage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/index.ts",
+            r#"export * from '../Link.vue'
+export * from '../Button.vue'"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+interface RouterLinkOptions {
+  replace?: boolean
+  activeClass?: string
+  ariaCurrentValue?: string
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  custom?: boolean
+  exactActiveClass?: string
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: string
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  as?: any
+  class?: any
+  raw?: boolean
+}
+
+export type LinkPropsKeys = 'to' | 'replace' | 'activeClass' | 'ariaCurrentValue'
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+  variant?: string
+  size?: string
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'icon' | 'color' | 'variant'> {
+  status?: string
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../Link.vue".to_string(),
+                resolved_canonical_id: Some("/src/Link.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../Button.vue".to_string(),
+                resolved_canonical_id: Some("/src/Button.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project.host().resolve_imported_types("/src/App.vue");
+    let button = resolved
+        .iter()
+        .find(|ty| ty.name == "ButtonProps")
+        .expect("should resolve ButtonProps");
+    assert!(
+        button.expanded.contains("loading"),
+        "resolved ButtonProps should include inherited props, got: {}",
+        button.expanded
+    );
+    assert!(
+        button.expanded.contains("label"),
+        "resolved ButtonProps should include button props, got: {}",
+        button.expanded
+    );
 }
 
 // ===========================================================================

@@ -131,11 +131,28 @@ describe("P3: Default Values", () => {
   test("JS options API: should extract default value from defineProps options", async () => {
     const prop = await getProp("P3a-JSDefaults.vue", "size");
     expect(prop).toBeDefined();
+    expect(prop).toMatchObject({
+      type: "String",
+      default: "md",
+    });
   });
 
   test("TS script setup: should extract default from withDefaults or options", async () => {
     const prop = await getProp("P3b-TSDefaults.vue", "count");
     expect(prop).toBeDefined();
+    expect(prop).toMatchObject({
+      type: "number",
+      default: "0",
+    });
+  });
+
+  test("runtime defineProps object syntax should preserve default values", async () => {
+    const prop = await getProp("StringPropDefault.vue", "hello");
+    expect(prop).toBeDefined();
+    expect(prop).toMatchObject({
+      type: "string",
+      default: "Hello",
+    });
   });
 });
 
@@ -146,6 +163,15 @@ describe("P4: DOM & Advanced Types", () => {
   test("HTMLCanvasElement prop should have { kind: 'object', schema: {} } not flat string", async () => {
     const prop = await getProp("P4a-DomTypes.vue", "canvas");
     expect(prop).toBeDefined();
+    expect(prop!.type).toBe("HTMLCanvasElement");
+    if (typeof prop!.schema === "string") {
+      expect(prop!.schema).toBe("HTMLCanvasElement");
+    } else {
+      expect(prop!.schema).toMatchObject({
+        kind: "object",
+        type: "HTMLCanvasElement",
+      });
+    }
   });
 
   test("Partial<HTMLImageElement> in union should produce structured enum schema", async () => {
