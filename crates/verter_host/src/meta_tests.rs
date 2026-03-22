@@ -4105,18 +4105,17 @@ defineProps<WidgetProps>()
     );
 }
 
-// ── Fix 4: type_reachable_count boundary scoping ──────────────────
+// ── Fix 4: full eval source set for utility heritage and fallthrough ─────────
 
 #[test]
-fn type_reachable_count_scopes_eval_sources_while_fallthrough_uses_all() {
+fn full_eval_sources_include_macro_and_value_dependencies() {
     // Component with:
     // - a cross-file macro type dep (ButtonProps from ./types.ts)
     // - an imported value (rootAttrs from ./utils.ts) used in v-bind spread
     // - additional non-type imports (./helpers.ts)
     //
-    // type_reachable_count should be > 0 (type dep sources) and < sources.len()
-    // (full graph includes non-type imports). Type eval uses only the prefix;
-    // fallthrough eval uses everything (including rootAttrs).
+    // The cached eval inputs should include both the macro type source and the
+    // broader value-only imports required by downstream evaluation.
     let project = make_project();
     project
         .upsert_base(
@@ -4173,7 +4172,7 @@ const msg = format('hello')
 
     let meta = get_meta(&project, "/src/App.vue");
 
-    // Type eval should still resolve props correctly (uses only type-reachable sources)
+    // Type eval should still resolve props correctly with the full imported source set.
     assert_eq!(meta.props.len(), 1, "should resolve the cross-file prop");
     assert_eq!(meta.props[0].name, "label");
 
@@ -4189,48 +4188,18 @@ const msg = format('hello')
         .expect("expanded resolved state should retain cached eval inputs");
 
     assert!(
-        imported_inputs.type_reachable_count > 0,
-        "macro type deps should contribute at least one type-reachable source"
-    );
-    assert!(
-        imported_inputs.type_reachable_count < imported_inputs.sources.len(),
-        "full eval sources should include value-only imports beyond the type-reachable prefix"
-    );
-
-    let type_reachable_sources = &imported_inputs.sources[..imported_inputs.type_reachable_count];
-    let fallthrough_only_sources = &imported_inputs.sources[imported_inputs.type_reachable_count..];
-
-    assert!(
-        type_reachable_sources
+        imported_inputs
+            .sources
             .iter()
             .any(|source| source.contains("interface ButtonProps")),
-        "type-reachable prefix should include the macro type source"
+        "full eval sources should include the macro type source"
     );
     assert!(
-        !type_reachable_sources
+        imported_inputs
+            .sources
             .iter()
             .any(|source| source.contains("root-attrs-marker")),
-        "value-only utils import should not be parsed during type eval"
-    );
-    assert!(
-        fallthrough_only_sources
-            .iter()
-            .any(|source| source.contains("root-attrs-marker")),
-        "fallthrough-only suffix should include the utils source used by v-bind"
-    );
-
-    let mut prefix_env = verter_analysis::type_eval_build::parse_and_build_env("");
-    for dep_source in type_reachable_sources {
-        prefix_env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
-            dep_source,
-        ));
-    }
-    let prefix_eval =
-        verter_analysis::type_eval_build::evaluate_value_expression("rootAttrs", &mut prefix_env)
-            .expect("value expression parsing should succeed");
-    assert!(
-        !matches!(prefix_eval, verter_analysis::type_expr::TypeExpr::Object(_)),
-        "type-reachable prefix alone should not resolve the value-only utils import, got: {prefix_eval:?}"
+        "full eval sources should include the value-only utils import used by v-bind"
     );
 
     let mut full_env = verter_analysis::type_eval_build::parse_and_build_env("");

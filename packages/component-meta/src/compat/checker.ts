@@ -36,6 +36,32 @@ import type {
   ProjectSession,
 } from "../runtime/index.js";
 
+const COMPAT_BLOCKED_SLOT_NAMES = new Set([
+  "type",
+  "props",
+  "key",
+  "ref",
+  "scopeId",
+  "children",
+  "component",
+  "dirs",
+  "transition",
+  "el",
+  "placeholder",
+  "anchor",
+  "target",
+  "targetStart",
+  "targetAnchor",
+  "suspense",
+  "shapeFlag",
+  "patchFlag",
+  "appContext",
+]);
+
+function isCompatVisibleSlotName(name: string): boolean {
+  return !COMPAT_BLOCKED_SLOT_NAMES.has(name);
+}
+
 /**
  * Minimal workspace interface used by the checker.
  * Matches the Workspace class from @verter/native.
@@ -193,7 +219,9 @@ export function mapComponentMeta(
     type: 0,
     props: meta.props.map((p) => mapPropMeta(p, options, typeRegistry)),
     events: meta.events.map((e) => mapEventMeta(e, options)),
-    slots: meta.slots.map((s) => mapSlotMeta(s, options)),
+    slots: meta.slots
+      .filter((s) => isCompatVisibleSlotName(s.name))
+      .map((s) => mapSlotMeta(s, options)),
     exposed: meta.exposed.map((e) => mapExposedMeta(e, options)),
     _verter: meta,
   };

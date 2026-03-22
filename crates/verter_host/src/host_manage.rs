@@ -65,11 +65,6 @@ pub struct ImportedEvalInputs {
     pub(crate) sources: Vec<String>,
     pub(crate) resolved_types: Vec<verter_analysis::ResolvedLocalType>,
     pub(crate) canonical_dependencies: std::collections::BTreeSet<String>,
-    /// Number of sources in `sources[..type_reachable_count]` that are
-    /// type-reachable (from macro type deps). Sources beyond this index
-    /// come from the full import graph walk and are only needed by
-    /// fallthrough eval (value expression evaluation).
-    pub(crate) type_reachable_count: usize,
 }
 
 impl VerterHost {
@@ -332,11 +327,6 @@ impl VerterHost {
             inputs.push(source);
         }
 
-        // Boundary: sources[..type_reachable_count] are from macro type dep
-        // resolution. Sources added after this point are from the full import
-        // graph walk and are only needed by fallthrough eval.
-        let type_reachable_count = inputs.len();
-
         self.collect_eval_dependency_sources_recursive(
             owner_canonical_id,
             &mut seen,
@@ -348,7 +338,6 @@ impl VerterHost {
             sources: inputs,
             resolved_types,
             canonical_dependencies,
-            type_reachable_count,
         }
     }
 
@@ -367,18 +356,16 @@ impl VerterHost {
         let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
         let local_binding_names: rustc_hash::FxHashSet<String> =
             env.value_symbols.keys().cloned().collect();
-        // When type_reachable_count > 0, only parse type-reachable sources
-        // (the prefix populated by macro type dep resolution). Sources beyond
-        // the boundary are from the full import graph walk and are only needed
-        // by fallthrough eval. When type_reachable_count == 0 (no macro type
-        // deps — e.g., inline defineProps), preserve prior broad behavior:
-        // the eval env may still need imported type definitions.
-        let source_slice = if imported_inputs.type_reachable_count > 0 {
-            &imported_inputs.sources[..imported_inputs.type_reachable_count]
-        } else {
-            &imported_inputs.sources
-        };
-        for dep_source in source_slice {
+        // Use the full import source set for evaluation. Sources are already
+        // deduplicated by canonical path (via `seen: FxHashSet` in
+        // `imported_eval_inputs()`), cycle-safe, and deterministically ordered
+        // (macro_type_deps phase first, then full import graph walk).
+        //
+        // Previously only `sources[..type_reachable_count]` was used, but this
+        // starved eval of imported sources needed for local utility heritage
+        // (e.g., `extends Omit<ImportedType, keys>`). See Bug 3 in
+        // soft-singing-conway plan.
+        for dep_source in &imported_inputs.sources {
             env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
                 dep_source,
             ));

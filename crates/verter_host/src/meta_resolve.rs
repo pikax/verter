@@ -237,6 +237,22 @@ impl VerterHost {
                     });
                 }
                 ResolverMode::Expanded => {
+                    if should_ignore_external_macro_type(&dep) {
+                        resolved_macros.push(ResolvedMacroMeta {
+                            macro_index,
+                            macro_kind: dep.macro_kind,
+                            type_name: dep.type_name.clone(),
+                            import_source: dep.import_source.clone(),
+                            declaration: declaration.clone(),
+                            native_props: Vec::new(),
+                            props: Vec::new(),
+                            emits: Vec::new(),
+                            slots: Vec::new(),
+                            jsdoc: jsdoc.clone(),
+                        });
+                        continue;
+                    }
+
                     let mut resolution_deps = std::collections::BTreeSet::new();
                     let resolved = self.resolve_external_type_from_loaded_files(
                         &canonical,
@@ -435,7 +451,7 @@ impl VerterHost {
             if !self.dependency_hashes_match(&cached.dependency_hashes) {
                 return None;
             }
-            return Some(cached.state.as_ref().clone());
+            Some(cached.state.as_ref().clone())
         }
 
         #[cfg(not(feature = "scheduler"))]
@@ -620,6 +636,12 @@ fn materialize_surfaces(
         }
         _ => (Vec::new(), Vec::new(), Vec::new()),
     }
+}
+
+fn should_ignore_external_macro_type(dep: &verter_analysis::MacroTypeDep) -> bool {
+    dep.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots
+        && dep.import_source == "vue"
+        && dep.type_name == "Slot"
 }
 
 fn member_jsdoc(

@@ -610,6 +610,50 @@ defineSlots<Slots>()
     );
 }
 
+#[test]
+fn imported_vue_slot_helper_is_ignored_for_define_slots() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"export type Slot = (props?: any) => any"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Slot } from 'vue'
+defineSlots<Slot>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    assert!(
+        meta.slots.is_empty(),
+        "vue Slot helper should be ignored for defineSlots, got: {:?}",
+        meta.slots
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 // ===========================================================================
 // Phase 1: Architecture — Raw analysis boundary
 // ===========================================================================
@@ -1283,6 +1327,45 @@ defineEmits<{ change: [value: string] }>()
 }
 
 #[test]
+fn local_type_reference_emits_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+interface Emits {
+  change: [value: string]
+  submit: []
+}
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"change"),
+        "same-file defineEmits type references should survive final meta extraction: {:?}",
+        event_names
+    );
+    assert!(
+        event_names.contains(&"submit"),
+        "same-file defineEmits type references should survive final meta extraction: {:?}",
+        event_names
+    );
+}
+
+#[test]
 fn local_inline_slots_still_work() {
     let project = make_project();
     project
@@ -1303,6 +1386,69 @@ defineSlots<{ default: (props: { row: string }) => any }>()
     assert!(
         !state.snapshot.macros.is_empty(),
         "local inline slots should be in the raw snapshot"
+    );
+}
+
+#[test]
+fn local_type_reference_slots_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+interface Slots {
+  default(props: { row: string }): any
+  footer?(): any
+}
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert!(
+        slot_names.contains(&"default"),
+        "same-file defineSlots type references should survive final meta extraction: {:?}",
+        slot_names
+    );
+    assert!(
+        slot_names.contains(&"footer"),
+        "same-file defineSlots type references should survive final meta extraction: {:?}",
+        slot_names
+    );
+}
+
+#[test]
+fn local_slot_intersection_keeps_named_slots_when_dynamic_branch_is_unresolvable() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+type DynamicSlots = Record<string, (props: { value: string }) => any>
+type Slots = { default(props: { row: string }): any } & DynamicSlots
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert!(
+        slot_names.contains(&"default"),
+        "resolvable local slot branches should survive final meta extraction even when dynamic utility branches cannot be expanded: {:?}",
+        slot_names
     );
 }
 

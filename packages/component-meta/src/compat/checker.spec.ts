@@ -216,6 +216,45 @@ describe("mapComponentMeta", () => {
     expect("models" in result).toBe(false);
     expect("flags" in result).toBe(false);
   });
+
+  it("filters known VNode/internal slot names from compat output", () => {
+    const meta = {
+      filePath: "test.vue",
+      optionsApi: false,
+      props: [],
+      events: [],
+      slots: [
+        { name: "default", isScoped: false, bindings: [], isRequired: false },
+        { name: "type", isScoped: false, bindings: [], isRequired: false },
+        { name: "props", isScoped: false, bindings: [], isRequired: false },
+        { name: "appContext", isScoped: false, bindings: [], isRequired: false },
+        { name: "targetStart", isScoped: false, bindings: [], isRequired: false },
+      ],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+    };
+
+    const result = mapComponentMeta(meta);
+
+    expect(result.slots.map((slot) => slot.name)).toEqual(["default"]);
+  });
 });
 
 // ── Checker integration tests ───────────────────────────────────────

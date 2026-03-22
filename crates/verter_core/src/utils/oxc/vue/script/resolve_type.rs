@@ -249,6 +249,43 @@ pub struct ResolvedEmit {
     pub span_is_absolute: bool,
 }
 
+/// Resolution surface that a `BlockedType` applies to.
+/// Controls WHEN the block is applied based on the macro/context being resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlockedTypeSurface {
+    /// Block when resolving `defineSlots` types
+    DefineSlots,
+    /// Block when resolving `defineProps` types
+    DefineProps,
+    /// Block when resolving `defineEmits` types
+    DefineEmits,
+    /// Block when resolving public component surface types
+    Public,
+    /// Block when resolving root props for fallthrough inheritance
+    RootProps,
+}
+
+/// A type that should be skipped during resolution expansion.
+/// When the resolver encounters a reference to a blocked type, it returns empty
+/// `ResolvedElements` rather than expanding the type's members.
+///
+/// Three dimensions:
+/// - `name`: the type name to block (e.g., "VNode")
+/// - `import_source`: the package/module the type must originate from (e.g., "vue")
+/// - `surface`: which macro/context this block applies to (e.g., DefineSlots)
+#[derive(Debug, Clone)]
+pub struct BlockedType {
+    /// Type name to block (e.g., "VNode").
+    pub name: String,
+    /// Package/module qualifier. Only blocks the type when it was imported from
+    /// this specific package (e.g., "vue"). Uses the resolved import source from
+    /// `companion_origins`. When None, blocks by name regardless of origin.
+    pub import_source: Option<String>,
+    /// Which resolution surface this block applies to. When empty, blocks for
+    /// all surfaces. When non-empty, only blocks for the listed surfaces.
+    pub surfaces: Vec<BlockedTypeSurface>,
+}
+
 /// Result of resolving type elements from a type annotation.
 #[derive(Debug, Default, Clone)]
 pub struct ResolvedElements {
@@ -405,6 +442,16 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Keyed by type name string, value is the resolved elements.
     /// Used when a type reference can't be found in the local context.
     pub companion_types: rustc_hash::FxHashMap<String, ResolvedElements>,
+    /// Import origins for companion types. Keyed by type name, value is the
+    /// package/module specifier the type was imported from (e.g., "vue").
+    /// Used for package-qualified `BlockedType` matching.
+    pub companion_origins: rustc_hash::FxHashMap<String, String>,
+    /// Types that should NOT be expanded during resolution.
+    /// Used per-surface to block expansion of specific types (e.g., VNode for slots).
+    pub blocked_types: Vec<BlockedType>,
+    /// Current resolution surface, used to filter `blocked_types` by surface.
+    /// When None, all blocked types apply regardless of surface.
+    pub current_surface: Option<BlockedTypeSurface>,
 }
 
 impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
@@ -419,7 +466,56 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             type_param_bindings: Vec::new(),
             diagnostics: Vec::new(),
             companion_types: rustc_hash::FxHashMap::default(),
+            companion_origins: rustc_hash::FxHashMap::default(),
+            blocked_types: Vec::new(),
+            current_surface: None,
         }
+    }
+
+    /// Check if a type name is blocked by the per-surface blocklist.
+    /// Returns true if the type should be skipped during expansion.
+    ///
+    /// Checks three dimensions:
+    /// 1. Name must match
+    /// 2. Import source must match (or be None for unconditional)
+    /// 3. Surface must match (empty surfaces list = all surfaces)
+    pub fn is_type_blocked(&self, type_name: &str) -> bool {
+        self.blocked_types.iter().any(|blocked| {
+            // Name must match
+            if blocked.name != type_name {
+                return false;
+            }
+            // Surface must match (empty = all surfaces)
+            if !blocked.surfaces.is_empty() {
+                match &self.current_surface {
+                    Some(surface) => {
+                        if !blocked.surfaces.contains(surface) {
+                            return false;
+                        }
+                    }
+                    None => {
+                        // No current surface set — only match if blocked has no surface filter
+                        return false;
+                    }
+                }
+            }
+            // Import source must match
+            match &blocked.import_source {
+                None => true, // No import qualifier → block unconditionally
+                Some(pkg) => {
+                    // Check companion_origins for the import source.
+                    // Exact match or scoped package prefix (e.g., "vue" matches "vue",
+                    // "@vue/runtime-core" matches "@vue/runtime-core", but "vue" does NOT
+                    // match "vue-router").
+                    self.companion_origins.get(type_name).is_some_and(|origin| {
+                        origin == pkg
+                            || origin
+                                .strip_prefix(pkg.as_str())
+                                .is_some_and(|rest| rest.starts_with('/'))
+                    })
+                }
+            }
+        })
     }
 
     /// Look up a type alias by comparing spans against source bytes
@@ -1524,6 +1620,11 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             let type_name = get_type_reference_name(&type_ref.type_name);
             let type_name_bytes = type_name.as_bytes();
 
+            // 0. Check per-surface type blocklist — skip expansion entirely
+            if ctx.is_type_blocked(&type_name) {
+                return;
+            }
+
             // 1. Check local type aliases
             if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
                 let mut child = instantiate_type_params_ctx(
@@ -1735,6 +1836,11 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             // Get the type name for lookup
             let type_name = get_type_reference_name(&type_ref.type_name);
             let type_name_bytes = type_name.as_bytes();
+
+            // 0. Check per-surface type blocklist — skip expansion entirely
+            if ctx.is_type_blocked(&type_name) {
+                return;
+            }
 
             // 1. Check local type aliases
             if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
@@ -2037,6 +2143,7 @@ fn extract_string_literal_keys(ty: &TSType) -> Vec<String> {
             .iter()
             .flat_map(|t| extract_string_literal_keys(t))
             .collect(),
+        TSType::TSParenthesizedType(paren) => extract_string_literal_keys(&paren.type_annotation),
         _ => vec![],
     }
 }
@@ -3132,6 +3239,11 @@ fn resolve_named_external_type<'a>(
     source_bytes: &[u8],
     ctx: &TypeResolutionContext<'_, 'a>,
 ) -> Option<ResolvedElements> {
+    // Check per-surface type blocklist before expanding
+    if ctx.is_type_blocked(type_name) {
+        return Some(ResolvedElements::default());
+    }
+
     let name_bytes = type_name.as_bytes();
 
     if let Some((ts_type, _)) = ctx.find_type_alias(name_bytes) {

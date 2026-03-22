@@ -584,16 +584,13 @@ pub(crate) fn resolve_macro_type_references(
         return;
     }
 
-    // Collect type param AST nodes for each defineProps macro by matching spans
-    let type_params = collect_define_props_type_params(program);
+    // Collect type param AST nodes for each macro by matching spans
+    let props_type_params = collect_macro_call_type_params(program, "defineProps");
+    let emits_type_params = collect_macro_call_type_params(program, "defineEmits");
+    let slots_type_params = collect_macro_call_type_params(program, "defineSlots");
 
     for mac in macros.iter_mut() {
-        if mac.kind != AnalyzedMacroKind::DefineProps || !mac.is_type_based {
-            continue;
-        }
-
-        // Skip if no type references to resolve
-        if mac.type_references.is_empty() {
+        if !mac.is_type_based || mac.type_references.is_empty() {
             continue;
         }
 
@@ -606,62 +603,67 @@ pub(crate) fn resolve_macro_type_references(
             continue;
         }
 
-        let mut visited = FxHashSet::default();
-        let mut resolved_types = Vec::new();
-
-        // Try to find the actual type param AST and resolve the full type
-        let mac_start = mac.span.start;
-        if let Some(type_param) = type_params.iter().find(|tp| tp.0 == mac_start) {
-            if let Some(fields) = resolve_type_to_prop_fields(
-                type_param.1,
-                &registry,
-                source,
-                &program.comments,
-                &mut visited,
-            ) {
-                // Build resolved_local_types for each type reference
-                for type_ref in &mac.type_references {
-                    if let Some(decl) = registry.get(type_ref.as_str()) {
-                        visited.clear();
-                        if let Some(ref_fields) = resolve_interface_decl(
-                            type_ref,
-                            decl,
-                            &registry,
-                            source,
-                            &program.comments,
-                            &mut visited,
-                        ) {
-                            let expanded = build_expanded_type_text(&ref_fields);
-                            let span = match decl {
-                                LocalTypeDecl::Interface { body, .. } => body.span.into(),
-                                LocalTypeDecl::Alias(t) => t.span().into(),
-                                LocalTypeDecl::Class => verter_span::Span::default(),
-                            };
-                            resolved_types.push(ResolvedLocalType {
-                                name: type_ref.clone(),
-                                expanded,
-                                span,
-                            });
-                        }
-                    }
-                }
-                mac.prop_fields = fields;
+        match mac.kind {
+            AnalyzedMacroKind::DefineProps => {
+                resolve_local_define_props(
+                    mac,
+                    &props_type_params,
+                    &registry,
+                    source,
+                    &program.comments,
+                );
             }
-        } else {
-            // Fallback: resolve individual type references (single ref case)
-            visited.clear();
-            if mac.type_references.len() == 1 {
-                let type_ref = &mac.type_references[0];
+            AnalyzedMacroKind::DefineEmits => {
+                resolve_local_define_emits(
+                    mac,
+                    &emits_type_params,
+                    &registry,
+                    source,
+                    &program.comments,
+                );
+            }
+            AnalyzedMacroKind::DefineSlots => {
+                resolve_local_define_slots(
+                    mac,
+                    &slots_type_params,
+                    &registry,
+                    source,
+                    &program.comments,
+                );
+            }
+            _ => continue,
+        }
+    }
+}
+
+/// Resolve local types for a defineProps macro.
+fn resolve_local_define_props(
+    mac: &mut AnalyzedMacro,
+    type_params: &[(u32, &TSType<'_>)],
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+) {
+    let mut visited = FxHashSet::default();
+    let mut resolved_types = Vec::new();
+
+    let mac_start = mac.span.start;
+    if let Some(type_param) = type_params.iter().find(|tp| tp.0 == mac_start) {
+        if let Some(fields) =
+            resolve_type_to_prop_fields(type_param.1, registry, source, comments, &mut visited)
+        {
+            for type_ref in &mac.type_references {
                 if let Some(decl) = registry.get(type_ref.as_str()) {
-                    if let Some(fields) = resolve_interface_decl(
+                    visited.clear();
+                    if let Some(ref_fields) = resolve_interface_decl(
                         type_ref,
                         decl,
-                        &registry,
+                        registry,
                         source,
-                        &program.comments,
+                        comments,
                         &mut visited,
                     ) {
-                        let expanded = build_expanded_type_text(&fields);
+                        let expanded = build_expanded_type_text(&ref_fields);
                         let span = match decl {
                             LocalTypeDecl::Interface { body, .. } => body.span.into(),
                             LocalTypeDecl::Alias(t) => t.span().into(),
@@ -672,38 +674,136 @@ pub(crate) fn resolve_macro_type_references(
                             expanded,
                             span,
                         });
-                        mac.prop_fields = fields;
                     }
                 }
             }
+            mac.prop_fields = fields;
         }
+    } else {
+        // Fallback: resolve individual type references (single ref case)
+        visited.clear();
+        if mac.type_references.len() == 1 {
+            let type_ref = &mac.type_references[0];
+            if let Some(decl) = registry.get(type_ref.as_str()) {
+                if let Some(fields) =
+                    resolve_interface_decl(type_ref, decl, registry, source, comments, &mut visited)
+                {
+                    let expanded = build_expanded_type_text(&fields);
+                    let span = match decl {
+                        LocalTypeDecl::Interface { body, .. } => body.span.into(),
+                        LocalTypeDecl::Alias(t) => t.span().into(),
+                        LocalTypeDecl::Class => verter_span::Span::default(),
+                    };
+                    resolved_types.push(ResolvedLocalType {
+                        name: type_ref.clone(),
+                        expanded,
+                        span,
+                    });
+                    mac.prop_fields = fields;
+                }
+            }
+        }
+    }
 
-        mac.resolved_local_types = resolved_types;
+    mac.resolved_local_types = resolved_types;
+}
+
+/// Resolve local types for a defineEmits macro.
+fn resolve_local_define_emits(
+    mac: &mut AnalyzedMacro,
+    type_params: &[(u32, &TSType<'_>)],
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+) {
+    let mut visited = FxHashSet::default();
+    let mac_start = mac.span.start;
+
+    if let Some(type_param) = type_params.iter().find(|tp| tp.0 == mac_start) {
+        if let Some(fields) =
+            resolve_type_to_emit_fields(type_param.1, registry, source, comments, &mut visited)
+        {
+            mac.emit_fields = fields;
+        }
+    } else if mac.type_references.len() == 1 {
+        let type_ref = &mac.type_references[0];
+        if let Some(decl) = registry.get(type_ref.as_str()) {
+            if let Some(fields) = resolve_interface_decl_generic(
+                type_ref,
+                decl,
+                registry,
+                source,
+                comments,
+                &mut visited,
+                &extract_emit_fields_from_members,
+            ) {
+                mac.emit_fields = fields;
+            }
+        }
     }
 }
 
-/// Collect the type parameter AST nodes for all `defineProps<T>()` calls in the program.
+/// Resolve local types for a defineSlots macro.
+fn resolve_local_define_slots(
+    mac: &mut AnalyzedMacro,
+    type_params: &[(u32, &TSType<'_>)],
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+) {
+    let mut visited = FxHashSet::default();
+    let mac_start = mac.span.start;
+
+    if let Some(type_param) = type_params.iter().find(|tp| tp.0 == mac_start) {
+        if let Some(fields) =
+            resolve_type_to_slot_fields(type_param.1, registry, source, comments, &mut visited)
+        {
+            mac.slot_fields = fields;
+        }
+    } else if mac.type_references.len() == 1 {
+        let type_ref = &mac.type_references[0];
+        if let Some(decl) = registry.get(type_ref.as_str()) {
+            if let Some(fields) = resolve_interface_decl_generic(
+                type_ref,
+                decl,
+                registry,
+                source,
+                comments,
+                &mut visited,
+                &extract_slot_fields_from_members,
+            ) {
+                mac.slot_fields = fields;
+            }
+        }
+    }
+}
+
+/// Collect the type parameter AST nodes for all calls to `callee_name<T>()` in the program.
 /// Returns `(call_span_start, &TSType)` pairs.
-fn collect_define_props_type_params<'a>(program: &'a Program<'a>) -> Vec<(u32, &'a TSType<'a>)> {
+fn collect_macro_call_type_params<'a>(
+    program: &'a Program<'a>,
+    callee_name: &str,
+) -> Vec<(u32, &'a TSType<'a>)> {
     let mut result = Vec::new();
     for stmt in &program.body {
-        collect_define_props_from_stmt(stmt, &mut result);
+        collect_macro_call_from_stmt(stmt, callee_name, &mut result);
     }
     result
 }
 
-fn collect_define_props_from_stmt<'a>(
+fn collect_macro_call_from_stmt<'a>(
     stmt: &'a Statement<'a>,
+    callee_name: &str,
     result: &mut Vec<(u32, &'a TSType<'a>)>,
 ) {
     match stmt {
         Statement::ExpressionStatement(es) => {
-            collect_define_props_from_expr(&es.expression, result);
+            collect_macro_call_from_expr(&es.expression, callee_name, result);
         }
         Statement::VariableDeclaration(decl) => {
             for d in &decl.declarations {
                 if let Some(init) = &d.init {
-                    collect_define_props_from_expr(init, result);
+                    collect_macro_call_from_expr(init, callee_name, result);
                 }
             }
         }
@@ -711,24 +811,27 @@ fn collect_define_props_from_stmt<'a>(
     }
 }
 
-fn collect_define_props_from_expr<'a>(
+fn collect_macro_call_from_expr<'a>(
     expr: &'a Expression<'a>,
+    callee_name: &str,
     result: &mut Vec<(u32, &'a TSType<'a>)>,
 ) {
     if let Expression::CallExpression(call) = expr {
-        let is_define_props =
-            matches!(&call.callee, Expression::Identifier(id) if id.name == "defineProps");
-        if is_define_props {
+        let is_target =
+            matches!(&call.callee, Expression::Identifier(id) if id.name == callee_name);
+        if is_target {
             if let Some(ref type_args) = call.type_arguments {
                 if let Some(first) = type_args.params.first() {
                     result.push((call.span.start, first));
                 }
             }
         }
-        // Also check for withDefaults(defineProps<T>(), ...)
-        if let Some(first_arg) = call.arguments.first() {
-            if let Some(inner_expr) = first_arg.as_expression() {
-                collect_define_props_from_expr(inner_expr, result);
+        // Also check for withDefaults(defineProps<T>(), ...) — only relevant for defineProps
+        if callee_name == "defineProps" {
+            if let Some(first_arg) = call.arguments.first() {
+                if let Some(inner_expr) = first_arg.as_expression() {
+                    collect_macro_call_from_expr(inner_expr, callee_name, result);
+                }
             }
         }
     }
@@ -789,6 +892,230 @@ fn resolve_interface_decl(
     };
     visited.remove(name);
     result
+}
+
+// ── Generic local type resolution for emit/slot fields ──
+// Single resolver shared by emits and slots. Differences are only in the
+// member extraction function (what fields to extract from TSSignature members).
+
+/// Trait for extracting a dedup key from a resolved field.
+trait NamedField {
+    fn field_name(&self) -> &str;
+}
+
+impl NamedField for AnalyzedEmitField {
+    fn field_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl NamedField for AnalyzedSlotField {
+    fn field_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Generic type-to-fields resolver. Shared walker for emit/slot fields.
+/// Returns `None` if the type cannot be resolved locally (triggers host fallback).
+///
+/// Termination behavior: does not emit partial/guessed fields, does not fall back
+/// to host resolution. Leaves the branch empty for unresolvable types.
+fn resolve_type_to_fields<T: NamedField + Clone>(
+    ts_type: &TSType<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment]) -> Vec<T>,
+) -> Option<Vec<T>> {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => {
+            Some(extract_from_members(&literal.members, source, comments))
+        }
+        TSType::TSTypeReference(ref_type) => {
+            let name = type_name_to_string(&ref_type.type_name);
+            if visited.contains(&name) {
+                return Some(Vec::new());
+            }
+            // Utility types are unresolvable locally — stop without inventing fields
+            if ref_type.type_arguments.is_some() {
+                match name.as_str() {
+                    "Partial" | "Required" | "Pick" | "Omit" | "ReturnType" | "InstanceType"
+                    | "Record" | "Extract" | "Exclude" | "NonNullable" => {
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            visited.insert(name.clone());
+            let result = match registry.get(&name) {
+                Some(LocalTypeDecl::Interface { body, extends }) => {
+                    let mut all_fields = Vec::new();
+                    let mut seen_names = FxHashSet::default();
+                    for heritage in *extends {
+                        let Some(parent_name) = heritage_name(&heritage.expression) else {
+                            continue;
+                        };
+                        if let Some(parent_decl) = registry.get(&parent_name) {
+                            if let Some(parent_fields) = resolve_interface_decl_generic(
+                                &parent_name,
+                                parent_decl,
+                                registry,
+                                source,
+                                comments,
+                                visited,
+                                extract_from_members,
+                            ) {
+                                for field in parent_fields {
+                                    if seen_names.insert(field.field_name().to_string()) {
+                                        all_fields.push(field);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let own_fields = extract_from_members(&body.body, source, comments);
+                    for field in own_fields {
+                        if seen_names.insert(field.field_name().to_string()) {
+                            all_fields.push(field);
+                        }
+                    }
+                    Some(all_fields)
+                }
+                Some(LocalTypeDecl::Alias(aliased_type)) => resolve_type_to_fields(
+                    aliased_type,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                    extract_from_members,
+                ),
+                Some(LocalTypeDecl::Class) | None => None,
+            };
+            visited.remove(&name);
+            result
+        }
+        TSType::TSIntersectionType(intersection) => {
+            let mut all_fields = Vec::new();
+            let mut seen_names = FxHashSet::default();
+            for t in &intersection.types {
+                if let Some(fields) = resolve_type_to_fields(
+                    t,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                    extract_from_members,
+                ) {
+                    for field in fields {
+                        if seen_names.insert(field.field_name().to_string()) {
+                            all_fields.push(field);
+                        }
+                    }
+                }
+            }
+            Some(all_fields)
+        }
+        _ => None,
+    }
+}
+
+/// Generic interface declaration resolver. Shared by emit/slot resolution.
+fn resolve_interface_decl_generic<T: NamedField + Clone>(
+    name: &str,
+    decl: &LocalTypeDecl<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment]) -> Vec<T>,
+) -> Option<Vec<T>> {
+    if visited.contains(name) {
+        return Some(Vec::new());
+    }
+    visited.insert(name.to_string());
+    let result = match decl {
+        LocalTypeDecl::Interface { body, extends } => {
+            let mut fields = Vec::new();
+            let mut seen_names = FxHashSet::default();
+            for heritage in *extends {
+                let Some(parent_name) = heritage_name(&heritage.expression) else {
+                    continue;
+                };
+                if let Some(parent_decl) = registry.get(&parent_name) {
+                    if let Some(parent_fields) = resolve_interface_decl_generic(
+                        &parent_name,
+                        parent_decl,
+                        registry,
+                        source,
+                        comments,
+                        visited,
+                        extract_from_members,
+                    ) {
+                        for field in parent_fields {
+                            if seen_names.insert(field.field_name().to_string()) {
+                                fields.push(field);
+                            }
+                        }
+                    }
+                }
+            }
+            let own_fields = extract_from_members(&body.body, source, comments);
+            for field in own_fields {
+                if seen_names.insert(field.field_name().to_string()) {
+                    fields.push(field);
+                }
+            }
+            Some(fields)
+        }
+        LocalTypeDecl::Alias(aliased_type) => resolve_type_to_fields(
+            aliased_type,
+            registry,
+            source,
+            comments,
+            visited,
+            extract_from_members,
+        ),
+        LocalTypeDecl::Class => None,
+    };
+    visited.remove(name);
+    result
+}
+
+/// Resolve emit fields from a TSType using the shared generic resolver.
+fn resolve_type_to_emit_fields(
+    ts_type: &TSType<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+) -> Option<Vec<AnalyzedEmitField>> {
+    resolve_type_to_fields(
+        ts_type,
+        registry,
+        source,
+        comments,
+        visited,
+        &extract_emit_fields_from_members,
+    )
+}
+
+/// Resolve slot fields from a TSType using the shared generic resolver.
+fn resolve_type_to_slot_fields(
+    ts_type: &TSType<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+) -> Option<Vec<AnalyzedSlotField>> {
+    resolve_type_to_fields(
+        ts_type,
+        registry,
+        source,
+        comments,
+        visited,
+        &extract_slot_fields_from_members,
+    )
 }
 
 /// Build an expanded type text like `"{ title: string; isbn: string }"` from prop fields.
@@ -1409,84 +1736,9 @@ fn extract_emit_fields_from_type(
     source: &str,
 ) -> Vec<AnalyzedEmitField> {
     match ts_type {
-        TSType::TSTypeLiteral(literal) => literal
-            .members
-            .iter()
-            .filter_map(|member| match member {
-                // Property signature: `custom: [payload: string]`
-                TSSignature::TSPropertySignature(prop) => {
-                    let key_name = match &prop.key {
-                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                        _ => None,
-                    };
-                    // Extract payload type from the value type annotation
-                    let payload_type = prop.type_annotation.as_ref().and_then(|ta| {
-                        let start = ta.type_annotation.span().start as usize;
-                        let end = ta.type_annotation.span().end as usize;
-                        if end <= source.len() {
-                            let text = source[start..end].trim();
-                            if !text.is_empty() {
-                                Some(text.to_string())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    });
-                    let (description, tags) =
-                        extract_jsdoc_for(comments, prop.span().start, source);
-                    key_name.map(|name| AnalyzedEmitField {
-                        name,
-                        span: prop.key.span().into(),
-                        payload_type,
-                        description,
-                        tags,
-                    })
-                }
-                // Call signature: `(e: 'change', id: number): void`
-                TSSignature::TSCallSignatureDeclaration(call_sig) => {
-                    // First param should be string literal type: `e: 'change'`
-                    let first_param = call_sig.params.items.first()?;
-                    let type_ann = first_param.type_annotation.as_ref()?;
-                    if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
-                        if let TSLiteral::StringLiteral(s) = &lit.literal {
-                            // Extract payload params (all params after the event name)
-                            let payload_type = {
-                                let extra_params: Vec<String> = call_sig
-                                    .params
-                                    .items
-                                    .iter()
-                                    .skip(1)
-                                    .map(|p| {
-                                        let start = p.span().start as usize;
-                                        let end = p.span().end as usize;
-                                        if end <= source.len() {
-                                            source[start..end].to_string()
-                                        } else {
-                                            "unknown".to_string()
-                                        }
-                                    })
-                                    .collect();
-                                Some(format!("[{}]", extra_params.join(", ")))
-                            };
-                            let (description, tags) =
-                                extract_jsdoc_for(comments, call_sig.span().start, source);
-                            return Some(AnalyzedEmitField {
-                                name: s.value.to_string(),
-                                span: s.span.into(),
-                                payload_type,
-                                description,
-                                tags,
-                            });
-                        }
-                    }
-                    None
-                }
-                _ => None,
-            })
-            .collect(),
+        TSType::TSTypeLiteral(literal) => {
+            extract_emit_fields_from_members(&literal.members, source, comments)
+        }
         TSType::TSTypeReference(_) => Vec::new(),
         TSType::TSIntersectionType(intersection) => intersection
             .types
@@ -1495,6 +1747,87 @@ fn extract_emit_fields_from_type(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Extract emit fields from TSSignature members (shared between TSTypeLiteral and interface bodies).
+fn extract_emit_fields_from_members(
+    members: &[TSSignature<'_>],
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedEmitField> {
+    members
+        .iter()
+        .filter_map(|member| match member {
+            // Property signature: `custom: [payload: string]`
+            TSSignature::TSPropertySignature(prop) => {
+                let key_name = match &prop.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                };
+                let payload_type = prop.type_annotation.as_ref().and_then(|ta| {
+                    let start = ta.type_annotation.span().start as usize;
+                    let end = ta.type_annotation.span().end as usize;
+                    if end <= source.len() {
+                        let text = source[start..end].trim();
+                        if !text.is_empty() {
+                            Some(text.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
+                key_name.map(|name| AnalyzedEmitField {
+                    name,
+                    span: prop.key.span().into(),
+                    payload_type,
+                    description,
+                    tags,
+                })
+            }
+            // Call signature: `(e: 'change', id: number): void`
+            TSSignature::TSCallSignatureDeclaration(call_sig) => {
+                let first_param = call_sig.params.items.first()?;
+                let type_ann = first_param.type_annotation.as_ref()?;
+                if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
+                    if let TSLiteral::StringLiteral(s) = &lit.literal {
+                        let payload_type = {
+                            let extra_params: Vec<String> = call_sig
+                                .params
+                                .items
+                                .iter()
+                                .skip(1)
+                                .map(|p| {
+                                    let start = p.span().start as usize;
+                                    let end = p.span().end as usize;
+                                    if end <= source.len() {
+                                        source[start..end].to_string()
+                                    } else {
+                                        "unknown".to_string()
+                                    }
+                                })
+                                .collect();
+                            Some(format!("[{}]", extra_params.join(", ")))
+                        };
+                        let (description, tags) =
+                            extract_jsdoc_for(comments, call_sig.span().start, source);
+                        return Some(AnalyzedEmitField {
+                            name: s.value.to_string(),
+                            span: s.span.into(),
+                            payload_type,
+                            description,
+                            tags,
+                        });
+                    }
+                }
+                None
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Extract emit fields from a runtime argument (object keys or array string elements).
@@ -1690,75 +2023,9 @@ fn extract_slot_fields_from_type(
     comments: &[Comment],
 ) -> Vec<AnalyzedSlotField> {
     match ts_type {
-        TSType::TSTypeLiteral(literal) => literal
-            .members
-            .iter()
-            .filter_map(|member| match member {
-                TSSignature::TSPropertySignature(prop) => {
-                    let key_name = match &prop.key {
-                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                        _ => None,
-                    };
-                    // For property signatures, extract bindings from function type annotation
-                    let bindings = prop
-                        .type_annotation
-                        .as_ref()
-                        .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
-                        .unwrap_or_default();
-                    // Extract return type from function type: `(props: {...}) => ReturnType`
-                    let return_type = prop.type_annotation.as_ref().and_then(|ta| {
-                        extract_slot_return_type_from_fn(&ta.type_annotation, source)
-                    });
-                    let (description, tags) =
-                        extract_jsdoc_for(comments, prop.span().start, source);
-                    key_name.map(|name| AnalyzedSlotField {
-                        name,
-                        is_required: !prop.optional,
-                        span: prop.key.span().into(),
-                        bindings,
-                        return_type,
-                        description,
-                        tags,
-                    })
-                }
-                TSSignature::TSMethodSignature(method) => {
-                    let key_name = match &method.key {
-                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                        _ => None,
-                    };
-                    let bindings = extract_slot_bindings_from_params(&method.params, source);
-                    // Extract return type from method: `default(props: {...}): ReturnType`
-                    let return_type = method.return_type.as_ref().and_then(|rt| {
-                        let start = rt.type_annotation.span().start as usize;
-                        let end = rt.type_annotation.span().end as usize;
-                        if end <= source.len() {
-                            let text = source[start..end].trim();
-                            if !text.is_empty() {
-                                Some(text.to_string())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    });
-                    let (description, tags) =
-                        extract_jsdoc_for(comments, method.span().start, source);
-                    key_name.map(|name| AnalyzedSlotField {
-                        name,
-                        is_required: !method.optional,
-                        span: method.key.span().into(),
-                        bindings,
-                        return_type,
-                        description,
-                        tags,
-                    })
-                }
-                _ => None,
-            })
-            .collect(),
+        TSType::TSTypeLiteral(literal) => {
+            extract_slot_fields_from_members(&literal.members, source, comments)
+        }
         TSType::TSTypeReference(_) => Vec::new(),
         TSType::TSIntersectionType(intersection) => intersection
             .types
@@ -1767,6 +2034,78 @@ fn extract_slot_fields_from_type(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Extract slot fields from TSSignature members (shared between TSTypeLiteral and interface bodies).
+fn extract_slot_fields_from_members(
+    members: &[TSSignature<'_>],
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedSlotField> {
+    members
+        .iter()
+        .filter_map(|member| match member {
+            TSSignature::TSPropertySignature(prop) => {
+                let key_name = match &prop.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                };
+                let bindings = prop
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
+                    .unwrap_or_default();
+                let return_type = prop
+                    .type_annotation
+                    .as_ref()
+                    .and_then(|ta| extract_slot_return_type_from_fn(&ta.type_annotation, source));
+                let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
+                key_name.map(|name| AnalyzedSlotField {
+                    name,
+                    is_required: !prop.optional,
+                    span: prop.key.span().into(),
+                    bindings,
+                    return_type,
+                    description,
+                    tags,
+                })
+            }
+            TSSignature::TSMethodSignature(method) => {
+                let key_name = match &method.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                };
+                let bindings = extract_slot_bindings_from_params(&method.params, source);
+                let return_type = method.return_type.as_ref().and_then(|rt| {
+                    let start = rt.type_annotation.span().start as usize;
+                    let end = rt.type_annotation.span().end as usize;
+                    if end <= source.len() {
+                        let text = source[start..end].trim();
+                        if !text.is_empty() {
+                            Some(text.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                let (description, tags) = extract_jsdoc_for(comments, method.span().start, source);
+                key_name.map(|name| AnalyzedSlotField {
+                    name,
+                    is_required: !method.optional,
+                    span: method.key.span().into(),
+                    bindings,
+                    return_type,
+                    description,
+                    tags,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Extract the return type text from a `TSFunctionType` annotation.

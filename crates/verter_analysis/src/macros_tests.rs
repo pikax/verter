@@ -1803,3 +1803,212 @@ fn prop_mixed_fixture() {
         "foz default should preserve arrow function source"
     );
 }
+
+// ── Local defineEmits type resolution tests ──
+
+#[test]
+fn resolve_local_interface_in_define_emits() {
+    let source = r#"
+        interface Emits { change: [value: string]; submit: [] }
+        defineEmits<Emits>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let de = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+        .unwrap();
+    assert_eq!(
+        de.emit_fields.len(),
+        2,
+        "should resolve 2 emit fields from local interface, got: {:?}",
+        de.emit_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let names: Vec<&str> = de.emit_fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"change"), "should have 'change' event");
+    assert!(names.contains(&"submit"), "should have 'submit' event");
+    // Negative: no spurious fields
+    assert!(
+        !names.iter().any(|n| *n != "change" && *n != "submit"),
+        "should have no extra fields"
+    );
+}
+
+#[test]
+fn resolve_local_type_alias_in_define_emits() {
+    let source = r#"
+        type MyEmits = { change: [val: string] }
+        defineEmits<MyEmits>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let de = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+        .unwrap();
+    assert_eq!(
+        de.emit_fields.len(),
+        1,
+        "should resolve 1 emit field from type alias, got: {:?}",
+        de.emit_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    assert_eq!(de.emit_fields[0].name, "change");
+}
+
+#[test]
+fn resolve_local_interface_extends_in_define_emits() {
+    let source = r#"
+        interface BaseEmits { close: [] }
+        interface Emits extends BaseEmits { open: [value: boolean] }
+        defineEmits<Emits>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let de = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+        .unwrap();
+    assert_eq!(
+        de.emit_fields.len(),
+        2,
+        "should resolve 2 emit fields (1 inherited + 1 own), got: {:?}",
+        de.emit_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let names: Vec<&str> = de.emit_fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"close"), "should have inherited 'close'");
+    assert!(names.contains(&"open"), "should have own 'open'");
+}
+
+#[test]
+fn resolve_local_intersection_in_define_emits() {
+    let source = r#"
+        interface BaseEmits { close: [] }
+        defineEmits<BaseEmits & { extra: [val: number] }>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let de = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+        .unwrap();
+    assert_eq!(
+        de.emit_fields.len(),
+        2,
+        "should resolve 2 emit fields from intersection, got: {:?}",
+        de.emit_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let names: Vec<&str> = de.emit_fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"close"),
+        "should have 'close' from interface"
+    );
+    assert!(names.contains(&"extra"), "should have 'extra' from literal");
+}
+
+// ── Local defineSlots type resolution tests ──
+
+#[test]
+fn resolve_local_interface_in_define_slots() {
+    let source = r#"
+        interface Slots {
+            default(props: { item: string }): any
+            header?(): any
+        }
+        defineSlots<Slots>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let ds = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+        .unwrap();
+    assert_eq!(
+        ds.slot_fields.len(),
+        2,
+        "should resolve 2 slot fields from local interface, got: {:?}",
+        ds.slot_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let names: Vec<&str> = ds.slot_fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"default"), "should have 'default' slot");
+    assert!(names.contains(&"header"), "should have 'header' slot");
+    // Check required/optional
+    let default_slot = ds.slot_fields.iter().find(|f| f.name == "default").unwrap();
+    assert!(default_slot.is_required, "default slot should be required");
+    let header_slot = ds.slot_fields.iter().find(|f| f.name == "header").unwrap();
+    assert!(!header_slot.is_required, "header slot should be optional");
+    // Negative: no spurious slots
+    assert!(
+        !names.iter().any(|n| *n != "default" && *n != "header"),
+        "should have no extra slots"
+    );
+}
+
+#[test]
+fn resolve_local_type_alias_in_define_slots() {
+    let source = r#"
+        type MySlots = { default(props: { row: string }): any }
+        defineSlots<MySlots>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let ds = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+        .unwrap();
+    assert_eq!(
+        ds.slot_fields.len(),
+        1,
+        "should resolve 1 slot field from type alias, got: {:?}",
+        ds.slot_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    assert_eq!(ds.slot_fields[0].name, "default");
+}
+
+#[test]
+fn resolve_local_interface_extends_in_define_slots() {
+    let source = r#"
+        interface BaseSlots { default(props: { id: number }): any }
+        interface Slots extends BaseSlots { footer(): any }
+        defineSlots<Slots>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let ds = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+        .unwrap();
+    assert_eq!(
+        ds.slot_fields.len(),
+        2,
+        "should resolve 2 slot fields (1 inherited + 1 own), got: {:?}",
+        ds.slot_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let names: Vec<&str> = ds.slot_fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"default"),
+        "should have inherited 'default'"
+    );
+    assert!(names.contains(&"footer"), "should have own 'footer'");
+}
+
+#[test]
+fn resolve_local_slots_intersection_keeps_resolvable_branches_when_utility_branch_is_unresolvable()
+{
+    let source = r#"
+        type DynamicSlots = Record<string, (props: { value: string }) => any>
+        type Slots = { default(props: { id: number }): any } & DynamicSlots
+        defineSlots<Slots>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let ds = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+        .unwrap();
+    let names: Vec<&str> = ds.slot_fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"default"),
+        "resolvable local intersection branches should survive even when a utility branch cannot be expanded, got: {:?}",
+        names
+    );
+}

@@ -708,7 +708,7 @@ impl VerterHost {
         let mut state = valid_barrel.unwrap_or_else(|| crate::types::BarrelResolutionState {
             export_map: rustc_hash::FxHashMap::default(),
             source_hash: barrel_source_hash,
-            wildcard_sources: wildcard_sources.iter().cloned().collect(),
+            wildcard_sources: wildcard_sources.to_vec(),
             scanned_sources: rustc_hash::FxHashMap::default(),
             tracked_deps: rustc_hash::FxHashSet::default(),
             fully_resolved: false,

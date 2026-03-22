@@ -1738,7 +1738,7 @@ fn extract_styles(styles: &[crate::style::StyleBlockAnalysis]) -> Vec<StyleAnaly
             let css = style.css.as_ref();
 
             StyleAnalysis {
-                lang: style.lang.clone(),
+                lang: style.lang,
                 scoped: style.scoped,
                 is_module: style.is_module,
                 module_name: style.module_name.clone(),
