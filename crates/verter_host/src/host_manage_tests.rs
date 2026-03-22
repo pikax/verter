@@ -32,6 +32,17 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
     .unwrap();
 }
 
+fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
+    host.upsert(UpsertRequest {
+        canonical_id: None,
+        input_id: id.to_string(),
+        source: Arc::from(src),
+        file_kind: FileKind::NonSfc,
+        aliases: Vec::new(),
+    })
+    .unwrap();
+}
+
 #[cfg(not(feature = "scheduler"))]
 fn mutate_lazy_analysis_source(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
@@ -368,6 +379,75 @@ defineProps<ChildProps>()
     assert!(
         !names.iter().any(|name| name == "replace"),
         "evaluated ChildProps should omit imported key alias members, got: {names:?}"
+    );
+}
+
+#[test]
+fn imported_eval_inputs_walks_deep_dependency_graph_without_truncation() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import { value0 } from './dep0'
+console.log(value0)
+</script>
+<template><div /></template>"#,
+    );
+
+    for i in 0..40 {
+        let source = if i == 39 {
+            "export const value39 = 39".to_string()
+        } else {
+            format!(
+                "import {{ value{} }} from './dep{}'\nexport const value{} = value{}",
+                i + 1,
+                i + 1,
+                i,
+                i + 1
+            )
+        };
+        upsert_non_sfc(&host, &format!("/src/dep{i}.ts"), &source);
+    }
+
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./dep0".to_string(),
+            resolved_canonical_id: Some("/src/dep0.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    for i in 0..39 {
+        host.set_import_dependencies(
+            &format!("/src/dep{i}.ts"),
+            vec![crate::types::DependencyResolution {
+                specifier: format!("./dep{}", i + 1),
+                resolved_canonical_id: Some(format!("/src/dep{}.ts", i + 1)),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+    }
+    host.set_import_dependencies("/src/dep39.ts", Vec::new());
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+
+    assert!(
+        inputs.canonical_dependencies.contains("/src/dep39.ts"),
+        "deep dependency walk should reach the tail module, got: {:?}",
+        inputs.canonical_dependencies
+    );
+    assert!(
+        inputs
+            .sources
+            .iter()
+            .any(|source| source.contains("value39 = 39")),
+        "deep dependency walk should include the terminal source, got {} sources",
+        inputs.sources.len()
     );
 }
 
@@ -1886,17 +1966,6 @@ fn resolve_component_meta_uses_workspace_type_resolution_for_package_declaration
 // ═══════════════════════════════════════════════════════════
 // enrich_imported_types tests
 // ═══════════════════════════════════════════════════════════
-
-fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(src),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
-}
 
 /// resolve_component_meta(Expanded) populates prop fields from imported interface
 #[test]

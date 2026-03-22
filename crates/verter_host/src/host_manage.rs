@@ -194,9 +194,11 @@ impl VerterHost {
         out: &mut Vec<String>,
         canonical_dependencies: &mut std::collections::BTreeSet<String>,
     ) {
-        for dep in
+        let mut pending: Vec<String> =
             Self::resolved_dependency_targets(&self.dependency_resolutions_for_eval(canonical_id))
-        {
+                .into_iter()
+                .collect();
+        while let Some(dep) = pending.pop() {
             if !seen.insert(dep.clone()) {
                 continue;
             }
@@ -207,12 +209,13 @@ impl VerterHost {
                 out.push(source);
             }
 
-            self.collect_eval_dependency_sources_recursive(
-                dep.as_str(),
-                seen,
-                out,
-                canonical_dependencies,
-            );
+            for next in
+                Self::resolved_dependency_targets(&self.dependency_resolutions_for_eval(&dep))
+            {
+                if !seen.contains(&next) {
+                    pending.push(next);
+                }
+            }
         }
     }
 
@@ -235,6 +238,7 @@ impl VerterHost {
 
         for dep in snapshot.macro_type_deps.iter() {
             let mut tracked_deps = std::collections::BTreeSet::new();
+            let mut resolution_deps = std::collections::BTreeSet::new();
             // use_host_cache: true — safe because profile_hash is None here,
             // so host-cache freshness is governed solely by dep_source_hash.
             // The meta_resolve path warms this cache earlier in the same
@@ -244,12 +248,14 @@ impl VerterHost {
                 &dep.import_source,
                 &dep.type_name,
                 &mut tracked_deps,
+                &mut resolution_deps,
                 &mut cache,
                 &mut visiting,
                 false,
                 verter_vfs::ResolveRequestKind::TypeImport,
                 true,
                 None,
+                0,
             );
             let mut pushed_tracked_source = false;
 

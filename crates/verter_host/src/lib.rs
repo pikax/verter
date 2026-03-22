@@ -502,6 +502,8 @@ impl VerterHost {
                 entry.cached_tsc_extract = None;
                 entry.cached_resolved_meta.clear();
                 entry.cached_fallthrough = None;
+                entry.barrel_export_surface = None;
+                entry.import_route_cache.clear();
             }
         }
         #[cfg(not(feature = "scheduler"))]
@@ -795,6 +797,8 @@ impl VerterHost {
             cc.raw_template_analysis = None;
             cc.cached_resolved_meta.clear();
             cc.cached_fallthrough = None;
+            cc.barrel_export_surface = None;
+            cc.import_route_cache.clear();
         }
     }
 

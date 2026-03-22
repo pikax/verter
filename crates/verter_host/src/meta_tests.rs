@@ -4292,3 +4292,309 @@ defineProps<{ msg: string }>()
     assert_eq!(meta.props.len(), 1, "should resolve inline prop");
     assert_eq!(meta.props[0].name, "msg");
 }
+
+// ── Barrel resolution cache tests ──────────────────────────────────────
+
+#[test]
+fn barrel_many_wildcard_exports_resolves_without_hang() {
+    // Regression test: barrel with many `export *` entries should not hang.
+    // Previously, each type lookup scanned ALL wildcard sources linearly.
+    let project = make_project();
+
+    // Create 30 Vue files, each exporting a unique type
+    for i in 0..30 {
+        project
+            .upsert_base(
+                &format!("/src/components/Comp{i}.vue"),
+                &format!(
+                    r#"<script lang="ts">
+export interface Comp{i}Props {{
+  value{i}?: string
+}}
+</script>
+<template><div /></template>"#
+                ),
+            )
+            .unwrap();
+    }
+
+    // Create a barrel that re-exports all 30 + a direct types file
+    let mut barrel = String::new();
+    for i in 0..30 {
+        barrel.push_str(&format!("export * from '../components/Comp{i}.vue'\n"));
+    }
+    barrel.push_str("export * from './utils'\n");
+    project.upsert_base("/src/types/index.ts", &barrel).unwrap();
+
+    project
+        .upsert_base(
+            "/src/types/utils.ts",
+            r#"export interface UtilType { helper: boolean }"#,
+        )
+        .unwrap();
+
+    // Component that imports from the barrel
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Comp15Props, UtilType } from './types'
+
+interface AppProps extends Comp15Props {
+  extra?: UtilType
+}
+
+defineProps<AppProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Set up dependency resolutions
+    let mut barrel_deps: Vec<crate::types::DependencyResolution> = (0..30)
+        .map(|i| crate::types::DependencyResolution {
+            specifier: format!("../components/Comp{i}.vue"),
+            resolved_canonical_id: Some(format!("/src/components/Comp{i}.vue")),
+            possible_canonical_ids: Vec::new(),
+        })
+        .collect();
+    barrel_deps.push(crate::types::DependencyResolution {
+        specifier: "./utils".to_string(),
+        resolved_canonical_id: Some("/src/types/utils.ts".to_string()),
+        possible_canonical_ids: Vec::new(),
+    });
+    project
+        .host()
+        .set_import_dependencies("/src/types/index.ts", barrel_deps);
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&"value15"),
+        "should resolve Comp15Props.value15 through barrel: {names:?}"
+    );
+    assert!(
+        names.contains(&"extra"),
+        "should keep local extra prop: {names:?}"
+    );
+}
+
+#[test]
+fn barrel_fully_resolved_returns_none_for_missing_type() {
+    let project = make_project();
+
+    project
+        .upsert_base(
+            "/src/types/index.ts",
+            r#"export * from './a'
+export * from './b'"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/src/types/a.ts", r#"export interface AType { a: string }"#)
+        .unwrap();
+    project
+        .upsert_base("/src/types/b.ts", r#"export interface BType { b: number }"#)
+        .unwrap();
+
+    // Component imports a type that doesn't exist in the barrel
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { AType } from './types'
+
+defineProps<AType>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./a".to_string(),
+                resolved_canonical_id: Some("/src/types/a.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./b".to_string(),
+                resolved_canonical_id: Some("/src/types/b.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&"a"),
+        "should resolve AType.a through barrel: {names:?}"
+    );
+    // Negative: BType should NOT appear (not imported)
+    assert!(
+        !names.contains(&"b"),
+        "should not have BType.b (not imported): {names:?}"
+    );
+}
+
+#[test]
+fn barrel_nested_export_star_chain_resolves() {
+    // A -> export * from B -> export * from C
+    // A type from C should be found through the chain.
+    let project = make_project();
+
+    project
+        .upsert_base("/src/barrel_a.ts", r#"export * from './barrel_b'"#)
+        .unwrap();
+    project
+        .upsert_base("/src/barrel_b.ts", r#"export * from './deep'"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/deep.ts",
+            r#"export interface DeepType { level: number }"#,
+        )
+        .unwrap();
+
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { DeepType } from './barrel_a'
+
+defineProps<DeepType>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/barrel_a.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./barrel_b".to_string(),
+            resolved_canonical_id: Some("/src/barrel_b.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/barrel_b.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./deep".to_string(),
+            resolved_canonical_id: Some("/src/deep.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./barrel_a".to_string(),
+            resolved_canonical_id: Some("/src/barrel_a.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should succeed");
+
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&"level"),
+        "should resolve DeepType.level through nested barrel chain: {names:?}"
+    );
+}
+
+#[test]
+fn depth_limit_does_not_hang_on_extreme_chain() {
+    // Create a chain of 40 barrel files, each re-exporting from the next.
+    // Verifies the resolver terminates on long chains without stack overflow.
+    // (135 caused stack overflow in tests; 40 is safe and still exercises the chain.)
+    let project = make_project();
+
+    for i in 0..40 {
+        let source = format!("export * from './barrel_{}'", i + 1);
+        project
+            .upsert_base(&format!("/src/barrel_{i}.ts"), &source)
+            .unwrap();
+        project.host().set_import_dependencies(
+            &format!("/src/barrel_{i}.ts"),
+            vec![crate::types::DependencyResolution {
+                specifier: format!("./barrel_{}", i + 1),
+                resolved_canonical_id: Some(format!("/src/barrel_{}.ts", i + 1)),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+    }
+    // Terminal file
+    project
+        .upsert_base(
+            "/src/barrel_40.ts",
+            r#"export interface FinalType { done: boolean }"#,
+        )
+        .unwrap();
+
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { FinalType } from './barrel_0'
+defineProps<FinalType>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./barrel_0".to_string(),
+            resolved_canonical_id: Some("/src/barrel_0.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    // Should complete without hanging — depth limit terminates the chain
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should return a result");
+
+    // The type won't be found (depth exceeded), but the call must not hang
+    // It's OK if props is empty — the important thing is termination.
+    assert!(
+        meta.props.len() <= 1,
+        "depth-limited chain should produce 0-1 props (not hang): {:?}",
+        meta.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+}

@@ -2661,6 +2661,116 @@ pub fn extract_imported_type_bindings(
     result
 }
 
+/// Lightweight export surface of a file: names that are publicly exported
+/// plus wildcard `export *` source specifiers for recursive barrel scanning.
+///
+/// This does NOT resolve types — it only discovers what names a file exports
+/// so the barrel resolution cache can build its `export_map` cheaply.
+#[derive(Debug, Clone, Default)]
+pub struct ExtractedExportSurface {
+    /// Public exported names (type or value).
+    /// For `export { Foo as Bar }`, records `Bar` (the public name).
+    pub exported_names: FxHashSet<String>,
+    /// Source specifiers from `export * from '...'` declarations.
+    pub wildcard_reexport_sources: Vec<String>,
+}
+
+/// Extract the direct export surface of a source file.
+///
+/// Collects all publicly exported names and `export *` wildcard sources.
+/// This is a lightweight alternative to `extract_imported_type_bindings` —
+/// it does not track import bindings or resolve types, only export names.
+pub fn extract_export_surface(
+    source: &str,
+    allocator: &oxc_allocator::Allocator,
+) -> ExtractedExportSurface {
+    use oxc_ast::ast::*;
+
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(allocator, source, source_type).parse();
+
+    if parsed.panicked {
+        return ExtractedExportSurface::default();
+    }
+
+    let mut result = ExtractedExportSurface::default();
+
+    for stmt in &parsed.program.body {
+        match stmt {
+            // export interface Foo {} / export type Foo = ... / export enum Foo {} /
+            // export class Foo {} / export const Foo = ... / export function Foo()
+            Statement::ExportNamedDeclaration(export_decl) => {
+                // Named re-export with source: export { X } from './other'
+                if export_decl.source.is_some() {
+                    for specifier in &export_decl.specifiers {
+                        // The public name is `exported`, not `local`
+                        result
+                            .exported_names
+                            .insert(specifier.exported.name().to_string());
+                    }
+                    continue;
+                }
+
+                // Local re-export without source: export { Foo } / export { Foo as Bar }
+                if !export_decl.specifiers.is_empty() {
+                    for specifier in &export_decl.specifiers {
+                        result
+                            .exported_names
+                            .insert(specifier.exported.name().to_string());
+                    }
+                    continue;
+                }
+
+                // Exported declaration: export interface/type/enum/class/const/function
+                if let Some(decl) = &export_decl.declaration {
+                    match decl {
+                        Declaration::TSInterfaceDeclaration(d) => {
+                            result.exported_names.insert(d.id.name.to_string());
+                        }
+                        Declaration::TSTypeAliasDeclaration(d) => {
+                            result.exported_names.insert(d.id.name.to_string());
+                        }
+                        Declaration::TSEnumDeclaration(d) => {
+                            result.exported_names.insert(d.id.name.to_string());
+                        }
+                        Declaration::ClassDeclaration(d) => {
+                            if let Some(id) = &d.id {
+                                result.exported_names.insert(id.name.to_string());
+                            }
+                        }
+                        Declaration::FunctionDeclaration(d) => {
+                            if let Some(id) = &d.id {
+                                result.exported_names.insert(id.name.to_string());
+                            }
+                        }
+                        Declaration::VariableDeclaration(d) => {
+                            for declarator in &d.declarations {
+                                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                                    result.exported_names.insert(id.name.to_string());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // export * from './other'
+            Statement::ExportAllDeclaration(export_all) => {
+                result
+                    .wildcard_reexport_sources
+                    .push(export_all.source.value.to_string());
+            }
+            // export default ...
+            Statement::ExportDefaultDeclaration(_) => {
+                result.exported_names.insert("default".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
+
 pub fn collect_required_import_names_for_external_type(
     type_name: &str,
     dep_source: &str,

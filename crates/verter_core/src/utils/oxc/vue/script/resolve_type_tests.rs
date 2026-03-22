@@ -2536,3 +2536,154 @@ export interface Slots {
         "should have 'noReturn': {names:?}"
     );
 }
+
+// ── extract_export_surface tests ────────────────────────────────────────
+
+#[test]
+fn extract_export_surface_collects_exported_declarations() {
+    let alloc = Allocator::default();
+    let source = r#"
+export interface Foo {}
+export type Bar = string
+export enum Baz { A, B }
+export class Qux {}
+export const CONSTANT = 42
+export function helper() {}
+interface NotExported {}
+type AlsoNotExported = number
+"#;
+    let surface = extract_export_surface(source, &alloc);
+    assert!(surface.exported_names.contains("Foo"), "should have Foo");
+    assert!(surface.exported_names.contains("Bar"), "should have Bar");
+    assert!(surface.exported_names.contains("Baz"), "should have Baz");
+    assert!(surface.exported_names.contains("Qux"), "should have Qux");
+    assert!(
+        surface.exported_names.contains("CONSTANT"),
+        "should have CONSTANT"
+    );
+    assert!(
+        surface.exported_names.contains("helper"),
+        "should have helper"
+    );
+    assert!(
+        !surface.exported_names.contains("NotExported"),
+        "bare interface without export should not be collected"
+    );
+    assert!(
+        !surface.exported_names.contains("AlsoNotExported"),
+        "bare type without export should not be collected"
+    );
+    assert!(
+        surface.wildcard_reexport_sources.is_empty(),
+        "no wildcard re-exports"
+    );
+}
+
+#[test]
+fn extract_export_surface_collects_named_reexports() {
+    let alloc = Allocator::default();
+    let source = r#"
+export { Foo } from './foo'
+export { Bar as PublicBar } from './bar'
+export type { Baz } from './baz'
+export type { Qux as PublicQux } from './qux'
+"#;
+    let surface = extract_export_surface(source, &alloc);
+    assert!(surface.exported_names.contains("Foo"), "should have Foo");
+    assert!(
+        surface.exported_names.contains("PublicBar"),
+        "should have PublicBar (aliased)"
+    );
+    assert!(
+        !surface.exported_names.contains("Bar"),
+        "local name Bar should not be in exports"
+    );
+    assert!(surface.exported_names.contains("Baz"), "should have Baz");
+    assert!(
+        surface.exported_names.contains("PublicQux"),
+        "should have PublicQux (aliased type re-export)"
+    );
+}
+
+#[test]
+fn extract_export_surface_collects_local_reexports() {
+    let alloc = Allocator::default();
+    let source = r#"
+interface Foo {}
+type Bar = string
+export { Foo }
+export { Bar as PublicBar }
+"#;
+    let surface = extract_export_surface(source, &alloc);
+    assert!(surface.exported_names.contains("Foo"), "should have Foo");
+    assert!(
+        surface.exported_names.contains("PublicBar"),
+        "should have PublicBar (aliased local re-export)"
+    );
+    assert!(
+        !surface.exported_names.contains("Bar"),
+        "local name Bar should not be in exports"
+    );
+}
+
+#[test]
+fn extract_export_surface_collects_wildcard_reexports() {
+    let alloc = Allocator::default();
+    let source = r#"
+export * from './types'
+export * from '../components/Button.vue'
+export { Foo } from './foo'
+"#;
+    let surface = extract_export_surface(source, &alloc);
+    assert_eq!(surface.wildcard_reexport_sources.len(), 2);
+    assert_eq!(surface.wildcard_reexport_sources[0], "./types");
+    assert_eq!(
+        surface.wildcard_reexport_sources[1],
+        "../components/Button.vue"
+    );
+    assert!(surface.exported_names.contains("Foo"), "should have Foo");
+}
+
+#[test]
+fn extract_export_surface_collects_export_default() {
+    let alloc = Allocator::default();
+    let source = r#"
+export default function main() {}
+"#;
+    let surface = extract_export_surface(source, &alloc);
+    assert!(
+        surface.exported_names.contains("default"),
+        "should have default"
+    );
+}
+
+#[test]
+fn extract_export_surface_handles_empty_source() {
+    let alloc = Allocator::default();
+    let surface = extract_export_surface("", &alloc);
+    assert!(surface.exported_names.is_empty());
+    assert!(surface.wildcard_reexport_sources.is_empty());
+}
+
+#[test]
+fn extract_export_surface_handles_mixed_barrel() {
+    let alloc = Allocator::default();
+    // Simulate a Nuxt UI types/index.ts barrel
+    let source = r#"
+export * from '../components/Accordion.vue'
+export * from '../components/Alert.vue'
+export * from '../components/Button.vue'
+export * from './utils'
+export * from './tv'
+"#;
+    let surface = extract_export_surface(source, &alloc);
+    assert_eq!(
+        surface.wildcard_reexport_sources.len(),
+        5,
+        "should have 5 wildcard sources"
+    );
+    assert!(
+        surface.exported_names.is_empty(),
+        "pure barrel should have no direct exports"
+    );
+}

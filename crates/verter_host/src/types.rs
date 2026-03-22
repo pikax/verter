@@ -1258,6 +1258,25 @@ pub(crate) struct CompileCacheEntry {
     /// Eviction flag — when true, the file is invisible to host accessors
     /// but deps/aliases are preserved for old-state diffing during reload.
     pub(crate) evicted: bool,
+
+    // ── BarrelState: progressive export surface cache ──
+    /// Barrel export surface cache. Only populated for files with `export *` entries.
+    /// Progressively discovers what each wildcard source exports, so subsequent
+    /// type lookups through this barrel skip already-scanned sources.
+    pub(crate) barrel_export_surface: Option<BarrelResolutionState>,
+
+    // ── ExportRegistry: structural export graph index ──
+    /// Per-file export registry populated at analysis time from ExportSignature data.
+    /// Used by type resolution to follow export chains without re-parsing.
+    /// Does NOT store resolved type payloads — those stay in `resolved_type_cache`.
+    pub(crate) export_registry: Option<FileExportRegistry>,
+
+    // ── ImportRouteCache: importer-oriented type route cache ──
+    /// Cached import type routes for this file as an owner/importer.
+    /// Key: (import_source, type_name, resolve_kind).
+    /// Automatically invalidated when this file's compile_cache entry is cleared.
+    pub(crate) import_route_cache:
+        FxHashMap<(String, String, verter_vfs::ResolveRequestKind), ImportTypeRouteEntry>,
 }
 
 /// Override-aware file state returned by `effective_file_state()`.
@@ -1310,6 +1329,140 @@ pub(crate) struct StyleOverrideWithAnalysis {
 
 /// Maximum entries in the host-level resolved external type cache.
 pub(crate) const RESOLVED_TYPE_CACHE_CAP: usize = 4096;
+
+/// Maximum recursion depth for external type resolution.
+///
+/// Safety net for pathological barrel chains. The barrel resolution cache
+/// and visiting set handle all practical cases; this limit only fires for
+/// truly extreme input (e.g., 130+ nested `export *` chains).
+pub(crate) const MAX_RESOLVE_DEPTH: usize = 128;
+
+/// Error from [`VerterHost::resolve_external_type_from_loaded_files`].
+#[derive(Debug, Clone)]
+pub(crate) enum ExternalTypeResolveError {
+    /// The root dependency could not be resolved.
+    MissingRootDependency,
+    /// Recursion depth exceeded the configured limit.
+    DepthLimitExceeded {
+        limit: usize,
+        type_name: String,
+        last_dep: String,
+    },
+}
+
+/// Progressive barrel export resolution state.
+///
+/// Tracks the export surface of a barrel file (one with `export * from` entries)
+/// as it is progressively discovered. Each type lookup through the barrel extends
+/// the state until `fully_resolved` is true, at which point absent types can be
+/// reported immediately without rescanning.
+#[derive(Debug, Clone)]
+pub(crate) struct BarrelResolutionState {
+    /// Map: exported public name → (wildcard source specifier, canonical source ID).
+    /// The specifier is relative to the barrel file and is used for re-resolution
+    /// through `resolve_external_type_from_loaded_files`.
+    /// For `export { Foo as Bar }`, the key is `Bar` (the public name).
+    pub export_map: rustc_hash::FxHashMap<String, (String, String)>,
+    /// Source hash of the barrel file when this state was built.
+    pub source_hash: Hash16,
+    /// Direct wildcard source specifiers declared by the barrel itself.
+    #[allow(dead_code)]
+    pub wildcard_sources: Vec<String>,
+    /// Scanned wildcard graph nodes keyed by canonical ID for O(1) freshness
+    /// checks. Value is the file's whole-hash at scan time.
+    pub scanned_sources: rustc_hash::FxHashMap<String, Hash16>,
+    /// Canonical IDs discovered while scanning wildcard sources (de-duped).
+    /// Replayed into `tracked_deps` on cache hit so invalidation/eval stay correct.
+    pub tracked_deps: rustc_hash::FxHashSet<String>,
+    /// True only after every direct wildcard source, and every nested
+    /// `export *` hop reachable from them, has been scanned.
+    pub fully_resolved: bool,
+    /// Monotonically increasing counter, incremented on every rebuild.
+    /// Used by negative route entries to detect barrel-state changes cheaply.
+    pub generation: u64,
+}
+
+/// Named export entry — stored in the per-file export registry.
+///
+/// Represents a single named export's structural routing information.
+/// Does NOT store resolved type payloads.
+#[derive(Debug, Clone)]
+pub(crate) enum ExportEntry {
+    /// The name is directly exported by this file — either a local declaration
+    /// (interface, type alias, enum, class, const, function) or a local re-export
+    /// of an imported value (`import { X } from './y'; export { X }`).
+    /// The type resolution pipeline will do actual OXC work only at this terminal.
+    Defined,
+    /// The name is re-exported from another file, possibly renamed.
+    /// e.g., `export { Props as IconProps } from './types'`
+    Alias {
+        source_specifier: String,
+        original_name: String,
+    },
+}
+
+/// Per-file export registry — populated at analysis time from ExportSignature data.
+///
+/// Purely structural: maps exported names to their routing information.
+/// Never stores resolved type payloads — those stay in `resolved_type_cache`.
+#[derive(Debug, Clone)]
+pub(crate) struct FileExportRegistry {
+    /// Whole-file source hash when this registry was built.
+    /// Used for freshness checks, including disk-only lazy-populated files.
+    pub source_hash: Hash16,
+    /// Named exports: name → Defined | Alias.
+    pub named: FxHashMap<String, ExportEntry>,
+    /// Wildcard re-export edges: source specifiers from `export * from`.
+    /// Preserves source declaration order for deterministic BFS resolution.
+    pub wildcard_edges: Vec<String>,
+}
+
+/// Result of a registry-based type route lookup.
+///
+/// Contains both the resolved target and the traversal metadata needed
+/// for import-route-cache freshness validation.
+#[derive(Debug, Clone)]
+pub(crate) struct RegistryRoute {
+    /// The final defining file. `None` means the type was not found.
+    pub target: Option<NormalizedTypeTarget>,
+    /// Canonical IDs of all files traversed during route discovery.
+    pub tracked_deps: Vec<String>,
+    /// Every file whose registry content determined the route, with its hash.
+    pub route_hashes: Vec<(String, Hash16)>,
+}
+
+/// Normalized target of an import type route.
+///
+/// Represents the final file and exported name that an importer-local type
+/// resolves to, regardless of the route shape (direct, re-export, barrel).
+#[derive(Debug, Clone)]
+pub(crate) struct NormalizedTypeTarget {
+    /// The canonical file that actually defines/exports the type.
+    pub final_canonical_id: String,
+    /// The exported name in the final file (may differ from importer-local name
+    /// due to aliases along the route).
+    pub exported_name: String,
+}
+
+/// Cached import type route entry stored on the owner file's `CompileCacheEntry`.
+///
+/// Represents the resolved route from an importer-local type name to the
+/// final defining file. Freshness is validated via `owner_hash` + `route_hashes`.
+#[derive(Debug, Clone)]
+pub(crate) struct ImportTypeRouteEntry {
+    /// Hash of the owner file when this route was computed.
+    pub owner_hash: Hash16,
+    /// The resolved target. `None` means the type was fully explored and absent.
+    pub target: Option<NormalizedTypeTarget>,
+    /// Canonical dependencies discovered while building the route.
+    /// Replayed into `tracked_deps` on cache hit.
+    pub tracked_deps: Vec<String>,
+    /// Every file whose content determined the route, with its hash at resolution time.
+    pub route_hashes: Vec<(String, Hash16)>,
+    /// For negative entries: the barrel canonical + generation when the negative
+    /// conclusion was reached. Stale whenever the barrel's generation changes.
+    pub negative_barrel_gen: Option<(String, u64)>,
+}
 
 /// Key for the host-level resolved external type cache.
 ///

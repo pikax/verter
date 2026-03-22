@@ -237,17 +237,20 @@ impl VerterHost {
                     });
                 }
                 ResolverMode::Expanded => {
+                    let mut resolution_deps = std::collections::BTreeSet::new();
                     let resolved = self.resolve_external_type_from_loaded_files(
                         &canonical,
                         &dep.import_source,
                         &dep.type_name,
                         &mut tracked_deps,
+                        &mut resolution_deps,
                         &mut cache,
                         &mut visiting,
                         false,
                         kind,
                         true,
                         None,
+                        0,
                     );
 
                     match resolved {
@@ -292,7 +295,7 @@ impl VerterHost {
                                 jsdoc: jsdoc.clone(),
                             });
                         }
-                        Ok(None) | Err(()) => {
+                        Ok(None) | Err(_) => {
                             // Best-effort: record identity even on resolution failure.
                             resolved_macros.push(ResolvedMacroMeta {
                                 macro_index,
@@ -1044,17 +1047,20 @@ fn resolve_jsdoc_tag_type(
         .iter()
         .filter(|binding| required_import_names.contains(&binding.local_name))
     {
+        let mut resolution_deps = std::collections::BTreeSet::new();
         if let Ok(Some(resolved)) = host.resolve_external_type_from_loaded_files(
             canonical_source,
             &binding.source,
             &binding.imported_name,
             tracked_deps,
+            &mut resolution_deps,
             cache,
             visiting,
             false,
             kind,
             true,
             None,
+            0,
         ) {
             companion_types
                 .entry(binding.local_name.clone())

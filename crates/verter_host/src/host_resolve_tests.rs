@@ -1700,6 +1700,7 @@ export interface Props {
     );
 
     let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = rustc_hash::FxHashMap::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
@@ -1708,18 +1709,315 @@ export interface Props {
             "./wrapper",
             "Props",
             &mut tracked_deps,
+            &mut resolution_deps,
             &mut cache,
             &mut visiting,
             true,
             verter_vfs::ResolveRequestKind::TypeImport,
             true,
             None,
+            0,
         )
         .expect("external type resolution should complete without crashing");
 
     assert!(
         resolved.is_none(),
         "plain imported type bindings must not masquerade as re-exported macro types"
+    );
+}
+
+#[test]
+fn negative_import_route_cache_invalidates_when_imported_module_changes() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { DynamicProps } from './types'
+defineProps<DynamicProps>()
+</script>
+<template><div>consumer</div></template>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface StableProps { keep: string }\n",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let first = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./types",
+            "DynamicProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("first resolution should complete");
+    assert!(
+        first.is_none(),
+        "DynamicProps should be missing before the dependency update"
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface DynamicProps { added: string }\n",
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let second = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./types",
+            "DynamicProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("second resolution should complete")
+        .expect("DynamicProps should resolve after the dependency update");
+
+    assert!(
+        second
+            .props
+            .iter()
+            .filter_map(|prop| prop.key_name.as_deref())
+            .any(|name| name == "added"),
+        "resolved props should come from the updated dependency: {:?}",
+        second
+            .props
+            .iter()
+            .filter_map(|prop| prop.key_name.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_barrel_warm_lookup_keeps_following_export_star_chain() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { FirstProps, SecondProps } from './barrel_a'
+defineProps<FirstProps>()
+</script>
+<template><div>consumer</div></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/barrel_a.ts", "export * from './barrel_b'\n");
+    upsert_non_sfc(&host, "/src/barrel_b.ts", "export * from './deep'\n");
+    upsert_non_sfc(
+        &host,
+        "/src/deep.ts",
+        "export interface FirstProps { first: string }\nexport interface SecondProps { second: number }\n",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./barrel_a".to_string(),
+            resolved_canonical_id: Some("/src/barrel_a.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/barrel_a.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./barrel_b".to_string(),
+            resolved_canonical_id: Some("/src/barrel_b.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/barrel_b.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./deep".to_string(),
+            resolved_canonical_id: Some("/src/deep.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let first = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./barrel_a",
+            "FirstProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("first nested barrel resolution should complete")
+        .expect("FirstProps should resolve");
+    assert!(
+        first
+            .props
+            .iter()
+            .filter_map(|prop| prop.key_name.as_deref())
+            .any(|name| name == "first"),
+        "FirstProps should resolve through the nested barrel chain"
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let second = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./barrel_a",
+            "SecondProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("second nested barrel resolution should complete")
+        .expect("SecondProps should still resolve on a warm lookup");
+
+    assert!(
+        second
+            .props
+            .iter()
+            .filter_map(|prop| prop.key_name.as_deref())
+            .any(|name| name == "second"),
+        "SecondProps should still resolve through the nested barrel chain"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn barrel_scanned_vue_children_store_whole_hash_for_freshness() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script>
+<template><div>consumer</div></template>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types/index.ts",
+        "export * from '../Button.vue'\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface ButtonProps {
+  label: string
+}
+</script>
+<template><button>{{ label }}</button></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![crate::DependencyResolution {
+            specifier: "../Button.vue".to_string(),
+            resolved_canonical_id: Some("/src/Button.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let resolved = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./types",
+            "ButtonProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("barrel resolution should complete");
+    assert!(
+        resolved.is_some(),
+        "ButtonProps should resolve through the barrel"
+    );
+
+    let barrel_state = host
+        .compile_cache
+        .get("/src/types/index.ts")
+        .and_then(|cc| cc.barrel_export_surface.clone())
+        .expect("barrel state should be cached");
+    let scanned_hash = *barrel_state
+        .scanned_sources
+        .get("/src/Button.vue")
+        .expect("Vue child should be tracked in scanned_sources");
+    let whole_hash = host
+        .get_whole_hash("/src/Button.vue")
+        .expect("Vue child should have a whole hash");
+
+    assert_eq!(
+        scanned_hash, whole_hash,
+        "barrel child freshness must use the same whole-hash domain as validation"
     );
 }
 
@@ -2506,6 +2804,7 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
     );
 
     let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = rustc_hash::FxHashMap::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
@@ -2514,12 +2813,14 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             "fancy",
             "AccordionRootEmits",
             &mut tracked_deps,
+            &mut resolution_deps,
             &mut cache,
             &mut visiting,
             true,
             verter_vfs::ResolveRequestKind::TypeImport,
             true,
             None,
+            0,
         )
         .expect("external type resolution should succeed")
         .expect("external type resolution should produce a result");
