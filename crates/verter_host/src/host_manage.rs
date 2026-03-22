@@ -56,10 +56,16 @@ fn log_snapshot_debug(
     ));
 }
 
+#[derive(Debug)]
 pub(crate) struct ImportedEvalInputs {
     pub(crate) sources: Vec<String>,
     pub(crate) resolved_types: Vec<verter_analysis::ResolvedLocalType>,
     pub(crate) canonical_dependencies: std::collections::BTreeSet<String>,
+    /// Number of sources in `sources[..type_reachable_count]` that are
+    /// type-reachable (from macro type deps). Sources beyond this index
+    /// come from the full import graph walk and are only needed by
+    /// fallthrough eval (value expression evaluation).
+    pub(crate) type_reachable_count: usize,
 }
 
 impl VerterHost {
@@ -212,6 +218,9 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
     ) -> ImportedEvalInputs {
+        self.provenance
+            .imported_eval_inputs_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut seen = rustc_hash::FxHashSet::default();
         let mut inputs = Vec::new();
         let mut resolved_type_names = rustc_hash::FxHashSet::default();
@@ -222,6 +231,10 @@ impl VerterHost {
 
         for dep in snapshot.macro_type_deps.iter() {
             let mut tracked_deps = std::collections::BTreeSet::new();
+            // use_host_cache: true — safe because profile_hash is None here,
+            // so host-cache freshness is governed solely by dep_source_hash.
+            // The meta_resolve path warms this cache earlier in the same
+            // resolve_component_meta(Expanded) call.
             let resolved = self.resolve_external_type_from_loaded_files(
                 owner_canonical_id,
                 &dep.import_source,
@@ -231,7 +244,7 @@ impl VerterHost {
                 &mut visiting,
                 false,
                 verter_vfs::ResolveRequestKind::TypeImport,
-                false,
+                true,
                 None,
             );
             let mut pushed_tracked_source = false;
@@ -309,6 +322,11 @@ impl VerterHost {
             inputs.push(source);
         }
 
+        // Boundary: sources[..type_reachable_count] are from macro type dep
+        // resolution. Sources added after this point are from the full import
+        // graph walk and are only needed by fallthrough eval.
+        let type_reachable_count = inputs.len();
+
         self.collect_eval_dependency_sources_recursive(
             owner_canonical_id,
             &mut seen,
@@ -320,6 +338,7 @@ impl VerterHost {
             sources: inputs,
             resolved_types,
             canonical_dependencies,
+            type_reachable_count,
         }
     }
 
@@ -338,7 +357,18 @@ impl VerterHost {
         let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
         let local_binding_names: rustc_hash::FxHashSet<String> =
             env.value_symbols.keys().cloned().collect();
-        for dep_source in &imported_inputs.sources {
+        // When type_reachable_count > 0, only parse type-reachable sources
+        // (the prefix populated by macro type dep resolution). Sources beyond
+        // the boundary are from the full import graph walk and are only needed
+        // by fallthrough eval. When type_reachable_count == 0 (no macro type
+        // deps — e.g., inline defineProps), preserve prior broad behavior:
+        // the eval env may still need imported type definitions.
+        let source_slice = if imported_inputs.type_reachable_count > 0 {
+            &imported_inputs.sources[..imported_inputs.type_reachable_count]
+        } else {
+            &imported_inputs.sources
+        };
+        for dep_source in source_slice {
             env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
                 dep_source,
             ));
@@ -597,11 +627,19 @@ impl VerterHost {
                 let mut fallthrough_branches = Vec::new();
                 let mut any_partial = false;
                 let mut any_unresolved = false;
-                let mut eval_env = self.build_fallthrough_eval_env(
-                    canonical_id,
-                    &resolved.snapshot,
-                    prop_type_overrides,
-                );
+                let mut eval_env = if let Some(ref cached_inputs) = resolved.cached_eval_inputs {
+                    self.build_fallthrough_eval_env_with_inputs(
+                        canonical_id,
+                        prop_type_overrides,
+                        cached_inputs,
+                    )
+                } else {
+                    self.build_fallthrough_eval_env(
+                        canonical_id,
+                        &resolved.snapshot,
+                        prop_type_overrides,
+                    )
+                };
 
                 for branch in branches {
                     let branch_key = branch.branch_index.to_string();
@@ -940,11 +978,26 @@ impl VerterHost {
             &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
         >,
     ) -> Option<verter_analysis::type_eval::EvalEnv> {
+        let dep_resolutions = self.dependency_resolutions_for_eval(canonical_id);
+        let imported_inputs = self.imported_eval_inputs(canonical_id, snapshot, &dep_resolutions);
+        self.build_fallthrough_eval_env_with_inputs(
+            canonical_id,
+            prop_type_overrides,
+            &imported_inputs,
+        )
+    }
+
+    fn build_fallthrough_eval_env_with_inputs(
+        &self,
+        canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        imported_inputs: &ImportedEvalInputs,
+    ) -> Option<verter_analysis::type_eval::EvalEnv> {
         let (source, cached_parse, _) = self.current_eval_state(canonical_id)?;
         let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
         let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
-        let dep_resolutions = self.dependency_resolutions_for_eval(canonical_id);
-        let imported_inputs = self.imported_eval_inputs(canonical_id, snapshot, &dep_resolutions);
         for dep_source in &imported_inputs.sources {
             env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
                 dep_source,
@@ -1267,12 +1320,7 @@ impl VerterHost {
     ) -> std::collections::BTreeSet<String> {
         dep_resolutions
             .values()
-            .flat_map(|res| {
-                res.resolved_canonical_id
-                    .iter()
-                    .cloned()
-                    .chain(res.possible_canonical_ids.iter().cloned())
-            })
+            .filter_map(|res| res.effective_target().map(|s| s.to_string()))
             .collect()
     }
 

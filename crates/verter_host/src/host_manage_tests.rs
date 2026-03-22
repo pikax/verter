@@ -2357,3 +2357,144 @@ defineProps<Foo>()
         "should detect the <slot> despite unresolved type dep"
     );
 }
+
+// ── Fix 1: effective_target + resolved_dependency_targets ──────────
+
+#[test]
+fn effective_target_returns_resolved_when_present() {
+    let res = crate::types::DependencyResolution {
+        specifier: "./types".to_string(),
+        resolved_canonical_id: Some("/src/types.ts".to_string()),
+        possible_canonical_ids: vec!["/src/types.js".to_string(), "/src/types.d.ts".to_string()],
+    };
+    assert_eq!(
+        res.effective_target(),
+        Some("/src/types.ts"),
+        "resolved_canonical_id should win over possibles"
+    );
+}
+
+#[test]
+fn effective_target_picks_dts_over_ts_over_js() {
+    let res = crate::types::DependencyResolution {
+        specifier: "./utils".to_string(),
+        resolved_canonical_id: None,
+        possible_canonical_ids: vec![
+            "/src/utils.js".to_string(),
+            "/src/utils.ts".to_string(),
+            "/src/utils.d.ts".to_string(),
+        ],
+    };
+    assert_eq!(
+        res.effective_target(),
+        Some("/src/utils.d.ts"),
+        ".d.ts should have highest priority"
+    );
+}
+
+#[test]
+fn effective_target_picks_ts_over_js() {
+    let res = crate::types::DependencyResolution {
+        specifier: "./utils".to_string(),
+        resolved_canonical_id: None,
+        possible_canonical_ids: vec!["/src/utils.jsx".to_string(), "/src/utils.tsx".to_string()],
+    };
+    assert_eq!(
+        res.effective_target(),
+        Some("/src/utils.tsx"),
+        ".tsx should win over .jsx"
+    );
+}
+
+#[test]
+fn effective_target_returns_none_when_empty() {
+    let res = crate::types::DependencyResolution {
+        specifier: "./missing".to_string(),
+        resolved_canonical_id: None,
+        possible_canonical_ids: Vec::new(),
+    };
+    assert_eq!(res.effective_target(), None);
+}
+
+#[test]
+fn effective_target_vue_only_when_no_script_candidates() {
+    let res = crate::types::DependencyResolution {
+        specifier: "./Comp".to_string(),
+        resolved_canonical_id: None,
+        possible_canonical_ids: vec!["/src/Comp.vue".to_string()],
+    };
+    assert_eq!(
+        res.effective_target(),
+        Some("/src/Comp.vue"),
+        ".vue should be returned when it is the only candidate"
+    );
+}
+
+#[test]
+fn effective_target_prefers_dcts_over_cjs() {
+    let res = crate::types::DependencyResolution {
+        specifier: "./lib".to_string(),
+        resolved_canonical_id: None,
+        possible_canonical_ids: vec!["/lib/index.cjs".to_string(), "/lib/index.d.cts".to_string()],
+    };
+    assert_eq!(
+        res.effective_target(),
+        Some("/lib/index.d.cts"),
+        ".d.cts should win over .cjs"
+    );
+}
+
+#[test]
+fn resolved_dependency_targets_uses_effective_target() {
+    let mut dep_resolutions = rustc_hash::FxHashMap::default();
+    // Resolved: should use resolved_canonical_id only
+    dep_resolutions.insert(
+        "./types".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: vec!["/src/types.js".to_string()],
+        },
+    );
+    // Unresolved: should use highest-priority possible
+    dep_resolutions.insert(
+        "./utils".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./utils".to_string(),
+            resolved_canonical_id: None,
+            possible_canonical_ids: vec![
+                "/src/utils.js".to_string(),
+                "/src/utils.d.ts".to_string(),
+            ],
+        },
+    );
+    // No resolution at all
+    dep_resolutions.insert(
+        "./missing".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./missing".to_string(),
+            resolved_canonical_id: None,
+            possible_canonical_ids: Vec::new(),
+        },
+    );
+
+    let targets = VerterHost::resolved_dependency_targets(&dep_resolutions);
+
+    assert!(
+        targets.contains("/src/types.ts"),
+        "should include resolved ID"
+    );
+    assert!(
+        !targets.contains("/src/types.js"),
+        "should NOT include possibles when resolved exists"
+    );
+    assert!(
+        targets.contains("/src/utils.d.ts"),
+        "should include highest-priority possible"
+    );
+    assert!(
+        !targets.contains("/src/utils.js"),
+        "should NOT include lower-priority possible"
+    );
+    assert_eq!(targets.len(), 2, "missing should not contribute a target");
+}

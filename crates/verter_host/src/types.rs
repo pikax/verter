@@ -1053,9 +1053,61 @@ pub struct DependencyResolution {
     pub specifier: String,
     /// Exact resolved canonical ID, if the caller resolved it (e.g., `/src/components/base/index.ts`).
     pub resolved_canonical_id: Option<String>,
-    /// Ordered candidate canonical IDs when exact resolution isn't available.
-    /// First loaded candidate wins.
+    /// Candidate canonical IDs when exact resolution isn't available.
+    /// Selection uses TS-first priority via [`effective_target()`]: `.d.ts` > `.ts` >
+    /// `.tsx` > `.js`. Only the single highest-priority candidate is used; remaining
+    /// candidates are not tried if the selected one lacks the needed type.
     pub possible_canonical_ids: Vec<String>,
+}
+
+/// TS-first extension priority for unresolved candidate selection.
+///
+/// Verter relies on TS typing for type-strict analysis. JS files are
+/// fallback-only when no TS type definition exists. Lower value = higher
+/// priority.
+pub(crate) fn extension_priority(path: &str) -> u8 {
+    if path.ends_with(".d.ts") {
+        0
+    } else if path.ends_with(".d.cts") {
+        1
+    } else if path.ends_with(".d.mts") {
+        2
+    } else if path.ends_with(".ts") {
+        3
+    } else if path.ends_with(".tsx") {
+        4
+    } else if path.ends_with(".js") {
+        5
+    } else if path.ends_with(".jsx") {
+        6
+    } else if path.ends_with(".cjs") {
+        7
+    } else if path.ends_with(".mjs") {
+        8
+    } else {
+        // Non-script files (.vue, .json, .css) — only selected when
+        // no script candidates exist.
+        9
+    }
+}
+
+impl DependencyResolution {
+    /// Returns the single effective canonical ID for this resolution.
+    ///
+    /// When `resolved_canonical_id` is present, returns that directly.
+    /// Otherwise picks the single highest-priority candidate using TS-first
+    /// ordering. If the selected candidate does not contain the needed type,
+    /// callers should treat the resolution as not found — do NOT try
+    /// remaining candidates.
+    pub fn effective_target(&self) -> Option<&str> {
+        if let Some(ref id) = self.resolved_canonical_id {
+            return Some(id.as_str());
+        }
+        self.possible_canonical_ids
+            .iter()
+            .min_by_key(|c| extension_priority(c))
+            .map(|s| s.as_str())
+    }
 }
 
 #[cfg(any(not(feature = "scheduler"), test))]
@@ -1275,6 +1327,9 @@ pub(crate) struct ResolvedTypeCacheKey {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedTypeCacheEntry {
     pub resolved: Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+    /// Canonical IDs traversed during resolution. Replayed into the caller's
+    /// `tracked_deps` on cache hit so the eval path knows which sources to read.
+    pub tracked_deps: Vec<String>,
 }
 
 /// Cached host-owned component-meta resolved state.
@@ -1305,6 +1360,7 @@ pub struct MetaProvenance {
     pub evaluate_types_calls: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
+    pub imported_eval_inputs_calls: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1316,6 +1372,7 @@ impl Default for MetaProvenance {
             evaluate_types_calls: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_inputs_calls: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1345,6 +1402,10 @@ impl std::fmt::Debug for MetaProvenance {
                 "resolved_external_type_cache_misses",
                 &self.resolved_external_type_cache_misses.load(Relaxed),
             )
+            .field(
+                "imported_eval_inputs_calls",
+                &self.imported_eval_inputs_calls.load(Relaxed),
+            )
             .finish()
     }
 }
@@ -1364,6 +1425,7 @@ impl MetaProvenance {
             resolved_external_type_cache_misses: self
                 .resolved_external_type_cache_misses
                 .load(Relaxed),
+            imported_eval_inputs_calls: self.imported_eval_inputs_calls.load(Relaxed),
         }
     }
 
@@ -1377,6 +1439,7 @@ impl MetaProvenance {
         self.evaluate_types_calls.store(0, Relaxed);
         self.resolved_external_type_cache_hits.store(0, Relaxed);
         self.resolved_external_type_cache_misses.store(0, Relaxed);
+        self.imported_eval_inputs_calls.store(0, Relaxed);
     }
 }
 
@@ -1410,6 +1473,7 @@ pub struct MetaProvenanceSnapshot {
     pub evaluate_types_calls: u64,
     pub resolved_external_type_cache_hits: u64,
     pub resolved_external_type_cache_misses: u64,
+    pub imported_eval_inputs_calls: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

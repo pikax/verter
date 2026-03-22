@@ -71,6 +71,10 @@ pub struct ResolvedComponentMetaState {
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
     /// Evaluated types (populated in `Expanded` mode only).
     pub evaluated_types: Option<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
+    /// Cached imported eval inputs from `resolve_component_meta(Expanded)`.
+    /// Threaded through to `build_fallthrough_eval_env_with_inputs` to avoid
+    /// a redundant second `imported_eval_inputs()` call in the fallthrough path.
+    pub(crate) cached_eval_inputs: Option<Arc<crate::host_manage::ImportedEvalInputs>>,
 }
 
 /// Native provenance retained for an expanded type-registry entry.
@@ -334,16 +338,19 @@ impl VerterHost {
         }
 
         // Step 3: Compute evaluated types (Expanded mode only).
-        // Pre-compute imported eval inputs once and pass them through to avoid
-        // redundant `imported_eval_inputs()` calls inside `compute_evaluated_types`.
-        let evaluated_types = if mode == ResolverMode::Expanded {
+        // Pre-compute imported eval inputs once and cache them on the state so
+        // the fallthrough path can reuse them via `build_fallthrough_eval_env_with_inputs`
+        // instead of calling `imported_eval_inputs()` a second time.
+        let (evaluated_types, cached_eval_inputs) = if mode == ResolverMode::Expanded {
             let dep_resolutions = self.dependency_resolutions_for_eval(&canonical);
             let imported_inputs =
-                self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions);
+                Arc::new(self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions));
             tracked_deps.extend(imported_inputs.canonical_dependencies.iter().cloned());
-            self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs)
+            let eval_types =
+                self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs);
+            (eval_types, Some(imported_inputs))
         } else {
-            None
+            (None, None)
         };
 
         // Sync transitive macro type dependencies for invalidation tracking.
@@ -358,6 +365,7 @@ impl VerterHost {
             resolved_type_registry,
             resolved_type_registry_meta,
             evaluated_types,
+            cached_eval_inputs,
         };
         self.store_cached_resolved_meta(&canonical, mode, &state, &dependency_hashes);
         Some(state)

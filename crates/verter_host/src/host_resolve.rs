@@ -179,6 +179,11 @@ impl VerterHost {
                     self.provenance
                         .resolved_external_type_cache_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Replay tracked deps from the original resolution so the
+                    // eval path knows which source files to read.
+                    for dep in &entry.tracked_deps {
+                        tracked_deps.insert(dep.clone());
+                    }
                     cache.insert(cache_key, entry.resolved.clone());
                     return Ok(entry.resolved);
                 }
@@ -187,6 +192,11 @@ impl VerterHost {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
+
+        // Snapshot tracked_deps before resolution so we can compute the diff
+        // for host cache storage. On cache hit, these deps are replayed.
+        let tracked_deps_before: rustc_hash::FxHashSet<String> =
+            tracked_deps.iter().cloned().collect();
 
         if !visiting.insert(cache_key.clone()) {
             if debug_enabled {
@@ -263,10 +273,16 @@ impl VerterHost {
                         if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
                             host_cache.clear();
                         }
+                        let new_deps: Vec<String> = tracked_deps
+                            .iter()
+                            .filter(|d| !tracked_deps_before.contains(*d))
+                            .cloned()
+                            .collect();
                         host_cache.insert(
                             host_key,
                             crate::types::ResolvedTypeCacheEntry {
                                 resolved: Some(resolved.clone()),
+                                tracked_deps: new_deps,
                             },
                         );
                     }
@@ -379,10 +395,16 @@ impl VerterHost {
                 if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
                     host_cache.clear();
                 }
+                let new_deps: Vec<String> = tracked_deps
+                    .iter()
+                    .filter(|d| !tracked_deps_before.contains(*d))
+                    .cloned()
+                    .collect();
                 host_cache.insert(
                     host_key,
                     crate::types::ResolvedTypeCacheEntry {
                         resolved: resolved.clone(),
+                        tracked_deps: new_deps,
                     },
                 );
             }

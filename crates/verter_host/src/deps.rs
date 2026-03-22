@@ -93,15 +93,10 @@ fn import_resolves_to_dep_view(
     resolve_extensions: &[String],
 ) -> bool {
     if let Some(resolution) = view.dependency_resolutions.get(import_source) {
-        if let Some(ref resolved_id) = resolution.resolved_canonical_id {
-            return resolved_id == dependency_id;
-        }
-        if resolution
-            .possible_canonical_ids
-            .iter()
-            .any(|c| c == dependency_id)
-        {
-            return true;
+        // Use effective_target() for TS-first single-candidate selection.
+        // This matches only against the highest-priority candidate, not all possibles.
+        if let Some(target) = resolution.effective_target() {
+            return target == dependency_id;
         }
     }
 

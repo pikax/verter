@@ -2141,7 +2141,10 @@ fn resolved_type_cache_is_bounded() {
                     type_name: "T".to_string(),
                     resolve_kind: verter_vfs::ResolveRequestKind::TypeImport,
                 },
-                crate::types::ResolvedTypeCacheEntry { resolved: None },
+                crate::types::ResolvedTypeCacheEntry {
+                    resolved: None,
+                    tracked_deps: Vec::new(),
+                },
             );
         }
         assert_eq!(
@@ -3900,4 +3903,392 @@ import Child from './Child.vue'
             "dependency change must invalidate the parent's cached fallthrough surface"
         );
     }
+}
+
+// ── Fix 2: eval-path host cache reuse within single resolve_component_meta ──
+
+#[test]
+fn eval_path_benefits_from_host_cache_within_single_resolve() {
+    // The meta_resolve loop (step 2) calls resolve_external_type_from_loaded_files
+    // with use_host_cache: true, warming the cache. Then imported_eval_inputs (step 3)
+    // calls the same function. After Fix 2 (use_host_cache: true in eval path),
+    // the eval path should hit the cache warmed earlier in the same call.
+    let project = make_project();
+    let session = project.open_session().unwrap();
+
+    session
+        .upsert(
+            "/src/types.ts",
+            "export interface ButtonProps { label: string }".to_string(),
+        )
+        .unwrap();
+    session
+        .upsert(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+import { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script>
+<template><button /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    // Reset counters, then query component meta once
+    project.host().provenance().reset();
+    let meta = session
+        .get_component_meta("/src/Button.vue")
+        .unwrap()
+        .unwrap();
+    let p = provenance(&project);
+
+    assert_eq!(
+        meta.props.len(),
+        1,
+        "should resolve the prop from cross-file type"
+    );
+    assert_eq!(meta.props[0].name, "label");
+
+    // The eval path should have benefited from the host cache warmed by the
+    // meta_resolve path earlier in the same resolve_component_meta call.
+    // Before fix: hits == 0 (eval path passed use_host_cache: false)
+    // After fix: hits > 0 (eval path hits cache warmed by meta_resolve)
+    assert!(
+        p.resolved_external_type_cache_hits >= 1,
+        "eval path should hit host cache warmed by meta_resolve path within the same call, got hits={} misses={}",
+        p.resolved_external_type_cache_hits,
+        p.resolved_external_type_cache_misses,
+    );
+}
+
+// ── Fix 3: Eliminate double imported_eval_inputs per getComponentMeta ──
+
+#[test]
+fn imported_eval_inputs_called_once_per_get_component_meta() {
+    // A single get_component_meta() call should invoke imported_eval_inputs()
+    // exactly once, not twice. Before Fix 3, the flow was:
+    //   resolve_component_meta(Expanded) -> imported_eval_inputs()  [call 1]
+    //   extract_component_meta_from_resolved -> resolve_fallthrough_surface
+    //     -> build_fallthrough_eval_env -> imported_eval_inputs()   [call 2]
+    // After Fix 3, the cached inputs from call 1 are threaded through to
+    // build_fallthrough_eval_env_with_inputs, eliminating call 2.
+    let project = make_project();
+    let session = project.open_session().unwrap();
+
+    session
+        .upsert(
+            "/src/types.ts",
+            "export interface CardProps { title: string; subtitle?: string }".to_string(),
+        )
+        .unwrap();
+    session
+        .upsert(
+            "/src/Card.vue",
+            r#"<script setup lang="ts">
+import { CardProps } from './types'
+defineProps<CardProps>()
+</script>
+<template><div>{{ title }}</div></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Card.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    // Reset counters, then query component meta once
+    project.host().provenance().reset();
+    let meta = session
+        .get_component_meta("/src/Card.vue")
+        .unwrap()
+        .unwrap();
+    let p = provenance(&project);
+
+    // Sanity: props resolved correctly from cross-file type
+    assert_eq!(
+        meta.props.len(),
+        2,
+        "should resolve both props from cross-file type"
+    );
+    assert!(
+        meta.props.iter().any(|p| p.name == "title"),
+        "should have 'title' prop"
+    );
+    assert!(
+        meta.props.iter().any(|p| p.name == "subtitle"),
+        "should have 'subtitle' prop"
+    );
+
+    // The critical assertion: imported_eval_inputs should be called exactly once,
+    // not twice. The fallthrough path should reuse the cached inputs.
+    assert_eq!(
+        p.imported_eval_inputs_calls, 1,
+        "imported_eval_inputs should be called exactly once per get_component_meta, \
+         but was called {} times (the fallthrough path should reuse cached inputs)",
+        p.imported_eval_inputs_calls,
+    );
+}
+
+#[test]
+fn root_spread_with_cross_file_type_still_resolves_after_eval_caching() {
+    // Regression test for Fix 3: when cached eval inputs are threaded through
+    // to fallthrough resolution, root v-bind="importedObj" must still resolve
+    // the spread keys correctly and not degrade to UnknownSpread.
+    use verter_analysis::component_meta::AcceptedSurfaceCompleteness;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface WidgetProps { enabled: boolean }
+export const rootAttrs = { id: 'root', onClick: () => {} }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Widget.vue",
+            r#"<script setup lang="ts">
+import { WidgetProps, rootAttrs } from './types'
+defineProps<WidgetProps>()
+</script>
+<template><div v-bind="rootAttrs">content</div></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Widget.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let meta = get_meta(&project, "/src/Widget.vue");
+
+    // The declared prop must be present
+    assert!(
+        meta.props.iter().any(|p| p.name == "enabled"),
+        "should have the declared 'enabled' prop"
+    );
+
+    // The root spread keys ('id', 'click') must be consumed and subtracted
+    // from the accepted surface. If the eval caching broke, the spread would
+    // degrade to UnknownSpread and the surface would be LowerBound.
+    assert!(
+        !meta.accepted_props.iter().any(|p| p.name == "id"),
+        "root spread key 'id' must be consumed and subtracted from accepted attrs"
+    );
+    assert!(
+        !meta.accepted_events.iter().any(|e| e.name == "click"),
+        "root spread listener 'click' must be consumed and subtracted from accepted listeners"
+    );
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::Exact,
+        "with resolvable root spreads, accepted surface should be Exact, not degraded to LowerBound"
+    );
+}
+
+// ── Fix 4: type_reachable_count boundary scoping ──────────────────
+
+#[test]
+fn type_reachable_count_scopes_eval_sources_while_fallthrough_uses_all() {
+    // Component with:
+    // - a cross-file macro type dep (ButtonProps from ./types.ts)
+    // - an imported value (rootAttrs from ./utils.ts) used in v-bind spread
+    // - additional non-type imports (./helpers.ts)
+    //
+    // type_reachable_count should be > 0 (type dep sources) and < sources.len()
+    // (full graph includes non-type imports). Type eval uses only the prefix;
+    // fallthrough eval uses everything (including rootAttrs).
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export interface ButtonProps { label: string }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/helpers.ts",
+            "export function format(s: string): string { return s }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            "export const rootAttrs = { id: 'root-attrs-marker', onClick: () => {} }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import { ButtonProps } from './types'
+import { rootAttrs } from './utils'
+import { format } from './helpers'
+defineProps<ButtonProps>()
+const msg = format('hello')
+</script>
+<template><div v-bind="rootAttrs">{{ msg }}</div></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./helpers".to_string(),
+                resolved_canonical_id: Some("/src/helpers.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./utils".to_string(),
+                resolved_canonical_id: Some("/src/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let meta = get_meta(&project, "/src/App.vue");
+
+    // Type eval should still resolve props correctly (uses only type-reachable sources)
+    assert_eq!(meta.props.len(), 1, "should resolve the cross-file prop");
+    assert_eq!(meta.props[0].name, "label");
+
+    let state = cached_resolved_state(
+        &project,
+        "/src/App.vue",
+        crate::types::ResolverMode::Expanded,
+    )
+    .expect("expanded resolved state should be cached");
+    let imported_inputs = state
+        .cached_eval_inputs
+        .as_ref()
+        .expect("expanded resolved state should retain cached eval inputs");
+
+    assert!(
+        imported_inputs.type_reachable_count > 0,
+        "macro type deps should contribute at least one type-reachable source"
+    );
+    assert!(
+        imported_inputs.type_reachable_count < imported_inputs.sources.len(),
+        "full eval sources should include value-only imports beyond the type-reachable prefix"
+    );
+
+    let type_reachable_sources = &imported_inputs.sources[..imported_inputs.type_reachable_count];
+    let fallthrough_only_sources = &imported_inputs.sources[imported_inputs.type_reachable_count..];
+
+    assert!(
+        type_reachable_sources
+            .iter()
+            .any(|source| source.contains("interface ButtonProps")),
+        "type-reachable prefix should include the macro type source"
+    );
+    assert!(
+        !type_reachable_sources
+            .iter()
+            .any(|source| source.contains("root-attrs-marker")),
+        "value-only utils import should not be parsed during type eval"
+    );
+    assert!(
+        fallthrough_only_sources
+            .iter()
+            .any(|source| source.contains("root-attrs-marker")),
+        "fallthrough-only suffix should include the utils source used by v-bind"
+    );
+
+    let mut prefix_env = verter_analysis::type_eval_build::parse_and_build_env("");
+    for dep_source in type_reachable_sources {
+        prefix_env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
+            dep_source,
+        ));
+    }
+    let prefix_eval =
+        verter_analysis::type_eval_build::evaluate_value_expression("rootAttrs", &mut prefix_env)
+            .expect("value expression parsing should succeed");
+    assert!(
+        !matches!(prefix_eval, verter_analysis::type_expr::TypeExpr::Object(_)),
+        "type-reachable prefix alone should not resolve the value-only utils import, got: {prefix_eval:?}"
+    );
+
+    let mut full_env = verter_analysis::type_eval_build::parse_and_build_env("");
+    for dep_source in &imported_inputs.sources {
+        full_env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
+            dep_source,
+        ));
+    }
+    let full_eval =
+        verter_analysis::type_eval_build::evaluate_value_expression("rootAttrs", &mut full_env)
+            .expect("value expression parsing should succeed");
+    let full_object = match full_eval {
+        verter_analysis::type_expr::TypeExpr::Object(obj) => obj,
+        other => panic!("full eval sources should resolve rootAttrs to an object, got: {other:?}"),
+    };
+    let full_keys: Vec<String> = full_object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_analysis::type_expr::ObjectMember::Property(prop) => Some(prop.name.clone()),
+            verter_analysis::type_expr::ObjectMember::Method(method) => Some(method.name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        full_keys.iter().any(|key| key == "id"),
+        "full eval sources should expose attrs from the value-only utils import, got: {full_keys:?}"
+    );
+    assert!(
+        full_keys.iter().any(|key| key == "onClick"),
+        "full eval sources should expose listeners from the value-only utils import, got: {full_keys:?}"
+    );
+}
+
+#[test]
+fn type_reachable_count_zero_falls_back_to_all_sources() {
+    // Component with inline defineProps (no macro_type_deps) — type_reachable_count
+    // should be 0, and type eval should fall back to parsing all sources.
+    let project = make_project();
+    let session = project.open_session().unwrap();
+
+    session
+        .upsert(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("should get component meta");
+
+    // Type eval should still work with inline types
+    assert_eq!(meta.props.len(), 1, "should resolve inline prop");
+    assert_eq!(meta.props[0].name, "msg");
 }
