@@ -13,6 +13,7 @@
  * 5. Recursively traversing relative imports inside hydrated declaration files
  */
 import { dirname, join, parse, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
 import type { VerterHost, HostDependencyResolution, Workspace } from "@verter/native";
 
 type ResolveHook = (
@@ -20,6 +21,42 @@ type ResolveHook = (
   importer: string,
   options: { skipSelf: true },
 ) => Promise<unknown> | unknown;
+
+/**
+ * Minimal file access interface used by this module.
+ * When a `Workspace` is available, it wraps the native workspace.
+ * Otherwise, falls back to synchronous `node:fs` calls.
+ */
+interface FileAccess {
+  fileExists(path: string): boolean;
+  readFile(path: string): string | null;
+}
+
+function fileAccessFromWorkspace(ws: Workspace): FileAccess {
+  return {
+    fileExists: (path: string) => ws.fileExists(path),
+    readFile: (path: string) => ws.readFile(path),
+  };
+}
+
+function fileAccessFromDisk(): FileAccess {
+  return {
+    fileExists: (path: string) => {
+      try {
+        return existsSync(path);
+      } catch {
+        return false;
+      }
+    },
+    readFile: (path: string) => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    },
+  };
+}
 
 interface MacroTypeDep {
   typeName: string;
@@ -97,7 +134,7 @@ function resolvedIdFromHookResult(result: unknown): string | null {
  * checks (in order): `types`, `typings`, `exports["."].types`, sibling `.d.ts`,
  * package-root `index.d.ts`.
  */
-function findPackageDeclarationEntry(ws: Workspace, runtimeEntry: string): string | null {
+function findPackageDeclarationEntry(fa: FileAccess, runtimeEntry: string): string | null {
   let dir = dirname(runtimeEntry);
   const root = parse(dir).root;
 
@@ -106,7 +143,7 @@ function findPackageDeclarationEntry(ws: Workspace, runtimeEntry: string): strin
   let pkgDir: string | null = null;
   while (dir !== root) {
     const candidate = join(dir, "package.json");
-    if (ws.fileExists(normalizePath(candidate))) {
+    if (fa.fileExists(normalizePath(candidate))) {
       pkgJsonPath = candidate;
       pkgDir = dir;
       break;
@@ -118,7 +155,7 @@ function findPackageDeclarationEntry(ws: Workspace, runtimeEntry: string): strin
 
   let pkg: Record<string, unknown>;
   try {
-    const content = ws.readFile(normalizePath(pkgJsonPath));
+    const content = fa.readFile(normalizePath(pkgJsonPath));
     if (content === null) return null;
     pkg = JSON.parse(content);
   } catch {
@@ -128,34 +165,34 @@ function findPackageDeclarationEntry(ws: Workspace, runtimeEntry: string): strin
   // 1. `types` field
   if (typeof pkg.types === "string") {
     const typesPath = resolve(pkgDir, pkg.types);
-    if (ws.fileExists(normalizePath(typesPath))) return normalizePath(typesPath);
+    if (fa.fileExists(normalizePath(typesPath))) return normalizePath(typesPath);
   }
 
   // 2. `typings` field (deprecated alias)
   if (typeof pkg.typings === "string") {
     const typingsPath = resolve(pkgDir, pkg.typings);
-    if (ws.fileExists(normalizePath(typingsPath))) return normalizePath(typingsPath);
+    if (fa.fileExists(normalizePath(typingsPath))) return normalizePath(typingsPath);
   }
 
   // 3. `exports` with `types` condition
   if (pkg.exports && typeof pkg.exports === "object") {
     const typesFromExports = findTypesInExports(pkg.exports as Record<string, unknown>, pkgDir);
     if (typesFromExports) {
-      if (ws.fileExists(normalizePath(typesFromExports))) return normalizePath(typesFromExports);
+      if (fa.fileExists(normalizePath(typesFromExports))) return normalizePath(typesFromExports);
     }
   }
 
   // 4. Sibling `.d.ts` next to the runtime entry
   const runtimeBase = runtimeEntry.replace(/\.(js|mjs|cjs|jsx)$/, "");
   const siblingDts = runtimeBase + ".d.ts";
-  if (ws.fileExists(normalizePath(siblingDts))) return normalizePath(siblingDts);
+  if (fa.fileExists(normalizePath(siblingDts))) return normalizePath(siblingDts);
 
   const siblingDmts = runtimeBase + ".d.mts";
-  if (ws.fileExists(normalizePath(siblingDmts))) return normalizePath(siblingDmts);
+  if (fa.fileExists(normalizePath(siblingDmts))) return normalizePath(siblingDmts);
 
   // 5. Package-root `index.d.ts`
   const rootDts = join(pkgDir, "index.d.ts");
-  if (ws.fileExists(normalizePath(rootDts))) return normalizePath(rootDts);
+  if (fa.fileExists(normalizePath(rootDts))) return normalizePath(rootDts);
 
   return null;
 }
@@ -195,7 +232,7 @@ function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): s
 async function hydrateRelativeDependencyClosure(
   host: VerterHost,
   entryFile: string,
-  ws: Workspace,
+  fa: FileAccess,
   visited: Set<string>,
 ): Promise<void> {
   const normalizedEntry = normalizePath(entryFile);
@@ -247,7 +284,7 @@ async function hydrateRelativeDependencyClosure(
           });
           break;
         }
-        if (!ws.fileExists(normalized)) continue;
+        if (!fa.fileExists(normalized)) continue;
 
         // .vue files at the end of a barrel chain need their types available
         // for cross-file resolution. Upsert as SFC (not non_sfc) so script
@@ -257,7 +294,7 @@ async function hydrateRelativeDependencyClosure(
         if (normalized.endsWith(".vue")) {
           visited.add(normalized);
           try {
-            const vueSrc = ws.readFile(normalized);
+            const vueSrc = fa.readFile(normalized);
             if (vueSrc !== null) {
               host.upsert({ inputId: normalized, source: vueSrc });
             }
@@ -273,7 +310,7 @@ async function hydrateRelativeDependencyClosure(
 
         visited.add(normalized);
         try {
-          const depSource = ws.readFile(normalized);
+          const depSource = fa.readFile(normalized);
           if (depSource !== null) {
             host.upsert({
               inputId: normalized,
@@ -326,6 +363,9 @@ export async function hydrateMacroTypeDeps(
 
   if (!analysis.macroTypeDeps?.length) return;
 
+  // Create file access from workspace or fall back to disk
+  const fa: FileAccess = ws ? fileAccessFromWorkspace(ws) : fileAccessFromDisk();
+
   const hydratedRelativeVisited = new Set<string>();
 
   // Collect unique specifiers from macro type deps.
@@ -349,12 +389,12 @@ export async function hydrateMacroTypeDeps(
       if (result) resolvedPath = result;
     }
 
-    // For relative specifiers without a resolve hook, try workspace probing
-    if (!resolvedPath && isRelativeImport(specifier) && ws) {
+    // For relative specifiers without a resolve hook, try file probing
+    if (!resolvedPath && isRelativeImport(specifier)) {
       const absBase = resolve(dirname(filename), specifier);
       const candidates = [absBase, absBase + ".vue", absBase + "/index.vue"];
       for (const candidate of candidates) {
-        if (ws.fileExists(normalizePath(candidate))) {
+        if (fa.fileExists(normalizePath(candidate))) {
           resolvedPath = candidate;
           break;
         }
@@ -365,15 +405,13 @@ export async function hydrateMacroTypeDeps(
       const normalized = normalizePath(resolvedPath);
       if (normalized.endsWith(".vue")) {
         // Upsert the .vue file as SFC so the host can read its exported types
-        if (ws) {
-          try {
-            const vueSrc = ws.readFile(normalized);
-            if (vueSrc !== null) {
-              host.upsert({ inputId: normalized, source: vueSrc });
-            }
-          } catch {
-            // Read failed — skip
+        try {
+          const vueSrc = fa.readFile(normalized);
+          if (vueSrc !== null) {
+            host.upsert({ inputId: normalized, source: vueSrc });
           }
+        } catch {
+          // Read failed — skip
         }
         resolutions.push({ specifier, resolvedCanonicalId: normalized });
         continue;
@@ -388,46 +426,40 @@ export async function hydrateMacroTypeDeps(
         // no type info but types.d.ts has the full declarations.
         let effectivePath = resolvedPath;
         let effectiveNormalized = normalized;
-        if (ws) {
-          const jsExtMatch = resolvedPath.match(/\.(js|mjs|cjs)$/);
-          if (jsExtMatch) {
-            const base = resolvedPath.slice(0, -jsExtMatch[0].length);
-            const dtsExts = [".d.ts", ".d.mts", ".d.cts"];
-            for (const ext of dtsExts) {
-              const candidate = base + ext;
-              if (ws.fileExists(normalizePath(candidate))) {
-                effectivePath = candidate;
-                effectiveNormalized = normalizePath(candidate);
-                break;
-              }
+        const jsExtMatch = resolvedPath.match(/\.(js|mjs|cjs)$/);
+        if (jsExtMatch) {
+          const base = resolvedPath.slice(0, -jsExtMatch[0].length);
+          const dtsExts = [".d.ts", ".d.mts", ".d.cts"];
+          for (const ext of dtsExts) {
+            const candidate = base + ext;
+            if (fa.fileExists(normalizePath(candidate))) {
+              effectivePath = candidate;
+              effectiveNormalized = normalizePath(candidate);
+              break;
             }
           }
         }
-        if (ws) {
-          try {
-            const depSrc = ws.readFile(normalizePath(effectivePath));
-            if (depSrc !== null) {
-              host.upsert({ inputId: effectiveNormalized, source: depSrc, fileKind: "non_sfc" });
-            }
-          } catch {
-            // Read failed — skip
+        try {
+          const depSrc = fa.readFile(normalizePath(effectivePath));
+          if (depSrc !== null) {
+            host.upsert({ inputId: effectiveNormalized, source: depSrc, fileKind: "non_sfc" });
           }
+        } catch {
+          // Read failed — skip
         }
         resolutions.push({ specifier, resolvedCanonicalId: effectiveNormalized });
-        if (ws) {
-          await hydrateRelativeDependencyClosure(
-            host,
-            effectiveNormalized,
-            ws,
-            hydratedRelativeVisited,
-          );
-        }
+        await hydrateRelativeDependencyClosure(
+          host,
+          effectiveNormalized,
+          fa,
+          hydratedRelativeVisited,
+        );
         continue;
       }
     }
 
-    // Relative specifier with no resolve hook hit — try workspace probing
-    if (isRelativeImport(specifier) && ws) {
+    // Relative specifier with no resolve hook hit — try file probing
+    if (isRelativeImport(specifier)) {
       const absBase = resolve(dirname(filename), specifier);
       const probeCandidates = [
         absBase + ".ts",
@@ -439,10 +471,10 @@ export async function hydrateMacroTypeDeps(
       ];
       let found = false;
       for (const candidate of probeCandidates) {
-        if (ws.fileExists(normalizePath(candidate))) {
+        if (fa.fileExists(normalizePath(candidate))) {
           const normalized = normalizePath(candidate);
           try {
-            const depSrc = ws.readFile(normalized);
+            const depSrc = fa.readFile(normalized);
             if (depSrc !== null) {
               host.upsert({ inputId: normalized, source: depSrc, fileKind: "non_sfc" });
             }
@@ -450,7 +482,7 @@ export async function hydrateMacroTypeDeps(
             // skip
           }
           resolutions.push({ specifier, resolvedCanonicalId: normalized });
-          await hydrateRelativeDependencyClosure(host, normalized, ws, hydratedRelativeVisited);
+          await hydrateRelativeDependencyClosure(host, normalized, fa, hydratedRelativeVisited);
           found = true;
           break;
         }
@@ -491,10 +523,10 @@ export async function hydrateMacroTypeDeps(
 
     let entryPath: string | null = null;
 
-    if (runtimeEntry && ws) {
+    if (runtimeEntry) {
       // Find the declaration entry from package.json, or fall back to the
       // runtime entry itself if it's a .ts/.d.ts file (local project files).
-      entryPath = findPackageDeclarationEntry(ws, runtimeEntry);
+      entryPath = findPackageDeclarationEntry(fa, runtimeEntry);
       if (!entryPath && (runtimeEntry.endsWith(".ts") || runtimeEntry.endsWith(".d.ts"))) {
         entryPath = runtimeEntry;
       }
@@ -502,7 +534,7 @@ export async function hydrateMacroTypeDeps(
 
     // Fallback: for sub-path specifiers where runtime resolution failed,
     // find the package directory and probe for .d.ts files at the sub-path.
-    if (!entryPath && ws) {
+    if (!entryPath) {
       const { pkgName, subPath } = parseBareSpecifier(specifier);
       if (subPath) {
         let pkgDir: string | null = null;
@@ -517,7 +549,7 @@ export async function hydrateMacroTypeDeps(
           const root = parse(dir).root;
           while (dir !== root) {
             const candidate = join(dir, "node_modules", pkgName);
-            if (ws.fileExists(normalizePath(join(candidate, "package.json")))) {
+            if (fa.fileExists(normalizePath(join(candidate, "package.json")))) {
               pkgDir = candidate;
               break;
             }
@@ -536,7 +568,7 @@ export async function hydrateMacroTypeDeps(
             absBase,
           ];
           for (const candidate of candidates) {
-            if (ws.fileExists(normalizePath(candidate))) {
+            if (fa.fileExists(normalizePath(candidate))) {
               entryPath = normalizePath(candidate);
               break;
             }
@@ -550,33 +582,26 @@ export async function hydrateMacroTypeDeps(
     // Upsert the entry file
     const normalizedEntryPath = normalizePath(entryPath);
 
-    if (ws) {
-      try {
-        const source = ws.readFile(normalizedEntryPath);
-        if (source !== null) {
-          host.upsert({
-            inputId: normalizedEntryPath,
-            source,
-            fileKind: "non_sfc",
-          });
-          resolutions.push({
-            specifier,
-            resolvedCanonicalId: normalizedEntryPath,
-          });
-        } else {
-          continue;
-        }
-      } catch {
+    try {
+      const source = fa.readFile(normalizedEntryPath);
+      if (source !== null) {
+        host.upsert({
+          inputId: normalizedEntryPath,
+          source,
+          fileKind: "non_sfc",
+        });
+        resolutions.push({
+          specifier,
+          resolvedCanonicalId: normalizedEntryPath,
+        });
+      } else {
         continue;
       }
-
-      await hydrateRelativeDependencyClosure(
-        host,
-        normalizedEntryPath,
-        ws,
-        hydratedRelativeVisited,
-      );
+    } catch {
+      continue;
     }
+
+    await hydrateRelativeDependencyClosure(host, normalizedEntryPath, fa, hydratedRelativeVisited);
   }
 
   // Update the entry file's import dependencies to include the hydrated resolutions

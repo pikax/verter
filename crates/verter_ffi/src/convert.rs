@@ -1689,6 +1689,7 @@ mod tests {
                 },
             }],
             evaluated_types: None,
+            cached_eval_inputs: None,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));

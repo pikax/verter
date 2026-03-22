@@ -50,6 +50,7 @@ fn make_prop(name: &str) -> TemplatePropUsage {
     TemplatePropUsage {
         name: name.to_string(),
         is_bound: true,
+        expression: None,
         constness: PropValueConstness::Dynamic,
         referenced_bindings: vec![],
         from_spread: false,
@@ -129,6 +130,7 @@ fn builtin_attrs_not_flagged() {
             TemplatePropUsage {
                 name: "class".to_string(),
                 is_bound: false,
+                expression: None,
                 constness: PropValueConstness::Const,
                 referenced_bindings: vec![],
                 from_spread: false,
@@ -139,6 +141,7 @@ fn builtin_attrs_not_flagged() {
             TemplatePropUsage {
                 name: "style".to_string(),
                 is_bound: false,
+                expression: None,
                 constness: PropValueConstness::Const,
                 referenced_bindings: vec![],
                 from_spread: false,
@@ -383,6 +386,7 @@ fn diagnostics_have_correct_code_and_source() {
         vec![TemplatePropUsage {
             name: "unknown".to_string(),
             is_bound: true,
+            expression: None,
             constness: PropValueConstness::Dynamic,
             referenced_bindings: vec![],
             from_spread: false,
@@ -448,6 +452,7 @@ fn spread_prop_entry_ignored() {
         vec![TemplatePropUsage {
             name: String::new(),
             is_bound: true,
+            expression: None,
             constness: PropValueConstness::Unknown,
             referenced_bindings: vec![],
             from_spread: true,

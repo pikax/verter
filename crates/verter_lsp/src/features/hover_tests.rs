@@ -321,6 +321,7 @@ fn test_hover_on_component_shows_prop_constness() {
                         verter_analysis::template::TemplatePropUsage {
                             name: "title".into(),
                             is_bound: true,
+                            expression: None,
                             constness: verter_analysis::template::PropValueConstness::Dynamic,
                             referenced_bindings: vec!["msg".into()],
                             from_spread: false,
@@ -334,6 +335,7 @@ fn test_hover_on_component_shows_prop_constness() {
                         verter_analysis::template::TemplatePropUsage {
                             name: "disabled".into(),
                             is_bound: false,
+                            expression: None,
                             constness: verter_analysis::template::PropValueConstness::Const,
                             referenced_bindings: vec![],
                             from_spread: false,
@@ -734,6 +736,7 @@ fn test_hover_on_component_attr_does_not_show_constness() {
                     props: vec![verter_analysis::template::TemplatePropUsage {
                         name: "icon".into(),
                         is_bound: true,
+                        expression: None,
                         constness: verter_analysis::template::PropValueConstness::Dynamic,
                         referenced_bindings: vec!["x".into()],
                         from_spread: false,

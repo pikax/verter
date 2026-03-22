@@ -74,7 +74,7 @@ pub struct ResolvedComponentMetaState {
     /// Cached imported eval inputs from `resolve_component_meta(Expanded)`.
     /// Threaded through to `build_fallthrough_eval_env_with_inputs` to avoid
     /// a redundant second `imported_eval_inputs()` call in the fallthrough path.
-    pub(crate) cached_eval_inputs: Option<Arc<crate::host_manage::ImportedEvalInputs>>,
+    pub cached_eval_inputs: Option<Arc<crate::host_manage::ImportedEvalInputs>>,
 }
 
 /// Native provenance retained for an expanded type-registry entry.

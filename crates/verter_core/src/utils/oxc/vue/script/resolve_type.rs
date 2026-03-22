@@ -384,6 +384,7 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// The extends_type_names are extracted from heritage clauses as String names,
     /// since we need to look them up recursively. Heritage refs are preserved for
     /// utility types like `Pick<T, K>` that need type argument resolution.
+    #[allow(clippy::type_complexity)]
     pub interfaces: Vec<(
         Span,
         &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>,
@@ -437,6 +438,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
 
     /// Look up an interface by comparing spans against source bytes.
     /// Returns (body_members, extends_type_names).
+    #[allow(clippy::type_complexity)]
     pub fn find_interface(
         &self,
         name: &[u8],
@@ -944,17 +946,17 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
                 continue;
             }
             if let Some(type_args) = &h.type_arguments {
-                if !type_args.params.is_empty() {
-                    if try_resolve_heritage_utility_type(
+                if !type_args.params.is_empty()
+                    && try_resolve_heritage_utility_type(
                         base_name.as_str(),
                         type_args,
                         base_offset,
                         result,
                         ctx,
-                    ) {
-                        recursion_guard.pop();
-                        continue;
-                    }
+                    )
+                {
+                    recursion_guard.pop();
+                    continue;
                 }
             }
         }

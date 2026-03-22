@@ -56,8 +56,12 @@ fn log_snapshot_debug(
     ));
 }
 
+/// Imported eval inputs collected during component-meta resolution.
+/// Type is `pub` so cross-crate code can reference `Option<Arc<ImportedEvalInputs>>`
+/// (e.g., on `ResolvedComponentMetaState`), but fields are crate-private —
+/// only `verter_host` constructs and reads the contents.
 #[derive(Debug)]
-pub(crate) struct ImportedEvalInputs {
+pub struct ImportedEvalInputs {
     pub(crate) sources: Vec<String>,
     pub(crate) resolved_types: Vec<verter_analysis::ResolvedLocalType>,
     pub(crate) canonical_dependencies: std::collections::BTreeSet<String>,

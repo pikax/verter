@@ -483,6 +483,7 @@ mod tests {
         TemplatePropUsage {
             name: name.to_string(),
             is_bound: true,
+            expression: None,
             constness: PropValueConstness::Dynamic,
             referenced_bindings: vec![],
             from_spread: false,
