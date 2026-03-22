@@ -32,7 +32,7 @@ pub fn convert_raw_to_analysis(
     binding_class_unions: &[(String, Vec<String>)], // (binding_name, class_names)
     props_binding_name: Option<&str>,
 ) -> TemplateAnalysisSnapshot {
-    let components = raw
+    let components: Vec<TemplateComponentUsage> = raw
         .components
         .iter()
         .map(|c| {
@@ -61,6 +61,7 @@ pub fn convert_raw_to_analysis(
                     TemplatePropUsage {
                         name: p.name.clone(),
                         is_bound: p.is_bound,
+                        expression: p.expression.clone(),
                         constness,
                         referenced_bindings: p.referenced_bindings.clone(),
                         from_spread: p.from_spread,
@@ -362,6 +363,22 @@ pub fn convert_raw_to_analysis(
                 .flat_map(verter_analysis::template::extract_static_style_vars)
                 .collect();
 
+            let component_usage_index = if e.is_component {
+                let pascal_tag = to_pascal_case(&e.tag);
+                components
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| {
+                        c.span == e.span
+                            && (c.name == e.tag
+                                || c.name.eq_ignore_ascii_case(&e.tag)
+                                || c.name == pascal_tag)
+                    })
+                    .map(|(idx, _)| idx as u32)
+            } else {
+                None
+            };
+
             TemplateElement {
                 tag: e.tag.clone(),
                 is_component: e.is_component,
@@ -387,6 +404,7 @@ pub fn convert_raw_to_analysis(
                 dynamic_classes,
                 dynamic_style_vars,
                 static_style_vars,
+                component_usage_index,
                 span: e.span,
                 tag_span_end: e.tag_span_end,
                 content_end: e.content_end,
@@ -1186,6 +1204,59 @@ mod tests {
             result.components[0].dynamic_classes,
             vec!["primary", "secondary"],
             "component :class bare identifier should resolve from unions"
+        );
+    }
+
+    #[test]
+    fn component_element_gets_component_usage_index_from_span_match() {
+        let raw = RawTemplateData {
+            components: vec![RawComponentUsage {
+                tag_name: "Child".to_string(),
+                is_dynamic: false,
+                props: vec![],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_class_expr: None,
+                span: Span::new(10, 40),
+            }],
+            elements: vec![RawElementData {
+                tag: "Child".to_string(),
+                is_component: true,
+                is_self_closing: true,
+                has_v_if: false,
+                has_v_else: false,
+                has_v_else_if: false,
+                v_if_condition: None,
+                has_v_show: false,
+                has_v_html: false,
+                has_v_text: false,
+                has_text_content: false,
+                has_bare_text: false,
+                has_element_children: false,
+                nesting_depth: 0,
+                parent_tag: None,
+                parent_index: None,
+                span: Span::new(10, 40),
+                tag_span_end: 17,
+                content_end: 40,
+                attributes: vec![],
+                directives: vec![],
+                v_for_idx: None,
+                v_model_idx: None,
+                text_children: vec![],
+            }],
+            ..Default::default()
+        };
+
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+
+        assert_eq!(result.elements.len(), 1);
+        assert_eq!(
+            result.elements[0].component_usage_index,
+            Some(0),
+            "component elements should link to the matching TemplateComponentUsage by stable index"
         );
     }
 }

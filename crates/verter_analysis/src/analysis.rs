@@ -2211,18 +2211,20 @@ fn derive_macro_type_deps(
     let mut deps = Vec::new();
     let mut seen_deps = FxHashSet::default();
 
-    for m in macros {
+    for (macro_index, m) in macros.iter().enumerate() {
         if !m.is_type_based {
             continue;
         }
         for type_ref_name in &m.type_references {
             // Direct import match
             if let Some(source) = import_map.source(imports, type_ref_name) {
-                if seen_deps.insert((type_ref_name.clone(), m.kind)) {
+                if seen_deps.insert((type_ref_name.clone(), m.kind, macro_index)) {
                     deps.push(MacroTypeDep {
                         type_name: type_ref_name.clone(),
                         import_source: source.to_string(),
                         macro_kind: m.kind,
+                        macro_index,
+                        macro_span: m.span,
                     });
                 }
             } else {
@@ -2233,6 +2235,8 @@ fn derive_macro_type_deps(
                     imports,
                     import_map,
                     local_type_deps,
+                    macro_index,
+                    m.span,
                     &mut deps,
                     &mut seen_deps,
                     &mut FxHashSet::default(),
@@ -2252,8 +2256,10 @@ fn collect_transitive_deps(
     imports: &[AnalyzedImport],
     import_map: &ImportBindingMap,
     local_type_deps: &FxHashMap<String, Vec<String>>,
+    macro_index: usize,
+    macro_span: verter_span::Span,
     deps: &mut Vec<MacroTypeDep>,
-    seen_deps: &mut FxHashSet<(String, AnalyzedMacroKind)>,
+    seen_deps: &mut FxHashSet<(String, AnalyzedMacroKind, usize)>,
     visited: &mut FxHashSet<String>,
 ) {
     if !visited.insert(type_name.to_string()) {
@@ -2264,11 +2270,13 @@ fn collect_transitive_deps(
         for base_name in base_refs {
             if let Some(source) = import_map.source(imports, base_name) {
                 // Found an imported base type
-                if seen_deps.insert((base_name.clone(), macro_kind)) {
+                if seen_deps.insert((base_name.clone(), macro_kind, macro_index)) {
                     deps.push(MacroTypeDep {
                         type_name: base_name.clone(),
                         import_source: source.to_string(),
                         macro_kind,
+                        macro_index,
+                        macro_span,
                     });
                 }
             } else {
@@ -2279,6 +2287,8 @@ fn collect_transitive_deps(
                     imports,
                     import_map,
                     local_type_deps,
+                    macro_index,
+                    macro_span,
                     deps,
                     seen_deps,
                     visited,

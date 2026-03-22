@@ -129,6 +129,8 @@ pub struct TemplatePropUsage {
     pub name: String,
     /// Whether this is a bound prop (`:prop` vs `prop`).
     pub is_bound: bool,
+    /// Raw expression/value text when available.
+    pub expression: Option<String>,
     /// Constness classification of the expression.
     pub constness: PropValueConstness,
     /// Bindings referenced in the prop expression.
@@ -407,6 +409,9 @@ pub struct TemplateElement {
     pub dynamic_style_vars: Vec<DynamicStyleVar>,
     /// CSS variables set via static `style` attribute (e.g., `style="--color: red"`).
     pub static_style_vars: Vec<StaticStyleVar>,
+    /// Stable link to `TemplateComponentUsage` for component elements.
+    /// Index into `TemplateAnalysisSnapshot.components`. `None` for native elements.
+    pub component_usage_index: Option<u32>,
 }
 
 impl TemplateElement {
@@ -1424,6 +1429,9 @@ impl serde::Serialize for TemplatePropUsage {
         let mut s = serializer.serialize_struct("TemplatePropUsage", 5)?;
         s.serialize_field("name", &self.name)?;
         s.serialize_field("isBound", &self.is_bound)?;
+        if self.expression.is_some() {
+            s.serialize_field("expression", &self.expression)?;
+        }
         s.serialize_field("constness", &self.constness)?;
         if !self.referenced_bindings.is_empty() {
             s.serialize_field("referencedBindings", &self.referenced_bindings)?;
@@ -1450,6 +1458,8 @@ impl<'de> serde::Deserialize<'de> for TemplatePropUsage {
             name: String,
             #[serde(default)]
             is_bound: bool,
+            #[serde(default)]
+            expression: Option<String>,
             constness: PropValueConstness,
             #[serde(default)]
             referenced_bindings: Vec<String>,
@@ -1470,6 +1480,7 @@ impl<'de> serde::Deserialize<'de> for TemplatePropUsage {
         Ok(Self {
             name: w.name,
             is_bound: w.is_bound,
+            expression: w.expression,
             constness: w.constness,
             referenced_bindings: w.referenced_bindings,
             from_spread: w.from_spread,
@@ -1975,6 +1986,7 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             text_children: Vec::new(), // Not deserialized — Rust-only
             dynamic_style_vars: Vec::new(),
             static_style_vars: Vec::new(),
+            component_usage_index: None, // Populated later by host
         })
     }
 }
@@ -2345,6 +2357,7 @@ mod tests {
                 props: vec![TemplatePropUsage {
                     name: "msg".to_string(),
                     is_bound: false,
+                    expression: Some("hello".to_string()),
                     constness: PropValueConstness::Const,
                     referenced_bindings: vec![],
                     from_spread: false,
@@ -2461,6 +2474,7 @@ mod tests {
             text_children: Vec::new(),
             dynamic_style_vars: Vec::new(),
             static_style_vars: Vec::new(),
+            component_usage_index: None,
         };
 
         let json = serde_json::to_string(&element).expect("serialize");
@@ -2618,6 +2632,7 @@ mod tests {
         let prop = TemplatePropUsage {
             name: "".to_string(),
             is_bound: true,
+            expression: Some("obj".to_string()),
             constness: PropValueConstness::Unknown,
             referenced_bindings: vec!["obj".to_string()],
             from_spread: true,
@@ -3244,6 +3259,7 @@ mod tests {
             let v = TemplatePropUsage {
                 name: "foo".into(),
                 is_bound: true,
+                expression: Some("foo".into()),
                 constness: PropValueConstness::Const,
                 referenced_bindings: vec![],
                 from_spread: false,

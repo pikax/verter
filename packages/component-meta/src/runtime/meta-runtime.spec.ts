@@ -43,6 +43,7 @@ function mockNativeProject(): NativeMetaProject {
       return false;
     },
     configureProjects() {},
+    setHtmlIntrinsicsCatalog() {},
     openSession: () => mockNativeSession(),
     clearCaches() {},
     shutdown() {
@@ -65,7 +66,7 @@ function baseInput(root = "/project"): EngineKeyInput {
     configKind: "tsconfig",
     tsconfigPath: `${root}/tsconfig.json`,
     configHash: "hash1",
-    nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+    nativeFlags: { analysisLevel: "full" },
   };
 }
 

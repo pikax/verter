@@ -16,7 +16,6 @@ export interface EngineKeyInput {
   configHash: string;
   nativeFlags: {
     analysisLevel: string;
-    deepMacroResolutionType: boolean;
   };
 }
 
@@ -86,7 +85,6 @@ export function computeEngineKey(input: EngineKeyInput): string {
     input.tsconfigPath ? normalizePath(input.tsconfigPath) : "",
     input.configHash,
     input.nativeFlags.analysisLevel,
-    input.nativeFlags.deepMacroResolutionType ? "1" : "0",
   ];
   return parts.join("|");
 }

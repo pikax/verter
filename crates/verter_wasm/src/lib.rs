@@ -1083,22 +1083,6 @@ impl WasmMetaSession {
         }))?
     }
 
-    /// Resolve imported types for a file.
-    #[wasm_bindgen(js_name = "resolveImportedTypes")]
-    pub fn resolve_imported_types(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
-        let session = self.session()?;
-        catch_panic(AssertUnwindSafe(|| {
-            let types = session
-                .resolve_imported_types(canonical_or_alias)
-                .map_err(ffi_err)?;
-            if types.is_empty() {
-                Ok(JsValue::NULL)
-            } else {
-                to_wasm_value(&types)
-            }
-        }))?
-    }
-
     /// Get effective source for a file (overlay → base).
     #[wasm_bindgen(js_name = "getEffectiveSource")]
     pub fn get_effective_source(&self, canonical_id: &str) -> Result<JsValue, JsValue> {

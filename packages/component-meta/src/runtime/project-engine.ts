@@ -24,6 +24,7 @@ export interface NativeMetaProject {
   ensureLoaded(canonicalId: string): boolean;
   refreshBase(canonicalId: string): boolean;
   configureProjects(projects: unknown[]): void;
+  setHtmlIntrinsicsCatalog(catalogJson: string): void;
   openSession(): NativeMetaSession;
   clearCaches(): void;
   shutdown(): void;

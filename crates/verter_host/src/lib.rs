@@ -60,6 +60,7 @@ mod host_resolve;
 mod host_upsert;
 mod id;
 pub mod meta;
+pub mod meta_resolve;
 mod parse;
 #[cfg(feature = "scheduler")]
 pub mod scheduler_shim;
@@ -72,6 +73,7 @@ mod upsert;
 pub use types::*;
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
+pub use verter_core::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
 pub use verter_core::VERTER_TYPES_STANDALONE_DTS;
 
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
@@ -85,10 +87,6 @@ use id::canonicalize_id;
 pub use id::resolve_external;
 use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
-
-const DEEP_EXPANSION_INHERIT_CONFIG: u8 = 0;
-const DEEP_EXPANSION_DISABLED: u8 = 1;
-const DEEP_EXPANSION_ENABLED: u8 = 2;
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
@@ -132,17 +130,16 @@ pub struct VerterHost {
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,
-    /// Runtime override for `deep_macro_resolution_type`.
-    /// Allows the LSP to override deep expansion after host construction
-    /// (the setting arrives via initializationOptions, after the host is created).
-    /// Encoded as inherit/disabled/enabled so runtime config can override
-    /// the static host config in both directions.
-    pub(crate) deep_expansion_override: std::sync::atomic::AtomicU8,
     /// Host-level shared resolved external type cache.
     /// Keyed by (dep_canonical_id, dep_source_hash, type_name, resolve_kind).
     /// Bounded to RESOLVED_TYPE_CACHE_CAP entries; cleared on close/clear_compile_cache.
     pub(crate) resolved_type_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
+    /// Optional project-local HTML intrinsic override extracted from the
+    /// consumer project's installed TS/Vue JSX surface.
+    pub(crate) html_intrinsics_catalog: parking_lot::RwLock<
+        Option<Arc<verter_analysis::html_intrinsics::ProjectHtmlIntrinsicCatalog>>,
+    >,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -191,9 +188,7 @@ impl VerterHost {
             compile_cache: dashmap::DashMap::new(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            deep_expansion_override: std::sync::atomic::AtomicU8::new(
-                DEEP_EXPANSION_INHERIT_CONFIG,
-            ),
+            html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
 
@@ -215,9 +210,7 @@ impl VerterHost {
             metrics: HostMetrics::default(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            deep_expansion_override: std::sync::atomic::AtomicU8::new(
-                DEEP_EXPANSION_INHERIT_CONFIG,
-            ),
+            html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
 
@@ -256,37 +249,6 @@ impl VerterHost {
     /// Access provenance counters for component-meta observability.
     pub fn provenance(&self) -> &Arc<MetaProvenance> {
         &self.provenance
-    }
-
-    /// Enable or disable deep component-meta type expansion at runtime.
-    ///
-    /// This override takes effect for subsequent `get_analysis()` and
-    /// `get_component_meta()` calls. It is an atomic flag, safe to call
-    /// from the LSP after host construction.
-    pub fn set_deep_expansion(&self, enabled: bool) {
-        self.deep_expansion_override.store(
-            if enabled {
-                DEEP_EXPANSION_ENABLED
-            } else {
-                DEEP_EXPANSION_DISABLED
-            },
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    }
-
-    /// Whether deep macro resolution / component-meta expansion is active.
-    ///
-    /// Runtime override wins when set; otherwise the static config applies.
-    pub(crate) fn deep_expansion_enabled(&self) -> bool {
-        match self
-            .deep_expansion_override
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            DEEP_EXPANSION_INHERIT_CONFIG => self.config.deep_macro_resolution_type,
-            DEEP_EXPANSION_DISABLED => false,
-            DEEP_EXPANSION_ENABLED => true,
-            _ => self.config.deep_macro_resolution_type,
-        }
     }
 
     /// Clone the workspace Arc for internal use.
@@ -538,8 +500,8 @@ impl VerterHost {
                 entry.compile_slots.clear();
                 entry.raw_template_analysis = None;
                 entry.cached_tsc_extract = None;
-                entry.cached_evaluated_types = None;
-                entry.cached_enriched_analysis = None;
+                entry.cached_resolved_meta.clear();
+                entry.cached_fallthrough = None;
             }
         }
         #[cfg(not(feature = "scheduler"))]
@@ -548,11 +510,46 @@ impl VerterHost {
             for entry in files.values_mut() {
                 entry.compile_slots.clear();
                 entry.template_analysis = None;
-                entry.cached_evaluated_types = None;
-                entry.cached_enriched_analysis = None;
+                entry.cached_resolved_meta.clear();
             }
         }
         self.resolved_type_cache.lock().clear();
+    }
+
+    /// Clear only cached fallthrough surfaces.
+    pub(crate) fn clear_fallthrough_cache(&self) {
+        #[cfg(feature = "scheduler")]
+        {
+            for mut entry in self.compile_cache.iter_mut() {
+                entry.cached_fallthrough = None;
+            }
+        }
+    }
+
+    /// Install a project-local HTML intrinsic catalog for this host.
+    ///
+    /// The host remains the semantic owner. JavaScript only provides the raw
+    /// extracted tag/member surface from the project's installed types.
+    pub fn set_html_intrinsics_catalog(&self, catalog_json: &str) -> Result<(), String> {
+        let catalog =
+            verter_analysis::html_intrinsics::ProjectHtmlIntrinsicCatalog::from_json(catalog_json)
+                .map_err(|err| format!("invalid html intrinsics catalog: {err}"))?;
+        *self.html_intrinsics_catalog.write() = Some(Arc::new(catalog));
+        self.clear_fallthrough_cache();
+        Ok(())
+    }
+
+    pub(crate) fn intrinsic_members_for_tag(
+        &self,
+        tag: &str,
+    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
+        if let Some(catalog) = self.html_intrinsics_catalog.read().as_ref() {
+            if let Some(members) = catalog.members_for_tag(tag) {
+                return members.to_vec();
+            }
+        }
+
+        verter_analysis::html_intrinsics::owned_intrinsic_members_for_tag(tag)
     }
 
     /// Release all cached data (files, aliases, dependency graph).
@@ -592,6 +589,7 @@ impl VerterHost {
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
+        *self.html_intrinsics_catalog.write() = None;
 
         #[cfg(feature = "scheduler")]
         {
@@ -795,8 +793,8 @@ impl VerterHost {
             cc.latest_diagnostics.clear();
             cc.cached_tsc_extract = None;
             cc.raw_template_analysis = None;
-            cc.cached_evaluated_types = None;
-            cc.cached_enriched_analysis = None;
+            cc.cached_resolved_meta.clear();
+            cc.cached_fallthrough = None;
         }
     }
 

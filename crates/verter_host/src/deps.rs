@@ -365,8 +365,7 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
                 workspace,
             ) {
                 file.compile_slots.clear();
-                file.cached_evaluated_types = None;
-                file.cached_enriched_analysis = None;
+                file.cached_resolved_meta.clear();
             }
         }
     }
@@ -413,8 +412,8 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
         if let Some(mut cc) = compile_cache.get_mut(&owner) {
             if should_clear {
                 cc.compile_slots.clear();
-                cc.cached_evaluated_types = None;
-                cc.cached_enriched_analysis = None;
+                cc.cached_resolved_meta.clear();
+                cc.cached_fallthrough = None;
             }
             cc.resolved_type_hashes = view.resolved_type_hashes;
         }
@@ -524,8 +523,7 @@ pub(crate) fn smart_invalidate_dependents(
                 workspace,
             ) {
                 file.compile_slots.clear();
-                file.cached_evaluated_types = None;
-                file.cached_enriched_analysis = None;
+                file.cached_resolved_meta.clear();
             }
         }
     }

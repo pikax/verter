@@ -57,7 +57,6 @@ describe("computeEngineKey", () => {
     configHash: "abc123",
     nativeFlags: {
       analysisLevel: "full",
-      deepMacroResolutionType: true,
     },
   };
 
@@ -81,10 +80,10 @@ describe("computeEngineKey", () => {
     expect(computeEngineKey(base)).not.toBe(computeEngineKey(other));
   });
 
-  it("different analysis flags produce different key", () => {
+  it("different analysis levels produce different key", () => {
     const other = {
       ...base,
-      nativeFlags: { ...base.nativeFlags, deepMacroResolutionType: false },
+      nativeFlags: { ...base.nativeFlags, analysisLevel: "lite" },
     };
     expect(computeEngineKey(base)).not.toBe(computeEngineKey(other));
   });

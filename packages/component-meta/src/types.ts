@@ -44,6 +44,19 @@ export interface ComponentMeta {
   /** Per-style-block analysis. */
   styles: StyleMeta[];
 
+  // ── Fallthrough surface ────────────────────────────────────────
+
+  /** Accepted props: declared props + inherited attrs (computed by the host). */
+  acceptedProps: AcceptedPropMeta[];
+  /** Accepted events: declared emits + inherited listeners (computed by the host). */
+  acceptedEvents: AcceptedEventMeta[];
+  /** Whether `acceptedProps`/`acceptedEvents` are exact or only a sound lower bound. */
+  acceptedSurfaceCompleteness: AcceptedSurfaceCompleteness;
+  /** Root reachability classification for fallthrough inheritance. */
+  rootReachability: RootReachability;
+  /** Branch-structured inherited surface (declared members do NOT appear here). */
+  fallthroughSurface: FallthroughSurface;
+
   // ── Flags ──────────────────────────────────────────────────────
 
   /** Quick O(1) boolean checks for component characteristics. */
@@ -256,6 +269,216 @@ export interface SelectorMeta {
   text: string;
   /** Specificity as `[id, class, type]`. */
   specificity: [number, number, number];
+}
+
+// ── Component flags ────────────────────────────────────────────────
+
+// ── Fallthrough surface types ───────────────────────────────────────
+
+/** How a member arrived on the accepted surface. */
+export type MemberProvenance =
+  | { kind: "declared" }
+  | { kind: "inherited"; sources: InheritedSource[] };
+
+/** A single inheritance source. */
+export type InheritedSource =
+  | { kind: "nativeTag"; tag: string }
+  | { kind: "component"; canonicalId: string };
+
+/** Whether a member is always available or only in certain branches. */
+export type MemberAvailability = { kind: "always" } | { kind: "conditional"; branchKeys: string[] };
+
+/** Kind of accepted prop. */
+export type AcceptedPropKind = "declaredProp" | "attr";
+
+/** Kind of accepted event. */
+export type AcceptedEventKind = "declaredEmit" | "listener";
+
+/** Whether the accepted surface is exact or only a lower bound. */
+export type AcceptedSurfaceCompleteness = "exact" | "lowerBound";
+
+/** An accepted prop on the computed call-site surface. */
+export interface AcceptedPropMeta {
+  /** Prop/attr name. */
+  name: string;
+  /** Parsed type descriptor. */
+  type: TypeDescriptor;
+  /** Original TS type annotation string. */
+  rawType?: string;
+  /** Whether the prop is required. */
+  required: boolean;
+  /** How this member arrived on the surface. */
+  provenance: MemberProvenance;
+  /** In which branches this member is available. */
+  availability: MemberAvailability;
+  /** Whether this is a declared prop or an inherited attr. */
+  kind: AcceptedPropKind;
+}
+
+/** An accepted event on the computed call-site surface. */
+export interface AcceptedEventMeta {
+  /** Event/listener name. */
+  name: string;
+  /** Payload type descriptor. */
+  payload: TypeDescriptor;
+  /** Original emit signature string. */
+  rawSignature?: string;
+  /** How this member arrived on the surface. */
+  provenance: MemberProvenance;
+  /** In which branches this member is available. */
+  availability: MemberAvailability;
+  /** Whether this is a declared emit or an inherited listener. */
+  kind: AcceptedEventKind;
+}
+
+/** Root reachability classification for fallthrough inheritance. */
+export type RootReachability =
+  | { kind: "noFallthrough"; reason: NoFallthroughReason }
+  | { kind: "branches"; branches: RootBranch[] };
+
+/** Why a component has no fallthrough surface. */
+export type NoFallthroughReason =
+  | "inheritAttrsFalse"
+  | "multiRoot"
+  | "branchNotSingleRoot"
+  | "rootVFor"
+  | "noTemplate"
+  | "emptyTemplate"
+  | "textOrInterpolationRoot";
+
+/** A single root render branch. */
+export interface RootBranch {
+  /** Branch index in normalized source order. */
+  branchIndex: number;
+  /** Condition text for diagnostics only. */
+  conditionText?: string;
+  /** Root target reference. */
+  target: RootTargetRef;
+  /** Consumed root bindings. */
+  consumed: ConsumedRootBindings;
+  /** Whether `v-bind="obj"` spread is used on the root. */
+  hasUnknownSpread: boolean;
+}
+
+/** The kind of root render target. */
+export type RootTargetRef =
+  | { kind: "nativeElement"; elementIndex: number; tag: string }
+  | { kind: "dynamicComponentUsage"; elementIndex: number; usageIndex: number }
+  | {
+      kind: "componentUsage";
+      elementIndex: number;
+      usageIndex: number;
+      name: string;
+      importSource?: string;
+    }
+  | {
+      kind: "unresolvedTarget";
+      elementIndex: number;
+      tag: string;
+      reason: UnresolvedRootTargetReason;
+    };
+
+/** Why a root target cannot be resolved. */
+export type UnresolvedRootTargetReason =
+  | { kind: "dynamicComponentIs" }
+  | { kind: "slotOutlet" }
+  | { kind: "unsupportedBuiltin"; tag: string }
+  | { kind: "missingUsageLink" }
+  | { kind: "unresolvedImport" }
+  | { kind: "unknownRootTarget" };
+
+/** Attrs/listeners explicitly bound on the root element. */
+export interface ConsumedRootBindings {
+  /** Static attr names consumed on the root. */
+  attrs: string[];
+  /** Canonical listener names consumed on the root. */
+  listeners: string[];
+  /** Whether a dynamic attr name is bound. */
+  hasDynamicAttrName: boolean;
+  /** Whether a dynamic listener name is bound. */
+  hasDynamicListenerName: boolean;
+}
+
+/** The branch-structured inherited surface. */
+export type FallthroughSurface =
+  | { kind: "none"; reason: NoFallthroughReason }
+  | { kind: "branches"; branches: FallthroughBranch[] };
+
+/** Why generic-root specialization could not resolve a concrete instantiation. */
+export type GenericResolutionFailure =
+  | "spreadInput"
+  | "dynamicKey"
+  | "missingType"
+  | "unsupportedExpression"
+  | "missingUsageLink"
+  | "unresolvedChildGenericSurface";
+
+/** Known lower-bound causes for a partially resolved fallthrough branch. */
+export type PartialBranchReason =
+  | { kind: "dynamicAttrName" }
+  | { kind: "dynamicListenerName" }
+  | { kind: "unknownSpread" }
+  | { kind: "genericResolution"; failure: GenericResolutionFailure };
+
+/** Why a fallthrough branch could not be resolved at all. */
+export type UnresolvedBranchReason =
+  | { kind: "cycle"; canonicalId: string }
+  | { kind: "dynamicComponentIs" }
+  | { kind: "childResolutionFailed" }
+  | { kind: "unresolvedChildImport"; importSource?: string }
+  | { kind: "rootTarget"; reason: UnresolvedRootTargetReason }
+  | { kind: "genericResolution"; failure: GenericResolutionFailure };
+
+/** An inherited prop entry in a fallthrough branch. */
+export interface FallthroughPropEntry {
+  /** Prop/attr name. */
+  name: string;
+  /** Parsed type descriptor. */
+  type: TypeDescriptor;
+  /** Original TS type annotation string. */
+  rawType?: string;
+  /** Where this member was inherited from. */
+  sources: InheritedSource[];
+}
+
+/** An inherited event entry in a fallthrough branch. */
+export interface FallthroughEventEntry {
+  /** Event/listener name. */
+  name: string;
+  /** Payload type descriptor. */
+  payload: TypeDescriptor;
+  /** Original emit signature string. */
+  rawSignature?: string;
+  /** Where this member was inherited from. */
+  sources: InheritedSource[];
+}
+
+/** Status of a fallthrough branch. */
+export type BranchStatus =
+  | { kind: "resolved" }
+  | { kind: "partiallyUnresolved"; reasons: PartialBranchReason[] }
+  | { kind: "unresolved"; reason: UnresolvedBranchReason };
+
+/** A single step in the root resolution chain. */
+export type ResolvedRootStep =
+  | { kind: "nativeTag"; tag: string }
+  | { kind: "component"; canonicalId: string; componentName: string }
+  | { kind: "unresolved"; tag: string; reason: UnresolvedBranchReason };
+
+/** A single branch in the fallthrough surface. */
+export interface FallthroughBranch {
+  /** Deterministic branch key. */
+  branchKey: string;
+  /** Condition text for diagnostics only. */
+  conditionText?: string;
+  /** Inherited props in this branch (after subtraction). */
+  props: FallthroughPropEntry[];
+  /** Inherited events in this branch (after subtraction). */
+  events: FallthroughEventEntry[];
+  /** Chain of root steps traversed to produce this branch. */
+  rootChain: ResolvedRootStep[];
+  /** Resolution status of this branch. */
+  status: BranchStatus;
 }
 
 // ── Component flags ────────────────────────────────────────────────

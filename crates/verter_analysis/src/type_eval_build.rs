@@ -15,7 +15,7 @@ use oxc_span::GetSpan;
 use crate::type_eval::*;
 use crate::type_expr::{
     self, FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-    PrimitiveName, TypeExpr, TypeParam,
+    PrimitiveName, TypeExpr, TypeParam, ValueRef,
 };
 use crate::type_expr_lower::{has_immediate_vue_ignore_comment, lower_ts_type, property_key_name};
 
@@ -312,7 +312,7 @@ fn extract_variable(
     };
 
     // Extract type annotation from the variable declarator
-    let type_annotation = decl
+    let mut type_annotation = decl
         .type_annotation
         .as_ref()
         .map(|ta| lower_ts_type(&ta.type_annotation, source));
@@ -333,6 +333,13 @@ fn extract_variable(
                 object_shape = Some(extract_object_literal(obj, source));
             }
             _ => {}
+        }
+
+        if type_annotation.is_none() {
+            let inferred = infer_expression_type(init, source);
+            if !matches!(inferred, TypeExpr::Primitive(PrimitiveName::Any)) {
+                type_annotation = Some(inferred);
+            }
         }
     }
 
@@ -485,15 +492,32 @@ fn collect_return_types(
 /// Infer a simple type from an expression literal.
 fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
     match expr {
+        Expression::Identifier(ident) => TypeExpr::TypeOf(ValueRef {
+            path: vec![ident.name.as_str().to_string()],
+        }),
         Expression::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
         Expression::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
         Expression::NullLiteral(_) => TypeExpr::Primitive(PrimitiveName::Null),
+        Expression::ConditionalExpression(cond) => TypeExpr::union(vec![
+            infer_expression_type(&cond.consequent, source),
+            infer_expression_type(&cond.alternate, source),
+        ]),
+        Expression::ParenthesizedExpression(paren) => {
+            infer_expression_type(&paren.expression, source)
+        }
         Expression::ArrayExpression(_) => TypeExpr::Array {
             element: Box::new(TypeExpr::Primitive(PrimitiveName::Any)),
             readonly: false,
         },
         Expression::ObjectExpression(obj) => TypeExpr::Object(extract_object_literal(obj, source)),
+        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
+            let mut value = String::new();
+            for quasi in &tpl.quasis {
+                value.push_str(quasi.value.raw.as_str());
+            }
+            TypeExpr::string_literal(value)
+        }
         Expression::ArrowFunctionExpression(arrow) => {
             let sig = extract_arrow_signature(arrow, source);
             TypeExpr::Function(FunctionExpr {
@@ -1089,4 +1113,57 @@ pub fn parse_and_build_env(source: &str) -> EvalEnv {
     let source_type = SourceType::ts();
     let ret = Parser::new(&allocator, source, source_type).parse();
     build_eval_env(&ret.program, source)
+}
+
+/// Parse a JavaScript/TypeScript value expression into a lightweight [`TypeExpr`].
+///
+/// This preserves finite string literals, object-literal top-level shapes, identifier
+/// references via `typeof`, and conditional unions needed by the shared host-side
+/// fallthrough resolver.
+pub fn parse_value_expression_type(expression: &str) -> Option<TypeExpr> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let wrapped = format!("const __verter_expr__ = {expression};");
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, &wrapped, SourceType::ts()).parse();
+    let stmt = ret.program.body.first()?;
+    let Statement::VariableDeclaration(decl) = stmt else {
+        return None;
+    };
+    let declarator = decl.declarations.first()?;
+    let init = declarator.init.as_ref()?;
+    Some(lower_value_expression(init, &wrapped))
+}
+
+/// Parse and evaluate a value expression against an existing evaluation environment.
+pub fn evaluate_value_expression(expression: &str, env: &mut EvalEnv) -> Option<TypeExpr> {
+    let lowered = parse_value_expression_type(expression)?;
+    Some(crate::type_eval::evaluate(&lowered, env))
+}
+
+fn lower_value_expression(expr: &Expression<'_>, source: &str) -> TypeExpr {
+    match expr {
+        Expression::Identifier(ident) => TypeExpr::TypeOf(ValueRef {
+            path: vec![ident.name.as_str().to_string()],
+        }),
+        Expression::ConditionalExpression(cond) => TypeExpr::union(vec![
+            lower_value_expression(&cond.consequent, source),
+            lower_value_expression(&cond.alternate, source),
+        ]),
+        Expression::ParenthesizedExpression(paren) => {
+            lower_value_expression(&paren.expression, source)
+        }
+        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
+            let mut value = String::new();
+            for quasi in &tpl.quasis {
+                value.push_str(quasi.value.raw.as_str());
+            }
+            TypeExpr::string_literal(value)
+        }
+        Expression::TSAsExpression(ts_as) => lower_value_expression(&ts_as.expression, source),
+        Expression::TSSatisfiesExpression(sat) => lower_value_expression(&sat.expression, source),
+        _ => infer_expression_type(expr, source),
+    }
 }

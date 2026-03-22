@@ -38,6 +38,11 @@ function nativeMetaPayload(filePath: string) {
       hasInheritAttrsFalse: false,
       hasStoreUsage: false,
     },
+    acceptedProps: [],
+    acceptedEvents: [],
+    acceptedSurfaceCompleteness: "exact",
+    rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+    fallthroughSurface: { kind: "none", reason: "noTemplate" },
   };
 }
 
@@ -107,6 +112,7 @@ function createMockProject(baseFiles: Map<string, string>): NativeMetaProject {
       return baseFiles.has(id);
     },
     configureProjects() {},
+    setHtmlIntrinsicsCatalog() {},
     openSession: () => createMockSession(baseFiles),
     clearCaches() {},
     shutdown() {
@@ -144,7 +150,7 @@ describe("MetaProject public API", () => {
       configKind: "tsconfig" as const,
       configHash: "h1",
       tsconfigPath: "/test/tsconfig.json",
-      nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+      nativeFlags: { analysisLevel: "full" },
     };
 
     const engine1 = await runtime.getOrCreateEngine(input, bootstrap);
@@ -165,7 +171,7 @@ describe("MetaProject public API", () => {
       root: "/test",
       configKind: "inline" as const,
       configHash: "h2",
-      nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+      nativeFlags: { analysisLevel: "full" },
     };
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -195,7 +201,7 @@ describe("MetaProject public API", () => {
       root: "/test",
       configKind: "inline" as const,
       configHash: "h3",
-      nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+      nativeFlags: { analysisLevel: "full" },
     };
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -220,7 +226,7 @@ describe("MetaProject public API", () => {
       root: "/test",
       configKind: "inline" as const,
       configHash: "h4",
-      nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+      nativeFlags: { analysisLevel: "full" },
     };
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -243,7 +249,7 @@ describe("MetaProject public API", () => {
       root: "/test",
       configKind: "inline" as const,
       configHash: "h6",
-      nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+      nativeFlags: { analysisLevel: "full" },
     };
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -280,6 +286,171 @@ describe("MetaProject public API", () => {
     const meta = await project.getComponentMeta("Button.vue");
 
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
+  });
+
+  it("exposes raw native component-meta with resolution provenance", async () => {
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      getComponentMeta(id: string) {
+        return {
+          ...nativeMetaPayload(id),
+          typeRegistry: [
+            {
+              name: "Props",
+              type: {
+                kind: "object",
+                properties: [
+                  { name: "visible", optional: false, type: { kind: "primitive", name: "string" } },
+                ],
+              },
+              rawType: "export class Props { visible!: string; protected hidden!: boolean }",
+              declaration: {
+                requestedName: "Props",
+                resolvedName: "Props",
+                canonicalSource: "/test/types.ts",
+                spanStart: 12,
+                spanEnd: 81,
+                kind: "class",
+                text: "export class Props { visible!: string; protected hidden!: boolean }",
+              },
+            },
+          ],
+          resolution: {
+            mode: "expanded",
+            macros: [
+              {
+                macroIndex: 0,
+                macroKind: "defineProps",
+                typeName: "Props",
+                importSource: "./types",
+                declaration: {
+                  requestedName: "Props",
+                  resolvedName: "Props",
+                  canonicalSource: "/test/types.ts",
+                  spanStart: 12,
+                  spanEnd: 48,
+                  kind: "class",
+                  text: "export class Props { visible!: string; protected hidden!: boolean }",
+                },
+                nativeProps: [
+                  {
+                    name: "visible",
+                    isOptional: false,
+                    typeAnnotation: "string",
+                    visibility: "public",
+                    spanStart: 30,
+                    spanEnd: 45,
+                  },
+                  {
+                    name: "hidden",
+                    isOptional: false,
+                    typeAnnotation: "boolean",
+                    visibility: "protected",
+                    spanStart: 46,
+                    spanEnd: 64,
+                  },
+                ],
+                props: [
+                  {
+                    name: "visible",
+                    isOptional: false,
+                    typeAnnotation: "string",
+                  },
+                ],
+                emits: [],
+                slots: [],
+              },
+            ],
+          },
+        };
+      },
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<Props>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new MetaProject(session as any, "/test");
+
+    const nativeMeta = await project.getNativeComponentMeta("Button.vue");
+
+    expect(nativeMeta?.resolution?.mode).toBe("expanded");
+    expect(nativeMeta?.resolution?.macros[0]?.declaration.canonicalSource).toBe("/test/types.ts");
+    expect(nativeMeta?.resolution?.macros[0]?.nativeProps?.map((prop) => prop.name)).toEqual([
+      "visible",
+      "hidden",
+    ]);
+    expect(nativeMeta?.typeRegistry?.[0]?.rawType).toContain("export class Props");
+    expect(nativeMeta?.typeRegistry?.[0]?.declaration?.canonicalSource).toBe("/test/types.ts");
+  });
+
+  it("getNativeComponentMeta returns undefined for missing files", async () => {
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      ensureBaseFile: vi.fn(() => false),
+      getComponentMeta() {
+        return null;
+      },
+      getEffectiveSource() {
+        return undefined;
+      },
+      hasFile() {
+        return false;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new MetaProject(session as any, "/test");
+
+    const nativeMeta = await project.getNativeComponentMeta("NonExistent.vue");
+
+    // Assert+: should return undefined for a file that doesn't exist
+    expect(nativeMeta).toBeUndefined();
+  });
+
+  it("getNativeComponentMeta returns undefined for deleted files", async () => {
+    const getComponentMeta = vi
+      .fn()
+      .mockReturnValueOnce(nativeMetaPayload("/test/Button.vue"))
+      .mockReturnValue(null);
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      ensureBaseFile: vi.fn(() => true),
+      getComponentMeta,
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+      },
+      hasFile: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new MetaProject(session as any, "/test");
+
+    // First call succeeds
+    const firstMeta = await project.getNativeComponentMeta("Button.vue");
+    expect(firstMeta).toBeDefined();
+
+    // Simulate deletion — second call should return undefined
+    const secondMeta = await project.getNativeComponentMeta("Deleted.vue");
+    expect(secondMeta).toBeUndefined();
   });
 
   it("promotes lazy disk-backed files into the shared native project instead of session overlays", async () => {
@@ -338,7 +509,7 @@ describe("MetaProject public API", () => {
       root: "/test",
       configKind: "inline" as const,
       configHash: "h7",
-      nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+      nativeFlags: { analysisLevel: "full" },
     };
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -361,7 +532,7 @@ describe("MetaProject public API", () => {
       root: "/test",
       configKind: "inline" as const,
       configHash: "h5",
-      nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+      nativeFlags: { analysisLevel: "full" },
     };
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);

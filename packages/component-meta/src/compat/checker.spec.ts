@@ -18,8 +18,6 @@ import { primitive, unknown } from "../type-ir.js";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 
 let nextProjectRootId = 1;
-const itWithForcedGc =
-  typeof (globalThis as typeof globalThis & { gc?: () => void }).gc === "function" ? it : it.skip;
 
 async function createRuntimeChecker(
   name = "component-meta-checker",
@@ -62,6 +60,11 @@ function nativeMetaPayload(filePath: string) {
       hasInheritAttrsFalse: false,
       hasStoreUsage: false,
     },
+    acceptedProps: [],
+    acceptedEvents: [],
+    acceptedSurfaceCompleteness: "exact",
+    rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+    fallthroughSurface: { kind: "none", reason: "noTemplate" },
   };
 }
 
@@ -219,15 +222,6 @@ describe("mapComponentMeta", () => {
 
 describe("ComponentMetaChecker", () => {
   it("uses the native component-meta query instead of rebuilding from analysis snapshots", async () => {
-    const getAnalysis = vi.fn(() => {
-      throw new Error("legacy getAnalysis should not be called");
-    });
-    const resolveImportedTypes = vi.fn(() => {
-      throw new Error("legacy resolveImportedTypes should not be called");
-    });
-    const evaluateTypes = vi.fn(() => {
-      throw new Error("legacy evaluateTypes should not be called");
-    });
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const session = {
       closed: false,
@@ -249,9 +243,6 @@ describe("ComponentMetaChecker", () => {
     const checker = new ComponentMetaChecker(
       {
         upsert: vi.fn(),
-        getAnalysis,
-        resolveImportedTypes,
-        evaluateTypes,
       },
       "/tmp",
       {},
@@ -266,15 +257,38 @@ describe("ComponentMetaChecker", () => {
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
     expect(getComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getAnalysis).not.toHaveBeenCalled();
-    expect(resolveImportedTypes).not.toHaveBeenCalled();
-    expect(evaluateTypes).not.toHaveBeenCalled();
   });
 
-  it("createCheckerByJson owns a dedicated engine and tears it down on close", async () => {
+  it("createCheckerByJson reuses one pooled engine across include differences in selective-loading mode", async () => {
     shutdownMetaRuntime();
     const runtime = getMetaRuntime();
-    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-dedicated-json-"));
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `checker-pool-include-${nextProjectRootId++}`,
+    );
+
+    const checkerA = await createCheckerByJson(projectRoot, {
+      include: ["src/A.vue"],
+      compilerOptions: { baseUrl: "." },
+    });
+    const checkerB = await createCheckerByJson(projectRoot, {
+      include: ["src/B.vue"],
+      compilerOptions: { baseUrl: "." },
+    });
+
+    expect(runtime.engineCount).toBe(1);
+    expect(runtime.diagnostics.enginesCreated).toBe(1);
+    expect(runtime.diagnostics.enginesReused).toBe(1);
+
+    checkerA.close();
+    checkerB.close();
+    shutdownMetaRuntime();
+  });
+
+  it("createCheckerByJson uses pooled runtime leases instead of dedicated engines", async () => {
+    shutdownMetaRuntime();
+    const runtime = getMetaRuntime();
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-pooled-json-"));
     mkdirSync(resolve(projectRoot, "src"), { recursive: true });
     writeFileSync(
       resolve(projectRoot, "src", "App.vue"),
@@ -286,132 +300,56 @@ describe("ComponentMetaChecker", () => {
       include: ["src/**/*.vue"],
       compilerOptions: { baseUrl: "." },
     });
+
+    expect(runtime.engineCount).toBe(1);
+    expect(runtime.sessionCount).toBe(1);
+
     const engine = (checker as any)._session.engine;
-
-    const meta = await checker.getComponentMeta(resolve(projectRoot, "src", "App.vue"));
-
-    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
     expect(engine.state).toBe("active");
-    expect(runtime.engineCount).toBe(0);
 
     checker.close();
 
-    expect(engine.state).toBe("closed");
-    expect(engine.leaseCount).toBe(0);
-    expect(runtime.engineCount).toBe(0);
-    shutdownMetaRuntime();
-  });
-
-  it("createCheckerByJson can be created and disposed sequentially without pooling", async () => {
-    shutdownMetaRuntime();
-    const runtime = getMetaRuntime();
-    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-sequential-json-"));
-    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
-    writeFileSync(
-      resolve(projectRoot, "src", "App.vue"),
-      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
-      "utf8",
-    );
-
-    for (let index = 0; index < 4; index++) {
-      const checker = await createCheckerByJson(projectRoot, {
-        include: ["src/**/*.vue"],
-        compilerOptions: { baseUrl: "." },
-      });
-      const engine = (checker as any)._session.engine;
-
-      const meta = await checker.getComponentMeta(resolve(projectRoot, "src", "App.vue"));
-
-      expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
-      expect(engine.state).toBe("active");
-      expect(runtime.engineCount).toBe(0);
-
-      checker.dispose();
-
-      expect(engine.state).toBe("closed");
-      expect(engine.leaseCount).toBe(0);
-      expect(runtime.engineCount).toBe(0);
-    }
-
-    shutdownMetaRuntime();
-  });
-
-  // @ai-generated - Verifies the owned cleanup path used for abandoned dedicated checkers.
-  it("createCheckerByJson exposes owned resource cleanup for forgotten checkers", async () => {
-    shutdownMetaRuntime();
-    const runtime = getMetaRuntime();
-    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-owned-cleanup-json-"));
-    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
-    writeFileSync(
-      resolve(projectRoot, "src", "App.vue"),
-      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
-      "utf8",
-    );
-
-    const checker = await createCheckerByJson(projectRoot, {
-      include: ["src/**/*.vue"],
-      compilerOptions: { baseUrl: "." },
-    });
-    const engine = ((checker as any)._session as any).engine;
-    const ownedResources = (checker as any)._ownedResources;
-
-    expect(ownedResources).toBeDefined();
+    expect(runtime.engineCount).toBe(1);
+    expect(runtime.sessionCount).toBe(0);
     expect(engine.state).toBe("active");
-    expect(engine.leaseCount).toBe(1);
-    expect(runtime.engineCount).toBe(0);
-
-    ownedResources.release();
-
-    expect(engine.state).toBe("closed");
-    expect(engine.leaseCount).toBe(0);
-    expect(runtime.engineCount).toBe(0);
     shutdownMetaRuntime();
   });
 
-  // @ai-generated - Verifies abandoned dedicated compat checkers still release native resources.
-  itWithForcedGc(
-    "createCheckerByJson finalizes dedicated engines when callers forget close",
-    async () => {
-      shutdownMetaRuntime();
-      const runtime = getMetaRuntime();
-      const forceGc = (globalThis as typeof globalThis & { gc?: () => void }).gc!;
-      const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-finalize-json-"));
-      mkdirSync(resolve(projectRoot, "src"), { recursive: true });
-      writeFileSync(
-        resolve(projectRoot, "src", "App.vue"),
-        `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
-        "utf8",
-      );
-
-      let checker: ComponentMetaChecker | null = await createCheckerByJson(projectRoot, {
-        include: ["src/**/*.vue"],
-        compilerOptions: { baseUrl: "." },
-      });
-      const engine = ((checker as any)._session as any).engine;
-
-      await checker.getComponentMeta(resolve(projectRoot, "src", "App.vue"));
-      expect(engine.state).toBe("active");
-      expect(engine.leaseCount).toBe(1);
-      expect(runtime.engineCount).toBe(0);
-
-      checker = null;
-
-      for (let attempt = 0; attempt < 20 && engine.state !== "closed"; attempt++) {
-        forceGc();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-
-      expect(engine.state).toBe("closed");
-      expect(engine.leaseCount).toBe(0);
-      expect(runtime.engineCount).toBe(0);
-      shutdownMetaRuntime();
-    },
-  );
-
-  it("createChecker owns a dedicated engine and tears it down on close", async () => {
+  it("createChecker reuses one pooled engine for repeated tsconfig opens", async () => {
     shutdownMetaRuntime();
     const runtime = getMetaRuntime();
-    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-dedicated-tsconfig-"));
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-pooled-"));
+    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "tsconfig.json"),
+      JSON.stringify({
+        include: ["src/**/*.vue"],
+        compilerOptions: { baseUrl: "." },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(projectRoot, "src", "App.vue"),
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+      "utf8",
+    );
+
+    const checkerA = await createChecker(resolve(projectRoot, "tsconfig.json"));
+    const checkerB = await createChecker(resolve(projectRoot, "tsconfig.json"));
+
+    expect(runtime.engineCount).toBe(1);
+    expect(runtime.diagnostics.enginesCreated).toBe(1);
+    expect(runtime.diagnostics.enginesReused).toBe(1);
+
+    checkerA.close();
+    checkerB.close();
+    shutdownMetaRuntime();
+  });
+
+  it("createChecker and openMetaProject share one pooled engine for the same tsconfig", async () => {
+    shutdownMetaRuntime();
+    const runtime = getMetaRuntime();
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-project-shared-"));
     mkdirSync(resolve(projectRoot, "src"), { recursive: true });
     writeFileSync(
       resolve(projectRoot, "tsconfig.json"),
@@ -428,60 +366,16 @@ describe("ComponentMetaChecker", () => {
     );
 
     const checker = await createChecker(resolve(projectRoot, "tsconfig.json"));
-    const engine = (checker as any)._session.engine;
-
-    const meta = await checker.getComponentMeta("./src/App.vue");
-
-    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
-    expect(engine.state).toBe("active");
-    expect(runtime.engineCount).toBe(0);
-
-    checker.close();
-
-    expect(engine.state).toBe("closed");
-    expect(engine.leaseCount).toBe(0);
-    expect(runtime.engineCount).toBe(0);
-    shutdownMetaRuntime();
-  });
-
-  it("createChecker does not share pooled runtime state with openMetaProject", async () => {
-    shutdownMetaRuntime();
-    const runtime = getMetaRuntime();
-    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-project-isolated-"));
-    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
-    writeFileSync(
-      resolve(projectRoot, "tsconfig.json"),
-      JSON.stringify({
-        include: ["src/**/*.vue"],
-        compilerOptions: { baseUrl: "." },
-      }),
-      "utf8",
-    );
-    writeFileSync(
-      resolve(projectRoot, "src", "App.vue"),
-      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
-      "utf8",
-    );
-
     const project = await openMetaProject({
       root: projectRoot,
       tsconfig: resolve(projectRoot, "tsconfig.json"),
     });
-    const projectEngine = (project as any)._session.engine;
-    const checker = await createChecker(resolve(projectRoot, "tsconfig.json"));
-    const checkerEngine = (checker as any)._session.engine;
 
     expect(runtime.engineCount).toBe(1);
-    expect(projectEngine).not.toBe(checkerEngine);
-    expect(projectEngine.state).toBe("active");
-    expect(checkerEngine.state).toBe("active");
+    expect(runtime.diagnostics.enginesCreated).toBe(1);
+    expect(runtime.diagnostics.enginesReused).toBe(1);
 
     checker.close();
-
-    expect(checkerEngine.state).toBe("closed");
-    expect(projectEngine.state).toBe("active");
-    expect(runtime.engineCount).toBe(1);
-
     project.close();
     shutdownMetaRuntime();
   });
@@ -533,7 +427,6 @@ describe("ComponentMetaChecker", () => {
     const checker = new ComponentMetaChecker(
       {
         upsert: vi.fn(),
-        getAnalysis: vi.fn(),
       },
       "/tmp",
       {},
@@ -684,12 +577,6 @@ defineEmits<{
       getComponentMeta() {
         return null;
       },
-      getAnalysis() {
-        return null;
-      },
-      resolveImportedTypes() {
-        return null;
-      },
       getEffectiveSource() {
         return undefined;
       },
@@ -705,9 +592,6 @@ defineEmits<{
       {
         upsert() {},
         remove() {},
-        getAnalysis() {
-          return null;
-        },
       },
       "/tmp",
       {},
@@ -727,9 +611,6 @@ defineEmits<{
     const checker = new ComponentMetaChecker(
       {
         upsert() {},
-        getAnalysis() {
-          return null;
-        },
       },
       "/tmp",
       {},

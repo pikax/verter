@@ -1233,6 +1233,10 @@ pub struct MacroTypeDep {
     pub import_source: String,
     /// Which macro references this type.
     pub macro_kind: AnalyzedMacroKind,
+    /// Stable index of the originating macro in the raw snapshot.
+    pub macro_index: usize,
+    /// Stable identity of the originating macro in the raw snapshot.
+    pub macro_span: verter_span::Span,
 }
 
 /// Per-export signature for dependency files.

@@ -60,6 +60,7 @@ fn make_element(
         text_children: vec![],
         dynamic_style_vars: vec![],
         static_style_vars: vec![],
+        component_usage_index: None,
     }
 }
 

@@ -125,15 +125,11 @@ pub struct HostConfig {
     /// - [`AnalysisScope::LSP`](verter_analysis::AnalysisScope::LSP) — full for IDE features
     /// - [`AnalysisScope::LINTER`](verter_analysis::AnalysisScope::LINTER) — for lint rules
     pub analysis_scope: Option<verter_analysis::AnalysisScope>,
-
-    /// When `true`, `get_analysis()` enriches the snapshot with imported type
-    /// information by resolving `macro_type_deps` through the workspace (VFS
-    /// aliases, re-exports). Populates `prop_fields`/`emit_fields`/`slot_fields`
-    /// on target macros and adds resolved types to `resolved_local_types`.
+    /// Enable shared Rust-side generic root propagation for fallthrough resolution.
     ///
-    /// Designed for component-meta consumers that need full cross-file type
-    /// resolution without a TypeScript Program. Defaults to `false`.
-    pub deep_macro_resolution_type: bool,
+    /// When enabled, the host may specialize child root targets from
+    /// statically resolvable call-site prop types.
+    pub generic_root_propagation: bool,
 }
 
 impl Default for HostConfig {
@@ -158,7 +154,7 @@ impl Default for HostConfig {
             ],
             analysis_level: AnalysisLevel::Full,
             analysis_scope: None,
-            deep_macro_resolution_type: false,
+            generic_root_propagation: false,
         }
     }
 }
@@ -170,6 +166,29 @@ impl HostConfig {
         self.analysis_scope
             .unwrap_or_else(|| self.analysis_level.to_scope())
     }
+}
+
+/// Explicit mode for the shared host-backed component-meta resolver.
+///
+/// Mode selection is always explicit at the caller boundary — it is never
+/// inferred inside `component_meta.rs`, the compat layer, or from legacy
+/// booleans/config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResolverMode {
+    /// Resolve symbol identity and canonical declaration location only.
+    /// Does not materialize expanded prop/emit/slot shapes.
+    /// Does not compute evaluated types.
+    /// Does not populate type-registry entries.
+    /// For type-bearing JSDoc tags, resolves referenced symbol identity
+    /// and canonical location without expansion.
+    Type,
+
+    /// Full expansion: begins from the same declaration traversal path as
+    /// `Type`, then materializes props/emits/slots, attaches resolved JSDoc,
+    /// populates type-registry entries, and computes evaluated types.
+    /// Typed JSDoc payloads are expanded using the same type semantics as
+    /// TS types.
+    Expanded,
 }
 
 /// Per-compilation variant options.
@@ -1096,13 +1115,8 @@ pub(crate) struct FileEntry {
     /// call and reused for subsequent calls with different external types or modes.
     /// Cleared on source change (semantic_hash mismatch during upsert).
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
-    /// Cached component-meta type evaluation for this file content.
-    pub(crate) cached_evaluated_types: Option<(
-        Hash16,
-        Arc<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
-    )>,
-    /// Cached enriched analysis snapshot keyed by whole_hash.
-    pub(crate) cached_enriched_analysis: Option<(Hash16, Arc<FileAnalysisSnapshot>)>,
+    /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
+    pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
 }
 
 impl FileMeta {
@@ -1164,17 +1178,8 @@ pub(crate) struct CompileCacheEntry {
     /// Cached TSC extract keyed by whole_hash. On read: stored hash must match
     /// effective_file_state().whole_hash. Cleared on upsert when whole_hash changes.
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
-    /// Cached lightweight type evaluation keyed by whole_hash.
-    pub(crate) cached_evaluated_types: Option<(
-        Hash16,
-        Arc<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
-    )>,
-
-    /// Cached enriched analysis snapshot keyed by whole_hash.
-    /// Populated by `get_analysis()` when `deep_macro_resolution_type` is enabled.
-    /// Reused by subsequent `get_analysis()` and `evaluate_types()` calls for the
-    /// same unchanged file to avoid redundant deep enrichment.
-    pub(crate) cached_enriched_analysis: Option<(Hash16, Arc<FileAnalysisSnapshot>)>,
+    /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
+    pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
 
     /// Raw template analysis (source-derived, profileless).
     /// Computed by compute_template_analysis_if_missing() from raw scheduler data.
@@ -1193,6 +1198,10 @@ pub(crate) struct CompileCacheEntry {
     pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
     pub(crate) aliases: std::collections::BTreeSet<String>,
     pub(crate) generation: u64,
+
+    /// Cached fallthrough resolution keyed by (whole_hash, generic_root_propagation).
+    /// Cleared everywhere `cached_resolved_meta` is cleared.
+    pub(crate) cached_fallthrough: Option<(Hash16, bool, Arc<FallthroughResolution>)>,
 
     /// Eviction flag — when true, the file is invisible to host accessors
     /// but deps/aliases are preserved for old-state diffing during reload.
@@ -1268,6 +1277,19 @@ pub(crate) struct ResolvedTypeCacheEntry {
     pub resolved: Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
 }
 
+/// Cached host-owned component-meta resolved state.
+///
+/// The declaration-graph traversal cache remains shared and mode-agnostic.
+/// This cache stores the mode-specific materialized sidecar and verifies that
+/// both the owner file and every tracked dependency still match the hashes that
+/// produced the cached state.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedComponentMetaCacheEntry {
+    pub owner_whole_hash: Hash16,
+    pub dependency_hashes: Vec<(String, Hash16)>,
+    pub state: Arc<crate::meta_resolve::ResolvedComponentMetaState>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // MetaProvenance — per-host counters for component-meta observability
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1278,13 +1300,9 @@ pub(crate) struct ResolvedTypeCacheEntry {
 /// Host tests read counters directly via `host.provenance()`.
 pub struct MetaProvenance {
     pub get_component_meta_calls: std::sync::atomic::AtomicU64,
-    pub component_meta_legacy_workflow_reentry: std::sync::atomic::AtomicU64,
     pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,
     pub get_analysis_calls: std::sync::atomic::AtomicU64,
-    pub get_analysis_deep_enrich_runs: std::sync::atomic::AtomicU64,
-    pub get_analysis_enriched_cache_hits: std::sync::atomic::AtomicU64,
     pub evaluate_types_calls: std::sync::atomic::AtomicU64,
-    pub evaluate_types_reused_enriched_snapshot: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
 }
@@ -1293,13 +1311,9 @@ impl Default for MetaProvenance {
     fn default() -> Self {
         Self {
             get_component_meta_calls: std::sync::atomic::AtomicU64::new(0),
-            component_meta_legacy_workflow_reentry: std::sync::atomic::AtomicU64::new(0),
             component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64::new(0),
             get_analysis_calls: std::sync::atomic::AtomicU64::new(0),
-            get_analysis_deep_enrich_runs: std::sync::atomic::AtomicU64::new(0),
-            get_analysis_enriched_cache_hits: std::sync::atomic::AtomicU64::new(0),
             evaluate_types_calls: std::sync::atomic::AtomicU64::new(0),
-            evaluate_types_reused_enriched_snapshot: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
         }
@@ -1315,29 +1329,13 @@ impl std::fmt::Debug for MetaProvenance {
                 &self.get_component_meta_calls.load(Relaxed),
             )
             .field(
-                "component_meta_legacy_workflow_reentry",
-                &self.component_meta_legacy_workflow_reentry.load(Relaxed),
-            )
-            .field(
                 "component_meta_resolved_state_recomputes",
                 &self.component_meta_resolved_state_recomputes.load(Relaxed),
             )
             .field("get_analysis_calls", &self.get_analysis_calls.load(Relaxed))
             .field(
-                "get_analysis_deep_enrich_runs",
-                &self.get_analysis_deep_enrich_runs.load(Relaxed),
-            )
-            .field(
-                "get_analysis_enriched_cache_hits",
-                &self.get_analysis_enriched_cache_hits.load(Relaxed),
-            )
-            .field(
                 "evaluate_types_calls",
                 &self.evaluate_types_calls.load(Relaxed),
-            )
-            .field(
-                "evaluate_types_reused_enriched_snapshot",
-                &self.evaluate_types_reused_enriched_snapshot.load(Relaxed),
             )
             .field(
                 "resolved_external_type_cache_hits",
@@ -1357,19 +1355,11 @@ impl MetaProvenance {
         use std::sync::atomic::Ordering::Relaxed;
         MetaProvenanceSnapshot {
             get_component_meta_calls: self.get_component_meta_calls.load(Relaxed),
-            component_meta_legacy_workflow_reentry: self
-                .component_meta_legacy_workflow_reentry
-                .load(Relaxed),
             component_meta_resolved_state_recomputes: self
                 .component_meta_resolved_state_recomputes
                 .load(Relaxed),
             get_analysis_calls: self.get_analysis_calls.load(Relaxed),
-            get_analysis_deep_enrich_runs: self.get_analysis_deep_enrich_runs.load(Relaxed),
-            get_analysis_enriched_cache_hits: self.get_analysis_enriched_cache_hits.load(Relaxed),
             evaluate_types_calls: self.evaluate_types_calls.load(Relaxed),
-            evaluate_types_reused_enriched_snapshot: self
-                .evaluate_types_reused_enriched_snapshot
-                .load(Relaxed),
             resolved_external_type_cache_hits: self.resolved_external_type_cache_hits.load(Relaxed),
             resolved_external_type_cache_misses: self
                 .resolved_external_type_cache_misses
@@ -1381,19 +1371,33 @@ impl MetaProvenance {
     pub fn reset(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         self.get_component_meta_calls.store(0, Relaxed);
-        self.component_meta_legacy_workflow_reentry
-            .store(0, Relaxed);
         self.component_meta_resolved_state_recomputes
             .store(0, Relaxed);
         self.get_analysis_calls.store(0, Relaxed);
-        self.get_analysis_deep_enrich_runs.store(0, Relaxed);
-        self.get_analysis_enriched_cache_hits.store(0, Relaxed);
         self.evaluate_types_calls.store(0, Relaxed);
-        self.evaluate_types_reused_enriched_snapshot
-            .store(0, Relaxed);
         self.resolved_external_type_cache_hits.store(0, Relaxed);
         self.resolved_external_type_cache_misses.store(0, Relaxed);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fallthrough Resolution
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The computed fallthrough inheritance resolution for a component.
+///
+/// Contains the accepted surface (declared + inherited) and the
+/// branch-structured inherited surface. Produced by `resolve_fallthrough_surface`.
+#[derive(Debug, Clone)]
+pub struct FallthroughResolution {
+    /// Accepted props: declared props + inherited attrs.
+    pub accepted_props: Vec<verter_analysis::component_meta::AcceptedPropAnalysis>,
+    /// Accepted events: declared emits + inherited listeners.
+    pub accepted_events: Vec<verter_analysis::component_meta::AcceptedEventAnalysis>,
+    /// Whether the accepted surface is exact or a lower bound.
+    pub accepted_surface_completeness: verter_analysis::component_meta::AcceptedSurfaceCompleteness,
+    /// Branch-structured inherited surface.
+    pub fallthrough_surface: verter_analysis::component_meta::FallthroughSurface,
 }
 
 /// Serializable point-in-time snapshot of [`MetaProvenance`] counters.
@@ -1401,13 +1405,9 @@ impl MetaProvenance {
 #[serde(rename_all = "camelCase")]
 pub struct MetaProvenanceSnapshot {
     pub get_component_meta_calls: u64,
-    pub component_meta_legacy_workflow_reentry: u64,
     pub component_meta_resolved_state_recomputes: u64,
     pub get_analysis_calls: u64,
-    pub get_analysis_deep_enrich_runs: u64,
-    pub get_analysis_enriched_cache_hits: u64,
     pub evaluate_types_calls: u64,
-    pub evaluate_types_reused_enriched_snapshot: u64,
     pub resolved_external_type_cache_hits: u64,
     pub resolved_external_type_cache_misses: u64,
 }

@@ -2378,7 +2378,6 @@ fn macro_type_dep_resolves_types_only_package_exports() {
     );
     let host = VerterHost::new(
         HostConfig {
-            deep_macro_resolution_type: true,
             ..HostConfig::default()
         },
         ws.clone(),

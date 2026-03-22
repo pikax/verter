@@ -13,8 +13,9 @@
 
 use crate::type_expr::TypeExpr;
 use crate::types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind,
-    AnalyzedOptionsApi, AnalyzedPropField, JsdocTag, StoreUsage, VueApiCallSite,
+    AnalysisFlags, AnalyzedBinding, AnalyzedEmitField, AnalyzedImport, AnalyzedMacro,
+    AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, JsdocTag,
+    StoreUsage, VueApiCallSite,
 };
 
 /// Convenience: build `TypeExpr::Unknown { raw }` from a string.
@@ -30,12 +31,16 @@ fn unknown_type(raw: impl Into<String>) -> TypeExpr {
 ///
 /// All fields reference existing `verter_analysis` types.
 /// The host constructs this by projecting from its internal snapshot.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ComponentMetaFeatures {
-    /// When true, extractor consumes `evaluated_types` to materialize
-    /// expanded native `TypeExpr` results. When false, raw annotations are
-    /// preserved but deep-expanded types stay disabled.
-    pub expanded_types: bool,
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedMacroInput {
+    /// Index of the macro in `ComponentMetaInput.macros`.
+    pub macro_index: usize,
+    /// Host-resolved props for the macro.
+    pub props: Vec<AnalyzedPropField>,
+    /// Host-resolved emits for the macro.
+    pub emits: Vec<AnalyzedEmitField>,
+    /// Host-resolved slots for the macro.
+    pub slots: Vec<AnalyzedSlotField>,
 }
 
 pub struct ComponentMetaInput<'a> {
@@ -45,10 +50,11 @@ pub struct ComponentMetaInput<'a> {
     pub template: Option<&'a crate::template::TemplateAnalysisSnapshot>,
     pub options_api: Option<&'a AnalyzedOptionsApi>,
     pub analysis_flags: AnalysisFlags,
-    pub features: ComponentMetaFeatures,
     pub styles: &'a [crate::style::StyleBlockAnalysis],
     pub vue_api_calls: &'a [VueApiCallSite],
     pub store_usages: &'a [StoreUsage],
+    pub resolved_macros: &'a [ResolvedMacroInput],
+    pub resolved_type_registry: &'a [ResolvedTypeAnalysis],
     pub evaluated_types: Option<&'a crate::type_eval_build::EvaluatedComponentTypes>,
     pub file_path: &'a str,
 }
@@ -74,6 +80,17 @@ pub struct ComponentMetaAnalysis {
     pub vue_api_calls: Vec<VueApiCallAnalysis>,
     pub styles: Vec<StyleAnalysis>,
     pub flags: ComponentMetaFlags,
+    /// Root reachability classification for fallthrough inheritance.
+    /// Extracted from template facts only — host owns all inheritance semantics.
+    pub root_reachability: RootReachability,
+    /// Accepted props: declared props + inherited attrs (host-populated).
+    pub accepted_props: Vec<AcceptedPropAnalysis>,
+    /// Accepted events: declared emits + inherited listeners (host-populated).
+    pub accepted_events: Vec<AcceptedEventAnalysis>,
+    /// Whether the accepted surface is exact or a lower bound.
+    pub accepted_surface_completeness: AcceptedSurfaceCompleteness,
+    /// Branch-structured inherited surface (host-populated).
+    pub fallthrough_surface: FallthroughSurface,
     pub options_api: bool,
     pub file_path: String,
 }
@@ -253,6 +270,690 @@ pub struct ComponentMetaFlags {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Root Reachability
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Classification of a component's template root structure for fallthrough
+/// inheritance resolution. Extracted from `TemplateAnalysisSnapshot` facts only.
+///
+/// The host-owned resolver uses this to determine whether and how fallthrough
+/// inheritance applies. Analysis extracts facts; the host owns all semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RootReachability {
+    /// No fallthrough inheritance is possible.
+    NoFallthrough { reason: NoFallthroughReason },
+    /// One or more conditional branches, each with exactly one root target.
+    /// A single-element vec means an unconditional single root.
+    Branches { branches: Vec<RootBranch> },
+}
+
+/// Why a component has no fallthrough surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoFallthroughReason {
+    /// `defineOptions({ inheritAttrs: false })` or Options API `inheritAttrs: false`.
+    InheritAttrsFalse,
+    /// Multiple unconditional root elements (fragment).
+    MultiRoot,
+    /// A conditional branch does not resolve to exactly one root target.
+    BranchNotSingleRoot,
+    /// Root element has `v-for` (produces multiple DOM nodes).
+    RootVFor,
+    /// No `<template>` block in the SFC.
+    NoTemplate,
+    /// `<template>` exists but has no children.
+    EmptyTemplate,
+    /// Root children are only text/interpolation nodes (no element root).
+    TextOrInterpolationRoot,
+}
+
+/// A single root render branch in a component's template.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootBranch {
+    /// Branch index in normalized source order (after transparent `<template v-if>` expansion).
+    pub branch_index: u16,
+    /// Condition text for diagnostics and UI display only. Serialized to FFI/JSON for
+    /// debugging purposes but never used for identity, hashing, equality, or cache keys.
+    /// Semantic identity comes from `branch_index` / `branch_key`, not condition text.
+    pub condition_text: Option<String>,
+    /// What the root target is.
+    pub target: RootTargetRef,
+    /// Attrs/listeners explicitly consumed on the root element.
+    pub consumed: ConsumedRootBindings,
+    /// Whether `v-bind="obj"` spread (without argument) is used on the root.
+    pub has_unknown_spread: bool,
+}
+
+/// The kind of root render target.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RootTargetRef {
+    /// Native HTML element (e.g., `<div>`, `<input>`).
+    NativeElement {
+        /// Index into `TemplateAnalysisSnapshot.elements`.
+        element_index: u32,
+        /// Tag name (lowercase).
+        tag: String,
+    },
+    /// Dynamic `<component :is>` root with a stable link to `TemplateComponentUsage`.
+    DynamicComponentUsage {
+        /// Index into `TemplateAnalysisSnapshot.elements`.
+        element_index: u32,
+        /// Index into `TemplateAnalysisSnapshot.components`.
+        usage_index: u32,
+    },
+    /// Resolved component with a stable link to `TemplateComponentUsage`.
+    ComponentUsage {
+        /// Index into `TemplateAnalysisSnapshot.elements`.
+        element_index: u32,
+        /// Index into `TemplateAnalysisSnapshot.components`.
+        usage_index: u32,
+        /// PascalCase component name.
+        name: String,
+        /// Import source path for cross-file resolution.
+        import_source: Option<String>,
+    },
+    /// Dynamic, slot, built-in, or otherwise unresolvable root target.
+    UnresolvedTarget {
+        /// Index into `TemplateAnalysisSnapshot.elements`.
+        element_index: u32,
+        /// Tag name as written.
+        tag: String,
+        /// Why this target cannot be resolved.
+        reason: UnresolvedRootTargetReason,
+    },
+}
+
+/// Why a root target cannot be resolved for fallthrough inheritance.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnresolvedRootTargetReason {
+    /// `<component :is="...">` — dynamic component.
+    DynamicComponentIs,
+    /// `<slot>` outlet as root.
+    SlotOutlet,
+    /// Vue built-in with special render behavior (Teleport, Transition, etc.).
+    UnsupportedBuiltin { tag: String },
+    /// Component element without a matching `TemplateComponentUsage` entry.
+    MissingUsageLink,
+    /// Component whose import source could not be resolved.
+    UnresolvedImport,
+    /// Catch-all for unrecognized root target patterns.
+    UnknownRootTarget,
+}
+
+/// Attrs/listeners explicitly bound on the root element (consumed, not inherited).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConsumedRootBindings {
+    /// Static attr names consumed on the root (e.g., `disabled`, `placeholder`).
+    /// Does NOT include `class` or `style` (Vue always merges those).
+    pub attrs: Vec<String>,
+    /// Canonical listener names consumed on the root (e.g., `click` from `@click` or `:onClick`).
+    pub listeners: Vec<String>,
+    /// Whether a computed/dynamic attr name is bound (e.g., `:[expr]`).
+    /// When true, the branch is a lower bound — some consumed attrs are unknown.
+    pub has_dynamic_attr_name: bool,
+    /// Whether a computed/dynamic listener name is bound (e.g., `@[expr]`, `v-on="obj"`,
+    /// or spread with unknown keys). When true, the branch is a lower bound.
+    pub has_dynamic_listener_name: bool,
+}
+
+/// Why generic-root specialization could not resolve a concrete instantiation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GenericResolutionFailure {
+    SpreadInput,
+    DynamicKey,
+    MissingType,
+    UnsupportedExpression,
+    MissingUsageLink,
+    UnresolvedChildGenericSurface,
+}
+
+/// Known lower-bound causes for a partially resolved fallthrough branch.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PartialBranchReason {
+    DynamicAttrName,
+    DynamicListenerName,
+    UnknownSpread,
+    GenericResolution { failure: GenericResolutionFailure },
+}
+
+/// Why a fallthrough branch could not be resolved at all.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnresolvedBranchReason {
+    Cycle { canonical_id: String },
+    DynamicComponentIs,
+    ChildResolutionFailed,
+    UnresolvedChildImport { import_source: Option<String> },
+    RootTarget { reason: UnresolvedRootTargetReason },
+    GenericResolution { failure: GenericResolutionFailure },
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fallthrough Inheritance Types (host-populated)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// How a member arrived on the accepted surface.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemberProvenance {
+    /// Member is declared locally (defineProps / defineEmits / Options API).
+    Declared,
+    /// Member is inherited from one or more fallthrough sources.
+    Inherited { sources: Vec<InheritedSource> },
+}
+
+/// A single inheritance source.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InheritedSource {
+    /// Inherited from a native HTML element.
+    NativeTag { tag: String },
+    /// Inherited from a child component.
+    Component { canonical_id: String },
+}
+
+/// Whether a member is always available or only in certain branches.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemberAvailability {
+    /// Available in all branches (unconditional single-root or all branches).
+    Always,
+    /// Available only in specific branches.
+    Conditional { branch_keys: Vec<String> },
+}
+
+/// Kind of accepted prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptedPropKind {
+    /// Locally declared prop.
+    DeclaredProp,
+    /// Inherited HTML attribute.
+    Attr,
+}
+
+/// Kind of accepted event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptedEventKind {
+    /// Locally declared emit.
+    DeclaredEmit,
+    /// Inherited native listener.
+    Listener,
+}
+
+/// Whether the accepted surface is exact or only a lower bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptedSurfaceCompleteness {
+    /// All accepted members are known exactly.
+    Exact,
+    /// Some members may be missing due to unresolved or partial branches.
+    LowerBound,
+}
+
+/// An accepted prop on the computed call-site surface.
+#[derive(Debug, Clone)]
+pub struct AcceptedPropAnalysis {
+    pub name: String,
+    pub type_expr: TypeExpr,
+    pub raw_type: Option<String>,
+    pub required: bool,
+    pub provenance: MemberProvenance,
+    pub availability: MemberAvailability,
+    pub kind: AcceptedPropKind,
+}
+
+/// An accepted event on the computed call-site surface.
+#[derive(Debug, Clone)]
+pub struct AcceptedEventAnalysis {
+    pub name: String,
+    pub payload: TypeExpr,
+    pub raw_signature: Option<String>,
+    pub provenance: MemberProvenance,
+    pub availability: MemberAvailability,
+    pub kind: AcceptedEventKind,
+}
+
+/// The branch-structured inherited surface. Declared members do NOT appear here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FallthroughSurface {
+    /// No fallthrough inheritance.
+    None { reason: NoFallthroughReason },
+    /// Branch-structured inherited props and events.
+    Branches { branches: Vec<FallthroughBranch> },
+}
+
+/// An inherited prop entry in a fallthrough branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FallthroughPropEntry {
+    pub name: String,
+    pub type_expr: TypeExpr,
+    pub raw_type: Option<String>,
+    pub sources: Vec<InheritedSource>,
+}
+
+/// An inherited event entry in a fallthrough branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FallthroughEventEntry {
+    pub name: String,
+    pub payload: TypeExpr,
+    pub raw_signature: Option<String>,
+    pub sources: Vec<InheritedSource>,
+}
+
+/// Status of a fallthrough branch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BranchStatus {
+    /// All members in this branch are exactly known.
+    Resolved,
+    /// Some members are known but the branch may have additional unknown members.
+    PartiallyUnresolved { reasons: Vec<PartialBranchReason> },
+    /// This branch could not be resolved at all.
+    Unresolved { reason: UnresolvedBranchReason },
+}
+
+/// A single step in the root resolution chain.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedRootStep {
+    /// Native HTML element target.
+    NativeTag { tag: String },
+    /// Resolved child component target.
+    Component {
+        canonical_id: String,
+        component_name: String,
+    },
+    /// Unresolved root target.
+    Unresolved {
+        tag: String,
+        reason: UnresolvedBranchReason,
+    },
+}
+
+/// A single branch in the fallthrough surface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FallthroughBranch {
+    /// Deterministic branch key (e.g., "0", "0.1", "2.0.3").
+    pub branch_key: String,
+    /// Condition text for diagnostics only.
+    pub condition_text: Option<String>,
+    /// Inherited props in this branch (after subtraction).
+    pub props: Vec<FallthroughPropEntry>,
+    /// Inherited events in this branch (after subtraction).
+    pub events: Vec<FallthroughEventEntry>,
+    /// Chain of root steps traversed to produce this branch.
+    pub root_chain: Vec<ResolvedRootStep>,
+    /// Resolution status of this branch.
+    pub status: BranchStatus,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Root Reachability Extraction
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Vue built-in components with special render behavior that are not valid
+/// fallthrough targets.
+const UNSUPPORTED_BUILTINS: &[&str] = &[
+    "Teleport",
+    "teleport",
+    "Transition",
+    "transition",
+    "TransitionGroup",
+    "transition-group",
+    "KeepAlive",
+    "keep-alive",
+    "Suspense",
+    "suspense",
+];
+
+/// Extract root reachability facts from template analysis.
+///
+/// This is a pure fact extraction — no fallthrough semantics, no merge logic.
+/// The host-owned resolver consumes this to compute the actual inherited surface.
+pub fn extract_root_reachability(
+    template: Option<&crate::template::TemplateAnalysisSnapshot>,
+    flags: &ComponentMetaFlags,
+) -> RootReachability {
+    // Rule 1: inheritAttrs: false → no fallthrough
+    if flags.has_inherit_attrs_false {
+        return RootReachability::NoFallthrough {
+            reason: NoFallthroughReason::InheritAttrsFalse,
+        };
+    }
+
+    // Rule 2: no template
+    let template = match template {
+        Some(t) => t,
+        None => {
+            return RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::NoTemplate,
+            }
+        }
+    };
+
+    // Rule 3: empty template (no elements at all)
+    if template.elements.is_empty() {
+        return RootReachability::NoFallthrough {
+            reason: NoFallthroughReason::EmptyTemplate,
+        };
+    }
+
+    // Collect root elements (parent_index == None)
+    let root_elements: Vec<(u32, &crate::template::TemplateElement)> = template
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, el)| el.parent_index.is_none())
+        .map(|(i, el)| (i as u32, el))
+        .collect();
+
+    // Rule 4: no root elements but template has content (text/interpolation only)
+    if root_elements.is_empty() {
+        return RootReachability::NoFallthrough {
+            reason: NoFallthroughReason::TextOrInterpolationRoot,
+        };
+    }
+
+    // Partition root elements into independent roots and conditional branches.
+    // An element with has_v_else or has_v_else_if is a branch continuation,
+    // not an independent root.
+    let mut independent_roots: Vec<Vec<(u32, &crate::template::TemplateElement)>> = Vec::new();
+    let mut current_chain: Vec<(u32, &crate::template::TemplateElement)> = Vec::new();
+
+    for (idx, el) in &root_elements {
+        if el.has_v_else || el.has_v_else_if {
+            // Continuation of the current chain
+            current_chain.push((*idx, el));
+        } else {
+            // New independent root — flush any pending chain
+            if !current_chain.is_empty() {
+                independent_roots.push(std::mem::take(&mut current_chain));
+            }
+            current_chain.push((*idx, el));
+        }
+    }
+    if !current_chain.is_empty() {
+        independent_roots.push(current_chain);
+    }
+
+    // Rule 6: multiple unconditional independent roots → fragment
+    if independent_roots.len() > 1 {
+        return RootReachability::NoFallthrough {
+            reason: NoFallthroughReason::MultiRoot,
+        };
+    }
+
+    // Exactly one independent root (possibly with v-if chain branches)
+    let chain = &independent_roots[0];
+
+    let mut branches = Vec::with_capacity(chain.len());
+    for (branch_index, (root_element_index, root_el)) in chain.iter().enumerate() {
+        let (element_index, actual_el) =
+            match normalize_root_actual_target(*root_element_index, template) {
+                Ok(actual) => actual,
+                Err(reason) => {
+                    return RootReachability::NoFallthrough { reason };
+                }
+            };
+
+        let target = classify_root_target(element_index, actual_el, template);
+        let consumed = extract_consumed_root_bindings(actual_el);
+        let has_unknown_spread = actual_el
+            .directives
+            .iter()
+            .any(|d| d.name == "bind" && d.argument.is_none());
+
+        branches.push(RootBranch {
+            branch_index: branch_index as u16,
+            condition_text: root_el.v_if_condition.clone(),
+            target,
+            consumed,
+            has_unknown_spread,
+        });
+    }
+
+    RootReachability::Branches { branches }
+}
+
+/// Normalize a root element to the actual single render target that participates
+/// in fallthrough inheritance.
+///
+/// Transparent root `<template v-if>` wrappers are unwrapped recursively, but
+/// only if they yield exactly one direct child element and no direct text or
+/// interpolation content.
+fn normalize_root_actual_target(
+    element_index: u32,
+    template: &crate::template::TemplateAnalysisSnapshot,
+) -> Result<(u32, &crate::template::TemplateElement), NoFallthroughReason> {
+    let el = &template.elements[element_index as usize];
+
+    if el.v_for.is_some() {
+        return Err(NoFallthroughReason::RootVFor);
+    }
+
+    if el.tag != "template" {
+        return Ok((element_index, el));
+    }
+
+    if !el.text_children.is_empty() {
+        return Err(NoFallthroughReason::BranchNotSingleRoot);
+    }
+
+    let child_elements: Vec<u32> = template
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.parent_index == Some(element_index))
+        .map(|(idx, _)| idx as u32)
+        .collect();
+
+    if child_elements.len() != 1 {
+        return Err(NoFallthroughReason::BranchNotSingleRoot);
+    }
+
+    normalize_root_actual_target(child_elements[0], template)
+}
+
+/// Classify a root element into a `RootTargetRef`.
+fn classify_root_target(
+    element_index: u32,
+    el: &crate::template::TemplateElement,
+    template: &crate::template::TemplateAnalysisSnapshot,
+) -> RootTargetRef {
+    let tag = &el.tag;
+
+    // Check for slot outlet
+    if tag == "slot" {
+        return RootTargetRef::UnresolvedTarget {
+            element_index,
+            tag: tag.clone(),
+            reason: UnresolvedRootTargetReason::SlotOutlet,
+        };
+    }
+
+    // Check for unsupported Vue built-ins
+    if UNSUPPORTED_BUILTINS.contains(&tag.as_str()) {
+        return RootTargetRef::UnresolvedTarget {
+            element_index,
+            tag: tag.clone(),
+            reason: UnresolvedRootTargetReason::UnsupportedBuiltin { tag: tag.clone() },
+        };
+    }
+
+    if el.is_component {
+        // Check for dynamic component
+        if tag == "component" {
+            return match el.component_usage_index.and_then(|idx| {
+                template
+                    .components
+                    .get(idx as usize)
+                    .map(|usage| (idx, usage))
+            }) {
+                Some((usage_index, usage)) if usage.props.iter().any(|prop| prop.name == "is") => {
+                    RootTargetRef::DynamicComponentUsage {
+                        element_index,
+                        usage_index,
+                    }
+                }
+                Some((_usage_index, _usage)) => RootTargetRef::UnresolvedTarget {
+                    element_index,
+                    tag: tag.clone(),
+                    reason: UnresolvedRootTargetReason::UnknownRootTarget,
+                },
+                None => RootTargetRef::UnresolvedTarget {
+                    element_index,
+                    tag: tag.clone(),
+                    reason: UnresolvedRootTargetReason::MissingUsageLink,
+                },
+            };
+        }
+
+        match el.component_usage_index.and_then(|idx| {
+            template
+                .components
+                .get(idx as usize)
+                .map(|usage| (idx, usage))
+        }) {
+            Some((usage_index, usage)) if usage.import_source.is_some() => {
+                RootTargetRef::ComponentUsage {
+                    element_index,
+                    usage_index,
+                    name: usage.name.clone(),
+                    import_source: usage.import_source.clone(),
+                }
+            }
+            Some((_usage_index, _usage)) => RootTargetRef::UnresolvedTarget {
+                element_index,
+                tag: tag.clone(),
+                reason: UnresolvedRootTargetReason::UnresolvedImport,
+            },
+            None => RootTargetRef::UnresolvedTarget {
+                element_index,
+                tag: tag.clone(),
+                reason: UnresolvedRootTargetReason::MissingUsageLink,
+            },
+        }
+    } else {
+        RootTargetRef::NativeElement {
+            element_index,
+            tag: tag.clone(),
+        }
+    }
+}
+
+/// Extract consumed root bindings from a root element.
+///
+/// `class` and `style` are never consumed because Vue always merges them through.
+/// `@click` and `:onClick` normalize to the same canonical listener name `"click"`.
+fn extract_consumed_root_bindings(el: &crate::template::TemplateElement) -> ConsumedRootBindings {
+    let mut bindings = ConsumedRootBindings::default();
+
+    // Process static and dynamic attributes.
+    // `:foo` has is_dynamic=true but a known name ("foo").
+    // `:[expr]` has is_dynamic=true with a computed name that we can't statically know.
+    // We detect computed names by checking if the name starts with `[`.
+    for attr in &el.attributes {
+        // Skip class and style — Vue always merges these
+        if attr.name == "class" || attr.name == "style" {
+            continue;
+        }
+
+        if attr.is_dynamic && attr.name.starts_with('[') {
+            // Computed attribute name (:[expr]) — can't determine which attr is consumed
+            bindings.has_dynamic_attr_name = true;
+        } else {
+            // Static name (both `foo="bar"` and `:foo="expr"` have known names)
+            bindings.attrs.push(attr.name.clone());
+        }
+    }
+
+    // Process directives
+    for dir in &el.directives {
+        match dir.name.as_str() {
+            "on" => {
+                // @event or v-on:event
+                if let Some(ref arg) = dir.argument {
+                    if arg.starts_with('[') {
+                        // @[expr] — dynamic listener name
+                        bindings.has_dynamic_listener_name = true;
+                    } else {
+                        // Canonical listener name = the event name (e.g., "click")
+                        bindings.listeners.push(arg.clone());
+                    }
+                } else {
+                    // v-on="obj" — dynamic listener names
+                    bindings.has_dynamic_listener_name = true;
+                }
+            }
+            "bind" => {
+                if let Some(ref arg) = dir.argument {
+                    // Skip class and style
+                    if arg == "class" || arg == "style" {
+                        continue;
+                    }
+                    if arg.starts_with('[') {
+                        // :[expr] — dynamic attribute name
+                        bindings.has_dynamic_attr_name = true;
+                    } else if arg.starts_with("on")
+                        && arg.len() > 2
+                        && arg.as_bytes()[2].is_ascii_uppercase()
+                    {
+                        // :onClick → canonical listener "click"
+                        let event_name = arg[2..3].to_lowercase() + &arg[3..];
+                        bindings.listeners.push(event_name);
+                    } else {
+                        bindings.attrs.push(arg.clone());
+                    }
+                }
+                // v-bind="obj" without argument is spread — handled by has_unknown_spread
+            }
+            "model" => {
+                // v-model on a root element.
+                // For component roots: consumes the model prop name + update:* event.
+                // For native roots: consumes the Vue-facing attr/listener pair
+                // based on the element type.
+                if el.is_component {
+                    if let Some(ref arg) = dir.argument {
+                        // v-model:title → consumes "title" prop + "update:title" event
+                        bindings.attrs.push(arg.clone());
+                        bindings.listeners.push(format!("update:{}", arg));
+                    } else {
+                        // v-model → consumes "modelValue" prop + "update:modelValue" event
+                        bindings.attrs.push("modelValue".to_string());
+                        bindings.listeners.push("update:modelValue".to_string());
+                    }
+                } else {
+                    // Native v-model: the consumed attr/listener pair depends on the
+                    // element type. Vue's runtime behavior:
+                    // - <input type="checkbox"> / <input type="radio"> → checked + change
+                    // - <select> → value + change
+                    // - everything else (<input>, <textarea>) → value + input
+                    let tag = el.tag.as_str();
+                    let is_checkbox_or_radio = tag == "input"
+                        && el.attributes.iter().any(|a| {
+                            a.name == "type"
+                                && matches!(a.value.as_deref(), Some("checkbox" | "radio"))
+                        });
+
+                    if is_checkbox_or_radio {
+                        bindings.attrs.push("checked".to_string());
+                        bindings.listeners.push("change".to_string());
+                    } else if tag == "select" {
+                        bindings.attrs.push("value".to_string());
+                        bindings.listeners.push("change".to_string());
+                    } else {
+                        // <input>, <textarea>, and other elements
+                        bindings.attrs.push("value".to_string());
+                        bindings.listeners.push("input".to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Dedup consumed names
+    bindings.attrs.sort();
+    bindings.attrs.dedup();
+    bindings.listeners.sort();
+    bindings.listeners.dedup();
+
+    bindings
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Extraction
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -263,11 +964,7 @@ pub struct ComponentMetaFlags {
 pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAnalysis {
     let options_api = input.options_api.is_some();
     let flags = extract_flags(&input);
-    let evaluated_types = if input.features.expanded_types {
-        input.evaluated_types
-    } else {
-        None
-    };
+    let evaluated_types = input.evaluated_types;
 
     let mut props = Vec::new();
     let mut events = Vec::new();
@@ -307,11 +1004,13 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         .collect();
 
     for (macro_index, mac) in input.macros.iter().enumerate() {
+        let resolved_macro = merged_resolved_macro_input(input.resolved_macros, macro_index);
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
+                let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
                 extract_props_from_macro(
                     macro_index,
-                    mac,
+                    &prop_fields,
                     &default_keys,
                     &default_values,
                     evaluated_types,
@@ -319,13 +1018,16 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                 );
             }
             AnalyzedMacroKind::DefineEmits => {
-                extract_events_from_macro(mac, evaluated_types, &mut events);
+                let emit_fields = merged_emit_fields(mac, resolved_macro.as_ref());
+                extract_events_from_macro(&emit_fields, evaluated_types, &mut events);
             }
             AnalyzedMacroKind::DefineSlots => {
-                extract_slots_from_macro(mac, evaluated_types, &mut slots);
+                let slot_fields = merged_slot_fields(mac, resolved_macro.as_ref());
+                extract_slots_from_macro(&slot_fields, evaluated_types, &mut slots);
             }
             AnalyzedMacroKind::DefineModel => {
-                extract_model_from_macro(mac, evaluated_types, &mut models);
+                let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
+                extract_model_from_macro(mac, &prop_fields, evaluated_types, &mut models);
             }
             AnalyzedMacroKind::DefineExpose => {
                 extract_exposed_from_macro(mac, input.bindings, evaluated_types, &mut exposed);
@@ -351,21 +1053,30 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         }
     }
 
-    for mac in input
-        .macros
-        .iter()
-        .filter(|mac| mac.kind == AnalyzedMacroKind::DefineModel)
-    {
-        synthesize_model_prop_and_event(mac, evaluated_types, &mut props, &mut events);
+    for (macro_index, mac) in input.macros.iter().enumerate() {
+        if mac.kind != AnalyzedMacroKind::DefineModel {
+            continue;
+        }
+        let resolved_macro = merged_resolved_macro_input(input.resolved_macros, macro_index);
+        let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
+        synthesize_model_prop_and_event(
+            mac,
+            &prop_fields,
+            evaluated_types,
+            &mut props,
+            &mut events,
+        );
     }
 
-    let type_registry = extract_type_registry(input.macros);
+    let type_registry = input.resolved_type_registry.to_vec();
     let components = extract_components(input.template);
     let template_refs = extract_template_refs(input.template);
     let imports = extract_imports(input.imports);
     let bindings = extract_bindings(input.bindings, input.template);
     let vue_api_calls = extract_vue_api_calls(input.vue_api_calls);
     let styles = extract_styles(input.styles);
+
+    let root_reachability = extract_root_reachability(input.template, &flags);
 
     ComponentMetaAnalysis {
         props,
@@ -381,6 +1092,13 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         vue_api_calls,
         styles,
         flags,
+        root_reachability,
+        accepted_props: Vec::new(),
+        accepted_events: Vec::new(),
+        accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface: FallthroughSurface::None {
+            reason: NoFallthroughReason::NoTemplate,
+        },
         options_api,
         file_path: input.file_path.to_string(),
     }
@@ -390,21 +1108,48 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
 
 fn extract_props_from_macro(
     macro_index: usize,
-    mac: &AnalyzedMacro,
+    prop_fields: &[AnalyzedPropField],
     default_keys: &std::collections::HashSet<&str>,
     default_values: &std::collections::HashMap<&str, &str>,
     evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
     out: &mut Vec<PropAnalysis>,
 ) {
-    let mut seen = std::collections::HashSet::new();
+    if let Some(eval_fields) = evaluated_define_props_fields(evaluated, macro_index) {
+        if !eval_fields.is_empty() {
+            for field in eval_fields {
+                let source_field = prop_fields.iter().find(|prop| prop.name == field.name);
+                let has_default = default_keys.contains(field.name.as_str());
+                let default_value = default_values
+                    .get(field.name.as_str())
+                    .map(|v| v.to_string());
 
-    for field in &mac.prop_fields {
+                out.push(PropAnalysis {
+                    name: field.name.clone(),
+                    type_expr: field.r#type.clone(),
+                    raw_type: source_field.and_then(|prop| prop.type_annotation.clone()),
+                    required: !field.optional && !has_default,
+                    has_default,
+                    default_value,
+                    description: source_field.and_then(|prop| prop.description.clone()),
+                    tags: source_field
+                        .map(|prop| prop.tags.clone())
+                        .unwrap_or_default(),
+                });
+            }
+            // NOTE: We intentionally do NOT fall back to prop_fields here.
+            // When the evaluator runs and produces results, it is authoritative —
+            // utility types like Pick/Omit may have intentionally excluded some
+            // prop_fields entries. Adding them back would break filtering.
+            return;
+        }
+    }
+
+    for field in prop_fields {
         let type_expr = resolve_prop_type(field, evaluated);
         let has_default = default_keys.contains(field.name.as_str());
         let default_value = default_values
             .get(field.name.as_str())
             .map(|v| v.to_string());
-        seen.insert(field.name.clone());
 
         out.push(PropAnalysis {
             name: field.name.clone(),
@@ -419,6 +1164,8 @@ fn extract_props_from_macro(
     }
 
     if let Some(eval_fields) = evaluated_define_props_fields(evaluated, macro_index) {
+        let mut seen: std::collections::HashSet<String> =
+            prop_fields.iter().map(|field| field.name.clone()).collect();
         for field in eval_fields {
             if !seen.insert(field.name.clone()) {
                 continue;
@@ -443,10 +1190,10 @@ fn extract_props_from_macro(
     }
 }
 
-fn evaluated_define_props_fields<'a>(
-    evaluated: Option<&'a crate::type_eval_build::EvaluatedComponentTypes>,
+fn evaluated_define_props_fields(
+    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
     macro_index: usize,
-) -> Option<&'a [crate::type_eval_build::EvaluatedField]> {
+) -> Option<&[crate::type_eval_build::EvaluatedField]> {
     evaluated?
         .define_props
         .iter()
@@ -457,6 +1204,46 @@ fn evaluated_define_props_fields<'a>(
 /// Resolve prop type via priority chain:
 /// 1. Evaluated TypeExpr (preferred)
 /// 2. Raw annotation text → TypeExpr::Unknown
+fn merged_resolved_macro_input(
+    resolved_macros: &[ResolvedMacroInput],
+    macro_index: usize,
+) -> Option<ResolvedMacroInput> {
+    let mut merged: Option<ResolvedMacroInput> = None;
+    let mut seen_props = rustc_hash::FxHashSet::default();
+    let mut seen_emits = rustc_hash::FxHashSet::default();
+    let mut seen_slots = rustc_hash::FxHashSet::default();
+
+    for resolved in resolved_macros
+        .iter()
+        .filter(|resolved| resolved.macro_index == macro_index)
+    {
+        let entry = merged.get_or_insert_with(|| ResolvedMacroInput {
+            macro_index,
+            props: Vec::new(),
+            emits: Vec::new(),
+            slots: Vec::new(),
+        });
+
+        for prop in &resolved.props {
+            if seen_props.insert(prop.name.clone()) {
+                entry.props.push(prop.clone());
+            }
+        }
+        for emit in &resolved.emits {
+            if seen_emits.insert(emit.name.clone()) {
+                entry.emits.push(emit.clone());
+            }
+        }
+        for slot in &resolved.slots {
+            if seen_slots.insert(slot.name.clone()) {
+                entry.slots.push(slot.clone());
+            }
+        }
+    }
+
+    merged
+}
+
 fn resolve_prop_type(
     field: &AnalyzedPropField,
     evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
@@ -475,11 +1262,11 @@ fn resolve_prop_type(
 // ── Events ─────────────────────────────────────────────────────────────────
 
 fn extract_events_from_macro(
-    mac: &AnalyzedMacro,
+    emit_fields: &[crate::types::AnalyzedEmitField],
     evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
     out: &mut Vec<EventAnalysis>,
 ) {
-    for field in &mac.emit_fields {
+    for field in emit_fields {
         let payload = if let Some(eval) = evaluated {
             eval.emits
                 .iter()
@@ -509,11 +1296,11 @@ fn extract_events_from_macro(
 // ── Slots ──────────────────────────────────────────────────────────────────
 
 fn extract_slots_from_macro(
-    mac: &AnalyzedMacro,
+    slot_fields: &[crate::types::AnalyzedSlotField],
     evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
     out: &mut Vec<SlotAnalysis>,
 ) {
-    for field in &mac.slot_fields {
+    for field in slot_fields {
         let bindings: Vec<SlotBindingAnalysis> = field
             .bindings
             .iter()
@@ -576,6 +1363,7 @@ fn merge_template_slots(
 
 fn extract_model_from_macro(
     mac: &AnalyzedMacro,
+    prop_fields: &[AnalyzedPropField],
     evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
     out: &mut Vec<ModelAnalysis>,
 ) {
@@ -593,7 +1381,7 @@ fn extract_model_from_macro(
             .unwrap_or_else(|| unknown_type("unknown".to_string()))
     } else {
         // Fall back to prop_fields on the macro itself
-        mac.prop_fields
+        prop_fields
             .iter()
             .find(|f| f.name == name)
             .and_then(|f| f.type_annotation.as_ref())
@@ -608,6 +1396,7 @@ fn extract_model_from_macro(
 
 fn synthesize_model_prop_and_event(
     mac: &AnalyzedMacro,
+    prop_fields: &[AnalyzedPropField],
     evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
     props: &mut Vec<PropAnalysis>,
     events: &mut Vec<EventAnalysis>,
@@ -617,8 +1406,7 @@ fn synthesize_model_prop_and_event(
         .clone()
         .unwrap_or_else(|| "modelValue".to_string());
     let has_default = mac.default_keys.iter().any(|key| key == &name);
-    let raw_type = mac
-        .prop_fields
+    let raw_type = prop_fields
         .iter()
         .find(|field| field.name == name)
         .and_then(|field| field.type_annotation.clone());
@@ -724,6 +1512,57 @@ fn resolve_exposed_type(
 
 // ── Options API fallback ───────────────────────────────────────────────────
 
+fn merged_prop_fields(
+    mac: &AnalyzedMacro,
+    resolved: Option<&ResolvedMacroInput>,
+) -> Vec<AnalyzedPropField> {
+    let mut fields = mac.prop_fields.clone();
+    let mut seen: rustc_hash::FxHashSet<String> =
+        fields.iter().map(|field| field.name.clone()).collect();
+    if let Some(resolved) = resolved {
+        for prop in &resolved.props {
+            if seen.insert(prop.name.clone()) {
+                fields.push(prop.clone());
+            }
+        }
+    }
+    fields
+}
+
+fn merged_emit_fields(
+    mac: &AnalyzedMacro,
+    resolved: Option<&ResolvedMacroInput>,
+) -> Vec<crate::types::AnalyzedEmitField> {
+    let mut fields = mac.emit_fields.clone();
+    let mut seen: rustc_hash::FxHashSet<String> =
+        fields.iter().map(|field| field.name.clone()).collect();
+    if let Some(resolved) = resolved {
+        for emit in &resolved.emits {
+            if seen.insert(emit.name.clone()) {
+                fields.push(emit.clone());
+            }
+        }
+    }
+    fields
+}
+
+fn merged_slot_fields(
+    mac: &AnalyzedMacro,
+    resolved: Option<&ResolvedMacroInput>,
+) -> Vec<crate::types::AnalyzedSlotField> {
+    let mut fields = mac.slot_fields.clone();
+    let mut seen: rustc_hash::FxHashSet<String> =
+        fields.iter().map(|field| field.name.clone()).collect();
+    if let Some(resolved) = resolved {
+        for slot in &resolved.slots {
+            if seen.insert(slot.name.clone()) {
+                fields.push(slot.clone());
+            }
+        }
+    }
+    fields
+}
+
 fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnalysis>) {
     for prop in &opts.props {
         let raw_type = prop
@@ -774,24 +1613,6 @@ fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAna
 }
 
 // ── Flags ──────────────────────────────────────────────────────────────────
-
-fn extract_type_registry(macros: &[AnalyzedMacro]) -> Vec<ResolvedTypeAnalysis> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut registry = Vec::new();
-
-    for mac in macros {
-        for resolved in &mac.resolved_local_types {
-            if seen.insert(resolved.name.clone()) {
-                registry.push(ResolvedTypeAnalysis {
-                    name: resolved.name.clone(),
-                    type_expr: crate::type_expr_lower::parse_type_annotation(&resolved.expanded),
-                });
-            }
-        }
-    }
-
-    registry
-}
 
 fn extract_components(
     template: Option<&crate::template::TemplateAnalysisSnapshot>,

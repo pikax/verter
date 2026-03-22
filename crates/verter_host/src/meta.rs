@@ -226,6 +226,16 @@ impl MetaProject {
         Ok(())
     }
 
+    /// Install a project-local HTML intrinsic catalog for fallthrough resolution.
+    pub fn set_html_intrinsics_catalog(&self, catalog_json: &str) -> Result<(), MetaError> {
+        self.check_alive()?;
+        let _gate = self.enter_base_context()?;
+        self.host
+            .set_html_intrinsics_catalog(catalog_json)
+            .map_err(MetaError::Host)?;
+        Ok(())
+    }
+
     /// Open a new session against this project.
     pub fn open_session(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
         self.check_alive()?;
@@ -501,13 +511,15 @@ impl MetaSession {
         self.with_overlay_context(|host| host.evaluate_types(canonical_or_alias))
     }
 
-    /// Resolve imported types for a file, through this session's overlay.
-    pub fn resolve_imported_types(
+    /// Return the host-owned resolved component-meta state for this session's
+    /// overlay view using the explicit shared resolver API.
+    pub fn resolve_component_meta_state(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Vec<verter_analysis::ResolvedLocalType>, MetaError> {
+        mode: crate::ResolverMode,
+    ) -> Result<Option<crate::meta_resolve::ResolvedComponentMetaState>, MetaError> {
         self.check_alive()?;
-        self.with_overlay_context(|host| host.resolve_imported_types(canonical_or_alias))
+        self.with_overlay_context(|host| host.resolve_component_meta(canonical_or_alias, mode))
     }
 
     /// Single native component-meta query through this session's overlay view.
@@ -520,6 +532,27 @@ impl MetaSession {
     ) -> Result<Option<verter_analysis::component_meta::ComponentMetaAnalysis>, MetaError> {
         self.check_alive()?;
         self.with_overlay_context(|host| host.get_component_meta(canonical_or_alias))
+    }
+
+    /// Combined component-meta query: returns BOTH the analysis projection AND
+    /// the resolved-meta sidecar in a single call. Avoids the double
+    /// `resolve_component_meta(Expanded)` call that would happen if
+    /// `get_component_meta()` and `resolve_component_meta_state()` were
+    /// called separately.
+    pub fn get_component_meta_with_resolution(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<(
+            verter_analysis::component_meta::ComponentMetaAnalysis,
+            crate::meta_resolve::ResolvedComponentMetaState,
+        )>,
+        MetaError,
+    > {
+        self.check_alive()?;
+        self.with_overlay_context(|host| {
+            host.get_component_meta_with_resolution(canonical_or_alias)
+        })
     }
 
     /// Return provenance counters for this session's host.

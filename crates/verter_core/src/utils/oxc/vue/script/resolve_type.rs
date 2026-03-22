@@ -165,6 +165,28 @@ pub fn format_runtime_types(types: &[RuntimeType]) -> String {
     format!("[{}]", type_strs.join(", "))
 }
 
+/// Visibility of a resolved class/interface member.
+///
+/// Used by `meta_resolve.rs` to filter private/protected members from
+/// component props. The raw resolver preserves all members with their
+/// visibility tags — consumers decide whether to filter.
+///
+/// **Note**: Non-meta codegen paths (template compiler) do not currently
+/// filter by visibility. If `defineProps<MyClass>()` is used in a runtime
+/// codegen path, private members may leak as runtime props.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedMemberVisibility {
+    Public,
+    Protected,
+    Private,
+}
+
+impl ResolvedMemberVisibility {
+    pub const fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
 /// A resolved property from a type literal.
 #[derive(Debug, Clone)]
 pub struct ResolvedProp {
@@ -179,6 +201,9 @@ pub struct ResolvedProp {
     pub optional: bool,
     /// Inferred runtime types for this property
     pub types: Vec<RuntimeType>,
+    /// Visibility of the member when it originated from a class member.
+    /// Interface/type-literal members are always public.
+    pub visibility: ResolvedMemberVisibility,
     /// Span of the type annotation (excluding the `: ` prefix) in the source.
     /// Set for property signatures with explicit type annotations; `None` for
     /// method signatures and companion-script props.
@@ -366,6 +391,9 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
         &'ctx [TSInterfaceHeritage<'a>],
         Option<&'ctx TSTypeParameterDeclaration<'a>>,
     )>,
+    /// Local class declarations: (name_span, class_decl).
+    /// Classes resolve to their instance-side shape in type position.
+    pub classes: Vec<(Span, &'ctx Class<'a>)>,
     /// Generic type parameters with constraints: (name_span, constraint_type)
     pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
     /// Bound generic type parameters for the current instantiation.
@@ -385,6 +413,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             source,
             type_aliases: Vec::new(),
             interfaces: Vec::new(),
+            classes: Vec::new(),
             type_params: Vec::new(),
             type_param_bindings: Vec::new(),
             diagnostics: Vec::new(),
@@ -423,6 +452,14 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             .map(|(_, members, extends, heritage, params)| {
                 (*members, extends.as_slice(), *heritage, *params)
             })
+    }
+
+    /// Look up a class by comparing spans against source bytes.
+    pub fn find_class(&self, name: &[u8]) -> Option<&'ctx Class<'a>> {
+        self.classes
+            .iter()
+            .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
+            .map(|(_, class)| *class)
     }
 
     /// Look up a type parameter constraint by comparing spans against source bytes
@@ -476,6 +513,11 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                     interface.type_parameters.as_deref(),
                 ));
             }
+            Statement::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    ctx.classes.push((Span::from(id.span), class));
+                }
+            }
             // Collect exported type aliases and interfaces:
             // `export type Foo = { bar: string }` / `export interface Foo { bar: string }`
             Statement::ExportNamedDeclaration(export) => {
@@ -499,6 +541,11 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                                 &interface.extends,
                                 interface.type_parameters.as_deref(),
                             ));
+                        }
+                        Declaration::ClassDeclaration(class) => {
+                            if let Some(id) = &class.id {
+                                ctx.classes.push((Span::from(id.span), class));
+                            }
                         }
                         _ => {}
                     }
@@ -580,6 +627,22 @@ pub fn extract_companion_types(
                 resolved.root_runtime_types = vec![RuntimeType::Object];
                 types.insert(name, resolved);
             }
+            Statement::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    let name = id.name.as_str().to_string();
+                    let mut resolved = ResolvedElements::default();
+                    let mut guard = vec![name.clone()];
+                    resolve_class_with_heritage_ctx_ref(
+                        class,
+                        content_offset,
+                        &mut resolved,
+                        &ctx,
+                        &mut guard,
+                    );
+                    resolved.root_runtime_types = vec![RuntimeType::Object];
+                    types.insert(name, resolved);
+                }
+            }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(decl) = &export.declaration {
                     match decl {
@@ -608,6 +671,22 @@ pub fn extract_companion_types(
                             );
                             resolved.root_runtime_types = vec![RuntimeType::Object];
                             types.insert(name, resolved);
+                        }
+                        Declaration::ClassDeclaration(class) => {
+                            if let Some(id) = &class.id {
+                                let name = id.name.as_str().to_string();
+                                let mut resolved = ResolvedElements::default();
+                                let mut guard = vec![name.clone()];
+                                resolve_class_with_heritage_ctx_ref(
+                                    class,
+                                    content_offset,
+                                    &mut resolved,
+                                    &ctx,
+                                    &mut guard,
+                                );
+                                resolved.root_runtime_types = vec![RuntimeType::Object];
+                                types.insert(name, resolved);
+                            }
                         }
                         _ => {}
                     }
@@ -707,6 +786,10 @@ fn resolve_root_runtime_type_with_ctx<'ctx, 'a: 'ctx>(
                 return Some(vec![RuntimeType::Object]);
             }
 
+            if ctx.find_class(type_name_bytes).is_some() {
+                return Some(vec![RuntimeType::Object]);
+            }
+
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
                 return Some(
                     resolve_root_runtime_type_with_ctx(constraint, ctx)
@@ -747,6 +830,10 @@ fn resolve_root_runtime_type_with_ctx_ref<'ctx, 'a: 'ctx>(
             }
 
             if ctx.find_interface(type_name_bytes).is_some() {
+                return Some(vec![RuntimeType::Object]);
+            }
+
+            if ctx.find_class(type_name_bytes).is_some() {
                 return Some(vec![RuntimeType::Object]);
             }
 
@@ -858,57 +945,13 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
             }
             if let Some(type_args) = &h.type_arguments {
                 if !type_args.params.is_empty() {
-                    let name_str = base_name.as_str();
-                    let handled = match name_str {
-                        "Pick" if type_args.params.len() >= 2 => {
-                            let mut inner = ResolvedElements::default();
-                            resolve_type_elements_inner_with_ctx(
-                                &type_args.params[0],
-                                base_offset,
-                                &mut inner,
-                                ctx,
-                            );
-                            let keys = extract_string_literal_keys(&type_args.params[1]);
-                            inner
-                                .props
-                                .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
-                            inner.emits.retain(|e| keys.contains(&e.name));
-                            result.props.extend(inner.props);
-                            result.emits.extend(inner.emits);
-                            true
-                        }
-                        "Omit" if type_args.params.len() >= 2 => {
-                            let mut inner = ResolvedElements::default();
-                            resolve_type_elements_inner_with_ctx(
-                                &type_args.params[0],
-                                base_offset,
-                                &mut inner,
-                                ctx,
-                            );
-                            let keys = extract_string_literal_keys(&type_args.params[1]);
-                            inner
-                                .props
-                                .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
-                            inner.emits.retain(|e| !keys.contains(&e.name));
-                            result.props.extend(inner.props);
-                            result.emits.extend(inner.emits);
-                            true
-                        }
-                        "Partial" | "Required" | "Readonly" if !type_args.params.is_empty() => {
-                            let mut inner = ResolvedElements::default();
-                            resolve_type_elements_inner_with_ctx(
-                                &type_args.params[0],
-                                base_offset,
-                                &mut inner,
-                                ctx,
-                            );
-                            result.props.extend(inner.props);
-                            result.emits.extend(inner.emits);
-                            true
-                        }
-                        _ => false,
-                    };
-                    if handled {
+                    if try_resolve_heritage_utility_type(
+                        base_name.as_str(),
+                        type_args,
+                        base_offset,
+                        result,
+                        ctx,
+                    ) {
                         recursion_guard.pop();
                         continue;
                     }
@@ -929,6 +972,14 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
                 iface_members,
                 &iface_extends_owned,
                 iface_heritage,
+                base_offset,
+                result,
+                ctx,
+                recursion_guard,
+            );
+        } else if let Some(class_decl) = ctx.find_class(base_bytes) {
+            resolve_class_with_heritage_ctx_ref(
+                class_decl,
                 base_offset,
                 result,
                 ctx,
@@ -993,71 +1044,13 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
                     // so we replicate the utility type dispatch inline. This covers the
                     // most common cases; truly complex types may need the JS-side
                     // type registry fallback.
-                    let name_str = base_name.as_str();
-                    let handled = match name_str {
-                        "Pick" if type_args.params.len() >= 2 => {
-                            let mut inner = ResolvedElements::default();
-                            resolve_type_elements_inner_with_ctx_ref(
-                                &type_args.params[0],
-                                base_offset,
-                                &mut inner,
-                                ctx,
-                            );
-                            let keys = extract_string_literal_keys(&type_args.params[1]);
-                            inner
-                                .props
-                                .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
-                            inner.emits.retain(|e| keys.contains(&e.name));
-                            result.props.extend(inner.props);
-                            result.emits.extend(inner.emits);
-                            true
-                        }
-                        "Omit" if type_args.params.len() >= 2 => {
-                            let mut inner = ResolvedElements::default();
-                            resolve_type_elements_inner_with_ctx_ref(
-                                &type_args.params[0],
-                                base_offset,
-                                &mut inner,
-                                ctx,
-                            );
-                            let keys = extract_string_literal_keys(&type_args.params[1]);
-                            inner
-                                .props
-                                .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
-                            inner.emits.retain(|e| !keys.contains(&e.name));
-                            result.props.extend(inner.props);
-                            result.emits.extend(inner.emits);
-                            true
-                        }
-                        "Partial" | "Required" | "Readonly" if !type_args.params.is_empty() => {
-                            let mut inner = ResolvedElements::default();
-                            resolve_type_elements_inner_with_ctx_ref(
-                                &type_args.params[0],
-                                base_offset,
-                                &mut inner,
-                                ctx,
-                            );
-                            if name_str == "Partial" {
-                                for p in &mut inner.props {
-                                    p.optional = true;
-                                }
-                            } else if name_str == "Required" {
-                                for p in &mut inner.props {
-                                    p.optional = false;
-                                }
-                            }
-                            result.props.extend(inner.props);
-                            result.emits.extend(inner.emits);
-                            true
-                        }
-                        "Record" if type_args.params.len() >= 2 => {
-                            // Record<K, V> — resolve as object type
-                            result.root_runtime_types.push(RuntimeType::Object);
-                            true
-                        }
-                        _ => false,
-                    };
-                    if handled {
+                    if try_resolve_heritage_utility_type(
+                        base_name.as_str(),
+                        type_args,
+                        base_offset,
+                        result,
+                        ctx,
+                    ) {
                         if result.has_call_signature {
                             result.has_call_signature = true;
                         }
@@ -1084,6 +1077,14 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
                 ctx,
                 recursion_guard,
             );
+        } else if let Some(class_decl) = ctx.find_class(base_bytes) {
+            resolve_class_with_heritage_ctx_ref(
+                class_decl,
+                base_offset,
+                result,
+                ctx,
+                recursion_guard,
+            );
         } else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
             result.props.extend(companion.props.iter().cloned());
             result.emits.extend(companion.emits.iter().cloned());
@@ -1093,6 +1094,388 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
         }
 
         recursion_guard.pop();
+    }
+}
+
+fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
+    name: &str,
+    type_args: &'ctx TSTypeParameterInstantiation<'a>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> bool {
+    match name {
+        "Pick" if type_args.params.len() >= 2 => {
+            let mut inner = ResolvedElements::default();
+            resolve_type_elements_inner_with_ctx_ref(
+                &type_args.params[0],
+                base_offset,
+                &mut inner,
+                ctx,
+            );
+            let keys = extract_string_literal_keys(&type_args.params[1]);
+            inner
+                .props
+                .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
+            inner.emits.retain(|e| keys.contains(&e.name));
+            result.props.extend(inner.props);
+            result.emits.extend(inner.emits);
+            true
+        }
+        "Omit" if type_args.params.len() >= 2 => {
+            let mut inner = ResolvedElements::default();
+            resolve_type_elements_inner_with_ctx_ref(
+                &type_args.params[0],
+                base_offset,
+                &mut inner,
+                ctx,
+            );
+            let keys = extract_string_literal_keys(&type_args.params[1]);
+            inner
+                .props
+                .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
+            inner.emits.retain(|e| !keys.contains(&e.name));
+            result.props.extend(inner.props);
+            result.emits.extend(inner.emits);
+            true
+        }
+        "Partial" | "Required" | "Readonly" if !type_args.params.is_empty() => {
+            let mut inner = ResolvedElements::default();
+            resolve_type_elements_inner_with_ctx_ref(
+                &type_args.params[0],
+                base_offset,
+                &mut inner,
+                ctx,
+            );
+            if name == "Partial" {
+                for p in &mut inner.props {
+                    p.optional = true;
+                }
+            } else if name == "Required" {
+                for p in &mut inner.props {
+                    p.optional = false;
+                }
+            }
+            result.props.extend(inner.props);
+            result.emits.extend(inner.emits);
+            true
+        }
+        "Record" if type_args.params.len() >= 2 => {
+            result.root_runtime_types.push(RuntimeType::Object);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn resolve_class_with_heritage_ctx_ref<'ctx, 'a: 'ctx>(
+    class: &'ctx Class<'a>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    resolve_class_members(&class.body.body, base_offset, result, ctx.source);
+
+    if let Some(super_class) = &class.super_class {
+        if let Some(base_name) = get_expression_reference_name(super_class) {
+            if !recursion_guard.contains(&base_name) {
+                recursion_guard.push(base_name.clone());
+                if let Some(type_args) = class.super_type_arguments.as_deref() {
+                    if !type_args.params.is_empty()
+                        && try_resolve_heritage_utility_type(
+                            base_name.as_str(),
+                            type_args,
+                            base_offset,
+                            result,
+                            ctx,
+                        )
+                    {
+                        recursion_guard.pop();
+                    } else {
+                        resolve_named_class_heritage_target(
+                            base_name.as_str(),
+                            class.super_type_arguments.as_deref(),
+                            base_offset,
+                            result,
+                            ctx,
+                            recursion_guard,
+                        );
+                        recursion_guard.pop();
+                    }
+                } else {
+                    resolve_named_class_heritage_target(
+                        base_name.as_str(),
+                        None,
+                        base_offset,
+                        result,
+                        ctx,
+                        recursion_guard,
+                    );
+                    recursion_guard.pop();
+                }
+            }
+        }
+    }
+
+    for clause in &class.implements {
+        let base_name = get_type_reference_name(&clause.expression);
+        if recursion_guard.contains(&base_name) {
+            continue;
+        }
+        recursion_guard.push(base_name.clone());
+        if let Some(type_args) = clause.type_arguments.as_deref() {
+            if !type_args.params.is_empty()
+                && try_resolve_heritage_utility_type(
+                    base_name.as_str(),
+                    type_args,
+                    base_offset,
+                    result,
+                    ctx,
+                )
+            {
+                recursion_guard.pop();
+                continue;
+            }
+        }
+        resolve_named_class_heritage_target(
+            base_name.as_str(),
+            clause.type_arguments.as_deref(),
+            base_offset,
+            result,
+            ctx,
+            recursion_guard,
+        );
+        recursion_guard.pop();
+    }
+
+    result.dedup_props();
+}
+
+fn resolve_named_class_heritage_target<'ctx, 'a: 'ctx>(
+    name: &str,
+    type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    let name_bytes = name.as_bytes();
+    if let Some((aliased_type, type_params)) = ctx.find_type_alias(name_bytes) {
+        let child = instantiate_type_params_ctx(ctx, type_params, type_args);
+        resolve_type_elements_inner_with_ctx_ref(aliased_type, base_offset, result, &child);
+    } else if let Some((iface_members, iface_extends, iface_heritage, iface_type_params)) =
+        ctx.find_interface(name_bytes)
+    {
+        let child = instantiate_type_params_ctx(ctx, iface_type_params, type_args);
+        let iface_extends_owned: Vec<String> = iface_extends.to_vec();
+        resolve_interface_with_extends_ctx_ref(
+            iface_members,
+            &iface_extends_owned,
+            iface_heritage,
+            base_offset,
+            result,
+            &child,
+            recursion_guard,
+        );
+    } else if let Some(base_class) = ctx.find_class(name_bytes) {
+        let child =
+            instantiate_type_params_ctx(ctx, base_class.type_parameters.as_deref(), type_args);
+        resolve_class_with_heritage_ctx_ref(
+            base_class,
+            base_offset,
+            result,
+            &child,
+            recursion_guard,
+        );
+    } else if let Some(companion) = ctx.companion_types.get(name) {
+        result.props.extend(companion.props.iter().cloned());
+        result.emits.extend(companion.emits.iter().cloned());
+        if companion.has_call_signature {
+            result.has_call_signature = true;
+        }
+    }
+}
+
+fn resolve_class_members(
+    members: &[ClassElement],
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    source: &[u8],
+) {
+    for member in members {
+        match member {
+            ClassElement::PropertyDefinition(prop) => {
+                if let Some(resolved) = resolve_class_property_definition(prop, base_offset, source)
+                {
+                    result.props.push(resolved);
+                }
+            }
+            ClassElement::MethodDefinition(method) => {
+                if let Some(resolved) = resolve_class_method_definition(method, base_offset, source)
+                {
+                    result.props.push(resolved);
+                }
+            }
+            ClassElement::AccessorProperty(prop) => {
+                if let Some(resolved) = resolve_class_accessor_property(prop, base_offset, source) {
+                    result.props.push(resolved);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn resolve_class_property_definition(
+    prop: &PropertyDefinition,
+    base_offset: u32,
+    source: &[u8],
+) -> Option<ResolvedProp> {
+    if prop.r#static {
+        return None;
+    }
+
+    let key = get_property_key_span(&prop.key, base_offset)?;
+    let types = prop
+        .type_annotation
+        .as_ref()
+        .map(|ann| infer_runtime_type(&ann.type_annotation))
+        .or_else(|| prop.value.as_ref().map(infer_runtime_type_from_expression))
+        .unwrap_or_else(|| vec![RuntimeType::Unknown]);
+    let type_span = prop.type_annotation.as_ref().map(|ann| Span {
+        start: ann.type_annotation.span().start + base_offset,
+        end: ann.type_annotation.span().end + base_offset,
+    });
+    let type_text = prop
+        .type_annotation
+        .as_ref()
+        .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
+
+    Some(ResolvedProp {
+        span: Span {
+            start: prop.span.start + base_offset,
+            end: prop.span.end + base_offset,
+        },
+        key,
+        key_name: get_property_key_name(&prop.key),
+        optional: prop.optional,
+        types,
+        visibility: visibility_from_accessibility(prop.accessibility),
+        type_span,
+        type_text,
+        map_local: true,
+        span_is_absolute: base_offset != 0,
+    })
+}
+
+fn resolve_class_method_definition(
+    method: &MethodDefinition,
+    base_offset: u32,
+    source: &[u8],
+) -> Option<ResolvedProp> {
+    if method.r#static || method.kind == MethodDefinitionKind::Constructor {
+        return None;
+    }
+
+    let key = get_property_key_span(&method.key, base_offset)?;
+    let type_text = callable_signature_text(
+        source,
+        &method.value.params.items,
+        method
+            .value
+            .return_type
+            .as_ref()
+            .map(|return_type| &return_type.type_annotation),
+    );
+    Some(ResolvedProp {
+        span: Span {
+            start: method.span.start + base_offset,
+            end: method.span.end + base_offset,
+        },
+        key,
+        key_name: get_property_key_name(&method.key),
+        optional: method.optional,
+        types: vec![RuntimeType::Function],
+        visibility: visibility_from_accessibility(method.accessibility),
+        type_span: None,
+        type_text,
+        map_local: true,
+        span_is_absolute: base_offset != 0,
+    })
+}
+
+fn resolve_class_accessor_property(
+    prop: &AccessorProperty,
+    base_offset: u32,
+    source: &[u8],
+) -> Option<ResolvedProp> {
+    if prop.r#static {
+        return None;
+    }
+
+    let key = get_property_key_span(&prop.key, base_offset)?;
+    let types = prop
+        .type_annotation
+        .as_ref()
+        .map(|ann| infer_runtime_type(&ann.type_annotation))
+        .or_else(|| prop.value.as_ref().map(infer_runtime_type_from_expression))
+        .unwrap_or_else(|| vec![RuntimeType::Unknown]);
+    let type_span = prop.type_annotation.as_ref().map(|ann| Span {
+        start: ann.type_annotation.span().start + base_offset,
+        end: ann.type_annotation.span().end + base_offset,
+    });
+    let type_text = prop
+        .type_annotation
+        .as_ref()
+        .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
+
+    Some(ResolvedProp {
+        span: Span {
+            start: prop.span.start + base_offset,
+            end: prop.span.end + base_offset,
+        },
+        key,
+        key_name: get_property_key_name(&prop.key),
+        optional: false,
+        types,
+        visibility: visibility_from_accessibility(prop.accessibility),
+        type_span,
+        type_text,
+        map_local: true,
+        span_is_absolute: base_offset != 0,
+    })
+}
+
+fn infer_runtime_type_from_expression(expr: &Expression<'_>) -> Vec<RuntimeType> {
+    match expr {
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => vec![RuntimeType::String],
+        Expression::NumericLiteral(_) => vec![RuntimeType::Number],
+        Expression::BooleanLiteral(_) => vec![RuntimeType::Boolean],
+        Expression::ArrayExpression(_) => vec![RuntimeType::Array],
+        Expression::ObjectExpression(_) => vec![RuntimeType::Object],
+        Expression::NullLiteral(_) => vec![RuntimeType::Null],
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
+            vec![RuntimeType::Function]
+        }
+        _ => vec![RuntimeType::Unknown],
+    }
+}
+
+fn visibility_from_accessibility(
+    accessibility: Option<TSAccessibility>,
+) -> ResolvedMemberVisibility {
+    match accessibility {
+        Some(TSAccessibility::Private) => ResolvedMemberVisibility::Private,
+        Some(TSAccessibility::Protected) => ResolvedMemberVisibility::Protected,
+        _ => ResolvedMemberVisibility::Public,
+    }
+}
+
+fn get_expression_reference_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        _ => None,
     }
 }
 
@@ -1175,13 +1558,31 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 3. Check generic type parameter constraints
+            // 3. Check local classes (instance-side shape with heritage)
+            if let Some(class_decl) = ctx.find_class(type_name_bytes) {
+                let mut guard = vec![type_name.clone()];
+                let child = instantiate_type_params_ctx(
+                    ctx,
+                    class_decl.type_parameters.as_deref(),
+                    type_ref.type_arguments.as_deref(),
+                );
+                resolve_class_with_heritage_ctx_ref(
+                    class_decl,
+                    base_offset,
+                    result,
+                    &child,
+                    &mut guard,
+                );
+                return;
+            }
+
+            // 4. Check generic type parameter constraints
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
                 resolve_type_elements_inner_with_ctx(constraint, base_offset, result, ctx);
                 return;
             }
 
-            // 4. Check companion <script> block's pre-resolved types
+            // 5. Check companion <script> block's pre-resolved types
             if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
                 result.props.extend(companion.props.iter().cloned());
                 result.emits.extend(companion.emits.iter().cloned());
@@ -1191,7 +1592,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 5. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            // 6. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
             if let Some(args) = &type_ref.type_arguments {
                 match type_name.as_str() {
                     "Omit" if args.params.len() >= 2 => {
@@ -1367,13 +1768,31 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 3. Check generic type parameter constraints
+            // 3. Check local classes (instance-side shape with heritage)
+            if let Some(class_decl) = ctx.find_class(type_name_bytes) {
+                let mut guard = vec![type_name.clone()];
+                let child = instantiate_type_params_ctx(
+                    ctx,
+                    class_decl.type_parameters.as_deref(),
+                    type_ref.type_arguments.as_deref(),
+                );
+                resolve_class_with_heritage_ctx_ref(
+                    class_decl,
+                    base_offset,
+                    result,
+                    &child,
+                    &mut guard,
+                );
+                return;
+            }
+
+            // 4. Check generic type parameter constraints
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
                 resolve_type_elements_inner_with_ctx_ref(constraint, base_offset, result, ctx);
                 return;
             }
 
-            // 4. Check companion <script> block's pre-resolved types
+            // 5. Check companion <script> block's pre-resolved types
             if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
                 result.props.extend(companion.props.iter().cloned());
                 result.emits.extend(companion.emits.iter().cloned());
@@ -1383,7 +1802,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 5. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            // 6. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
             if let Some(args) = &type_ref.type_arguments {
                 match type_name.as_str() {
                     "Omit" if args.params.len() >= 2 => {
@@ -1476,12 +1895,13 @@ fn resolve_type_literal_members(
                 // Properties with tuple/array type values are treated as emits
                 if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
                     result.emits.push(emit);
-                } else if let Some(resolved) = resolve_property_signature(prop, base_offset) {
+                } else if let Some(resolved) = resolve_property_signature(prop, base_offset, source)
+                {
                     result.props.push(resolved);
                 }
             }
             TSSignature::TSMethodSignature(method) => {
-                if let Some(resolved) = resolve_method_signature(method, base_offset) {
+                if let Some(resolved) = resolve_method_signature(method, base_offset, source) {
                     result.props.push(resolved);
                 }
             }
@@ -1654,6 +2074,7 @@ fn has_immediate_vue_ignore_comment(source: &[u8], start: u32) -> bool {
 fn resolve_property_signature(
     prop: &TSPropertySignature,
     base_offset: u32,
+    source: &[u8],
 ) -> Option<ResolvedProp> {
     let key = get_property_key_span(&prop.key, base_offset)?;
     let optional = prop.optional;
@@ -1674,6 +2095,10 @@ fn resolve_property_signature(
         start: ann.type_annotation.span().start + base_offset,
         end: ann.type_annotation.span().end + base_offset,
     });
+    let type_text = prop
+        .type_annotation
+        .as_ref()
+        .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
 
     Some(ResolvedProp {
         span,
@@ -1681,15 +2106,20 @@ fn resolve_property_signature(
         key_name: get_property_key_name(&prop.key),
         optional,
         types,
+        visibility: ResolvedMemberVisibility::Public,
         type_span,
-        type_text: None,
+        type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
     })
 }
 
 /// Resolve a method signature to a ResolvedProp (methods are function-typed properties).
-fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Option<ResolvedProp> {
+fn resolve_method_signature(
+    method: &TSMethodSignature,
+    base_offset: u32,
+    source: &[u8],
+) -> Option<ResolvedProp> {
     let key = get_property_key_span(&method.key, base_offset)?;
     let optional = method.optional;
 
@@ -1705,11 +2135,57 @@ fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Opt
         key_name: get_property_key_name(&method.key),
         optional,
         types: vec![RuntimeType::Function],
+        visibility: ResolvedMemberVisibility::Public,
         type_span: None,
-        type_text: None,
+        type_text: callable_signature_text(
+            source,
+            &method.params.items,
+            method
+                .return_type
+                .as_ref()
+                .map(|return_type| &return_type.type_annotation),
+        ),
         map_local: true,
         span_is_absolute: base_offset != 0,
     })
+}
+
+fn callable_signature_text<'a>(
+    source: &[u8],
+    params: &[FormalParameter<'a>],
+    return_type: Option<&TSType<'a>>,
+) -> Option<String> {
+    let params = params
+        .iter()
+        .map(|param| {
+            let name = span_text(source, param.pattern.span().into()).unwrap_or("_".to_string());
+            let mut rendered = name.trim().to_string();
+            if let Some(type_annotation) = &param.type_annotation {
+                if let Some(type_text) =
+                    span_text(source, type_annotation.type_annotation.span().into())
+                {
+                    rendered.push_str(": ");
+                    rendered.push_str(type_text.trim());
+                }
+            }
+            rendered
+        })
+        .collect::<Vec<_>>();
+    let return_type = return_type
+        .and_then(|return_type| span_text(source, return_type.span().into()))
+        .unwrap_or_else(|| "void".to_string());
+    Some(format!("({}) => {}", params.join(", "), return_type.trim()))
+}
+
+fn span_text(source: &[u8], span: Span) -> Option<String> {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= end || end > source.len() {
+        return None;
+    }
+    std::str::from_utf8(&source[start..end])
+        .ok()
+        .map(ToString::to_string)
 }
 
 /// Extract the span of a property key.
@@ -2055,6 +2531,7 @@ fn infer_props_from_object_literal(
             key_name: None,
             types: runtime_type,
             optional: false,
+            visibility: ResolvedMemberVisibility::Public,
             type_span: None,
             type_text: None,
             map_local: true,
@@ -2115,31 +2592,58 @@ pub fn extract_imported_type_bindings(
                     continue;
                 };
                 for specifier in specifiers {
-                    let ImportDeclarationSpecifier::ImportSpecifier(import_spec) = specifier else {
-                        continue;
-                    };
-                    result.bindings.push(ImportedTypeBinding {
-                        local_name: import_spec.local.name.to_string(),
-                        imported_name: import_spec.imported.name().to_string(),
-                        source: import_decl.source.value.to_string(),
-                    });
+                    match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(import_spec) => {
+                            result.bindings.push(ImportedTypeBinding {
+                                local_name: import_spec.local.name.to_string(),
+                                imported_name: import_spec.imported.name().to_string(),
+                                source: import_decl.source.value.to_string(),
+                            });
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(import_spec) => {
+                            result.bindings.push(ImportedTypeBinding {
+                                local_name: import_spec.local.name.to_string(),
+                                imported_name: "default".to_string(),
+                                source: import_decl.source.value.to_string(),
+                            });
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+                    }
                 }
             }
             Statement::ExportNamedDeclaration(export_decl) => {
-                // `export { X } from './Y'` — named re-export with source
-                let Some(source) = &export_decl.source else {
+                if let Some(source) = &export_decl.source {
+                    // `export { X } from './Y'` — named re-export with source
+                    for specifier in &export_decl.specifiers {
+                        let local_name = specifier.exported.name().to_string();
+                        let imported_name = specifier.local.name().to_string();
+                        let binding = ImportedTypeBinding {
+                            local_name,
+                            imported_name,
+                            source: source.value.to_string(),
+                        };
+                        result.bindings.push(binding.clone());
+                        result.reexport_bindings.push(binding);
+                    }
                     continue;
-                };
+                }
+
+                // `import { Foo as Bar } from './Y'; export type { Bar as Baz }`
+                // should resolve like a real re-export while preserving the original
+                // imported symbol and source module.
                 for specifier in &export_decl.specifiers {
-                    let local_name = specifier.exported.name().to_string();
-                    let imported_name = specifier.local.name().to_string();
-                    let binding = ImportedTypeBinding {
-                        local_name,
-                        imported_name,
-                        source: source.value.to_string(),
+                    let Some(imported) = result
+                        .bindings
+                        .iter()
+                        .find(|binding| specifier.local.name() == binding.local_name)
+                    else {
+                        continue;
                     };
-                    result.bindings.push(binding.clone());
-                    result.reexport_bindings.push(binding);
+                    result.reexport_bindings.push(ImportedTypeBinding {
+                        local_name: specifier.exported.name().to_string(),
+                        imported_name: imported.imported_name.clone(),
+                        source: imported.source.clone(),
+                    });
                 }
             }
             Statement::ExportAllDeclaration(export_all) => {
@@ -2179,6 +2683,11 @@ pub fn collect_required_import_names_for_external_type(
             continue;
         }
 
+        if import_locals.contains(&current) {
+            required_imports.insert(current);
+            continue;
+        }
+
         let current_bytes = current.as_bytes();
         if let Some((ts_type, _)) = ctx.find_type_alias(current_bytes) {
             let mut refs = FxHashSet::default();
@@ -2206,6 +2715,19 @@ pub fn collect_required_import_names_for_external_type(
                 &mut pending,
                 &visited,
             );
+            continue;
+        }
+
+        if let Some(class_decl) = ctx.find_class(current_bytes) {
+            let mut refs = FxHashSet::default();
+            collect_class_reference_names(class_decl, &mut refs);
+            enqueue_required_import_refs(
+                refs,
+                &import_locals,
+                &mut required_imports,
+                &mut pending,
+                &visited,
+            );
         }
     }
 
@@ -2222,10 +2744,15 @@ fn collect_named_import_locals(program: &Program<'_>) -> FxHashSet<String> {
             continue;
         };
         for specifier in specifiers {
-            let ImportDeclarationSpecifier::ImportSpecifier(import_spec) = specifier else {
-                continue;
-            };
-            locals.insert(import_spec.local.name.to_string());
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(import_spec) => {
+                    locals.insert(import_spec.local.name.to_string());
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(import_spec) => {
+                    locals.insert(import_spec.local.name.to_string());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            }
         }
     }
     locals
@@ -2299,6 +2826,57 @@ fn collect_interface_reference_names(
                 collect_type_reference_names(&index.type_annotation.type_annotation, refs);
             }
             TSSignature::TSConstructSignatureDeclaration(_) => {}
+        }
+    }
+}
+
+fn collect_class_reference_names(class: &Class<'_>, refs: &mut FxHashSet<String>) {
+    if let Some(super_class) = &class.super_class {
+        if let Some(name) = get_expression_reference_name(super_class) {
+            refs.insert(name);
+        }
+        if let Some(type_args) = &class.super_type_arguments {
+            for param in &type_args.params {
+                collect_type_reference_names(param, refs);
+            }
+        }
+    }
+
+    for clause in &class.implements {
+        refs.insert(get_type_reference_name(&clause.expression));
+        if let Some(type_args) = &clause.type_arguments {
+            for param in &type_args.params {
+                collect_type_reference_names(param, refs);
+            }
+        }
+    }
+
+    for member in &class.body.body {
+        match member {
+            ClassElement::PropertyDefinition(prop) => {
+                if let Some(type_annotation) = &prop.type_annotation {
+                    collect_type_reference_names(&type_annotation.type_annotation, refs);
+                }
+            }
+            ClassElement::MethodDefinition(method) => {
+                if let Some(return_type) = &method.value.return_type {
+                    collect_type_reference_names(&return_type.type_annotation, refs);
+                }
+                for param in &method.value.params.items {
+                    if let Some(type_annotation) = &param.type_annotation {
+                        collect_type_reference_names(&type_annotation.type_annotation, refs);
+                    }
+                }
+            }
+            ClassElement::AccessorProperty(prop) => {
+                if let Some(type_annotation) = &prop.type_annotation {
+                    collect_type_reference_names(&type_annotation.type_annotation, refs);
+                }
+            }
+            ClassElement::TSIndexSignature(sig) => {
+                collect_type_reference_names(&sig.type_annotation.type_annotation, refs);
+            }
+            _ => {}
         }
     }
 }
@@ -2419,44 +2997,134 @@ pub fn resolve_external_type_with_companion(
             .or_insert_with(|| resolved.clone());
     }
 
-    let name_bytes = type_name.as_bytes();
+    let mut result = resolve_named_external_type(type_name, &parsed.program, source_bytes, &ctx);
 
-    let mut result = None;
-
-    // Try type alias first
-    if let Some((ts_type, _)) = ctx.find_type_alias(name_bytes) {
-        result = Some(resolve_type_elements_with_ctx_ref(ts_type, 0, &ctx));
-    }
-
-    // Try interface (with extends support)
     if result.is_none() {
-        if let Some((members, extends, heritage, _)) = ctx.find_interface(name_bytes) {
-            let mut r = ResolvedElements::default();
-            let extends_owned: Vec<String> = extends.to_vec();
-            let mut guard = vec![type_name.to_string()];
-            resolve_interface_with_extends_ctx_ref(
-                members,
-                &extends_owned,
-                heritage,
-                0,
-                &mut r,
-                &ctx,
-                &mut guard,
-            );
-            r.root_runtime_types = vec![RuntimeType::Object];
-            result = Some(r);
+        if let Some(local_name) = resolve_local_export_alias_target(&parsed.program, type_name) {
+            result = resolve_named_external_type(&local_name, &parsed.program, source_bytes, &ctx);
         }
     }
 
-    // Try exported variable declarations: `export const X: { prop: Type } = ...`
-    // or non-exported `const X: { prop: Type } = ...` (for `typeof X`)
-    if result.is_none() {
-        result = resolve_value_declaration_type(type_name, &parsed.program, source_bytes, 0, &ctx);
+    if result.is_none() && type_name == "default" {
+        result = resolve_default_exported_type(&parsed.program, &ctx);
     }
 
     // Populate key_name on all props since spans reference the external file,
     // not the consuming SFC. Consumers use key_name when available.
     result.map(|resolved| finalize_external_resolution(resolved, source_bytes))
+}
+
+fn resolve_named_external_type<'a>(
+    type_name: &str,
+    program: &Program<'a>,
+    source_bytes: &[u8],
+    ctx: &TypeResolutionContext<'_, 'a>,
+) -> Option<ResolvedElements> {
+    let name_bytes = type_name.as_bytes();
+
+    if let Some((ts_type, _)) = ctx.find_type_alias(name_bytes) {
+        return Some(resolve_type_elements_with_ctx_ref(ts_type, 0, ctx));
+    }
+
+    if let Some((members, extends, heritage, _)) = ctx.find_interface(name_bytes) {
+        let mut resolved = ResolvedElements::default();
+        let extends_owned: Vec<String> = extends.to_vec();
+        let mut guard = vec![type_name.to_string()];
+        resolve_interface_with_extends_ctx_ref(
+            members,
+            &extends_owned,
+            heritage,
+            0,
+            &mut resolved,
+            ctx,
+            &mut guard,
+        );
+        resolved.root_runtime_types = vec![RuntimeType::Object];
+        return Some(resolved);
+    }
+
+    if let Some(class_decl) = ctx.find_class(name_bytes) {
+        let mut resolved = ResolvedElements::default();
+        let mut guard = vec![type_name.to_string()];
+        resolve_class_with_heritage_ctx_ref(class_decl, 0, &mut resolved, ctx, &mut guard);
+        resolved.root_runtime_types = vec![RuntimeType::Object];
+        return Some(resolved);
+    }
+
+    resolve_value_declaration_type(type_name, program, source_bytes, 0, ctx)
+}
+
+fn resolve_local_export_alias_target(program: &Program<'_>, exported_name: &str) -> Option<String> {
+    let mut current = exported_name.to_string();
+    let mut visited = FxHashSet::default();
+    let mut changed = false;
+
+    while visited.insert(current.clone()) {
+        let next = program.body.iter().find_map(|stmt| match stmt {
+            Statement::ExportNamedDeclaration(export) if export.source.is_none() => export
+                .specifiers
+                .iter()
+                .find(|specifier| specifier.exported.name() == current)
+                .map(|specifier| specifier.local.name().to_string()),
+            _ => None,
+        });
+
+        match next {
+            Some(local) if local != current => {
+                current = local;
+                changed = true;
+            }
+            _ => break,
+        }
+    }
+
+    changed.then_some(current)
+}
+
+fn resolve_default_exported_type<'a>(
+    program: &Program<'a>,
+    ctx: &TypeResolutionContext<'_, 'a>,
+) -> Option<ResolvedElements> {
+    for stmt in &program.body {
+        let Statement::ExportDefaultDeclaration(export) = stmt else {
+            continue;
+        };
+
+        match &export.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(class_decl) => {
+                let mut resolved = ResolvedElements::default();
+                let guard_name = class_decl
+                    .id
+                    .as_ref()
+                    .map(|id| id.name.to_string())
+                    .unwrap_or_else(|| "default".to_string());
+                let mut guard = vec![guard_name];
+                resolve_class_with_heritage_ctx_ref(class_decl, 0, &mut resolved, ctx, &mut guard);
+                resolved.root_runtime_types = vec![RuntimeType::Object];
+                return Some(resolved);
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface_decl) => {
+                let mut resolved = ResolvedElements::default();
+                let extends = extract_heritage_type_names(&interface_decl.extends);
+                let guard_name = interface_decl.id.name.to_string();
+                let mut guard = vec![guard_name];
+                resolve_interface_with_extends_ctx_ref(
+                    &interface_decl.body.body,
+                    &extends,
+                    &interface_decl.extends,
+                    0,
+                    &mut resolved,
+                    ctx,
+                    &mut guard,
+                );
+                resolved.root_runtime_types = vec![RuntimeType::Object];
+                return Some(resolved);
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn finalize_external_resolution(

@@ -422,7 +422,6 @@ fn make_host(project_root: &Path) -> io::Result<VerterHost> {
     let host = VerterHost::new(
         HostConfig {
             analysis_level: verter_host::AnalysisLevel::Full,
-            deep_macro_resolution_type: true,
             ..HostConfig::default()
         },
         Arc::new(ws),
@@ -523,8 +522,11 @@ fn run_component_meta_request(
 
     let (resolve_imported_elapsed, resolved_imported_types) = if include_resolve_imported {
         let resolve_started = Instant::now();
-        let imported = host.resolve_imported_types(target_id);
-        (Some(resolve_started.elapsed()), imported.len())
+        let resolved = host.resolve_component_meta(target_id, verter_host::ResolverMode::Expanded);
+        let resolved_count = resolved
+            .map(|state| state.resolved_macros.len())
+            .unwrap_or(0);
+        (Some(resolve_started.elapsed()), resolved_count)
     } else {
         (None, 0)
     };
@@ -642,7 +644,7 @@ fn main() {
     eprintln!(
         "  compat-like sequence: get_analysis{}evaluate_types",
         if config.include_resolve_imported {
-            " -> resolve_imported_types -> "
+            " -> resolve_component_meta(expanded) -> "
         } else {
             " -> "
         }

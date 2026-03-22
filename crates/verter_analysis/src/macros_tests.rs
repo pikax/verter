@@ -1262,26 +1262,27 @@ fn emit_field_payload_type_runtime_none() {
 #[test]
 fn parse_jsdoc_unit_tests() {
     // Simple description
-    let (desc, tags) = parse_jsdoc("/** Hello world */");
+    let (desc, tags) = crate::jsdoc::parse_jsdoc("/** Hello world */");
     assert_eq!(desc.as_deref(), Some("Hello world"));
     assert!(tags.is_empty());
 
     // Tag only
-    let (desc, tags) = parse_jsdoc("/** @deprecated */");
+    let (desc, tags) = crate::jsdoc::parse_jsdoc("/** @deprecated */");
     assert!(desc.is_none());
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0].name, "deprecated");
     assert!(tags[0].text.is_none());
 
     // Tag with text
-    let (desc, tags) = parse_jsdoc("/** @default 'hello' */");
+    let (desc, tags) = crate::jsdoc::parse_jsdoc("/** @default 'hello' */");
     assert!(desc.is_none());
     assert_eq!(tags[0].name, "default");
     assert_eq!(tags[0].text.as_deref(), Some("'hello'"));
 
     // Multi-line
-    let (desc, tags) =
-        parse_jsdoc("/**\n * A description\n * @param name - the name\n * @returns nothing\n */");
+    let (desc, tags) = crate::jsdoc::parse_jsdoc(
+        "/**\n * A description\n * @param name - the name\n * @returns nothing\n */",
+    );
     assert_eq!(desc.as_deref(), Some("A description"));
     assert_eq!(tags.len(), 2);
     assert_eq!(tags[0].name, "param");

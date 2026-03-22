@@ -16,6 +16,15 @@ use crate::types::*;
 pub fn component_meta_analysis_to_ffi(
     analysis: verter_analysis::component_meta::ComponentMetaAnalysis,
 ) -> FfiComponentMeta {
+    component_meta_analysis_to_ffi_with_resolution(analysis, None)
+}
+
+/// Convert component-meta analysis plus optional native resolved-state sidecar
+/// to the FFI boundary DTO.
+pub fn component_meta_analysis_to_ffi_with_resolution(
+    analysis: verter_analysis::component_meta::ComponentMetaAnalysis,
+    resolved_state: Option<&host::meta_resolve::ResolvedComponentMetaState>,
+) -> FfiComponentMeta {
     FfiComponentMeta {
         props: analysis
             .props
@@ -82,9 +91,32 @@ pub fn component_meta_analysis_to_ffi(
         type_registry: analysis
             .type_registry
             .into_iter()
-            .map(|entry| FfiResolvedTypeMeta {
-                name: entry.name,
-                r#type: entry.type_expr,
+            .map(|entry| {
+                let declaration = resolved_state
+                    .and_then(|state| {
+                        state
+                            .resolved_type_registry_meta
+                            .iter()
+                            .find(|meta| meta.name == entry.name)
+                    })
+                    .map(|meta| FfiResolvedTypeDeclaration {
+                        requested_name: meta.declaration.requested_name.clone(),
+                        resolved_name: meta.declaration.resolved_name.clone(),
+                        canonical_source: meta.declaration.canonical_source.clone(),
+                        span_start: meta.declaration.span.start,
+                        span_end: meta.declaration.span.end,
+                        kind: resolved_declaration_kind_to_string(meta.declaration.kind),
+                        text: meta.declaration.text.clone(),
+                    });
+
+                FfiResolvedTypeMeta {
+                    name: entry.name,
+                    r#type: entry.type_expr,
+                    raw_type: declaration
+                        .as_ref()
+                        .and_then(|declaration| declaration.text.clone()),
+                    declaration,
+                }
             })
             .collect(),
         components: analysis
@@ -187,8 +219,24 @@ pub fn component_meta_analysis_to_ffi(
             has_inherit_attrs_false: analysis.flags.has_inherit_attrs_false,
             has_store_usage: analysis.flags.has_store_usage,
         },
+        accepted_props: analysis
+            .accepted_props
+            .into_iter()
+            .map(accepted_prop_to_ffi)
+            .collect(),
+        accepted_events: analysis
+            .accepted_events
+            .into_iter()
+            .map(accepted_event_to_ffi)
+            .collect(),
+        accepted_surface_completeness: accepted_surface_completeness_to_ffi(
+            analysis.accepted_surface_completeness,
+        ),
+        root_reachability: root_reachability_to_ffi(analysis.root_reachability),
+        fallthrough_surface: fallthrough_surface_to_ffi(analysis.fallthrough_surface),
         options_api: analysis.options_api,
         file_path: analysis.file_path,
+        resolution: resolved_state.map(resolved_component_meta_to_ffi),
     }
 }
 
@@ -196,6 +244,504 @@ fn jsdoc_to_ffi(tag: verter_analysis::types::JsdocTag) -> FfiJsdocTag {
     FfiJsdocTag {
         name: tag.name,
         text: tag.text,
+    }
+}
+
+// ─── Fallthrough surface conversions ────────────────────────────────────────
+
+fn accepted_prop_to_ffi(
+    prop: verter_analysis::component_meta::AcceptedPropAnalysis,
+) -> FfiAcceptedPropMeta {
+    FfiAcceptedPropMeta {
+        name: prop.name,
+        r#type: prop.type_expr,
+        raw_type: prop.raw_type,
+        required: prop.required,
+        provenance: member_provenance_to_ffi(prop.provenance),
+        availability: member_availability_to_ffi(prop.availability),
+        kind: accepted_prop_kind_to_ffi(prop.kind),
+    }
+}
+
+fn accepted_event_to_ffi(
+    event: verter_analysis::component_meta::AcceptedEventAnalysis,
+) -> FfiAcceptedEventMeta {
+    FfiAcceptedEventMeta {
+        name: event.name,
+        payload: event.payload,
+        raw_signature: event.raw_signature,
+        provenance: member_provenance_to_ffi(event.provenance),
+        availability: member_availability_to_ffi(event.availability),
+        kind: accepted_event_kind_to_ffi(event.kind),
+    }
+}
+
+fn member_provenance_to_ffi(
+    provenance: verter_analysis::component_meta::MemberProvenance,
+) -> FfiMemberProvenance {
+    match provenance {
+        verter_analysis::component_meta::MemberProvenance::Declared => {
+            FfiMemberProvenance::Declared
+        }
+        verter_analysis::component_meta::MemberProvenance::Inherited { sources } => {
+            FfiMemberProvenance::Inherited {
+                sources: sources.into_iter().map(inherited_source_to_ffi).collect(),
+            }
+        }
+    }
+}
+
+fn inherited_source_to_ffi(
+    source: verter_analysis::component_meta::InheritedSource,
+) -> FfiInheritedSource {
+    match source {
+        verter_analysis::component_meta::InheritedSource::NativeTag { tag } => {
+            FfiInheritedSource::NativeTag { tag }
+        }
+        verter_analysis::component_meta::InheritedSource::Component { canonical_id } => {
+            FfiInheritedSource::Component { canonical_id }
+        }
+    }
+}
+
+fn member_availability_to_ffi(
+    availability: verter_analysis::component_meta::MemberAvailability,
+) -> FfiMemberAvailability {
+    match availability {
+        verter_analysis::component_meta::MemberAvailability::Always => {
+            FfiMemberAvailability::Always
+        }
+        verter_analysis::component_meta::MemberAvailability::Conditional { branch_keys } => {
+            FfiMemberAvailability::Conditional { branch_keys }
+        }
+    }
+}
+
+fn accepted_prop_kind_to_ffi(
+    kind: verter_analysis::component_meta::AcceptedPropKind,
+) -> FfiAcceptedPropKind {
+    match kind {
+        verter_analysis::component_meta::AcceptedPropKind::DeclaredProp => {
+            FfiAcceptedPropKind::DeclaredProp
+        }
+        verter_analysis::component_meta::AcceptedPropKind::Attr => FfiAcceptedPropKind::Attr,
+    }
+}
+
+fn accepted_event_kind_to_ffi(
+    kind: verter_analysis::component_meta::AcceptedEventKind,
+) -> FfiAcceptedEventKind {
+    match kind {
+        verter_analysis::component_meta::AcceptedEventKind::DeclaredEmit => {
+            FfiAcceptedEventKind::DeclaredEmit
+        }
+        verter_analysis::component_meta::AcceptedEventKind::Listener => {
+            FfiAcceptedEventKind::Listener
+        }
+    }
+}
+
+fn accepted_surface_completeness_to_ffi(
+    completeness: verter_analysis::component_meta::AcceptedSurfaceCompleteness,
+) -> FfiAcceptedSurfaceCompleteness {
+    match completeness {
+        verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact => {
+            FfiAcceptedSurfaceCompleteness::Exact
+        }
+        verter_analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound => {
+            FfiAcceptedSurfaceCompleteness::LowerBound
+        }
+    }
+}
+
+fn root_reachability_to_ffi(
+    reachability: verter_analysis::component_meta::RootReachability,
+) -> FfiRootReachability {
+    match reachability {
+        verter_analysis::component_meta::RootReachability::NoFallthrough { reason } => {
+            FfiRootReachability::NoFallthrough {
+                reason: no_fallthrough_reason_to_ffi(reason),
+            }
+        }
+        verter_analysis::component_meta::RootReachability::Branches { branches } => {
+            FfiRootReachability::Branches {
+                branches: branches.into_iter().map(root_branch_to_ffi).collect(),
+            }
+        }
+    }
+}
+
+fn no_fallthrough_reason_to_ffi(
+    reason: verter_analysis::component_meta::NoFallthroughReason,
+) -> FfiNoFallthroughReason {
+    match reason {
+        verter_analysis::component_meta::NoFallthroughReason::InheritAttrsFalse => {
+            FfiNoFallthroughReason::InheritAttrsFalse
+        }
+        verter_analysis::component_meta::NoFallthroughReason::MultiRoot => {
+            FfiNoFallthroughReason::MultiRoot
+        }
+        verter_analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot => {
+            FfiNoFallthroughReason::BranchNotSingleRoot
+        }
+        verter_analysis::component_meta::NoFallthroughReason::RootVFor => {
+            FfiNoFallthroughReason::RootVFor
+        }
+        verter_analysis::component_meta::NoFallthroughReason::NoTemplate => {
+            FfiNoFallthroughReason::NoTemplate
+        }
+        verter_analysis::component_meta::NoFallthroughReason::EmptyTemplate => {
+            FfiNoFallthroughReason::EmptyTemplate
+        }
+        verter_analysis::component_meta::NoFallthroughReason::TextOrInterpolationRoot => {
+            FfiNoFallthroughReason::TextOrInterpolationRoot
+        }
+    }
+}
+
+fn root_branch_to_ffi(branch: verter_analysis::component_meta::RootBranch) -> FfiRootBranch {
+    FfiRootBranch {
+        branch_index: branch.branch_index,
+        condition_text: branch.condition_text,
+        target: root_target_ref_to_ffi(branch.target),
+        consumed: FfiConsumedRootBindings {
+            attrs: branch.consumed.attrs,
+            listeners: branch.consumed.listeners,
+            has_dynamic_attr_name: branch.consumed.has_dynamic_attr_name,
+            has_dynamic_listener_name: branch.consumed.has_dynamic_listener_name,
+        },
+        has_unknown_spread: branch.has_unknown_spread,
+    }
+}
+
+fn root_target_ref_to_ffi(
+    target: verter_analysis::component_meta::RootTargetRef,
+) -> FfiRootTargetRef {
+    match target {
+        verter_analysis::component_meta::RootTargetRef::NativeElement { element_index, tag } => {
+            FfiRootTargetRef::NativeElement { element_index, tag }
+        }
+        verter_analysis::component_meta::RootTargetRef::DynamicComponentUsage {
+            element_index,
+            usage_index,
+        } => FfiRootTargetRef::DynamicComponentUsage {
+            element_index,
+            usage_index,
+        },
+        verter_analysis::component_meta::RootTargetRef::ComponentUsage {
+            element_index,
+            usage_index,
+            name,
+            import_source,
+        } => FfiRootTargetRef::ComponentUsage {
+            element_index,
+            usage_index,
+            name,
+            import_source,
+        },
+        verter_analysis::component_meta::RootTargetRef::UnresolvedTarget {
+            element_index,
+            tag,
+            reason,
+        } => FfiRootTargetRef::UnresolvedTarget {
+            element_index,
+            tag,
+            reason: unresolved_root_target_reason_to_ffi(reason),
+        },
+    }
+}
+
+fn unresolved_root_target_reason_to_ffi(
+    reason: verter_analysis::component_meta::UnresolvedRootTargetReason,
+) -> FfiUnresolvedRootTargetReason {
+    match reason {
+        verter_analysis::component_meta::UnresolvedRootTargetReason::DynamicComponentIs => {
+            FfiUnresolvedRootTargetReason::DynamicComponentIs
+        }
+        verter_analysis::component_meta::UnresolvedRootTargetReason::SlotOutlet => {
+            FfiUnresolvedRootTargetReason::SlotOutlet
+        }
+        verter_analysis::component_meta::UnresolvedRootTargetReason::UnsupportedBuiltin { tag } => {
+            FfiUnresolvedRootTargetReason::UnsupportedBuiltin { tag }
+        }
+        verter_analysis::component_meta::UnresolvedRootTargetReason::MissingUsageLink => {
+            FfiUnresolvedRootTargetReason::MissingUsageLink
+        }
+        verter_analysis::component_meta::UnresolvedRootTargetReason::UnresolvedImport => {
+            FfiUnresolvedRootTargetReason::UnresolvedImport
+        }
+        verter_analysis::component_meta::UnresolvedRootTargetReason::UnknownRootTarget => {
+            FfiUnresolvedRootTargetReason::UnknownRootTarget
+        }
+    }
+}
+
+fn fallthrough_surface_to_ffi(
+    surface: verter_analysis::component_meta::FallthroughSurface,
+) -> FfiFallthroughSurface {
+    match surface {
+        verter_analysis::component_meta::FallthroughSurface::None { reason } => {
+            FfiFallthroughSurface::None {
+                reason: no_fallthrough_reason_to_ffi(reason),
+            }
+        }
+        verter_analysis::component_meta::FallthroughSurface::Branches { branches } => {
+            FfiFallthroughSurface::Branches {
+                branches: branches
+                    .into_iter()
+                    .map(fallthrough_branch_to_ffi)
+                    .collect(),
+            }
+        }
+    }
+}
+
+fn fallthrough_branch_to_ffi(
+    branch: verter_analysis::component_meta::FallthroughBranch,
+) -> FfiFallthroughBranch {
+    FfiFallthroughBranch {
+        branch_key: branch.branch_key,
+        condition_text: branch.condition_text,
+        props: branch
+            .props
+            .into_iter()
+            .map(|p| FfiFallthroughPropEntry {
+                name: p.name,
+                r#type: p.type_expr,
+                raw_type: p.raw_type,
+                sources: p.sources.into_iter().map(inherited_source_to_ffi).collect(),
+            })
+            .collect(),
+        events: branch
+            .events
+            .into_iter()
+            .map(|e| FfiFallthroughEventEntry {
+                name: e.name,
+                payload: e.payload,
+                raw_signature: e.raw_signature,
+                sources: e.sources.into_iter().map(inherited_source_to_ffi).collect(),
+            })
+            .collect(),
+        root_chain: branch
+            .root_chain
+            .into_iter()
+            .map(resolved_root_step_to_ffi)
+            .collect(),
+        status: branch_status_to_ffi(branch.status),
+    }
+}
+
+fn resolved_root_step_to_ffi(
+    step: verter_analysis::component_meta::ResolvedRootStep,
+) -> FfiResolvedRootStep {
+    match step {
+        verter_analysis::component_meta::ResolvedRootStep::NativeTag { tag } => {
+            FfiResolvedRootStep::NativeTag { tag }
+        }
+        verter_analysis::component_meta::ResolvedRootStep::Component {
+            canonical_id,
+            component_name,
+        } => FfiResolvedRootStep::Component {
+            canonical_id,
+            component_name,
+        },
+        verter_analysis::component_meta::ResolvedRootStep::Unresolved { tag, reason } => {
+            FfiResolvedRootStep::Unresolved {
+                tag,
+                reason: unresolved_branch_reason_to_ffi(reason),
+            }
+        }
+    }
+}
+
+fn branch_status_to_ffi(status: verter_analysis::component_meta::BranchStatus) -> FfiBranchStatus {
+    match status {
+        verter_analysis::component_meta::BranchStatus::Resolved => FfiBranchStatus::Resolved,
+        verter_analysis::component_meta::BranchStatus::PartiallyUnresolved { reasons } => {
+            FfiBranchStatus::PartiallyUnresolved {
+                reasons: reasons
+                    .into_iter()
+                    .map(partial_branch_reason_to_ffi)
+                    .collect(),
+            }
+        }
+        verter_analysis::component_meta::BranchStatus::Unresolved { reason } => {
+            FfiBranchStatus::Unresolved {
+                reason: unresolved_branch_reason_to_ffi(reason),
+            }
+        }
+    }
+}
+
+fn generic_resolution_failure_to_ffi(
+    failure: verter_analysis::component_meta::GenericResolutionFailure,
+) -> FfiGenericResolutionFailure {
+    match failure {
+        verter_analysis::component_meta::GenericResolutionFailure::SpreadInput => {
+            FfiGenericResolutionFailure::SpreadInput
+        }
+        verter_analysis::component_meta::GenericResolutionFailure::DynamicKey => {
+            FfiGenericResolutionFailure::DynamicKey
+        }
+        verter_analysis::component_meta::GenericResolutionFailure::MissingType => {
+            FfiGenericResolutionFailure::MissingType
+        }
+        verter_analysis::component_meta::GenericResolutionFailure::UnsupportedExpression => {
+            FfiGenericResolutionFailure::UnsupportedExpression
+        }
+        verter_analysis::component_meta::GenericResolutionFailure::MissingUsageLink => {
+            FfiGenericResolutionFailure::MissingUsageLink
+        }
+        verter_analysis::component_meta::GenericResolutionFailure::UnresolvedChildGenericSurface => {
+            FfiGenericResolutionFailure::UnresolvedChildGenericSurface
+        }
+    }
+}
+
+fn partial_branch_reason_to_ffi(
+    reason: verter_analysis::component_meta::PartialBranchReason,
+) -> FfiPartialBranchReason {
+    match reason {
+        verter_analysis::component_meta::PartialBranchReason::DynamicAttrName => {
+            FfiPartialBranchReason::DynamicAttrName
+        }
+        verter_analysis::component_meta::PartialBranchReason::DynamicListenerName => {
+            FfiPartialBranchReason::DynamicListenerName
+        }
+        verter_analysis::component_meta::PartialBranchReason::UnknownSpread => {
+            FfiPartialBranchReason::UnknownSpread
+        }
+        verter_analysis::component_meta::PartialBranchReason::GenericResolution { failure } => {
+            FfiPartialBranchReason::GenericResolution {
+                failure: generic_resolution_failure_to_ffi(failure),
+            }
+        }
+    }
+}
+
+fn unresolved_branch_reason_to_ffi(
+    reason: verter_analysis::component_meta::UnresolvedBranchReason,
+) -> FfiUnresolvedBranchReason {
+    match reason {
+        verter_analysis::component_meta::UnresolvedBranchReason::Cycle { canonical_id } => {
+            FfiUnresolvedBranchReason::Cycle { canonical_id }
+        }
+        verter_analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs => {
+            FfiUnresolvedBranchReason::DynamicComponentIs
+        }
+        verter_analysis::component_meta::UnresolvedBranchReason::ChildResolutionFailed => {
+            FfiUnresolvedBranchReason::ChildResolutionFailed
+        }
+        verter_analysis::component_meta::UnresolvedBranchReason::UnresolvedChildImport {
+            import_source,
+        } => FfiUnresolvedBranchReason::UnresolvedChildImport { import_source },
+        verter_analysis::component_meta::UnresolvedBranchReason::RootTarget { reason } => {
+            FfiUnresolvedBranchReason::RootTarget {
+                reason: unresolved_root_target_reason_to_ffi(reason),
+            }
+        }
+        verter_analysis::component_meta::UnresolvedBranchReason::GenericResolution { failure } => {
+            FfiUnresolvedBranchReason::GenericResolution {
+                failure: generic_resolution_failure_to_ffi(failure),
+            }
+        }
+    }
+}
+
+fn resolved_component_meta_to_ffi(
+    state: &host::meta_resolve::ResolvedComponentMetaState,
+) -> FfiComponentMetaResolution {
+    FfiComponentMetaResolution {
+        mode: resolver_mode_to_string(state.mode),
+        macros: state
+            .resolved_macros
+            .iter()
+            .map(resolved_macro_to_ffi)
+            .collect(),
+    }
+}
+
+fn resolved_macro_to_ffi(resolved: &host::meta_resolve::ResolvedMacroMeta) -> FfiResolvedMacroMeta {
+    FfiResolvedMacroMeta {
+        macro_index: resolved.macro_index as u32,
+        macro_kind: macro_kind_to_string(resolved.macro_kind),
+        type_name: resolved.type_name.clone(),
+        import_source: resolved.import_source.clone(),
+        declaration: FfiResolvedTypeDeclaration {
+            requested_name: resolved.declaration.requested_name.clone(),
+            resolved_name: resolved.declaration.resolved_name.clone(),
+            canonical_source: resolved.declaration.canonical_source.clone(),
+            span_start: resolved.declaration.span.start,
+            span_end: resolved.declaration.span.end,
+            kind: resolved_declaration_kind_to_string(resolved.declaration.kind),
+            text: resolved.declaration.text.clone(),
+        },
+        native_props: resolved
+            .native_props
+            .iter()
+            .map(|prop| FfiResolvedNativeProp {
+                name: prop.name.clone(),
+                is_optional: prop.is_optional,
+                type_annotation: prop.type_annotation.clone(),
+                visibility: member_visibility_to_string(prop.visibility),
+                span_start: prop.span.start,
+                span_end: prop.span.end,
+            })
+            .collect(),
+        props: resolved
+            .props
+            .iter()
+            .map(|prop| FfiResolvedPropField {
+                name: prop.name.clone(),
+                is_optional: prop.is_optional,
+                type_annotation: prop.type_annotation.clone(),
+                description: prop.description.clone(),
+                tags: prop.tags.iter().cloned().map(jsdoc_to_ffi).collect(),
+            })
+            .collect(),
+        emits: resolved
+            .emits
+            .iter()
+            .map(|emit| FfiResolvedEmitField {
+                name: emit.name.clone(),
+                payload_type: emit.payload_type.clone(),
+                description: emit.description.clone(),
+                tags: emit.tags.iter().cloned().map(jsdoc_to_ffi).collect(),
+            })
+            .collect(),
+        slots: resolved
+            .slots
+            .iter()
+            .map(|slot| FfiResolvedSlotField {
+                name: slot.name.clone(),
+                is_required: slot.is_required,
+                bindings: slot
+                    .bindings
+                    .iter()
+                    .map(|binding| FfiResolvedSlotBinding {
+                        name: binding.name.clone(),
+                        type_annotation: binding.type_annotation.clone(),
+                    })
+                    .collect(),
+                return_type: slot.return_type.clone(),
+                description: slot.description.clone(),
+                tags: slot.tags.iter().cloned().map(jsdoc_to_ffi).collect(),
+            })
+            .collect(),
+        jsdoc: resolved.jsdoc.as_ref().map(|jsdoc| FfiResolvedJsdocBlock {
+            description: jsdoc.description.clone(),
+            tags: jsdoc.tags.iter().map(resolved_jsdoc_tag_to_ffi).collect(),
+        }),
+    }
+}
+
+fn resolved_jsdoc_tag_to_ffi(tag: &host::meta_resolve::ResolvedJsdocTag) -> FfiResolvedJsdocTag {
+    FfiResolvedJsdocTag {
+        name: tag.name.clone(),
+        text: tag.text.clone(),
+        raw_type: tag.raw_type.clone(),
+        subject_name: tag.subject_name.clone(),
+        resolved_type: tag.resolved_type.clone(),
     }
 }
 
@@ -239,6 +785,44 @@ fn vue_api_to_string(api: verter_analysis::types::VueApiClassification) -> Strin
 
 fn style_lang_to_string(lang: verter_analysis::style::StyleAnalysisLang) -> String {
     format!("{lang:?}")
+}
+
+fn resolver_mode_to_string(mode: host::ResolverMode) -> String {
+    match mode {
+        host::ResolverMode::Type => "type".to_string(),
+        host::ResolverMode::Expanded => "expanded".to_string(),
+    }
+}
+
+fn macro_kind_to_string(kind: verter_analysis::AnalyzedMacroKind) -> String {
+    match kind {
+        verter_analysis::AnalyzedMacroKind::DefineProps => "defineProps".to_string(),
+        verter_analysis::AnalyzedMacroKind::WithDefaults => "withDefaults".to_string(),
+        verter_analysis::AnalyzedMacroKind::DefineEmits => "defineEmits".to_string(),
+        verter_analysis::AnalyzedMacroKind::DefineSlots => "defineSlots".to_string(),
+        verter_analysis::AnalyzedMacroKind::DefineModel => "defineModel".to_string(),
+        verter_analysis::AnalyzedMacroKind::DefineExpose => "defineExpose".to_string(),
+        verter_analysis::AnalyzedMacroKind::DefineOptions => "defineOptions".to_string(),
+    }
+}
+
+fn resolved_declaration_kind_to_string(
+    kind: host::meta_resolve::ResolvedDeclarationKind,
+) -> String {
+    match kind {
+        host::meta_resolve::ResolvedDeclarationKind::Interface => "interface".to_string(),
+        host::meta_resolve::ResolvedDeclarationKind::TypeAlias => "typeAlias".to_string(),
+        host::meta_resolve::ResolvedDeclarationKind::Class => "class".to_string(),
+        host::meta_resolve::ResolvedDeclarationKind::Unknown => "unknown".to_string(),
+    }
+}
+
+fn member_visibility_to_string(visibility: host::ResolvedMemberVisibility) -> String {
+    match visibility {
+        host::ResolvedMemberVisibility::Public => "public".to_string(),
+        host::ResolvedMemberVisibility::Protected => "protected".to_string(),
+        host::ResolvedMemberVisibility::Private => "private".to_string(),
+    }
 }
 
 /// Typed error for FFI → host conversion failures.
@@ -346,9 +930,6 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
         } else {
             return Err(FfiConversionError::InvalidAnalysisLevel(level));
         };
-    }
-    if let Some(deep) = input.deep_macro_resolution_type {
-        out.deep_macro_resolution_type = deep;
     }
     Ok(out)
 }
@@ -1057,6 +1638,82 @@ mod tests {
     }
 
     #[test]
+    fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_information() {
+        let analysis = verter_analysis::component_meta::ComponentMetaAnalysis {
+            props: Vec::new(),
+            events: Vec::new(),
+            slots: Vec::new(),
+            models: Vec::new(),
+            exposed: Vec::new(),
+            type_registry: vec![verter_analysis::component_meta::ResolvedTypeAnalysis {
+                name: "Props".to_string(),
+                type_expr: verter_analysis::type_expr::TypeExpr::Unknown {
+                    raw: "{ label: string }".to_string(),
+                },
+            }],
+            components: Vec::new(),
+            template_refs: Vec::new(),
+            imports: Vec::new(),
+            bindings: Vec::new(),
+            vue_api_calls: Vec::new(),
+            styles: Vec::new(),
+            flags: verter_analysis::component_meta::ComponentMetaFlags::default(),
+            root_reachability: verter_analysis::component_meta::RootReachability::NoFallthrough {
+                reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
+            accepted_props: Vec::new(),
+            accepted_events: Vec::new(),
+            accepted_surface_completeness:
+                verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface: verter_analysis::component_meta::FallthroughSurface::None {
+                reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
+            options_api: false,
+            file_path: "/src/App.vue".to_string(),
+        };
+        let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
+            snapshot: host::FileAnalysisSnapshot::default(),
+            mode: host::ResolverMode::Expanded,
+            whole_hash: [0; 16],
+            resolved_macros: Vec::new(),
+            resolved_type_registry: Vec::new(),
+            resolved_type_registry_meta: vec![host::meta_resolve::ResolvedTypeRegistryMeta {
+                name: "Props".to_string(),
+                declaration: host::meta_resolve::ResolvedTypeDeclaration {
+                    requested_name: "Props".to_string(),
+                    resolved_name: "Props".to_string(),
+                    canonical_source: "/src/types.ts".to_string(),
+                    span: verter_span::Span::new(10, 48),
+                    kind: host::meta_resolve::ResolvedDeclarationKind::Interface,
+                    text: Some("export interface Props { label: string }".to_string()),
+                },
+            }],
+            evaluated_types: None,
+        };
+
+        let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
+        let entry = ffi
+            .type_registry
+            .first()
+            .expect("type registry entry should be present");
+
+        assert_eq!(entry.name, "Props");
+        assert_eq!(
+            entry.raw_type.as_deref(),
+            Some("export interface Props { label: string }"),
+            "native payload should expose the pre-expansion source form explicitly",
+        );
+        assert_eq!(
+            entry
+                .declaration
+                .as_ref()
+                .map(|declaration| declaration.canonical_source.as_str()),
+            Some("/src/types.ts"),
+            "native payload should also retain declaration provenance",
+        );
+    }
+
+    #[test]
     fn file_kind_vue_default() {
         let kind = ffi_file_kind_to_host(None).unwrap();
         assert_eq!(kind, host::FileKind::VueSfc);
@@ -1139,7 +1796,6 @@ mod tests {
             max_profiles_per_file: Some(4),
             resolve_extensions: Some(vec![".vue".to_string(), ".ts".to_string()]),
             analysis_level: Some("essential".to_string()),
-            deep_macro_resolution_type: Some(true),
         };
         let result = ffi_config_to_host(config).unwrap();
         assert!(!result.dev_mode);
@@ -1151,7 +1807,6 @@ mod tests {
         assert_eq!(result.max_profiles_per_file, 4);
         assert_eq!(result.resolve_extensions, vec![".vue", ".ts"]);
         assert_eq!(result.analysis_level, host::AnalysisLevel::Essential);
-        assert!(result.deep_macro_resolution_type);
     }
 
     // ── Config: all policy string variants ───────────────────────────

@@ -103,6 +103,17 @@ impl NapiMetaProject {
         }))?
     }
 
+    /// Install a project-local HTML intrinsic catalog extracted from installed
+    /// TypeScript/Vue types.
+    #[napi(js_name = "setHtmlIntrinsicsCatalog")]
+    pub fn set_html_intrinsics_catalog(&self, catalog_json: String) -> Result<()> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner
+                .set_html_intrinsics_catalog(&catalog_json)
+                .map_err(meta_err)
+        }))?
+    }
+
     /// Open a new isolated session against this project.
     #[napi(js_name = "openSession")]
     pub fn open_session(&self) -> Result<NapiMetaSession> {
@@ -233,16 +244,24 @@ impl NapiMetaSession {
     /// Returns a JSON string containing the full component metadata (props,
     /// events, slots, models, exposed, flags) with structured type IR.
     /// Returns `null` if the file doesn't exist.
+    ///
+    /// Uses `get_component_meta_with_resolution()` to call
+    /// `resolve_component_meta(Expanded)` exactly once, avoiding the
+    /// double-call that would occur if `get_component_meta()` and
+    /// `resolve_component_meta_state()` were invoked separately.
     #[napi(js_name = "getComponentMeta")]
     pub fn get_component_meta(&self, canonical_or_alias: String) -> Result<Option<String>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let result = session
-                .get_component_meta(&canonical_or_alias)
+                .get_component_meta_with_resolution(&canonical_or_alias)
                 .map_err(meta_err)?;
             match result {
-                Some(analysis) => {
-                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
+                Some((analysis, resolved_state)) => {
+                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
+                        analysis,
+                        Some(&resolved_state),
+                    );
                     let json = serde_json::to_string(&ffi).map_err(|e| {
                         Error::new(
                             Status::GenericFailure,

@@ -20,14 +20,8 @@ export interface VerterHostAdapter {
   upsert(request: HostUpsertRequest): unknown;
   /** Remove a file from the host when the backend supports true deletion. */
   remove?(canonicalOrAlias: string): unknown;
-  /** Retrieve the analysis snapshot for a file, or `null` if not found. */
-  getAnalysis(canonicalOrAlias: string): unknown | null;
   /** Release host-backed resources when the backend exposes lifecycle control. */
   close?(): void;
-  /** Resolve imported types for a file's macro type dependencies. Returns JSON or null. */
-  resolveImportedTypes?(canonicalOrAlias: string): string | null;
-  /** Evaluate type annotations using the native lightweight evaluator. Returns JSON or null. */
-  evaluateTypes?(canonicalOrAlias: string): string | null;
   /** Configure project-scoped path alias resolution (optional). */
   configureProjects?(
     projects: {

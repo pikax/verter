@@ -3917,17 +3917,6 @@ impl LanguageServer for VerterLanguageServer {
                     "disabled"
                 }
             );
-            self.documents
-                .host()
-                .set_deep_expansion(experimental.deep_component_meta_expansion);
-            tracing::info!(
-                "deep component-meta expansion: {}",
-                if experimental.deep_component_meta_expansion {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            );
         }
 
         Ok(InitializeResult {

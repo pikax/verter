@@ -500,9 +500,6 @@ export async function activateVueLanguageServer(
         strictSlots: workspace
           .getConfiguration("verter.experimental")
           .get<boolean>("strictSlots", false),
-        deepComponentMetaExpansion: workspace
-          .getConfiguration("verter.experimental")
-          .get<boolean>("deepComponentMetaExpansion", false),
       },
     },
     outputChannel: log,

@@ -33,7 +33,6 @@ pub struct FfiHostConfig {
     pub max_profiles_per_file: Option<u32>,
     pub resolve_extensions: Option<Vec<String>>,
     pub analysis_level: Option<String>,
-    pub deep_macro_resolution_type: Option<bool>,
 }
 
 /// Per-compilation variant options.
@@ -463,8 +462,15 @@ pub struct FfiComponentMeta {
     pub vue_api_calls: Vec<FfiVueApiCallMeta>,
     pub styles: Vec<FfiStyleMeta>,
     pub flags: FfiComponentMetaFlags,
+    pub accepted_props: Vec<FfiAcceptedPropMeta>,
+    pub accepted_events: Vec<FfiAcceptedEventMeta>,
+    pub accepted_surface_completeness: FfiAcceptedSurfaceCompleteness,
+    pub root_reachability: FfiRootReachability,
+    pub fallthrough_surface: FfiFallthroughSurface,
     pub options_api: bool,
     pub file_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<FfiComponentMetaResolution>,
 }
 
 #[derive(Serialize, Clone)]
@@ -541,6 +547,133 @@ pub struct FfiExposedMeta {
 pub struct FfiResolvedTypeMeta {
     pub name: String,
     pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<FfiResolvedTypeDeclaration>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentMetaResolution {
+    pub mode: String,
+    pub macros: Vec<FfiResolvedMacroMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedMacroMeta {
+    pub macro_index: u32,
+    pub macro_kind: String,
+    pub type_name: String,
+    pub import_source: String,
+    pub declaration: FfiResolvedTypeDeclaration,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub native_props: Vec<FfiResolvedNativeProp>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub props: Vec<FfiResolvedPropField>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub emits: Vec<FfiResolvedEmitField>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<FfiResolvedSlotField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jsdoc: Option<FfiResolvedJsdocBlock>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedTypeDeclaration {
+    pub requested_name: String,
+    pub resolved_name: String,
+    pub canonical_source: String,
+    pub span_start: u32,
+    pub span_end: u32,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedNativeProp {
+    pub name: String,
+    pub is_optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
+    pub visibility: String,
+    pub span_start: u32,
+    pub span_end: u32,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedPropField {
+    pub name: String,
+    pub is_optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedEmitField {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedSlotField {
+    pub name: String,
+    pub is_required: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<FfiResolvedSlotBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedSlotBinding {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedJsdocBlock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiResolvedJsdocTag>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedJsdocTag {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_type: Option<verter_analysis::type_expr::TypeExpr>,
 }
 
 #[derive(Serialize, Clone)]
@@ -650,4 +783,316 @@ pub struct FfiJsdocTag {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+}
+
+// =============================================================================
+// Component-meta: fallthrough surface types (Rust → JS)
+// =============================================================================
+
+/// Root reachability classification for fallthrough inheritance.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiRootReachability {
+    /// No fallthrough inheritance is possible.
+    #[serde(rename_all = "camelCase")]
+    NoFallthrough { reason: FfiNoFallthroughReason },
+    /// One or more conditional branches, each with exactly one root target.
+    #[serde(rename_all = "camelCase")]
+    Branches { branches: Vec<FfiRootBranch> },
+}
+
+/// Why a component has no fallthrough surface.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiNoFallthroughReason {
+    InheritAttrsFalse,
+    MultiRoot,
+    BranchNotSingleRoot,
+    RootVFor,
+    NoTemplate,
+    EmptyTemplate,
+    TextOrInterpolationRoot,
+}
+
+/// A single root render branch.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiRootBranch {
+    pub branch_index: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition_text: Option<String>,
+    pub target: FfiRootTargetRef,
+    pub consumed: FfiConsumedRootBindings,
+    pub has_unknown_spread: bool,
+}
+
+/// The kind of root render target.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiRootTargetRef {
+    #[serde(rename_all = "camelCase")]
+    NativeElement { element_index: u32, tag: String },
+    #[serde(rename_all = "camelCase")]
+    DynamicComponentUsage {
+        element_index: u32,
+        usage_index: u32,
+    },
+    #[serde(rename_all = "camelCase")]
+    ComponentUsage {
+        element_index: u32,
+        usage_index: u32,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        import_source: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    UnresolvedTarget {
+        element_index: u32,
+        tag: String,
+        reason: FfiUnresolvedRootTargetReason,
+    },
+}
+
+/// Why a root target cannot be resolved for fallthrough inheritance.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiUnresolvedRootTargetReason {
+    DynamicComponentIs,
+    SlotOutlet,
+    #[serde(rename_all = "camelCase")]
+    UnsupportedBuiltin {
+        tag: String,
+    },
+    MissingUsageLink,
+    UnresolvedImport,
+    UnknownRootTarget,
+}
+
+/// Attrs/listeners explicitly bound on the root element.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiConsumedRootBindings {
+    pub attrs: Vec<String>,
+    pub listeners: Vec<String>,
+    pub has_dynamic_attr_name: bool,
+    pub has_dynamic_listener_name: bool,
+}
+
+/// Why generic-root specialization could not resolve a concrete instantiation.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiGenericResolutionFailure {
+    SpreadInput,
+    DynamicKey,
+    MissingType,
+    UnsupportedExpression,
+    MissingUsageLink,
+    UnresolvedChildGenericSurface,
+}
+
+/// Known lower-bound causes for a partially resolved fallthrough branch.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiPartialBranchReason {
+    DynamicAttrName,
+    DynamicListenerName,
+    UnknownSpread,
+    #[serde(rename_all = "camelCase")]
+    GenericResolution {
+        failure: FfiGenericResolutionFailure,
+    },
+}
+
+/// Why a fallthrough branch could not be resolved at all.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiUnresolvedBranchReason {
+    #[serde(rename_all = "camelCase")]
+    Cycle {
+        canonical_id: String,
+    },
+    DynamicComponentIs,
+    ChildResolutionFailed,
+    #[serde(rename_all = "camelCase")]
+    UnresolvedChildImport {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        import_source: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RootTarget {
+        reason: FfiUnresolvedRootTargetReason,
+    },
+    #[serde(rename_all = "camelCase")]
+    GenericResolution {
+        failure: FfiGenericResolutionFailure,
+    },
+}
+
+/// How a member arrived on the accepted surface.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiMemberProvenance {
+    /// Member is declared locally.
+    Declared,
+    /// Member is inherited from one or more fallthrough sources.
+    #[serde(rename_all = "camelCase")]
+    Inherited { sources: Vec<FfiInheritedSource> },
+}
+
+/// A single inheritance source.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiInheritedSource {
+    /// Inherited from a native HTML element.
+    #[serde(rename_all = "camelCase")]
+    NativeTag { tag: String },
+    /// Inherited from a child component.
+    #[serde(rename_all = "camelCase")]
+    Component { canonical_id: String },
+}
+
+/// Whether a member is always available or only in certain branches.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiMemberAvailability {
+    /// Available in all branches.
+    Always,
+    /// Available only in specific branches.
+    #[serde(rename_all = "camelCase")]
+    Conditional { branch_keys: Vec<String> },
+}
+
+/// Kind of accepted prop (camelCase string).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiAcceptedPropKind {
+    DeclaredProp,
+    Attr,
+}
+
+/// Kind of accepted event (camelCase string).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiAcceptedEventKind {
+    DeclaredEmit,
+    Listener,
+}
+
+/// Whether the accepted surface is exact or only a lower bound (camelCase string).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiAcceptedSurfaceCompleteness {
+    Exact,
+    LowerBound,
+}
+
+/// An accepted prop on the computed call-site surface.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiAcceptedPropMeta {
+    pub name: String,
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
+    pub required: bool,
+    pub provenance: FfiMemberProvenance,
+    pub availability: FfiMemberAvailability,
+    pub kind: FfiAcceptedPropKind,
+}
+
+/// An accepted event on the computed call-site surface.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiAcceptedEventMeta {
+    pub name: String,
+    pub payload: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_signature: Option<String>,
+    pub provenance: FfiMemberProvenance,
+    pub availability: FfiMemberAvailability,
+    pub kind: FfiAcceptedEventKind,
+}
+
+/// The branch-structured inherited surface.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiFallthroughSurface {
+    /// No fallthrough inheritance.
+    #[serde(rename_all = "camelCase")]
+    None { reason: FfiNoFallthroughReason },
+    /// Branch-structured inherited props and events.
+    #[serde(rename_all = "camelCase")]
+    Branches { branches: Vec<FfiFallthroughBranch> },
+}
+
+/// An inherited prop entry in a fallthrough branch.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiFallthroughPropEntry {
+    pub name: String,
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
+    pub sources: Vec<FfiInheritedSource>,
+}
+
+/// An inherited event entry in a fallthrough branch.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiFallthroughEventEntry {
+    pub name: String,
+    pub payload: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_signature: Option<String>,
+    pub sources: Vec<FfiInheritedSource>,
+}
+
+/// Status of a fallthrough branch.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiBranchStatus {
+    /// All members in this branch are exactly known.
+    Resolved,
+    /// Some members are known but the branch may have additional unknown members.
+    #[serde(rename_all = "camelCase")]
+    PartiallyUnresolved {
+        reasons: Vec<FfiPartialBranchReason>,
+    },
+    /// This branch could not be resolved at all.
+    #[serde(rename_all = "camelCase")]
+    Unresolved { reason: FfiUnresolvedBranchReason },
+}
+
+/// A single step in the root resolution chain.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiResolvedRootStep {
+    /// Native HTML element target.
+    #[serde(rename_all = "camelCase")]
+    NativeTag { tag: String },
+    /// Resolved child component target.
+    #[serde(rename_all = "camelCase")]
+    Component {
+        canonical_id: String,
+        component_name: String,
+    },
+    /// Unresolved root target.
+    #[serde(rename_all = "camelCase")]
+    Unresolved {
+        tag: String,
+        reason: FfiUnresolvedBranchReason,
+    },
+}
+
+/// A single branch in the fallthrough surface.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiFallthroughBranch {
+    pub branch_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition_text: Option<String>,
+    pub props: Vec<FfiFallthroughPropEntry>,
+    pub events: Vec<FfiFallthroughEventEntry>,
+    pub root_chain: Vec<FfiResolvedRootStep>,
+    pub status: FfiBranchStatus,
 }

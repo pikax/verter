@@ -39,7 +39,6 @@ pub fn merge_init_options(resolved: &mut ResolvedLintConfig, init_options: &serd
 pub struct ExperimentalInitOptions {
     pub conditional_root_narrowing: bool,
     pub strict_slots: bool,
-    pub deep_component_meta_expansion: bool,
 }
 
 pub fn parse_experimental_init_options(
@@ -53,10 +52,6 @@ pub fn parse_experimental_init_options(
             .unwrap_or(false),
         strict_slots: experimental
             .and_then(|v| v.get("strictSlots"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        deep_component_meta_expansion: experimental
-            .and_then(|v| v.get("deepComponentMetaExpansion"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     }
@@ -141,12 +136,11 @@ mod config_migration_tests {
     }
 
     #[test]
-    fn parse_experimental_init_options_reads_deep_component_meta_expansion() {
+    fn parse_experimental_init_options_reads_supported_flags() {
         let opts = serde_json::json!({
             "experimental": {
                 "conditionalRootNarrowing": true,
-                "strictSlots": true,
-                "deepComponentMetaExpansion": true
+                "strictSlots": true
             }
         });
         assert_eq!(
@@ -154,7 +148,6 @@ mod config_migration_tests {
             ExperimentalInitOptions {
                 conditional_root_narrowing: true,
                 strict_slots: true,
-                deep_component_meta_expansion: true,
             }
         );
     }

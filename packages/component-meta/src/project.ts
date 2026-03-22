@@ -23,6 +23,8 @@ import {
   nativeComponentMetaToComponentMeta,
   nativeTypeRegistryToMap,
 } from "./native-component-meta.js";
+import type { NativeComponentMetaResult } from "./native-component-meta.js";
+import { configureProjectHtmlIntrinsics } from "./project-html-intrinsics.js";
 import {
   computeEngineKey,
   extractPathAliases,
@@ -126,12 +128,11 @@ export class MetaProject {
     this._session.engine.clearCaches();
   }
 
-  async getComponentMeta(filePath: string): Promise<VolarComponentMeta> {
-    this.ensureOpen();
+  private loadNativeComponentMeta(filePath: string): NativeComponentMetaResult | undefined {
     const abs = normalizePath(resolve(this._root, filePath));
 
     if (this._deletedFiles.has(abs)) {
-      return { type: 0, props: [], events: [], slots: [], exposed: [] };
+      return undefined;
     }
 
     if (!this._session.hasFile(abs) && this._workspace && this._session.ensureBaseFile(abs)) {
@@ -139,23 +140,34 @@ export class MetaProject {
     }
 
     if (this._session.getEffectiveSource(abs) === undefined) {
-      return { type: 0, props: [], events: [], slots: [], exposed: [] };
+      return undefined;
     }
 
     const nativeMeta = this._session.getComponentMeta(abs);
+    if (!nativeMeta) {
+      return undefined;
+    }
+
+    return nativeMeta as NativeComponentMetaResult;
+  }
+
+  async getComponentMeta(filePath: string): Promise<VolarComponentMeta> {
+    this.ensureOpen();
+    const nativeMeta = this.loadNativeComponentMeta(filePath);
     if (!nativeMeta) {
       return { type: 0, props: [], events: [], slots: [], exposed: [] };
     }
 
     return mapComponentMeta(
-      nativeComponentMetaToComponentMeta(
-        nativeMeta as import("./native-component-meta.js").NativeComponentMetaResult,
-      ),
+      nativeComponentMetaToComponentMeta(nativeMeta),
       this._options,
-      nativeTypeRegistryToMap(
-        nativeMeta as import("./native-component-meta.js").NativeComponentMetaResult,
-      ),
+      nativeTypeRegistryToMap(nativeMeta),
     );
+  }
+
+  async getNativeComponentMeta(filePath: string): Promise<NativeComponentMetaResult | undefined> {
+    this.ensureOpen();
+    return this.loadNativeComponentMeta(filePath);
   }
 
   async getExportNames(_filePath: string): Promise<string[]> {
@@ -200,7 +212,7 @@ function buildEngineKeyInput(options: MetaProjectConfig): EngineKeyInput {
     configHash: options.config
       ? stableSelectiveConfigHash(options.config)
       : hashTsconfigConfig(resolve(options.tsconfig)),
-    nativeFlags: { analysisLevel: "full", deepMacroResolutionType: true },
+    nativeFlags: { analysisLevel: "full" },
   };
 }
 
@@ -221,7 +233,6 @@ export async function openMetaProject(
     const config = {
       devMode: false,
       analysisLevel: "full",
-      deepMacroResolutionType: true,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
 
@@ -234,6 +245,11 @@ export async function openMetaProject(
       const aliases = extractPathAliases(options.config, normalizePath(root));
       workspace.configureProjects([aliases]);
     }
+
+    await configureProjectHtmlIntrinsics(nativeProject, {
+      root: normalizePath(root),
+      config: options.tsconfig ? parsedConfig?.config : options.config,
+    });
 
     // Selective loading: no eager preload. Files are loaded on-demand
     // in getComponentMeta() when the file is first requested.

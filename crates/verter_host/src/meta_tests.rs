@@ -6,10 +6,16 @@ use verter_analysis::type_eval_build::EvaluatedComponentTypes;
 use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
 fn make_project() -> Arc<MetaProject> {
+    make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    })
+}
+
+fn make_project_with_config(config: HostConfig) -> Arc<MetaProject> {
     let host = VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
-        deep_macro_resolution_type: true,
-        ..HostConfig::default()
+        ..config
     });
     MetaProject::new(host)
 }
@@ -18,7 +24,6 @@ fn make_workspace_project(ws: Arc<verter_vfs::MemoryWorkspace>) -> Arc<MetaProje
     let host = VerterHost::new(
         HostConfig {
             analysis_level: crate::types::AnalysisLevel::Full,
-            deep_macro_resolution_type: true,
             ..HostConfig::default()
         },
         ws,
@@ -55,51 +60,52 @@ fn evaluated_prop_type<'a>(types: &'a EvaluatedComponentTypes, name: &str) -> &'
         .r#type
 }
 
-fn cached_evaluated_types(
+fn cached_resolved_state(
     project: &MetaProject,
     canonical: &str,
-) -> Option<(crate::types::Hash16, Arc<EvaluatedComponentTypes>)> {
+    mode: crate::types::ResolverMode,
+) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
     #[cfg(feature = "scheduler")]
     {
         project
             .host()
             .compile_cache
             .get(canonical)
-            .and_then(|entry| entry.cached_evaluated_types.clone())
+            .and_then(|entry| {
+                entry
+                    .cached_resolved_meta
+                    .get(&mode)
+                    .map(|cached| Arc::clone(&cached.state))
+            })
     }
 
     #[cfg(not(feature = "scheduler"))]
     {
         let files = crate::shared::read_lock(&project.host().files);
-        files
-            .get(canonical)
-            .and_then(|entry| entry.cached_evaluated_types.clone())
+        files.get(canonical).and_then(|entry| {
+            entry
+                .cached_resolved_meta
+                .get(&mode)
+                .map(|cached| Arc::clone(&cached.state))
+        })
     }
 }
 
-fn cached_enriched_analysis(
+#[cfg(feature = "scheduler")]
+fn cached_fallthrough_state(
     project: &MetaProject,
     canonical: &str,
-) -> Option<(
-    crate::types::Hash16,
-    Arc<crate::types::FileAnalysisSnapshot>,
-)> {
-    #[cfg(feature = "scheduler")]
-    {
-        project
-            .host()
-            .compile_cache
-            .get(canonical)
-            .and_then(|entry| entry.cached_enriched_analysis.clone())
-    }
-
-    #[cfg(not(feature = "scheduler"))]
-    {
-        let files = crate::shared::read_lock(&project.host().files);
-        files
-            .get(canonical)
-            .and_then(|entry| entry.cached_enriched_analysis.clone())
-    }
+) -> Option<Arc<crate::types::FallthroughResolution>> {
+    project
+        .host()
+        .compile_cache
+        .get(canonical)
+        .and_then(|entry| {
+            entry
+                .cached_fallthrough
+                .as_ref()
+                .map(|(_, _, cached)| Arc::clone(cached))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -468,19 +474,10 @@ fn clear_caches_preserves_base_files() {
         .get_analysis("Comp.vue")
         .unwrap()
         .expect("analysis should exist before clearing caches");
-    assert!(
-        cached_enriched_analysis(&project, "Comp.vue").is_some(),
-        "clear_caches test should start with a populated enriched-analysis cache"
-    );
 
     project.clear_caches().unwrap();
 
-    assert!(
-        cached_enriched_analysis(&project, "Comp.vue").is_none(),
-        "clear_caches must flush the enriched-analysis cache",
-    );
-
-    // Base file should still exist and be queryable
+    // Base file should still exist and be queryable after clearing caches
     let analysis = s.get_analysis("Comp.vue").unwrap();
     assert!(
         analysis.is_some(),
@@ -726,25 +723,28 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
         &TypeExpr::Primitive(PrimitiveName::Number)
     );
 
-    let first_cache = cached_evaluated_types(&project, "Comp.vue")
-        .expect("first evaluation should populate the cache");
+    let first_cache =
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+            .expect("first evaluation should populate the cache");
 
     let second = session.evaluate_types("Comp.vue").unwrap().unwrap();
-    let second_cache = cached_evaluated_types(&project, "Comp.vue")
-        .expect("second evaluation should reuse the cache");
+    let second_cache =
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+            .expect("second evaluation should reuse the cache");
 
     assert_eq!(first.props.len(), second.props.len());
-    assert!(Arc::ptr_eq(&first_cache.1, &second_cache.1));
+    assert!(Arc::ptr_eq(&first_cache, &second_cache));
 
     session
         .upsert("Comp.vue", sfc("count: number; label: string"))
         .unwrap();
     let third = session.evaluate_types("Comp.vue").unwrap().unwrap();
-    let third_cache = cached_evaluated_types(&project, "Comp.vue")
-        .expect("updated file should repopulate the cache");
+    let third_cache =
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+            .expect("updated file should repopulate the cache");
 
     assert!(third.props.iter().any(|field| field.name == "label"));
-    assert!(!Arc::ptr_eq(&second_cache.1, &third_cache.1));
+    assert!(!Arc::ptr_eq(&second_cache, &third_cache));
 }
 
 #[test]
@@ -866,8 +866,9 @@ defineProps<{
 
     let session = project.open_session().unwrap();
     let first = session.evaluate_types("Comp.vue").unwrap().unwrap();
-    let first_cache = cached_evaluated_types(&project, "Comp.vue")
-        .expect("first evaluation should populate the cache");
+    let first_cache =
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+            .expect("first evaluation should populate the cache");
 
     match evaluated_prop_type(&first, "user") {
         TypeExpr::Object(obj) => {
@@ -896,12 +897,13 @@ defineProps<{
         .unwrap();
 
     let second = session.evaluate_types("Comp.vue").unwrap().unwrap();
-    let second_cache = cached_evaluated_types(&project, "Comp.vue")
-        .expect("dependency update should repopulate the cache");
+    let second_cache =
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+            .expect("dependency update should repopulate the cache");
 
     assert!(
-        !Arc::ptr_eq(&first_cache.1, &second_cache.1),
-        "dependency change must invalidate the owner's evaluated-type cache",
+        !Arc::ptr_eq(&first_cache, &second_cache),
+        "dependency change must invalidate the owner's resolved-meta cache",
     );
     match evaluated_prop_type(&second, "user") {
         TypeExpr::Object(obj) => {
@@ -930,7 +932,7 @@ fn provenance(project: &MetaProject) -> crate::types::MetaProvenanceSnapshot {
 }
 
 #[test]
-fn evaluate_types_records_resolved_state_recompute_when_enriched_snapshot_is_missing() {
+fn evaluate_types_returns_correct_results_for_imported_types() {
     let project = make_project();
     project
         .upsert_base(
@@ -943,28 +945,34 @@ fn evaluate_types_records_resolved_state_recompute_when_enriched_snapshot_is_mis
             "/App.vue",
             r#"<script setup lang="ts">
 import { Props } from './types'
-defineProps<Props>()
+defineProps<{ item: Props }>()
 </script>
 <template><div /></template>"#,
         )
         .unwrap();
 
-    project.host().provenance().reset();
     let session = project.open_session().unwrap();
 
-    let _ = session
+    let evaluated = session
         .evaluate_types("/App.vue")
-        .expect("evaluate_types should succeed");
+        .expect("evaluate_types should succeed")
+        .expect("should return evaluated types");
 
-    let p = provenance(&project);
-    assert_eq!(p.evaluate_types_calls, 1);
+    // Assert+: the prop referencing the imported type is present
     assert_eq!(
-        p.component_meta_resolved_state_recomputes, 1,
-        "evaluate_types should record one resolved-state recompute when no enriched snapshot exists",
+        evaluated.props.len(),
+        1,
+        "should have exactly 1 prop 'item'"
     );
-    assert_eq!(
-        p.evaluate_types_reused_enriched_snapshot, 0,
-        "evaluate_types should not report enriched-snapshot reuse on a cold path",
+    assert_eq!(evaluated.props[0].name, "item");
+
+    // Assert-: no spurious props with names from the imported interface
+    assert!(
+        !evaluated
+            .props
+            .iter()
+            .any(|p| p.name == "a" || p.name == "b"),
+        "imported interface fields should not appear as top-level props"
     );
 }
 
@@ -1003,52 +1011,88 @@ defineProps<Props>()
 }
 
 #[test]
-fn evaluate_types_records_enriched_snapshot_reuse_after_get_analysis() {
+fn evaluate_types_works_independently_of_prior_get_analysis_call() {
     let project = make_project();
     project
-        .upsert_base(
-            "/types.ts",
-            r#"export interface Props { a: string; b: number }"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/App.vue",
-            r#"<script setup lang="ts">
-import { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
+        .upsert_base("/App.vue", &sfc("count: number; label: string"))
         .unwrap();
 
     let session = project.open_session().unwrap();
-    let _ = session
+
+    // Call get_analysis first (raw, no enrichment)
+    let analysis = session
         .get_analysis("/App.vue")
         .unwrap()
-        .expect("get_analysis should populate enriched-analysis cache");
+        .expect("get_analysis should return raw analysis");
 
-    project.host().provenance().reset();
+    // get_analysis returns raw props
+    let raw_names = prop_names(&analysis);
+    assert!(
+        raw_names.contains(&"count".to_string()),
+        "raw analysis should have 'count' prop"
+    );
 
-    let _ = session
+    // evaluate_types should still work correctly regardless of prior get_analysis
+    let evaluated = session
         .evaluate_types("/App.vue")
-        .expect("evaluate_types should reuse the cached enriched snapshot");
+        .expect("evaluate_types should succeed")
+        .expect("should return evaluated types");
 
-    let p = provenance(&project);
-    assert_eq!(p.evaluate_types_calls, 1);
+    // Assert+: types are properly resolved
     assert_eq!(
-        p.component_meta_resolved_state_recomputes, 0,
-        "evaluate_types should not recompute resolved state when an enriched snapshot already exists",
+        evaluated_prop_type(&evaluated, "count"),
+        &TypeExpr::Primitive(PrimitiveName::Number),
     );
     assert_eq!(
-        p.evaluate_types_reused_enriched_snapshot, 1,
-        "evaluate_types should record enriched-snapshot reuse after get_analysis",
+        evaluated_prop_type(&evaluated, "label"),
+        &TypeExpr::Primitive(PrimitiveName::String),
     );
+
+    // Assert-: only the expected props
+    assert_eq!(evaluated.props.len(), 2);
 }
 
 #[test]
-fn evaluate_types_does_not_trigger_second_deep_enrichment_for_unchanged_file() {
-    // Setup: dep file + SFC importing from it
+fn evaluate_types_returns_consistent_results_for_repeated_calls() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("a: string; b: number"))
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    // First call
+    let first = session
+        .evaluate_types("/App.vue")
+        .expect("first evaluate_types should succeed")
+        .expect("should return evaluated types");
+
+    // Second call — should return identical results
+    let second = session
+        .evaluate_types("/App.vue")
+        .expect("second evaluate_types should succeed")
+        .expect("should return evaluated types");
+
+    // Assert+: both calls return the same prop count and types
+    assert_eq!(
+        first.props.len(),
+        second.props.len(),
+        "repeated evaluate_types calls should return the same number of props"
+    );
+    assert_eq!(
+        evaluated_prop_type(&first, "a"),
+        evaluated_prop_type(&second, "a"),
+        "repeated calls should return the same type for prop 'a'"
+    );
+
+    // Assert-: no extra props introduced
+    assert_eq!(first.props.len(), 2, "should have exactly 2 props");
+}
+
+#[test]
+fn resolve_component_meta_expanded_returns_consistent_results_on_repeated_calls() {
+    use crate::types::ResolverMode;
+
     let project = make_project();
     project
         .upsert_base(
@@ -1067,165 +1111,121 @@ defineProps<Props>()
         )
         .unwrap();
 
-    // Reset counters after upsert
-    project.host().provenance().reset();
+    project.host().set_import_dependencies(
+        "/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
 
     let session = project.open_session().unwrap();
+    // Force host to load the file
+    let _ = session.get_analysis("/App.vue").unwrap();
 
-    // Act: call get_analysis() then evaluate_types() — the compat workflow
-    let _analysis = session.get_analysis("/App.vue").unwrap();
-    let _eval = session.evaluate_types("/App.vue").unwrap();
+    // First call
+    let first = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("first resolve_component_meta should succeed");
 
-    let p = provenance(&project);
+    // Second call — should return consistent results
+    let second = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("second resolve_component_meta should succeed");
 
-    // Assert+: get_analysis was called at least once
-    assert!(
-        p.get_analysis_calls >= 1,
-        "get_analysis should have been called, got: {}",
-        p.get_analysis_calls
-    );
-
-    // Assert+: deep enrichment ran exactly once (not twice)
+    // Assert+: both calls return the same resolved macros
     assert_eq!(
-        p.get_analysis_deep_enrich_runs, 1,
-        "deep enrichment should run exactly once for the compat workflow, got: {}",
-        p.get_analysis_deep_enrich_runs
+        first.resolved_macros.len(),
+        second.resolved_macros.len(),
+        "repeated calls should return the same number of resolved macros"
     );
 
-    // Assert-: deep enrichment must NOT have run twice
+    // Assert+: resolved macros have consistent prop counts
     assert!(
-        p.get_analysis_deep_enrich_runs != 2,
-        "deep enrichment must NOT run twice for one compat request"
+        !first.resolved_macros.is_empty(),
+        "Expanded mode should resolve cross-file macro types on first call"
     );
+    assert!(
+        !second.resolved_macros.is_empty(),
+        "Expanded mode should resolve cross-file macro types on second call"
+    );
+    assert_eq!(
+        first.resolved_macros[0].props.len(),
+        second.resolved_macros[0].props.len(),
+        "repeated calls should produce the same resolved prop count"
+    );
+
+    // Assert-: mode is Expanded, not Type
+    assert_eq!(first.mode, ResolverMode::Expanded);
+    assert_ne!(first.mode, ResolverMode::Type);
 }
 
 #[test]
-fn deep_enriched_analysis_is_cached_for_unchanged_owner() {
+fn resolve_component_meta_expanded_returns_updated_results_after_owner_change() {
+    use crate::types::ResolverMode;
+
     let project = make_project();
     project
-        .upsert_base(
-            "/types.ts",
-            r#"export interface Props { a: string; b: number }"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/App.vue",
-            r#"<script setup lang="ts">
-import { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
+        .upsert_base("/App.vue", &sfc("a: string; b: number"))
         .unwrap();
 
-    project.host().provenance().reset();
-    let session = project.open_session().unwrap();
+    // First call — inline props should be resolved
+    let first = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("first resolve_component_meta should succeed");
 
-    // First call triggers enrichment
-    let first = session.get_analysis("/App.vue").unwrap().unwrap();
-    let p1 = provenance(&project);
-    assert_eq!(
-        p1.get_analysis_deep_enrich_runs, 1,
-        "first call should trigger exactly one enrichment"
-    );
-
-    // Second call should hit the cache
-    let second = session.get_analysis("/App.vue").unwrap().unwrap();
-    let p2 = provenance(&project);
-
-    // Assert+: cache was hit on the second call
-    assert_eq!(
-        p2.get_analysis_enriched_cache_hits, 1,
-        "second call should hit the enriched-analysis cache, got: {}",
-        p2.get_analysis_enriched_cache_hits
-    );
-
-    // Assert+: both results have the same prop fields
-    let first_props = prop_names(&first);
-    let second_props = prop_names(&second);
-    assert_eq!(
-        first_props, second_props,
-        "both results should have identical prop fields"
-    );
-
-    // Assert-: deep enrichment should NOT have run again
-    assert_eq!(
-        p2.get_analysis_deep_enrich_runs, 1,
-        "deep enrichment should NOT run again for unchanged file, got: {}",
-        p2.get_analysis_deep_enrich_runs
-    );
-}
-
-#[test]
-fn deep_enriched_analysis_invalidates_on_owner_change() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/types.ts",
-            r#"export interface Props { a: string; b: number }"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/App.vue",
-            r#"<script setup lang="ts">
-import { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let session = project.open_session().unwrap();
-
-    // First call populates the cache
-    let _first = session.get_analysis("/App.vue").unwrap().unwrap();
-
-    // Modify the owner SFC to add a local prop
-    session
-        .upsert(
-            "/App.vue",
-            r#"<script setup lang="ts">
-import { Props } from './types'
-interface LocalProps extends Props { c: boolean }
-defineProps<LocalProps>()
-</script>
-<template><div /></template>"#
-                .into(),
-        )
-        .unwrap();
-
-    // Reset counters to measure the second call clearly
-    project.host().provenance().reset();
-    let second = session.get_analysis("/App.vue").unwrap().unwrap();
-    let p = provenance(&project);
-
-    // Assert+: result includes the new prop 'c'
-    let names = prop_names(&second);
+    let first_snap_props = prop_names(&first.snapshot);
     assert!(
-        names.contains(&"c".to_string()),
+        first_snap_props.contains(&"a".to_string()),
+        "first call should have prop 'a', got: {:?}",
+        first_snap_props
+    );
+    assert_eq!(first_snap_props.len(), 2, "should start with 2 props");
+
+    // Modify the owner SFC to change props
+    project
+        .upsert_base("/App.vue", &sfc("c: boolean; d: string"))
+        .unwrap();
+
+    // Second call — should see the updated props
+    let second = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("second resolve_component_meta should succeed after owner change");
+
+    let second_snap_props = prop_names(&second.snapshot);
+
+    // Assert+: result includes the new props
+    assert!(
+        second_snap_props.contains(&"c".to_string()),
         "owner change should produce updated props including 'c', got: {:?}",
-        names
+        second_snap_props
+    );
+    assert!(
+        second_snap_props.contains(&"d".to_string()),
+        "owner change should produce updated props including 'd', got: {:?}",
+        second_snap_props
     );
 
-    // Assert+: deep enrichment ran again (cache was invalidated)
-    assert_eq!(
-        p.get_analysis_deep_enrich_runs, 1,
-        "owner change should trigger a fresh deep enrichment, got: {}",
-        p.get_analysis_deep_enrich_runs
+    // Assert-: old props should not appear
+    assert!(
+        !second_snap_props.contains(&"a".to_string()),
+        "old prop 'a' should not appear after owner change"
     );
-
-    // Assert-: cache should NOT have been reused (hash changed)
-    assert_eq!(
-        p.get_analysis_enriched_cache_hits, 0,
-        "owner change should NOT reuse the enriched cache, got: {}",
-        p.get_analysis_enriched_cache_hits
+    assert!(
+        !second_snap_props.contains(&"b".to_string()),
+        "old prop 'b' should not appear after owner change"
     );
 }
 
 #[test]
-fn deep_enriched_analysis_invalidates_on_dependency_change() {
+fn resolve_component_meta_expanded_returns_updated_results_after_dependency_change() {
+    use crate::types::ResolverMode;
+
     let project = make_project();
     project
         .upsert_base(
@@ -1245,8 +1245,6 @@ defineProps<Props>()
         .unwrap();
 
     // Manually register the import dependency so reverse-dep tracking works.
-    // In production, set_import_dependencies is called by the NAPI layer after
-    // the bundler resolves specifiers to canonical IDs with extensions.
     project.host().set_import_dependencies(
         "/src/App.vue",
         vec![crate::types::DependencyResolution {
@@ -1256,73 +1254,107 @@ defineProps<Props>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    // First call — should resolve props a, b via resolved_macros
+    let first = project
+        .host()
+        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .expect("first resolve_component_meta should succeed");
 
-    // First call populates the cache and enriches imported types
-    let first = session.get_analysis("/src/App.vue").unwrap().unwrap();
-    let first_names = prop_names(&first);
     assert!(
-        first_names.contains(&"a".to_string()),
-        "first call should resolve props, got: {:?}",
-        first_names
+        !first.resolved_macros.is_empty(),
+        "Expanded mode should resolve cross-file macro types"
+    );
+    let first_prop_names: Vec<&str> = first.resolved_macros[0]
+        .props
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        first_prop_names.contains(&"a") && first_prop_names.contains(&"b"),
+        "first call should resolve props a and b, got: {:?}",
+        first_prop_names
     );
 
-    // Modify the dependency to add prop 'c'
-    session
-        .upsert(
+    // Modify the dependency via base upsert (directly on host, not session)
+    project
+        .upsert_base(
             "/src/types.ts",
-            r#"export interface Props { a: string; b: number; c: boolean }"#.into(),
+            r#"export interface Props { a: string; b: number; c: boolean }"#,
         )
         .unwrap();
 
-    // Reset counters
-    project.host().provenance().reset();
-    let second = session.get_analysis("/src/App.vue").unwrap().unwrap();
-    let p = provenance(&project);
+    // Second call — should reflect the dependency change
+    let second = project
+        .host()
+        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .expect("resolve_component_meta should succeed after dependency change");
+
+    assert!(
+        !second.resolved_macros.is_empty(),
+        "should still have resolved macros after dep change"
+    );
+    let second_prop_names: Vec<&str> = second.resolved_macros[0]
+        .props
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
 
     // Assert+: result includes the new prop 'c'
-    let names = prop_names(&second);
     assert!(
-        names.contains(&"c".to_string()),
+        second_prop_names.contains(&"c"),
         "dependency change should produce updated props including 'c', got: {:?}",
-        names
+        second_prop_names
     );
 
-    // Assert+: deep enrichment re-ran (at least once)
+    // Assert-: should not still have only the old 2-prop result
     assert!(
-        p.get_analysis_deep_enrich_runs >= 1,
-        "dependency change should trigger re-enrichment, got: {}",
-        p.get_analysis_deep_enrich_runs
+        second_prop_names.len() > 2,
+        "dependency change must not return the stale 2-prop result, got: {:?}",
+        second_prop_names
     );
 }
 
 #[test]
-fn invalidate_compile_slots_clears_enriched_analysis_cache() {
+fn invalidate_compile_slots_does_not_break_subsequent_analysis() {
     let project = make_project();
     project
         .upsert_base("/App.vue", &sfc("msg: string"))
         .unwrap();
 
     let session = project.open_session().unwrap();
-    let _ = session
+    let before = session
         .get_analysis("/App.vue")
         .unwrap()
-        .expect("analysis should populate the enriched cache");
+        .expect("analysis should exist before invalidation");
+    let before_names = prop_names(&before);
     assert!(
-        cached_enriched_analysis(&project, "/App.vue").is_some(),
-        "enriched-analysis cache should be populated before invalidation"
+        before_names.contains(&"msg".to_string()),
+        "should see 'msg' prop before invalidation"
     );
 
     project.host().invalidate_compile_slots("/App.vue");
 
+    // Assert+: analysis still works after invalidation
+    let after = session
+        .get_analysis("/App.vue")
+        .unwrap()
+        .expect("analysis should still work after invalidate_compile_slots");
+    let after_names = prop_names(&after);
     assert!(
-        cached_enriched_analysis(&project, "/App.vue").is_none(),
-        "invalidate_compile_slots must clear the enriched-analysis cache",
+        after_names.contains(&"msg".to_string()),
+        "should still see 'msg' prop after invalidation"
+    );
+
+    // Assert-: no spurious props introduced
+    assert_eq!(
+        after_names.len(),
+        1,
+        "should have exactly 1 prop after invalidation, not more"
     );
 }
 
 #[test]
-fn removing_dependency_clears_enriched_analysis_cache_for_dependents() {
+fn removing_dependency_does_not_break_subsequent_analysis() {
     let project = make_project();
     project
         .upsert_base(
@@ -1351,39 +1383,56 @@ defineProps<Props>()
     );
 
     let session = project.open_session().unwrap();
-    let _ = session
+    // Verify analysis works before removal
+    let before = session
         .get_analysis("/src/App.vue")
         .unwrap()
-        .expect("analysis should populate the dependent enriched cache");
+        .expect("analysis should work before dependency removal");
+    // Raw analysis may not resolve cross-file props, but should succeed
     assert!(
-        cached_enriched_analysis(&project, "/src/App.vue").is_some(),
-        "dependent should have a populated enriched-analysis cache before removal"
+        before
+            .macros
+            .iter()
+            .any(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps),
+        "should have defineProps macro before removal"
     );
 
     let _ = project.host().remove("/src/types.ts");
 
+    // Assert+: analysis still returns a result (doesn't panic/crash)
+    let after = session.get_analysis("/src/App.vue").unwrap();
     assert!(
-        cached_enriched_analysis(&project, "/src/App.vue").is_none(),
-        "removing a dependency must clear the dependent enriched-analysis cache",
+        after.is_some(),
+        "analysis should still return a result after dependency removal"
+    );
+
+    // Assert-: the removed dependency should not be resolvable as a component
+    assert!(
+        project
+            .host()
+            .resolve_component_meta("/src/types.ts", crate::types::ResolverMode::Type)
+            .is_none(),
+        "removed dependency should not be resolvable via resolve_component_meta"
     );
 }
 
 #[cfg(not(feature = "scheduler"))]
 #[test]
-fn non_scheduler_upsert_clears_enriched_analysis_cache_immediately() {
+fn non_scheduler_upsert_reflects_updated_source_in_subsequent_analysis() {
     let project = make_project();
     project
         .upsert_base("/App.vue", &sfc("msg: string"))
         .unwrap();
 
     let session = project.open_session().unwrap();
-    let _ = session
+    let before = session
         .get_analysis("/App.vue")
         .unwrap()
-        .expect("analysis should populate the enriched cache");
+        .expect("analysis should exist before upsert");
+    let before_names = prop_names(&before);
     assert!(
-        cached_enriched_analysis(&project, "/App.vue").is_some(),
-        "non-scheduler test should start with a populated enriched-analysis cache"
+        before_names.contains(&"msg".to_string()),
+        "should see 'msg' before upsert"
     );
 
     let updated = sfc("msg: string; count: number");
@@ -1398,9 +1447,22 @@ fn non_scheduler_upsert_clears_enriched_analysis_cache_immediately() {
         })
         .unwrap();
 
+    // Assert+: subsequent analysis reflects updated content
+    let after = session
+        .get_analysis("/App.vue")
+        .unwrap()
+        .expect("analysis should work after upsert");
+    let after_names = prop_names(&after);
     assert!(
-        cached_enriched_analysis(&project, "/App.vue").is_none(),
-        "non-scheduler upsert must clear the stale enriched-analysis cache immediately",
+        after_names.contains(&"count".to_string()),
+        "should see 'count' after upsert, got: {:?}",
+        after_names
+    );
+
+    // Assert-: should not lose the original prop
+    assert!(
+        after_names.contains(&"msg".to_string()),
+        "should still see 'msg' after upsert"
     );
 }
 
@@ -1467,16 +1529,16 @@ fn get_component_meta_uses_single_native_query_path() {
         "get_component_meta should record one call"
     );
 
-    // Assert+: deep enrichment ran at most once
+    // Assert+: resolved state was computed at most once
     assert!(
-        p.get_analysis_deep_enrich_runs <= 1,
-        "get_component_meta should perform at most one deep enrichment, got: {}",
-        p.get_analysis_deep_enrich_runs
+        p.component_meta_resolved_state_recomputes <= 1,
+        "get_component_meta should compute resolved state at most once, got: {}",
+        p.component_meta_resolved_state_recomputes
     );
 }
 
 #[test]
-fn get_component_meta_reuses_enriched_cache_on_second_call() {
+fn get_component_meta_returns_consistent_results_on_repeated_calls() {
     let project = make_project();
     project
         .upsert_base("/App.vue", &sfc("msg: string"))
@@ -1485,30 +1547,41 @@ fn get_component_meta_reuses_enriched_cache_on_second_call() {
     let session = project.open_session().unwrap();
 
     // First call
-    let _first = session.get_component_meta("/App.vue").unwrap().unwrap();
+    let first = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("first call should return metadata");
 
-    project.host().provenance().reset();
+    // Second call — should return consistent results
+    let second = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("second call should return metadata");
 
-    // Second call — should reuse cached enriched analysis
-    let _second = session.get_component_meta("/App.vue").unwrap().unwrap();
-    let p = provenance(&project);
-
+    // Assert+: both calls return the same props
     assert_eq!(
-        p.get_component_meta_calls, 1,
-        "second call should be counted"
+        first.props.len(),
+        second.props.len(),
+        "repeated calls should return the same number of props"
     );
     assert_eq!(
-        p.get_analysis_enriched_cache_hits, 1,
-        "second call should hit the enriched-analysis cache"
+        first.props[0].name, second.props[0].name,
+        "repeated calls should return the same prop names"
     );
-    assert_eq!(
-        p.get_analysis_deep_enrich_runs, 0,
-        "second call should NOT run deep enrichment"
+
+    // Assert-: no extra events/models introduced
+    assert!(
+        first.events.is_empty() && second.events.is_empty(),
+        "no defineEmits means no events on either call"
+    );
+    assert!(
+        first.models.is_empty() && second.models.is_empty(),
+        "no defineModel means no models on either call"
     );
 }
 
 #[test]
-fn get_component_meta_provenance_has_zero_legacy_reentry() {
+fn get_component_meta_provenance_uses_single_resolver_path() {
     let project = make_project();
     project
         .upsert_base("/App.vue", &sfc("msg: string"))
@@ -1520,9 +1593,15 @@ fn get_component_meta_provenance_has_zero_legacy_reentry() {
     let _meta = session.get_component_meta("/App.vue").unwrap().unwrap();
     let p = provenance(&project);
 
+    // Assert+: exactly one resolved state computation
     assert_eq!(
-        p.component_meta_legacy_workflow_reentry, 0,
-        "native get_component_meta must not trigger legacy workflow reentry"
+        p.component_meta_resolved_state_recomputes, 1,
+        "native get_component_meta should compute resolved state exactly once"
+    );
+    // Assert-: get_analysis should NOT have been called (component-meta uses the resolver path)
+    assert_eq!(
+        p.get_analysis_calls, 0,
+        "native get_component_meta must not call get_analysis()"
     );
 }
 
@@ -1594,7 +1673,6 @@ fn get_component_meta_prefers_declaration_entrypoints_for_package_type_imports()
     let host = VerterHost::new(
         HostConfig {
             analysis_level: crate::types::AnalysisLevel::Full,
-            deep_macro_resolution_type: true,
             ..HostConfig::default()
         },
         ws,
@@ -1635,6 +1713,79 @@ defineProps<FancyProps>()
         ),
         "expanded prop type should come from the declaration entrypoint, got: {:?}",
         meta.props[0].type_expr
+    );
+}
+
+#[test]
+fn evaluate_types_prefers_declaration_entrypoints_for_package_type_imports() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/fancy/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js", "require": "./dist/index.cjs" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+        Arc::from(r#"import { FancyProps } from "./inner.js"; export type { FancyProps };"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/inner.d.ts".to_string(),
+        Arc::from("export interface FancyProps { open: boolean }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/inner.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    let project = MetaProject::new(host);
+    project
+        .upsert_base(
+            "/workspace/src/Consumer.vue",
+            r#"<script setup lang="ts">
+import type { FancyProps } from 'fancy'
+defineProps<FancyProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/workspace/src/Consumer.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+
+    let open_field = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.fields.iter())
+        .find(|field| field.name == "open")
+        .expect("evaluated defineProps should include imported declaration prop");
+    assert!(
+        matches!(
+            open_field.r#type,
+            TypeExpr::Primitive(PrimitiveName::Boolean)
+        ),
+        "evaluate_types should resolve declaration-entrypoint prop types, got: {:?}",
+        open_field.r#type
     );
 }
 
@@ -1856,7 +2007,6 @@ fn resolved_type_cache_is_reused_for_workspace_only_package_dependencies() {
     let host = VerterHost::new(
         HostConfig {
             analysis_level: crate::types::AnalysisLevel::Full,
-            deep_macro_resolution_type: true,
             ..HostConfig::default()
         },
         ws,
@@ -1977,7 +2127,6 @@ defineProps<Props>()
 fn resolved_type_cache_is_bounded() {
     // Verify that inserting beyond cap doesn't grow unbounded
     let host = VerterHost::new_standalone(HostConfig {
-        deep_macro_resolution_type: true,
         ..HostConfig::default()
     });
 
@@ -2464,7 +2613,7 @@ defineProps<ChildProps>()
 }
 
 #[test]
-fn resolve_imported_types_handles_barrel_cycle_utility_heritage() {
+fn resolve_component_meta_handles_barrel_cycle_utility_heritage() {
     let project = make_project();
     project
         .upsert_base(
@@ -2573,132 +2722,1182 @@ defineProps<ChildProps>()
         ],
     );
 
-    let resolved = project.host().resolve_imported_types("/src/App.vue");
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("expanded state should resolve");
     let button = resolved
+        .resolved_macros
         .iter()
-        .find(|ty| ty.name == "ButtonProps")
+        .find(|meta| meta.type_name == "ButtonProps")
         .expect("should resolve ButtonProps");
     assert!(
-        button.expanded.contains("loading"),
-        "resolved ButtonProps should include inherited props, got: {}",
-        button.expanded
+        button.props.iter().any(|prop| prop.name == "loading"),
+        "resolved ButtonProps should include inherited props, got: {:?}",
+        button.props
     );
     assert!(
-        button.expanded.contains("label"),
-        "resolved ButtonProps should include button props, got: {}",
-        button.expanded
+        button.props.iter().any(|prop| prop.name == "label"),
+        "resolved ButtonProps should include button props, got: {:?}",
+        button.props
     );
 }
 
 // ===========================================================================
-// Phase 9: LSP deep expansion config
+// Phase 3: Fallthrough inheritance resolver
 // ===========================================================================
 
-#[test]
-fn deep_expansion_disabled_by_default() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    assert!(
-        !host.deep_expansion_enabled(),
-        "default host should NOT have deep expansion enabled"
-    );
+use verter_analysis::component_meta::{
+    AcceptedEventKind, AcceptedPropKind, AcceptedSurfaceCompleteness, BranchStatus,
+    FallthroughSurface, MemberAvailability, MemberProvenance, PartialBranchReason,
+    ResolvedRootStep, UnresolvedBranchReason,
+};
+
+/// Helper: get the component meta for a file (through session).
+fn get_meta(
+    project: &Arc<MetaProject>,
+    canonical_id: &str,
+) -> verter_analysis::component_meta::ComponentMetaAnalysis {
+    let session = project.open_session().unwrap();
+    session
+        .get_component_meta(canonical_id)
+        .unwrap()
+        .expect("get_component_meta should return metadata")
 }
 
 #[test]
-fn deep_expansion_enabled_via_runtime_override() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    assert!(!host.deep_expansion_enabled());
-
-    host.set_deep_expansion(true);
-    assert!(
-        host.deep_expansion_enabled(),
-        "set_deep_expansion(true) should enable deep expansion"
-    );
-
-    host.set_deep_expansion(false);
-    assert!(
-        !host.deep_expansion_enabled(),
-        "set_deep_expansion(false) should disable deep expansion"
-    );
-}
-
-#[test]
-fn deep_expansion_enabled_via_static_config() {
-    let host = VerterHost::new_standalone(HostConfig {
-        deep_macro_resolution_type: true,
-        ..HostConfig::default()
-    });
-    assert!(
-        host.deep_expansion_enabled(),
-        "static config deep_macro_resolution_type=true should enable deep expansion"
-    );
-}
-
-#[test]
-fn runtime_override_can_disable_static_deep_expansion_config() {
-    let host = VerterHost::new_standalone(HostConfig {
-        deep_macro_resolution_type: true,
-        ..HostConfig::default()
-    });
-    assert!(host.deep_expansion_enabled());
-
-    host.set_deep_expansion(false);
-    assert!(
-        !host.deep_expansion_enabled(),
-        "runtime override false should disable static deep expansion config"
-    );
-}
-
-#[test]
-fn get_analysis_uses_enriched_path_when_deep_expansion_override_set() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    host.set_deep_expansion(true);
-
-    let project = crate::meta::MetaProject::new(host);
+fn single_native_root_inherits_intrinsic_surface() {
+    let project = make_project();
     project
-        .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: declared prop is in accepted_props
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "msg"
+            && matches!(p.provenance, MemberProvenance::Declared)
+            && matches!(p.kind, AcceptedPropKind::DeclaredProp)),
+        "accepted_props should contain declared 'msg' prop, got: {:?}",
+        meta.accepted_props
+            .iter()
+            .map(|p| &p.name)
+            .collect::<Vec<_>>()
+    );
+
+    // Assert+: inherited attrs from div should be present
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "id"
+            && matches!(p.provenance, MemberProvenance::Inherited { .. })
+            && matches!(p.kind, AcceptedPropKind::Attr)),
+        "accepted_props should contain inherited 'id' attr from <div>, got: {:?}",
+        meta.accepted_props
+            .iter()
+            .map(|p| &p.name)
+            .collect::<Vec<_>>()
+    );
+
+    // Assert+: inherited events from div
+    assert!(
+        meta.accepted_events.iter().any(|e| e.name == "click"
+            && matches!(e.provenance, MemberProvenance::Inherited { .. })
+            && matches!(e.kind, AcceptedEventKind::Listener)),
+        "accepted_events should contain inherited 'click' listener from <div>, got: {:?}",
+        meta.accepted_events
+            .iter()
+            .map(|e| &e.name)
+            .collect::<Vec<_>>()
+    );
+
+    // Assert+: surface completeness should be Exact
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::Exact,
+        "completeness should be Exact for a simple native root"
+    );
+
+    // Assert+: fallthrough_surface should have branches
+    assert!(
+        matches!(
+            meta.fallthrough_surface,
+            FallthroughSurface::Branches { .. }
+        ),
+        "fallthrough_surface should be Branches, got: {:?}",
+        meta.fallthrough_surface
+    );
+
+    // Assert-: declared props should NOT appear in fallthrough_surface
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert_eq!(branches.len(), 1, "should have one branch");
+        assert!(
+            !branches[0].props.iter().any(|p| p.name == "msg"),
+            "fallthrough_surface should NOT contain declared 'msg' prop"
+        );
+        assert_eq!(
+            branches[0].status,
+            BranchStatus::Resolved,
+            "branch status should be Resolved"
+        );
+        assert!(
+            matches!(&branches[0].root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "div"),
+            "root_chain should show NativeTag div"
+        );
+    }
+}
+
+#[test]
+fn explicit_root_bindings_are_subtracted() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div id="root" @click="() => {}">{{ msg }}</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert-: explicitly bound 'id' attr should NOT be inherited
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert!(
+            !branches[0].props.iter().any(|p| p.name == "id"),
+            "consumed 'id' attr should be subtracted from inherited props"
+        );
+    }
+
+    // Assert-: explicitly bound 'click' listener should NOT be inherited
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert!(
+            !branches[0].events.iter().any(|e| e.name == "click"),
+            "consumed 'click' listener should be subtracted from inherited events"
+        );
+    }
+
+    // Assert+: other attrs should still be inherited
+    assert!(
+        meta.accepted_props.iter().any(
+            |p| p.name == "title" && matches!(p.provenance, MemberProvenance::Inherited { .. })
+        ),
+        "non-consumed 'title' attr should still be inherited"
+    );
+}
+
+#[test]
+fn declared_props_and_events_take_precedence() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ id: number }>()
+defineEmits<{ (e: 'click', value: string): void }>()
+</script>
+<template><div>hello</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: 'id' should be declared, not inherited
+    let id_prop = meta
+        .accepted_props
+        .iter()
+        .find(|p| p.name == "id")
+        .expect("should have 'id' in accepted_props");
+    assert!(
+        matches!(id_prop.provenance, MemberProvenance::Declared),
+        "'id' should be declared, not inherited"
+    );
+
+    // Assert+: 'click' should be declared, not inherited
+    let click_event = meta
+        .accepted_events
+        .iter()
+        .find(|e| e.name == "click")
+        .expect("should have 'click' in accepted_events");
+    assert!(
+        matches!(click_event.provenance, MemberProvenance::Declared),
+        "'click' should be declared, not inherited"
+    );
+
+    // Assert-: should NOT have duplicate 'id' or 'click'
+    assert_eq!(
+        meta.accepted_props
+            .iter()
+            .filter(|p| p.name == "id")
+            .count(),
+        1,
+        "'id' should appear exactly once"
+    );
+    assert_eq!(
+        meta.accepted_events
+            .iter()
+            .filter(|e| e.name == "click")
+            .count(),
+        1,
+        "'click' should appear exactly once"
+    );
+}
+
+#[test]
+fn declared_on_listener_alias_prop_blocks_inherited_click_listener() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ onClick?: () => void }>()
+</script>
+<template><div>hello</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    assert!(
+        meta.accepted_props
+            .iter()
+            .any(|p| p.name == "onClick" && matches!(p.provenance, MemberProvenance::Declared)),
+        "declared onClick prop must remain on the accepted prop surface"
+    );
+    assert!(
+        !meta.accepted_events.iter().any(|e| e.name == "click"),
+        "declared onClick prop must block the inherited click listener alias"
+    );
+
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert!(
+            branches
+                .iter()
+                .all(|branch| branch.events.iter().all(|event| event.name != "click")),
+            "fallthrough branches must not leak click when a declared onClick prop shadows it"
+        );
+    }
+}
+
+#[test]
+fn inherit_attrs_false_returns_declared_only_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: declared prop is present
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "msg"),
+        "should have declared 'msg'"
+    );
+
+    // Assert-: no inherited members
+    assert!(
+        !meta
+            .accepted_props
+            .iter()
+            .any(|p| matches!(p.provenance, MemberProvenance::Inherited { .. })),
+        "should have no inherited props when inheritAttrs: false"
+    );
+    assert!(
+        !meta
+            .accepted_events
+            .iter()
+            .any(|e| matches!(e.provenance, MemberProvenance::Inherited { .. })),
+        "should have no inherited events when inheritAttrs: false"
+    );
+
+    // Assert+: fallthrough_surface is None
+    assert!(
+        matches!(meta.fallthrough_surface, FallthroughSurface::None { .. }),
+        "fallthrough_surface should be None when inheritAttrs: false"
+    );
+}
+
+#[test]
+fn unconditional_multi_root_returns_declared_only_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>a</div><span>b</span></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: declared prop is present
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "msg"),
+        "should have declared 'msg'"
+    );
+
+    // Assert-: no inherited members
+    assert!(
+        !meta
+            .accepted_props
+            .iter()
+            .any(|p| matches!(p.provenance, MemberProvenance::Inherited { .. })),
+        "multi-root should have no inherited props"
+    );
+
+    // Assert+: fallthrough_surface is None
+    assert!(
+        matches!(meta.fallthrough_surface, FallthroughSurface::None { .. }),
+        "fallthrough_surface should be None for multi-root"
+    );
+}
+
+#[test]
+fn conditional_single_root_returns_exact_branches() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const show = true
+defineProps<{ msg: string }>()
+</script>
+<template>
+  <div v-if="show">a</div>
+  <input v-else />
+</template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: should have branches
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert_eq!(branches.len(), 2, "should have 2 branches (div, input)");
+
+        // Branch 0: div
+        assert_eq!(branches[0].branch_key, "0");
+        assert!(
+            matches!(&branches[0].root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "div"),
+            "first branch should be div"
+        );
+
+        // Branch 1: input
+        assert_eq!(branches[1].branch_key, "1");
+        assert!(
+            matches!(&branches[1].root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "input"),
+            "second branch should be input"
+        );
+
+        // Assert+: input-specific attrs should be conditional
+        // (only in branch 1, not branch 0)
+        let input_specific = meta.accepted_props.iter().find(|p| p.name == "type");
+        if let Some(p) = input_specific {
+            assert!(
+                matches!(p.availability, MemberAvailability::Conditional { .. }),
+                "'type' attr should be conditional (only in input branch)"
+            );
+        }
+    } else {
+        panic!("expected FallthroughSurface::Branches");
+    }
+}
+
+#[test]
+fn static_dynamic_is_root_resolves_native_candidates() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+const showNative = true
+</script>
+<template><component :is="showNative ? 'div' : Child" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    let value_prop = meta
+        .accepted_props
+        .iter()
+        .find(|p| p.name == "value")
+        .expect("dynamic :is should propagate the input branch's accepted attrs");
+    assert!(
+        matches!(
+            value_prop.availability,
+            MemberAvailability::Conditional { .. }
+        ),
+        "input-only attrs from dynamic :is candidates must stay conditional"
+    );
+
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert!(
+            branches
+                .iter()
+                .any(|branch| matches!(&branch.root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "div")),
+            "dynamic :is should produce a native div branch"
+        );
+        assert!(
+            branches.iter().any(|branch| {
+                branch
+                    .root_chain
+                    .iter()
+                    .any(|step| matches!(step, ResolvedRootStep::Component { component_name, .. } if component_name == "Child"))
+            }),
+            "dynamic :is should also preserve the imported component branch"
+        );
+    } else {
+        panic!("expected FallthroughSurface::Branches");
+    }
+}
+
+#[test]
+fn root_v_bind_known_object_shape_is_consumed_exactly() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const rootAttrs = {
+  id: 'root',
+  onClick: () => {},
+}
+</script>
+<template><div v-bind="rootAttrs" /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    assert!(
+        !meta.accepted_props.iter().any(|p| p.name == "id"),
+        "exact root spread keys must be subtracted from inherited attrs"
+    );
+    assert!(
+        !meta.accepted_events.iter().any(|e| e.name == "click"),
+        "exact root spread listener aliases must be subtracted from inherited listeners"
+    );
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::Exact,
+        "resolvable root spreads should not force a lower-bound surface"
+    );
+
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert!(
+            branches
+                .iter()
+                .all(|branch| branch.props.iter().all(|prop| prop.name != "id")),
+            "spread-consumed attrs must not leak back into fallthrough branches"
+        );
+        assert!(
+            branches
+                .iter()
+                .all(|branch| branch.events.iter().all(|event| event.name != "click")),
+            "spread-consumed listeners must not leak back into fallthrough branches"
+        );
+        assert!(
+            branches
+                .iter()
+                .all(|branch| matches!(branch.status, BranchStatus::Resolved)),
+            "an exact root spread should keep the branch resolved"
+        );
+    } else {
+        panic!("expected FallthroughSurface::Branches");
+    }
+}
+
+#[test]
+fn root_v_bind_unknown_shape_uses_structured_partial_reason() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const rootAttrs: Record<string, unknown> = {}
+</script>
+<template><div v-bind="rootAttrs" /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::LowerBound,
+        "unknown root spreads must lower accepted-surface completeness"
+    );
+
+    let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("expected FallthroughSurface::Branches");
+    };
+
+    assert!(
+        branches.iter().any(|branch| matches!(
+            &branch.status,
+            BranchStatus::PartiallyUnresolved { reasons }
+                if reasons == &vec![PartialBranchReason::UnknownSpread]
+        )),
+        "unknown root spreads must surface a structured UnknownSpread reason, got: {:?}",
+        branches
+            .iter()
+            .map(|branch| &branch.status)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn project_local_intrinsics_override_replaces_builtin_tag_surface() {
+    let project = make_project();
+    project
+        .set_html_intrinsics_catalog(
+            r#"{
+  "tags": [
+    {
+      "tag": "div",
+      "members": [
+        { "name": "projectOnly", "kind": "attr", "rawType": "string" },
+        { "name": "click", "kind": "listener", "rawType": "ProjectClickEvent" }
+      ]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/App.vue", r#"<template><div /></template>"#)
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    assert!(
+        meta.accepted_props
+            .iter()
+            .any(|prop| prop.name == "projectOnly"),
+        "project-local tag members must be used when a tag override is present"
+    );
+    assert!(
+        !meta.accepted_props.iter().any(|prop| prop.name == "id"),
+        "tag overrides should replace the built-in fallback surface for that tag"
+    );
+
+    let click = meta
+        .accepted_events
+        .iter()
+        .find(|event| event.name == "click")
+        .expect("project-local listeners must still appear on the accepted event surface");
+    assert!(
+        matches!(
+            &click.payload,
+            TypeExpr::Unknown { raw } if raw == "(payload: ProjectClickEvent) => void"
+        ),
+        "project-local listener payloads must be preserved, got: {:?}",
+        click.payload
+    );
+}
+
+#[test]
+fn generic_root_propagation_off_stays_sound() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Poly.vue",
+            r#"<script setup lang="ts" generic="T extends 'button' | 'input'">
+defineProps<{ as: T }>()
+</script>
+<template><component :is="as" /></template>"#,
+        )
         .unwrap();
     project
         .upsert_base(
             "/App.vue",
             r#"<script setup lang="ts">
-import { Props } from './types'
-defineProps<Props>()
+import Poly from './Poly.vue'
 </script>
-<template><div /></template>"#,
+<template><Poly as="input" /></template>"#,
         )
         .unwrap();
-    project.host().set_import_dependencies(
-        "/App.vue",
-        vec![crate::types::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
+
+    let meta = get_meta(&project, "/App.vue");
+
+    assert!(
+        !meta.accepted_props.iter().any(|prop| prop.name == "value"),
+        "generic root propagation disabled must not invent input-only attrs"
+    );
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::LowerBound,
+        "an unresolved generic root must remain a lower-bound surface"
     );
 
-    project.host().provenance().reset();
-    let session = project.open_session().unwrap();
-    let _analysis = session.get_analysis("/App.vue").unwrap();
-
-    let p = provenance(&project);
-    // When deep expansion is enabled via runtime override, get_analysis
-    // runs enrichment even though config.deep_macro_resolution_type was
-    // false at construction time.
-    assert_eq!(
-        p.get_analysis_deep_enrich_runs, 1,
-        "runtime deep expansion override should trigger enrichment"
+    let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("expected FallthroughSurface::Branches");
+    };
+    assert!(
+        branches.iter().any(|branch| {
+            matches!(
+                &branch.status,
+                BranchStatus::Unresolved {
+                    reason: UnresolvedBranchReason::DynamicComponentIs
+                }
+            )
+        }),
+        "without propagation the generic child root should remain unresolved, got: {:?}",
+        branches
+            .iter()
+            .map(|branch| &branch.status)
+            .collect::<Vec<_>>()
     );
 }
 
 #[test]
-fn default_lsp_host_does_not_enable_deep_expansion() {
-    // Simulate what the LSP does: HostConfig::default() with analysis_level Full
-    let host = VerterHost::new_standalone(HostConfig {
-        analysis_level: crate::types::AnalysisLevel::Full,
+fn generic_root_propagation_specializes_dynamic_is_when_enabled() {
+    let project = make_project_with_config(HostConfig {
+        generic_root_propagation: true,
         ..HostConfig::default()
     });
+    project
+        .upsert_base(
+            "/Poly.vue",
+            r#"<script setup lang="ts" generic="T extends 'button' | 'input'">
+defineProps<{ as: T }>()
+</script>
+<template><component :is="as" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Poly from './Poly.vue'
+</script>
+<template><Poly as="input" /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    let value_prop = meta
+        .accepted_props
+        .iter()
+        .find(|prop| prop.name == "value")
+        .expect("generic propagation should specialize the child root to input");
     assert!(
-        !host.deep_expansion_enabled(),
-        "LSP-default host must NOT enable deep expansion"
+        matches!(value_prop.availability, MemberAvailability::Always),
+        "single specialized generic roots should yield always-available attrs"
     );
+
+    let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("expected FallthroughSurface::Branches");
+    };
+    assert!(
+        branches.iter().any(|branch| {
+            matches!(
+                branch.root_chain.as_slice(),
+                [
+                    ResolvedRootStep::Component { component_name, .. },
+                    ResolvedRootStep::NativeTag { tag }
+                ] if component_name == "Poly" && tag == "input"
+            )
+        }),
+        "generic propagation should resolve the child root chain to Poly -> input, got: {:?}",
+        branches
+            .iter()
+            .map(|branch| &branch.root_chain)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn generic_root_propagation_recurses_through_component_chain() {
+    let project = make_project_with_config(HostConfig {
+        generic_root_propagation: true,
+        ..HostConfig::default()
+    });
+    project
+        .upsert_base(
+            "/Poly.vue",
+            r#"<script setup lang="ts" generic="T extends 'button' | 'input'">
+defineProps<{ as: T }>()
+</script>
+<template><component :is="as" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Wrapper.vue",
+            r#"<script setup lang="ts" generic="T extends 'button' | 'input'">
+import Poly from './Poly.vue'
+defineProps<{ as: T }>()
+</script>
+<template><Poly :as="as" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Wrapper from './Wrapper.vue'
+</script>
+<template><Wrapper as="input" /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    assert!(
+        meta.accepted_props.iter().any(|prop| prop.name == "value"),
+        "recursive generic propagation should preserve the specialized input attrs through Wrapper"
+    );
+
+    let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("expected FallthroughSurface::Branches");
+    };
+    assert!(
+        branches.iter().any(|branch| {
+            matches!(
+                branch.root_chain.as_slice(),
+                [
+                    ResolvedRootStep::Component { component_name: wrapper_name, .. },
+                    ResolvedRootStep::Component { component_name: poly_name, .. },
+                    ResolvedRootStep::NativeTag { tag }
+                ] if wrapper_name == "Wrapper" && poly_name == "Poly" && tag == "input"
+            )
+        }),
+        "recursive generic propagation should resolve Wrapper -> Poly -> input, got: {:?}",
+        branches
+            .iter()
+            .map(|branch| &branch.root_chain)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn recursive_cycle_uses_structured_unresolved_reason() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/A.vue",
+            r#"<script setup lang="ts">
+import B from './B.vue'
+</script>
+<template><B /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/B.vue",
+            r#"<script setup lang="ts">
+import A from './A.vue'
+</script>
+<template><A /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/A.vue");
+    let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("expected FallthroughSurface::Branches");
+    };
+
+    assert!(
+        branches.iter().any(|branch| matches!(
+            &branch.status,
+            BranchStatus::Unresolved {
+                reason: UnresolvedBranchReason::Cycle { canonical_id }
+            } if canonical_id == "/A.vue"
+        )),
+        "cycles must terminate with a structured cycle reason, got: {:?}",
+        branches
+            .iter()
+            .map(|branch| &branch.status)
+            .collect::<Vec<_>>()
+    );
+
+    assert!(
+        branches.iter().any(|branch| {
+            branch.root_chain.iter().any(|step| {
+                matches!(
+                    step,
+                    ResolvedRootStep::Unresolved {
+                        reason: UnresolvedBranchReason::Cycle { canonical_id },
+                        ..
+                    } if canonical_id == "/A.vue"
+                )
+            })
+        }),
+        "cycle branches must preserve the structured cycle reason in the root chain"
+    );
+}
+
+#[test]
+fn recursive_component_propagates_inherited_surface() {
+    let project = make_project();
+
+    // Child component with <div> root
+    project
+        .upsert_base(
+            "/Child.vue",
+            r#"<script setup lang="ts">
+defineProps<{ childProp: string }>()
+</script>
+<template><div>child</div></template>"#,
+        )
+        .unwrap();
+
+    // Parent with component root
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+defineProps<{ parentProp: string }>()
+</script>
+<template><Child :childProp="parentProp" /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: declared prop is present
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "parentProp"),
+        "should have declared 'parentProp'"
+    );
+
+    // Assert+: fallthrough_surface should have branches
+    assert!(
+        matches!(
+            meta.fallthrough_surface,
+            FallthroughSurface::Branches { .. }
+        ),
+        "fallthrough_surface should be Branches for component root"
+    );
+
+    // Assert+: root_chain should show Component step
+    if let FallthroughSurface::Branches { ref branches } = meta.fallthrough_surface {
+        assert!(!branches.is_empty(), "should have at least one branch");
+        assert!(
+            branches[0]
+                .root_chain
+                .iter()
+                .any(|step| matches!(step, ResolvedRootStep::Component { .. })),
+            "root_chain should contain a Component step, got: {:?}",
+            branches[0].root_chain
+        );
+    }
+}
+
+#[test]
+fn recursive_component_keeps_child_declared_surface_alongside_child_fallthrough() {
+    let project = make_project();
+
+    project
+        .upsert_base(
+            "/Child.vue",
+            r#"<script setup lang="ts">
+defineProps<{ childProp: string }>()
+defineEmits<{ (e: 'childClick', value: number): void }>()
+</script>
+<template><div>child</div></template>"#,
+        )
+        .unwrap();
+
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    let child_prop = meta
+        .accepted_props
+        .iter()
+        .find(|p| p.name == "childProp")
+        .expect("parent must expose child's declared prop through component root recursion");
+    assert!(
+        matches!(child_prop.provenance, MemberProvenance::Inherited { .. }),
+        "child declared prop must arrive as inherited acceptance on the parent"
+    );
+    assert!(
+        matches!(child_prop.kind, AcceptedPropKind::Attr),
+        "child declared prop should be exposed as an accepted attr on the parent"
+    );
+
+    let child_event = meta
+        .accepted_events
+        .iter()
+        .find(|e| e.name == "childClick")
+        .expect("parent must expose child's declared event through component root recursion");
+    assert!(
+        matches!(child_event.provenance, MemberProvenance::Inherited { .. }),
+        "child declared event must arrive as inherited acceptance on the parent"
+    );
+    assert!(
+        matches!(child_event.kind, AcceptedEventKind::Listener),
+        "child declared event should be exposed as an accepted listener on the parent"
+    );
+
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "id"),
+        "parent must still expose child's inherited native attrs, not just declared members"
+    );
+}
+
+#[test]
+fn cycle_terminates_without_invented_members() {
+    let project = make_project();
+
+    // A imports B, B imports A — create a cycle
+    project
+        .upsert_base(
+            "/A.vue",
+            r#"<script setup lang="ts">
+import B from './B.vue'
+defineProps<{ aProp: string }>()
+</script>
+<template><B /></template>"#,
+        )
+        .unwrap();
+
+    project
+        .upsert_base(
+            "/B.vue",
+            r#"<script setup lang="ts">
+import A from './A.vue'
+defineProps<{ bProp: string }>()
+</script>
+<template><A /></template>"#,
+        )
+        .unwrap();
+
+    // Should not panic or infinite loop
+    let meta = get_meta(&project, "/A.vue");
+
+    // Assert+: declared props are present
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "aProp"),
+        "should have declared 'aProp'"
+    );
+
+    // Assert+: surface completeness should be LowerBound due to cycle
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::LowerBound,
+        "cycle should produce LowerBound completeness"
+    );
+
+    // Assert-: no invented members from the cycle
+    assert!(
+        !meta.accepted_props.iter().any(|p| p.name == "bProp"),
+        "should NOT inherit 'bProp' through a cycle"
+    );
+}
+
+#[test]
+fn unresolved_target_branch_does_not_crash() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><slot /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: declared prop is present
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "msg"),
+        "should have declared 'msg'"
+    );
+
+    // Assert-: no inherited members from slot
+    assert!(
+        !meta
+            .accepted_props
+            .iter()
+            .any(|p| matches!(p.provenance, MemberProvenance::Inherited { .. })),
+        "slot root should produce no inherited props"
+    );
+}
+
+#[test]
+fn builtin_root_is_unresolved_branch() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><Teleport to="body">{{ msg }}</Teleport></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: declared prop is present
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "msg"),
+        "should have declared 'msg'"
+    );
+
+    // Assert-: no inherited members from Teleport
+    assert!(
+        !meta
+            .accepted_props
+            .iter()
+            .any(|p| matches!(p.provenance, MemberProvenance::Inherited { .. })),
+        "Teleport root should produce no inherited props"
+    );
+}
+
+#[test]
+fn accepted_surface_member_order_is_deterministic() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ z: string; a: number }>()
+</script>
+<template><div>test</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Assert+: declared props come first in declared source order
+    let declared_props: Vec<&str> = meta
+        .accepted_props
+        .iter()
+        .filter(|p| matches!(p.provenance, MemberProvenance::Declared))
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(
+        declared_props,
+        vec!["z", "a"],
+        "declared props should keep source order"
+    );
+
+    // Assert+: inherited props come after declared, sorted lexicographically
+    let inherited_props: Vec<&str> = meta
+        .accepted_props
+        .iter()
+        .filter(|p| matches!(p.provenance, MemberProvenance::Inherited { .. }))
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut sorted = inherited_props.clone();
+    sorted.sort();
+    assert_eq!(
+        inherited_props, sorted,
+        "inherited props should be sorted lexicographically"
+    );
+}
+
+#[test]
+fn cache_hit_reused() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        )
+        .unwrap();
+
+    // First call
+    let meta1 = get_meta(&project, "/App.vue");
+    // Second call — should use cache
+    let meta2 = get_meta(&project, "/App.vue");
+
+    // Assert+: both calls return the same accepted surface
+    let names1: Vec<&str> = meta1
+        .accepted_props
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    let names2: Vec<&str> = meta2
+        .accepted_props
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names1, names2, "cached result should be identical");
+}
+
+#[test]
+fn child_change_invalidates_parent_fallthrough_cache() {
+    let project = make_project();
+    project
+        .upsert_base("/Child.vue", r#"<template><div>child</div></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let first = get_meta(&project, "/App.vue");
+    assert!(
+        !first.accepted_props.iter().any(|p| p.name == "value"),
+        "div-root child should not expose input-only attrs before the dependency changes"
+    );
+
+    #[cfg(feature = "scheduler")]
+    let first_cache = cached_fallthrough_state(&project, "/App.vue")
+        .expect("first query should cache fallthrough");
+
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+
+    let second = get_meta(&project, "/App.vue");
+    assert!(
+        second.accepted_props.iter().any(|p| p.name == "value"),
+        "parent fallthrough surface must refresh when the child root changes"
+    );
+
+    #[cfg(feature = "scheduler")]
+    {
+        let second_cache = cached_fallthrough_state(&project, "/App.vue")
+            .expect("second query should repopulate the parent fallthrough cache");
+        assert!(
+            !Arc::ptr_eq(&first_cache, &second_cache),
+            "dependency change must invalidate the parent's cached fallthrough surface"
+        );
+    }
 }

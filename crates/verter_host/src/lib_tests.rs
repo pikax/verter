@@ -113,8 +113,7 @@ fn file_entry_from_snapshot(canonical_id: &str, src: &str, snap: &ParseSnapshot)
         generation: 1,
         cached_parse: None,
         cached_tsc_extract: None,
-        cached_evaluated_types: None,
-        cached_enriched_analysis: None,
+        cached_resolved_meta: FxHashMap::default(),
     }
 }
 
@@ -762,8 +761,7 @@ fn import_resolves_to_dep_non_relative_in_deps() {
         generation: 0,
         cached_parse: None,
         cached_tsc_extract: None,
-        cached_evaluated_types: None,
-        cached_enriched_analysis: None,
+        cached_resolved_meta: FxHashMap::default(),
     };
     let exts = vec![".ts".to_string()];
     assert!(import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -807,8 +805,7 @@ fn import_resolves_to_dep_non_relative_not_in_deps() {
         generation: 0,
         cached_parse: None,
         cached_tsc_extract: None,
-        cached_evaluated_types: None,
-        cached_enriched_analysis: None,
+        cached_resolved_meta: FxHashMap::default(),
     };
     let exts = vec![".ts".to_string()];
     assert!(!import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -846,8 +843,7 @@ fn import_resolves_to_dep_relative_exact() {
         generation: 0,
         cached_parse: None,
         cached_tsc_extract: None,
-        cached_evaluated_types: None,
-        cached_enriched_analysis: None,
+        cached_resolved_meta: FxHashMap::default(),
     };
     let exts = vec![".ts".to_string(), ".js".to_string()];
     assert!(import_resolves_to_dep(&entry, "./B", "/src/B", &exts));
@@ -889,8 +885,7 @@ fn import_resolves_to_dep_relative_extension_strip() {
         generation: 0,
         cached_parse: None,
         cached_tsc_extract: None,
-        cached_evaluated_types: None,
-        cached_enriched_analysis: None,
+        cached_resolved_meta: FxHashMap::default(),
     };
     let exts = vec![".ts".to_string(), ".js".to_string()];
     // ./types resolves to /src/types, dep is /src/types.ts

@@ -5,12 +5,13 @@ use crate::types::AnalyzedExposeField;
 fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
     ComponentMetaInput {
         macros,
+        resolved_macros: &[],
+        resolved_type_registry: &[],
         bindings: &[],
         imports: &[],
         template: None,
         options_api: None,
         analysis_flags: crate::types::AnalysisFlags::default(),
-        features: ComponentMetaFeatures::default(),
         styles: &[],
         vue_api_calls: &[],
         store_usages: &[],
@@ -111,7 +112,6 @@ fn props_use_evaluated_type_when_available() {
     };
 
     let mut input = empty_input(&macros);
-    input.features.expanded_types = true;
     input.evaluated_types = Some(&evaluated);
 
     let result = extract_component_meta(input);
@@ -125,7 +125,7 @@ fn props_use_evaluated_type_when_available() {
 }
 
 #[test]
-fn expanded_types_are_disabled_without_feature_selection() {
+fn evaluated_types_are_used_when_supplied() {
     let macros = vec![make_define_props(vec![make_prop(
         "label",
         Some("MyType"),
@@ -148,10 +148,11 @@ fn expanded_types_are_disabled_without_feature_selection() {
 
     let result = extract_component_meta(input);
 
-    match &result.props[0].type_expr {
-        TypeExpr::Unknown { raw } => assert_eq!(raw, "MyType"),
-        other => panic!("expected Unknown(\"MyType\") when expansion is disabled, got {other:?}"),
-    }
+    assert_eq!(
+        result.props[0].type_expr,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "projection should use host-supplied evaluated types without a local expansion flag"
+    );
 }
 
 #[test]
@@ -202,7 +203,6 @@ fn define_props_eval_supplements_missing_prop_fields() {
     };
 
     let mut input = empty_input(&macros);
-    input.features.expanded_types = true;
     input.evaluated_types = Some(&evaluated);
 
     let result = extract_component_meta(input);
@@ -213,6 +213,40 @@ fn define_props_eval_supplements_missing_prop_fields() {
     assert_eq!(result.props[1].name, "y");
     assert!(!result.props[1].required);
     assert!(result.props.iter().all(|prop| prop.raw_type.is_none()));
+}
+
+#[test]
+fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
+    let macros = vec![make_define_props(Vec::new())];
+    let resolved = vec![
+        crate::component_meta::ResolvedMacroInput {
+            macro_index: 0,
+            props: vec![make_prop("x", Some("string"), false)],
+            emits: Vec::new(),
+            slots: Vec::new(),
+        },
+        crate::component_meta::ResolvedMacroInput {
+            macro_index: 0,
+            props: vec![make_prop("y", Some("number"), true)],
+            emits: Vec::new(),
+            slots: Vec::new(),
+        },
+    ];
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved;
+
+    let result = extract_component_meta(input);
+
+    assert_eq!(result.props.len(), 2);
+    assert_eq!(
+        result
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x", "y"]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +458,91 @@ fn extracts_exposed_from_define_expose() {
     assert_eq!(result.exposed[0].name, "focus");
 }
 
+#[test]
+fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
+    let macros = vec![make_define_props(Vec::new())];
+    let resolved_fields = vec![
+        make_prop("imported", Some("string"), false),
+        make_prop("optionalImported", Some("number"), true),
+    ];
+    let resolved_macros = vec![ResolvedMacroInput {
+        macro_index: 0,
+        props: resolved_fields,
+        emits: Vec::new(),
+        slots: Vec::new(),
+    }];
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+
+    let result = extract_component_meta(input);
+    let names: Vec<&str> = result.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"imported"),
+        "component_meta should project host-supplied imported props without mutating macros: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"optionalImported"),
+        "component_meta should project all supplied resolved props: {:?}",
+        names
+    );
+}
+
+#[test]
+fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
+    let macros = vec![make_define_props(vec![make_prop(
+        "localOnly",
+        Some("string"),
+        false,
+    )])];
+    let resolved_macros = vec![ResolvedMacroInput {
+        macro_index: 0,
+        props: vec![make_prop("importedOnly", Some("number"), true)],
+        emits: Vec::new(),
+        slots: Vec::new(),
+    }];
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+
+    let result = extract_component_meta(input);
+    let names: Vec<&str> = result.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"localOnly"),
+        "local prop fields should still be projected: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"importedOnly"),
+        "host-resolved imported fields should merge with local fields for mixed type sources: {:?}",
+        names
+    );
+}
+
+#[test]
+fn type_registry_comes_from_resolved_inputs_not_macro_local_types() {
+    let macros = vec![make_define_props(Vec::new())];
+    let registry = vec![ResolvedTypeAnalysis {
+        name: "ImportedProps".to_string(),
+        type_expr: TypeExpr::Primitive(PrimitiveName::String),
+    }];
+
+    let mut input = empty_input(&macros);
+    input.resolved_type_registry = &registry;
+
+    let result = extract_component_meta(input);
+
+    assert_eq!(
+        result.type_registry.len(),
+        1,
+        "resolved type registry should be projected"
+    );
+    assert_eq!(result.type_registry[0].name, "ImportedProps");
+}
+
 // ---------------------------------------------------------------------------
 // Options API fallback
 // ---------------------------------------------------------------------------
@@ -446,12 +565,13 @@ fn options_api_props_used_when_no_composition_props() {
     };
     let input = ComponentMetaInput {
         macros: &[],
+        resolved_macros: &[],
+        resolved_type_registry: &[],
         bindings: &[],
         imports: &[],
         template: None,
         options_api: Some(&opts),
         analysis_flags: crate::types::AnalysisFlags::HAS_OPTIONS_API,
-        features: ComponentMetaFeatures::default(),
         styles: &[],
         vue_api_calls: &[],
         store_usages: &[],
@@ -490,12 +610,13 @@ fn options_api_prop_type_annotation_is_preserved() {
     };
     let input = ComponentMetaInput {
         macros: &[],
+        resolved_macros: &[],
+        resolved_type_registry: &[],
         bindings: &[],
         imports: &[],
         template: None,
         options_api: Some(&opts),
         analysis_flags: crate::types::AnalysisFlags::HAS_OPTIONS_API,
-        features: ComponentMetaFeatures::default(),
         styles: &[],
         vue_api_calls: &[],
         store_usages: &[],
@@ -597,4 +718,1147 @@ fn preserves_source_order_of_props() {
         vec!["zebra", "alpha", "middle"],
         "props must preserve source order, not be sorted"
     );
+}
+
+// ===========================================================================
+// Root Reachability Tests
+// ===========================================================================
+
+use crate::template::{
+    TemplateAnalysisSnapshot, TemplateAttribute, TemplateComponentUsage, TemplateDirective,
+    TemplateElement,
+};
+
+fn make_flags(inherit_attrs_false: bool) -> ComponentMetaFlags {
+    ComponentMetaFlags {
+        has_inherit_attrs_false: inherit_attrs_false,
+        ..Default::default()
+    }
+}
+
+fn make_native_root_element(tag: &str) -> TemplateElement {
+    TemplateElement {
+        tag: tag.to_string(),
+        is_component: false,
+        parent_index: None,
+        parent_tag: None,
+        ..Default::default()
+    }
+}
+
+fn make_component_root_element(tag: &str) -> TemplateElement {
+    TemplateElement {
+        tag: tag.to_string(),
+        is_component: true,
+        parent_index: None,
+        parent_tag: None,
+        ..Default::default()
+    }
+}
+
+fn make_template_with_elements(elements: Vec<TemplateElement>) -> TemplateAnalysisSnapshot {
+    TemplateAnalysisSnapshot {
+        elements,
+        ..Default::default()
+    }
+}
+
+fn make_template_with_elements_and_components(
+    elements: Vec<TemplateElement>,
+    components: Vec<TemplateComponentUsage>,
+) -> TemplateAnalysisSnapshot {
+    TemplateAnalysisSnapshot {
+        elements,
+        components,
+        ..Default::default()
+    }
+}
+
+// ── inheritAttrs: false ──────────────────────────────────────────────────
+
+#[test]
+fn root_reachability_inherit_attrs_false() {
+    let template = make_template_with_elements(vec![make_native_root_element("div")]);
+    let flags = make_flags(true);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    assert!(
+        matches!(
+            result,
+            RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::InheritAttrsFalse
+            }
+        ),
+        "inheritAttrs: false must yield NoFallthrough, got: {:?}",
+        result
+    );
+}
+
+// ── No template ──────────────────────────────────────────────────────────
+
+#[test]
+fn root_reachability_no_template() {
+    let flags = make_flags(false);
+    let result = extract_root_reachability(None, &flags);
+
+    assert!(
+        matches!(
+            result,
+            RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::NoTemplate
+            }
+        ),
+        "no template must yield NoFallthrough::NoTemplate, got: {:?}",
+        result
+    );
+}
+
+// ── Empty template ──────────────────────────────────────────────────────
+
+#[test]
+fn root_reachability_empty_template() {
+    let template = make_template_with_elements(vec![]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    assert!(
+        matches!(
+            result,
+            RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::EmptyTemplate
+            }
+        ),
+        "empty template must yield NoFallthrough::EmptyTemplate, got: {:?}",
+        result
+    );
+}
+
+// ── Multi-root ──────────────────────────────────────────────────────────
+
+#[test]
+fn root_reachability_multi_root() {
+    let template = make_template_with_elements(vec![
+        make_native_root_element("div"),
+        make_native_root_element("span"),
+    ]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    assert!(
+        matches!(
+            result,
+            RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::MultiRoot
+            }
+        ),
+        "two independent root elements must yield MultiRoot, got: {:?}",
+        result
+    );
+}
+
+// ── Root v-for ──────────────────────────────────────────────────────────
+
+#[test]
+fn root_reachability_root_v_for() {
+    use crate::template::VForDirective;
+    let mut el = make_native_root_element("div");
+    el.v_for = Some(VForDirective {
+        variable: "item".to_string(),
+        index: None,
+        iterable: "items".to_string(),
+        has_key: false,
+        key_expression: None,
+        key_uses_index: false,
+        span: verter_span::Span::default(),
+    });
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    assert!(
+        matches!(
+            result,
+            RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::RootVFor
+            }
+        ),
+        "root v-for must yield NoFallthrough::RootVFor, got: {:?}",
+        result
+    );
+}
+
+// ── Single native root ──────────────────────────────────────────────────
+
+#[test]
+fn root_reachability_single_native_root() {
+    let template = make_template_with_elements(vec![make_native_root_element("div")]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(branches.len(), 1, "single root must produce 1 branch");
+            assert_eq!(branches[0].branch_index, 0);
+            match &branches[0].target {
+                RootTargetRef::NativeElement { tag, .. } => {
+                    assert_eq!(tag, "div");
+                }
+                other => panic!("expected NativeElement, got: {:?}", other),
+            }
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── Component root with usage link ──────────────────────────────────────
+
+#[test]
+fn root_reachability_component_usage_link_preserved() {
+    let mut comp_el = make_component_root_element("MyComp");
+    comp_el.component_usage_index = Some(0);
+
+    let components = vec![TemplateComponentUsage {
+        name: "MyComp".to_string(),
+        import_source: Some("./MyComp.vue".to_string()),
+        is_dynamic: false,
+        props: vec![],
+        has_spread: false,
+        slots_used: vec![],
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        span: verter_span::Span::default(),
+    }];
+
+    let template = make_template_with_elements_and_components(vec![comp_el], components);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(branches.len(), 1);
+            match &branches[0].target {
+                RootTargetRef::ComponentUsage {
+                    name,
+                    import_source,
+                    usage_index,
+                    ..
+                } => {
+                    assert_eq!(name, "MyComp");
+                    assert_eq!(import_source.as_deref(), Some("./MyComp.vue"));
+                    assert_eq!(*usage_index, 0);
+                }
+                other => panic!("expected ComponentUsage, got: {:?}", other),
+            }
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── Dynamic component without usage link stays unresolved ───────────────
+
+#[test]
+fn root_reachability_dynamic_component_missing_usage_link_is_unresolved_target() {
+    let el = TemplateElement {
+        tag: "component".to_string(),
+        is_component: true,
+        parent_index: None,
+        parent_tag: None,
+        ..Default::default()
+    };
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(branches.len(), 1);
+            match &branches[0].target {
+                RootTargetRef::UnresolvedTarget { reason, .. } => {
+                    assert_eq!(*reason, UnresolvedRootTargetReason::MissingUsageLink);
+                }
+                other => panic!("expected UnresolvedTarget, got: {:?}", other),
+            }
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+#[test]
+fn root_reachability_dynamic_component_static_is_is_not_thrown_away() {
+    let mut el = TemplateElement {
+        tag: "component".to_string(),
+        is_component: true,
+        parent_index: None,
+        parent_tag: None,
+        component_usage_index: Some(0),
+        ..Default::default()
+    };
+    el.directives = vec![TemplateDirective {
+        name: "bind".to_string(),
+        raw_name: ":is".to_string(),
+        argument: Some("is".to_string()),
+        modifiers: vec![],
+        expression: Some("showNative ? 'div' : Child".to_string()),
+        span: verter_span::Span::default(),
+        name_end: 0,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans: vec![],
+    }];
+
+    let components = vec![TemplateComponentUsage {
+        name: "component".to_string(),
+        import_source: None,
+        is_dynamic: true,
+        props: vec![crate::template::TemplatePropUsage {
+            name: "is".to_string(),
+            is_bound: true,
+            constness: crate::template::PropValueConstness::Dynamic,
+            referenced_bindings: vec!["showNative".to_string(), "Child".to_string()],
+            expression: Some("showNative ? 'div' : Child".to_string()),
+            from_spread: false,
+            span: verter_span::Span::default(),
+            name_span: verter_span::Span::default(),
+            is_shorthand: false,
+        }],
+        has_spread: false,
+        slots_used: vec![],
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        span: verter_span::Span::default(),
+    }];
+
+    let template = make_template_with_elements_and_components(vec![el], components);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(branches.len(), 1);
+            assert!(
+                !matches!(
+                    &branches[0].target,
+                    RootTargetRef::UnresolvedTarget {
+                        reason: UnresolvedRootTargetReason::DynamicComponentIs,
+                        ..
+                    }
+                ),
+                "static :is candidates must survive into root reachability facts"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+#[test]
+fn root_reachability_root_template_vif_single_child_uses_actual_child_target() {
+    let wrapper = TemplateElement {
+        tag: "template".to_string(),
+        is_component: false,
+        parent_index: None,
+        parent_tag: None,
+        has_v_if: true,
+        v_if_condition: Some("show".to_string()),
+        has_element_children: true,
+        ..Default::default()
+    };
+    let child = TemplateElement {
+        tag: "div".to_string(),
+        is_component: false,
+        parent_index: Some(0),
+        parent_tag: Some("template".to_string()),
+        ..Default::default()
+    };
+
+    let template = make_template_with_elements(vec![wrapper, child]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(
+                branches.len(),
+                1,
+                "wrapper branch should unwrap to one branch"
+            );
+            assert_eq!(branches[0].condition_text.as_deref(), Some("show"));
+            match &branches[0].target {
+                RootTargetRef::NativeElement { tag, element_index } => {
+                    assert_eq!(
+                        tag, "div",
+                        "wrapper should normalize to actual child target"
+                    );
+                    assert_eq!(
+                        *element_index, 1,
+                        "branch should point at the actual child element index"
+                    );
+                }
+                other => panic!("expected NativeElement div, got: {:?}", other),
+            }
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+#[test]
+fn root_reachability_root_template_vif_multi_child_disables_fallthrough() {
+    let wrapper = TemplateElement {
+        tag: "template".to_string(),
+        is_component: false,
+        parent_index: None,
+        parent_tag: None,
+        has_v_if: true,
+        v_if_condition: Some("show".to_string()),
+        has_element_children: true,
+        ..Default::default()
+    };
+    let child_a = TemplateElement {
+        tag: "div".to_string(),
+        is_component: false,
+        parent_index: Some(0),
+        parent_tag: Some("template".to_string()),
+        ..Default::default()
+    };
+    let child_b = TemplateElement {
+        tag: "span".to_string(),
+        is_component: false,
+        parent_index: Some(0),
+        parent_tag: Some("template".to_string()),
+        ..Default::default()
+    };
+
+    let template = make_template_with_elements(vec![wrapper, child_a, child_b]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    assert!(
+        matches!(
+            result,
+            RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::BranchNotSingleRoot
+            }
+        ),
+        "root template wrapper with multiple actual child roots must disable fallthrough, got: {:?}",
+        result
+    );
+}
+
+// ── Built-in root is unresolved ────────────────────────────────────
+
+#[test]
+fn root_reachability_builtin_root_is_unresolved_target() {
+    let el = TemplateElement {
+        tag: "Teleport".to_string(),
+        is_component: true,
+        parent_index: None,
+        parent_tag: None,
+        ..Default::default()
+    };
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(branches.len(), 1);
+            match &branches[0].target {
+                RootTargetRef::UnresolvedTarget {
+                    reason: UnresolvedRootTargetReason::UnsupportedBuiltin { tag },
+                    ..
+                } => {
+                    assert_eq!(tag, "Teleport");
+                }
+                other => panic!(
+                    "expected UnresolvedTarget::UnsupportedBuiltin, got: {:?}",
+                    other
+                ),
+            }
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── Slot root is unresolved ────────────────────────────────────────
+
+#[test]
+fn root_reachability_slot_root_is_unresolved_target() {
+    let el = TemplateElement {
+        tag: "slot".to_string(),
+        is_component: false,
+        parent_index: None,
+        parent_tag: None,
+        ..Default::default()
+    };
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(branches.len(), 1);
+            match &branches[0].target {
+                RootTargetRef::UnresolvedTarget {
+                    reason: UnresolvedRootTargetReason::SlotOutlet,
+                    ..
+                } => {}
+                other => panic!("expected UnresolvedTarget::SlotOutlet, got: {:?}", other),
+            }
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── Conditional root (v-if / v-else) ────────────────────────────────────
+
+#[test]
+fn root_reachability_conditional_native_branches() {
+    let mut div = make_native_root_element("div");
+    div.has_v_if = true;
+    div.v_if_condition = Some("show".to_string());
+
+    let mut span = make_native_root_element("span");
+    span.has_v_else = true;
+
+    let template = make_template_with_elements(vec![div, span]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert_eq!(
+                branches.len(),
+                2,
+                "v-if/v-else chain must produce 2 branches"
+            );
+            // Branch 0: div with condition
+            assert_eq!(branches[0].branch_index, 0);
+            assert_eq!(branches[0].condition_text.as_deref(), Some("show"));
+            assert!(matches!(
+                &branches[0].target,
+                RootTargetRef::NativeElement { tag, .. } if tag == "div"
+            ));
+            // Branch 1: span (v-else, no condition)
+            assert_eq!(branches[1].branch_index, 1);
+            assert!(branches[1].condition_text.is_none());
+            assert!(matches!(
+                &branches[1].target,
+                RootTargetRef::NativeElement { tag, .. } if tag == "span"
+            ));
+        }
+        other => panic!("expected Branches with 2 entries, got: {:?}", other),
+    }
+}
+
+// ── Consumed attrs and listeners ────────────────────────────────────────
+
+#[test]
+fn root_reachability_consumed_attrs_and_listeners() {
+    let mut el = make_native_root_element("div");
+    el.attributes = vec![
+        TemplateAttribute {
+            name: "disabled".to_string(),
+            value: None,
+            is_dynamic: false,
+            span: verter_span::Span::default(),
+            name_end: 0,
+            value_span: None,
+        },
+        TemplateAttribute {
+            name: "id".to_string(),
+            value: Some("app".to_string()),
+            is_dynamic: true,
+            span: verter_span::Span::default(),
+            name_end: 0,
+            value_span: None,
+        },
+    ];
+    el.directives = vec![TemplateDirective {
+        name: "on".to_string(),
+        raw_name: "@click".to_string(),
+        argument: Some("click".to_string()),
+        modifiers: vec![],
+        expression: Some("handler".to_string()),
+        span: verter_span::Span::default(),
+        name_end: 0,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans: vec![],
+    }];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.attrs.contains(&"disabled".to_string()),
+                "disabled should be in consumed attrs"
+            );
+            assert!(
+                consumed.attrs.contains(&"id".to_string()),
+                "id should be in consumed attrs"
+            );
+            assert!(
+                consumed.listeners.contains(&"click".to_string()),
+                "@click should produce consumed listener 'click'"
+            );
+            // Negative: class and style never consumed
+            assert!(
+                !consumed.attrs.contains(&"class".to_string()),
+                "class must not be consumed"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── class and style never consumed ──────────────────────────────────────
+
+#[test]
+fn root_reachability_class_style_not_consumed() {
+    let mut el = make_native_root_element("div");
+    el.attributes = vec![
+        TemplateAttribute {
+            name: "class".to_string(),
+            value: Some("foo".to_string()),
+            is_dynamic: false,
+            span: verter_span::Span::default(),
+            name_end: 0,
+            value_span: None,
+        },
+        TemplateAttribute {
+            name: "style".to_string(),
+            value: Some("color: red".to_string()),
+            is_dynamic: false,
+            span: verter_span::Span::default(),
+            name_end: 0,
+            value_span: None,
+        },
+    ];
+    // Also add dynamic :class and :style via v-bind
+    el.directives = vec![
+        TemplateDirective {
+            name: "bind".to_string(),
+            raw_name: ":class".to_string(),
+            argument: Some("class".to_string()),
+            modifiers: vec![],
+            expression: Some("{ active: true }".to_string()),
+            span: verter_span::Span::default(),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: vec![],
+        },
+        TemplateDirective {
+            name: "bind".to_string(),
+            raw_name: ":style".to_string(),
+            argument: Some("style".to_string()),
+            modifiers: vec![],
+            expression: Some("styles".to_string()),
+            span: verter_span::Span::default(),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: vec![],
+        },
+    ];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.attrs.is_empty(),
+                "class and style must never be consumed, got: {:?}",
+                consumed.attrs
+            );
+            assert!(
+                consumed.listeners.is_empty(),
+                "no listeners should be consumed, got: {:?}",
+                consumed.listeners
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── @click and :onClick normalize to same consumed listener ─────────────
+
+#[test]
+fn root_reachability_at_click_and_on_click_normalize_to_same_consumed_name() {
+    let mut el = make_native_root_element("div");
+    el.directives = vec![
+        // @click
+        TemplateDirective {
+            name: "on".to_string(),
+            raw_name: "@click".to_string(),
+            argument: Some("click".to_string()),
+            modifiers: vec![],
+            expression: Some("handler1".to_string()),
+            span: verter_span::Span::default(),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: vec![],
+        },
+        // :onClick
+        TemplateDirective {
+            name: "bind".to_string(),
+            raw_name: ":onClick".to_string(),
+            argument: Some("onClick".to_string()),
+            modifiers: vec![],
+            expression: Some("handler2".to_string()),
+            span: verter_span::Span::default(),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: vec![],
+        },
+    ];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            // Both should normalize to "click" and be deduped
+            assert_eq!(
+                consumed.listeners,
+                vec!["click"],
+                "@click and :onClick must normalize to one 'click' consumed listener"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── v-bind spread marks dynamic listener name ───────────────────────────
+
+#[test]
+fn root_reachability_v_bind_spread_marks_dynamic_listener_name() {
+    let mut el = make_native_root_element("div");
+    el.directives = vec![
+        // v-bind="attrs" (spread without argument)
+        TemplateDirective {
+            name: "bind".to_string(),
+            raw_name: "v-bind".to_string(),
+            argument: None,
+            modifiers: vec![],
+            expression: Some("attrs".to_string()),
+            span: verter_span::Span::default(),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: vec![],
+        },
+    ];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            assert!(
+                branches[0].has_unknown_spread,
+                "v-bind without argument must set has_unknown_spread"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── v-model consumes component model members ────────────────────────────
+
+#[test]
+fn root_reachability_v_model_consumes_component_model_members() {
+    let mut el = make_component_root_element("MyComp");
+    el.component_usage_index = Some(0);
+    el.directives = vec![
+        // v-model:title
+        TemplateDirective {
+            name: "model".to_string(),
+            raw_name: "v-model:title".to_string(),
+            argument: Some("title".to_string()),
+            modifiers: vec![],
+            expression: Some("myTitle".to_string()),
+            span: verter_span::Span::default(),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: vec![],
+        },
+    ];
+
+    let components = vec![TemplateComponentUsage {
+        name: "MyComp".to_string(),
+        import_source: Some("./MyComp.vue".to_string()),
+        is_dynamic: false,
+        props: vec![],
+        has_spread: false,
+        slots_used: vec![],
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        span: verter_span::Span::default(),
+    }];
+
+    let template = make_template_with_elements_and_components(vec![el], components);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.attrs.contains(&"title".to_string()),
+                "v-model:title must consume 'title' attr"
+            );
+            assert!(
+                consumed.listeners.contains(&"update:title".to_string()),
+                "v-model:title must consume 'update:title' listener"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── v-model consumes native model members ───────────────────────────────
+
+#[test]
+fn root_reachability_v_model_consumes_native_model_members() {
+    let mut el = make_native_root_element("input");
+    el.directives = vec![TemplateDirective {
+        name: "model".to_string(),
+        raw_name: "v-model".to_string(),
+        argument: None,
+        modifiers: vec![],
+        expression: Some("text".to_string()),
+        span: verter_span::Span::default(),
+        name_end: 0,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans: vec![],
+    }];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.attrs.contains(&"value".to_string()),
+                "native v-model must consume 'value' attr"
+            );
+            assert!(
+                consumed.listeners.contains(&"input".to_string()),
+                "native v-model must consume 'input' listener"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── v-else alone doesn't count as independent root ──────────────────────
+
+#[test]
+fn root_reachability_v_else_is_branch_not_independent_root() {
+    let mut div = make_native_root_element("div");
+    div.has_v_if = true;
+    div.v_if_condition = Some("show".to_string());
+
+    let mut span = make_native_root_element("span");
+    span.has_v_else = true;
+
+    let template = make_template_with_elements(vec![div, span]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    // Should be Branches (conditional single root), NOT MultiRoot
+    assert!(
+        matches!(result, RootReachability::Branches { .. }),
+        "v-if/v-else chain must be Branches (not MultiRoot), got: {:?}",
+        result
+    );
+}
+
+// ── condition_text is debug-only ────────────────────────────────────────
+
+#[test]
+fn root_reachability_condition_text_is_debug_only() {
+    let mut div = make_native_root_element("div");
+    div.has_v_if = true;
+    div.v_if_condition = Some("  show  ".to_string());
+
+    let template = make_template_with_elements(vec![div]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            // condition_text is preserved as-is (including whitespace)
+            assert_eq!(branches[0].condition_text.as_deref(), Some("  show  "));
+            // branch_index is the stable identity, not condition_text
+            assert_eq!(branches[0].branch_index, 0);
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── Computed/dynamic attribute names ────────────────────────────────────
+
+#[test]
+fn root_reachability_computed_attr_name_marks_dynamic() {
+    let mut el = make_native_root_element("div");
+    el.attributes = vec![
+        // :[key]="value" — computed attr name
+        TemplateAttribute {
+            name: "[key]".to_string(),
+            value: Some("value".to_string()),
+            is_dynamic: true,
+            span: verter_span::Span::default(),
+            name_end: 0,
+            value_span: None,
+        },
+        // :disabled="true" — static name, dynamic value
+        TemplateAttribute {
+            name: "disabled".to_string(),
+            value: Some("true".to_string()),
+            is_dynamic: true,
+            span: verter_span::Span::default(),
+            name_end: 0,
+            value_span: None,
+        },
+    ];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            // Positive: has_dynamic_attr_name must be set for :[key]
+            assert!(
+                consumed.has_dynamic_attr_name,
+                "computed attr name :[key] must set has_dynamic_attr_name"
+            );
+            // Positive: :disabled has a known name — should be in consumed attrs
+            assert!(
+                consumed.attrs.contains(&"disabled".to_string()),
+                ":disabled should be consumed with known name 'disabled'"
+            );
+            // Negative: [key] should NOT appear in consumed.attrs (it's dynamic)
+            assert!(
+                !consumed.attrs.contains(&"[key]".to_string()),
+                "computed attr [key] must NOT appear in consumed.attrs"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+#[test]
+fn root_reachability_dynamic_event_name_marks_dynamic_listener() {
+    let mut el = make_native_root_element("div");
+    el.directives = vec![
+        // @[eventName]="handler" — computed listener name
+        TemplateDirective {
+            name: "on".to_string(),
+            raw_name: "@[eventName]".to_string(),
+            argument: Some("[eventName]".to_string()),
+            modifiers: vec![],
+            expression: Some("handler".to_string()),
+            span: verter_span::Span::default(),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: vec![],
+        },
+    ];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.has_dynamic_listener_name,
+                "@[eventName] must set has_dynamic_listener_name"
+            );
+            // Negative: the computed name should NOT appear as a concrete consumed listener
+            assert!(
+                consumed.listeners.is_empty(),
+                "computed listener name should not be in concrete listeners list"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+// ── Native v-model element-type-aware consumption ───────────────────────
+
+#[test]
+fn root_reachability_v_model_checkbox_consumes_checked_and_change() {
+    let mut el = make_native_root_element("input");
+    el.attributes = vec![TemplateAttribute {
+        name: "type".to_string(),
+        value: Some("checkbox".to_string()),
+        is_dynamic: false,
+        span: verter_span::Span::default(),
+        name_end: 0,
+        value_span: None,
+    }];
+    el.directives = vec![TemplateDirective {
+        name: "model".to_string(),
+        raw_name: "v-model".to_string(),
+        argument: None,
+        modifiers: vec![],
+        expression: Some("checked".to_string()),
+        span: verter_span::Span::default(),
+        name_end: 0,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans: vec![],
+    }];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.attrs.contains(&"checked".to_string()),
+                "checkbox v-model must consume 'checked', got: {:?}",
+                consumed.attrs
+            );
+            assert!(
+                consumed.listeners.contains(&"change".to_string()),
+                "checkbox v-model must consume 'change' listener, got: {:?}",
+                consumed.listeners
+            );
+            // Negative: must NOT consume 'value' or 'input' for checkbox
+            assert!(
+                !consumed.attrs.contains(&"value".to_string()),
+                "checkbox v-model must NOT consume 'value'"
+            );
+            assert!(
+                !consumed.listeners.contains(&"input".to_string()),
+                "checkbox v-model must NOT consume 'input' listener"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+#[test]
+fn root_reachability_v_model_select_consumes_value_and_change() {
+    let mut el = make_native_root_element("select");
+    el.directives = vec![TemplateDirective {
+        name: "model".to_string(),
+        raw_name: "v-model".to_string(),
+        argument: None,
+        modifiers: vec![],
+        expression: Some("selected".to_string()),
+        span: verter_span::Span::default(),
+        name_end: 0,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans: vec![],
+    }];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.attrs.contains(&"value".to_string()),
+                "select v-model must consume 'value'"
+            );
+            assert!(
+                consumed.listeners.contains(&"change".to_string()),
+                "select v-model must consume 'change' listener"
+            );
+            // Negative: must NOT consume 'input' for select
+            assert!(
+                !consumed.listeners.contains(&"input".to_string()),
+                "select v-model must NOT consume 'input' listener"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
+}
+
+#[test]
+fn root_reachability_v_model_radio_consumes_checked_and_change() {
+    let mut el = make_native_root_element("input");
+    el.attributes = vec![TemplateAttribute {
+        name: "type".to_string(),
+        value: Some("radio".to_string()),
+        is_dynamic: false,
+        span: verter_span::Span::default(),
+        name_end: 0,
+        value_span: None,
+    }];
+    el.directives = vec![TemplateDirective {
+        name: "model".to_string(),
+        raw_name: "v-model".to_string(),
+        argument: None,
+        modifiers: vec![],
+        expression: Some("option".to_string()),
+        span: verter_span::Span::default(),
+        name_end: 0,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans: vec![],
+    }];
+
+    let template = make_template_with_elements(vec![el]);
+    let flags = make_flags(false);
+    let result = extract_root_reachability(Some(&template), &flags);
+
+    match result {
+        RootReachability::Branches { ref branches } => {
+            let consumed = &branches[0].consumed;
+            assert!(
+                consumed.attrs.contains(&"checked".to_string()),
+                "radio v-model must consume 'checked'"
+            );
+            assert!(
+                consumed.listeners.contains(&"change".to_string()),
+                "radio v-model must consume 'change' listener"
+            );
+            // Negative: must NOT consume 'value' or 'input' for radio
+            assert!(
+                !consumed.attrs.contains(&"value".to_string()),
+                "radio v-model must NOT consume 'value'"
+            );
+        }
+        other => panic!("expected Branches, got: {:?}", other),
+    }
 }

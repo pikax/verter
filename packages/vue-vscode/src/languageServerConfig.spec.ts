@@ -10,14 +10,6 @@ function makeEvent(changed: string[]) {
 }
 
 describe("shouldRestartLanguageServerForConfigurationChange", () => {
-  it("restarts for deep component-meta expansion changes", () => {
-    expect(
-      shouldRestartLanguageServerForConfigurationChange(
-        makeEvent(["verter.experimental.deepComponentMetaExpansion"]),
-      ),
-    ).toBe(true);
-  });
-
   it("restarts for other init-only experimental settings", () => {
     expect(
       shouldRestartLanguageServerForConfigurationChange(

@@ -47,7 +47,7 @@ export type PropertyMetaSchema =
 
 /**
  * Component metadata in Volar-compatible shape.
- * The `_verter` field provides opt-in access to the full Verter native metadata.
+ * The `_verter` field provides opt-in access to the full Verter mapped metadata.
  */
 export interface VolarComponentMeta {
   /** Component type (0 = component). */
@@ -60,7 +60,7 @@ export interface VolarComponentMeta {
   slots: PropertyMeta[];
   /** Exposed members as Volar PropertyMeta. */
   exposed: PropertyMeta[];
-  /** Full Verter native metadata (opt-in extension). */
+  /** Full Verter mapped metadata (opt-in extension). */
   _verter?: ComponentMeta;
 }
 

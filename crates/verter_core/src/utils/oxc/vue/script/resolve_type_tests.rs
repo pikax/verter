@@ -724,6 +724,7 @@ type Test = Local;"#;
         key_name: Some("baseField".to_string()),
         optional: false,
         types: vec![RuntimeType::String],
+        visibility: ResolvedMemberVisibility::Public,
         type_span: None,
         type_text: None,
         map_local: true,
@@ -792,6 +793,7 @@ export interface Props extends LocalBase {
         key_name: Some("id".to_string()),
         optional: false,
         types: vec![RuntimeType::String],
+        visibility: ResolvedMemberVisibility::Public,
         type_span: None,
         type_text: None,
         map_local: false,
@@ -836,6 +838,7 @@ export interface Props extends LocalBase {
         key_name: Some("id".to_string()),
         optional: false,
         types: vec![RuntimeType::String],
+        visibility: ResolvedMemberVisibility::Public,
         type_span: None,
         type_text: None,
         map_local: false,
@@ -1211,6 +1214,90 @@ fn extract_bindings_handles_export_star_and_named_reexports() {
         result3.wildcard_reexport_sources,
         vec!["./utils"],
         "should have one wildcard"
+    );
+}
+
+#[test]
+fn extract_bindings_follows_import_alias_then_export_local() {
+    let allocator = Allocator::new();
+    let source = "import type { Foo as Bar } from './dep'; export { Bar };";
+    let result = extract_imported_type_bindings(source, &allocator);
+
+    assert!(
+        result
+            .bindings
+            .iter()
+            .any(|binding| binding.local_name == "Bar"
+                && binding.imported_name == "Foo"
+                && binding.source == "./dep"),
+        "import alias should keep the original imported symbol: {:?}",
+        result.bindings
+    );
+    assert!(
+        result
+            .reexport_bindings
+            .iter()
+            .any(|binding| binding.local_name == "Bar"
+                && binding.imported_name == "Foo"
+                && binding.source == "./dep"),
+        "re-exporting the aliased local should preserve the original symbol: {:?}",
+        result.reexport_bindings
+    );
+}
+
+#[test]
+fn extract_bindings_follows_plain_import_alias_then_export_local() {
+    let allocator = Allocator::new();
+    let source = "import { foo as bar } from './dep'; export { bar };";
+    let result = extract_imported_type_bindings(source, &allocator);
+
+    assert!(
+        result
+            .bindings
+            .iter()
+            .any(|binding| binding.local_name == "bar"
+                && binding.imported_name == "foo"
+                && binding.source == "./dep"),
+        "plain import alias should keep the original imported symbol: {:?}",
+        result.bindings
+    );
+    assert!(
+        result
+            .reexport_bindings
+            .iter()
+            .any(|binding| binding.local_name == "bar"
+                && binding.imported_name == "foo"
+                && binding.source == "./dep"),
+        "re-exporting the aliased plain import should preserve the original symbol: {:?}",
+        result.reexport_bindings
+    );
+}
+
+#[test]
+fn extract_bindings_follows_default_import_then_export_local() {
+    let allocator = Allocator::new();
+    let source = "import Foo from './dep'; export { Foo as Bar };";
+    let result = extract_imported_type_bindings(source, &allocator);
+
+    assert!(
+        result
+            .bindings
+            .iter()
+            .any(|binding| binding.local_name == "Foo"
+                && binding.imported_name == "default"
+                && binding.source == "./dep"),
+        "default import should preserve the default export symbol: {:?}",
+        result.bindings
+    );
+    assert!(
+        result
+            .reexport_bindings
+            .iter()
+            .any(|binding| binding.local_name == "Bar"
+                && binding.imported_name == "default"
+                && binding.source == "./dep"),
+        "re-exporting a default-imported local should preserve the default symbol: {:?}",
+        result.reexport_bindings
     );
 }
 
@@ -1604,6 +1691,7 @@ fn ctx_ref_companion_fallback() {
         key_name: Some("compProp".to_string()),
         optional: false,
         types: vec![RuntimeType::String],
+        visibility: ResolvedMemberVisibility::Public,
         type_span: None,
         type_text: None,
         map_local: false,
@@ -1723,6 +1811,7 @@ fn typeof_query_with_companion() {
         key_name: Some("x".to_string()),
         optional: false,
         types: vec![RuntimeType::Number],
+        visibility: ResolvedMemberVisibility::Public,
         type_span: None,
         type_text: None,
         map_local: false,
@@ -1982,6 +2071,56 @@ export type Emits = Omit<BaseEmits, 'entryFocus'>
 }
 
 #[test]
+fn resolve_external_type_follows_local_export_alias_chain() {
+    let alloc = Allocator::default();
+    let dep = r#"
+type Foo = { label: string }
+export { Foo as Bar }
+"#;
+
+    let resolved =
+        resolve_external_type("Bar", dep, &alloc).expect("local export alias should resolve");
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|prop| prop.key_name.as_deref().unwrap_or(""))
+        .collect();
+
+    assert!(
+        names.contains(&"label"),
+        "local export aliases should resolve to the underlying declaration: {names:?}"
+    );
+}
+
+#[test]
+fn resolve_external_type_default_export_class_by_default_name() {
+    let alloc = Allocator::default();
+    let dep = r#"
+export default class Props {
+  label!: string
+  protected hidden!: boolean
+}
+"#;
+
+    let resolved = resolve_external_type("default", dep, &alloc)
+        .expect("default-exported class should resolve");
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|prop| prop.key_name.as_deref().unwrap_or(""))
+        .collect();
+
+    assert!(
+        names.contains(&"label"),
+        "default-exported class should resolve its public members: {names:?}"
+    );
+    assert!(
+        names.contains(&"hidden"),
+        "native default-exported class resolution should preserve protected members: {names:?}"
+    );
+}
+
+#[test]
 fn partial_preserves_all_members() {
     // Partial<T> should keep all props/emits (just makes them optional)
     let source = r#"
@@ -2129,5 +2268,271 @@ export interface Props extends /** @vue-ignore */ HtmlAttrs {
     assert!(
         !names.contains(&"title"),
         "should skip @vue-ignore extends props, got: {names:?}"
+    );
+}
+
+#[test]
+fn resolve_external_type_class_public_members_and_heritage() {
+    let alloc = Allocator::default();
+    let dep = r#"
+interface Implemented {
+  from_implements: number
+}
+
+class BaseProps {
+  from_base!: string
+  protected hidden!: boolean
+  private internal!: number
+  static ignored = true
+}
+
+export class Props extends BaseProps implements Implemented {
+  own?: boolean
+  from_implements!: number
+  method(): void {}
+}
+"#;
+
+    let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|p| p.key_name.as_deref().unwrap_or(""))
+        .collect();
+
+    assert!(
+        names.contains(&"from_base"),
+        "should include base members, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"from_implements"),
+        "should include public class members on implemented shapes, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"own"),
+        "should include own members, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"method"),
+        "should include public methods as function props, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"hidden"),
+        "native resolver should preserve protected members, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"internal"),
+        "native resolver should preserve private members, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"ignored"),
+        "should not expose static members, got: {names:?}"
+    );
+
+    let hidden = resolved
+        .props
+        .iter()
+        .find(|prop| prop.key_name.as_deref() == Some("hidden"))
+        .expect("protected member should be present");
+    assert_eq!(hidden.visibility, ResolvedMemberVisibility::Protected);
+    assert_eq!(
+        hidden.type_text.as_deref(),
+        Some("boolean"),
+        "class property annotations should be retained for native provenance"
+    );
+
+    let internal = resolved
+        .props
+        .iter()
+        .find(|prop| prop.key_name.as_deref() == Some("internal"))
+        .expect("private member should be present");
+    assert_eq!(internal.visibility, ResolvedMemberVisibility::Private);
+
+    let method = resolved
+        .props
+        .iter()
+        .find(|prop| prop.key_name.as_deref() == Some("method"))
+        .expect("method should be present");
+    assert_eq!(
+        method.type_text.as_deref(),
+        Some("() => void"),
+        "class methods should retain a callable raw type for downstream provenance"
+    );
+}
+
+#[test]
+fn class_references_stay_object_like_at_root() {
+    let (resolved, diagnostics) = resolve_with_ctx_ref(
+        r#"
+class Props {
+  label!: string
+}
+
+type Test = Props
+"#,
+    );
+
+    assert!(
+        diagnostics.is_empty(),
+        "class references should not produce diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(
+        resolved.root_runtime_types,
+        vec![RuntimeType::Object],
+        "class references should stay object-like for downstream validation"
+    );
+}
+
+#[test]
+fn collect_required_import_names_for_external_class_includes_heritage_imports() {
+    let alloc = Allocator::default();
+    let dep = r#"
+import { BaseProps } from './base'
+import type { Implemented } from './iface'
+
+export class Props extends BaseProps implements Implemented {
+  own?: boolean
+}
+"#;
+
+    let required = collect_required_import_names_for_external_type("Props", dep, &alloc);
+
+    assert!(
+        required.contains("BaseProps"),
+        "class extends imports should be followed, got: {required:?}"
+    );
+    assert!(
+        required.contains("Implemented"),
+        "class implements imports should be followed, got: {required:?}"
+    );
+}
+
+// ===========================================================================
+// Edge case: Pick/Partial applied to class types
+// ===========================================================================
+
+#[test]
+fn pick_on_class_type_selects_named_members() {
+    let alloc = Allocator::default();
+    let dep = r#"
+class BaseClass {
+  label!: string
+  count!: number
+  protected secret!: boolean
+}
+export type Props = Pick<BaseClass, 'label'>
+"#;
+    let resolved =
+        resolve_external_type("Props", dep, &alloc).expect("Pick<Class, 'label'> should resolve");
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+    assert!(
+        names.contains(&"label"),
+        "Pick should include 'label': {names:?}"
+    );
+    assert!(
+        !names.contains(&"count"),
+        "Pick should NOT include 'count': {names:?}"
+    );
+    assert!(
+        !names.contains(&"secret"),
+        "Pick should NOT include 'secret': {names:?}"
+    );
+}
+
+#[test]
+fn partial_on_class_type_keeps_all_members() {
+    let alloc = Allocator::default();
+    let dep = r#"
+class BaseClass {
+  label!: string
+  count!: number
+}
+export type Props = Partial<BaseClass>
+"#;
+    let resolved =
+        resolve_external_type("Props", dep, &alloc).expect("Partial<Class> should resolve");
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+    // Assert+: all members should be present
+    assert!(
+        names.contains(&"label"),
+        "Partial should keep 'label': {names:?}"
+    );
+    assert!(
+        names.contains(&"count"),
+        "Partial should keep 'count': {names:?}"
+    );
+    // Assert-: no extra members should appear
+    assert_eq!(names.len(), 2, "should have exactly 2 props: {names:?}");
+}
+
+// ===========================================================================
+// Edge case: abstract class members
+// ===========================================================================
+
+#[test]
+fn abstract_class_members_are_resolved() {
+    let alloc = Allocator::default();
+    let dep = r#"
+export abstract class BaseWidget {
+  abstract label: string
+  count!: number
+}
+"#;
+    let resolved =
+        resolve_external_type("BaseWidget", dep, &alloc).expect("abstract class should resolve");
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+    // Abstract members should still appear as props (they define the shape)
+    assert!(
+        names.contains(&"label"),
+        "abstract member 'label' should be resolved: {names:?}"
+    );
+    assert!(
+        names.contains(&"count"),
+        "'count' should be resolved: {names:?}"
+    );
+}
+
+// ===========================================================================
+// Edge case: callable_signature_text with no return type annotation
+// ===========================================================================
+
+#[test]
+fn method_without_return_type_defaults_to_void() {
+    let alloc = Allocator::default();
+    let dep = r#"
+export interface Slots {
+  default(props: { row: string }): void
+  noReturn(props: { item: number })
+}
+"#;
+    // The second method has no return type annotation;
+    // callable_signature_text should default to "void" not "unknown"
+    let resolved =
+        resolve_external_type("Slots", dep, &alloc).expect("interface with methods should resolve");
+    // Both should be present as props (method signatures on interfaces)
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+    assert!(
+        names.contains(&"default"),
+        "should have 'default': {names:?}"
+    );
+    assert!(
+        names.contains(&"noReturn"),
+        "should have 'noReturn': {names:?}"
     );
 }

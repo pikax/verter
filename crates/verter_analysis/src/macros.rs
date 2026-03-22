@@ -1,5 +1,5 @@
 use oxc_ast::ast::*;
-use oxc_ast::{Comment, CommentContent};
+use oxc_ast::Comment;
 use oxc_span::GetSpan;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1891,118 +1891,13 @@ fn has_inherit_attrs_false_in_args(call: &CallExpression<'_>) -> bool {
 /// Find a leading JSDoc comment for a declaration at the given byte offset.
 ///
 /// OXC's `Comment.attached_to` is the byte offset of the token the comment precedes.
-fn find_leading_jsdoc<'a>(
-    comments: &[Comment],
-    target_start: u32,
-    source: &'a str,
-) -> Option<&'a str> {
-    for comment in comments {
-        if comment.attached_to == target_start
-            && comment.is_block()
-            && matches!(
-                comment.content,
-                CommentContent::Jsdoc | CommentContent::JsdocLegal
-            )
-        {
-            let start = comment.span.start as usize;
-            let end = comment.span.end as usize;
-            if end <= source.len() {
-                return Some(&source[start..end]);
-            }
-        }
-    }
-    None
-}
-
-/// Parse a raw JSDoc comment text into a description and a list of tags.
-///
-/// Input is the full comment including `/**` and `*/` delimiters.
-/// Returns `(description, tags)`.
-fn parse_jsdoc(raw: &str) -> (Option<String>, Vec<JsdocTag>) {
-    // Strip /** and */ delimiters
-    let inner = raw
-        .strip_prefix("/**")
-        .unwrap_or(raw)
-        .strip_suffix("*/")
-        .unwrap_or(raw);
-
-    // Clean up each line: strip leading whitespace and `*`
-    let lines: Vec<&str> = inner
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim();
-            trimmed.strip_prefix('*').unwrap_or(trimmed).trim()
-        })
-        .collect();
-
-    let mut description_parts = Vec::new();
-    let mut tags = Vec::new();
-    let mut current_tag: Option<(String, Vec<String>)> = None;
-
-    for line in &lines {
-        if let Some(rest) = line.strip_prefix('@') {
-            // Flush current tag
-            if let Some((name, text_parts)) = current_tag.take() {
-                let text = text_parts.join(" ");
-                tags.push(JsdocTag {
-                    name,
-                    text: if text.is_empty() { None } else { Some(text) },
-                });
-            }
-            // Parse new tag
-            let (tag_name, tag_text) =
-                if let Some(space_idx) = rest.find(|c: char| c.is_whitespace()) {
-                    (&rest[..space_idx], rest[space_idx..].trim())
-                } else {
-                    (rest.trim(), "")
-                };
-            current_tag = Some((
-                tag_name.to_string(),
-                if tag_text.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![tag_text.to_string()]
-                },
-            ));
-        } else if let Some(ref mut tag) = current_tag {
-            // Continuation of a tag
-            if !line.is_empty() {
-                tag.1.push(line.to_string());
-            }
-        } else if !line.is_empty() {
-            // Part of description
-            description_parts.push(*line);
-        }
-    }
-
-    // Flush last tag
-    if let Some((name, text_parts)) = current_tag {
-        let text = text_parts.join(" ");
-        tags.push(JsdocTag {
-            name,
-            text: if text.is_empty() { None } else { Some(text) },
-        });
-    }
-
-    let description = if description_parts.is_empty() {
-        None
-    } else {
-        Some(description_parts.join(" "))
-    };
-
-    (description, tags)
-}
-
 /// Extract JSDoc description and tags for a given AST node position.
 pub(crate) fn extract_jsdoc_for(
     comments: &[Comment],
     target_start: u32,
     source: &str,
 ) -> (Option<String>, Vec<JsdocTag>) {
-    match find_leading_jsdoc(comments, target_start, source) {
-        Some(raw) => parse_jsdoc(raw),
-        None => (None, Vec::new()),
-    }
+    crate::jsdoc::extract_jsdoc_for_comments(comments, target_start, source)
 }
 
 #[cfg(test)]

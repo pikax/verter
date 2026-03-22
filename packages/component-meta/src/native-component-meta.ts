@@ -1,16 +1,24 @@
 import { basename } from "node:path";
 
 import { typeExprToDescriptor } from "./type-expr-bridge.js";
-import type { ComponentMeta } from "./types.js";
+import type {
+  ComponentMeta,
+  AcceptedPropMeta,
+  AcceptedEventMeta,
+  AcceptedSurfaceCompleteness,
+  RootReachability,
+  FallthroughSurface,
+  FallthroughBranch,
+} from "./types.js";
 import type { TypeDescriptor } from "./type-ir.js";
 import type { NativeTypeExpr } from "./type-expr-bridge.js";
 
-interface NativeJsdocTag {
+export interface NativeJsdocTag {
   name: string;
   text?: string;
 }
 
-interface NativePropMeta {
+export interface NativePropMeta {
   name: string;
   type: NativeTypeExpr;
   rawType?: string;
@@ -21,7 +29,7 @@ interface NativePropMeta {
   tags?: NativeJsdocTag[];
 }
 
-interface NativeEventMeta {
+export interface NativeEventMeta {
   name: string;
   payload: NativeTypeExpr;
   rawSignature?: string;
@@ -29,13 +37,13 @@ interface NativeEventMeta {
   tags?: NativeJsdocTag[];
 }
 
-interface NativeSlotBindingMeta {
+export interface NativeSlotBindingMeta {
   name: string;
   type: NativeTypeExpr;
   rawType?: string;
 }
 
-interface NativeSlotMeta {
+export interface NativeSlotMeta {
   name: string;
   isScoped: boolean;
   bindings: NativeSlotBindingMeta[];
@@ -44,29 +52,116 @@ interface NativeSlotMeta {
   tags?: NativeJsdocTag[];
 }
 
-interface NativeModelMeta {
+export interface NativeModelMeta {
   name: string;
   type: NativeTypeExpr;
 }
 
-interface NativeExposedMeta {
+export interface NativeExposedMeta {
   name: string;
   type: NativeTypeExpr;
   description?: string;
 }
 
-interface NativeResolvedTypeMeta {
+export interface NativeResolvedTypeMeta {
   name: string;
+  /**
+   * Expanded lightweight native type.
+   * This is what compat/public mapping consumes.
+   */
   type: NativeTypeExpr;
+  /**
+   * Pre-expansion source form retained for native callers that need to inspect
+   * what the expanded type came from.
+   */
+  rawType?: string;
+  declaration?: NativeResolvedTypeDeclaration;
 }
 
-interface NativeComponentPropUsage {
+export interface NativeResolvedTypeDeclaration {
+  requestedName: string;
+  resolvedName: string;
+  canonicalSource: string;
+  spanStart: number;
+  spanEnd: number;
+  kind: "interface" | "typeAlias" | "class" | "unknown";
+  text?: string;
+}
+
+export interface NativeResolvedNativeProp {
+  name: string;
+  isOptional: boolean;
+  typeAnnotation?: string;
+  visibility: "public" | "protected" | "private";
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface NativeResolvedPropField {
+  name: string;
+  isOptional: boolean;
+  typeAnnotation?: string;
+  description?: string;
+  tags?: NativeJsdocTag[];
+}
+
+export interface NativeResolvedEmitField {
+  name: string;
+  payloadType?: string;
+  description?: string;
+  tags?: NativeJsdocTag[];
+}
+
+export interface NativeResolvedSlotBinding {
+  name: string;
+  typeAnnotation?: string;
+}
+
+export interface NativeResolvedSlotField {
+  name: string;
+  isRequired: boolean;
+  bindings: NativeResolvedSlotBinding[];
+  returnType?: string;
+  description?: string;
+  tags?: NativeJsdocTag[];
+}
+
+export interface NativeResolvedJsdocTag extends NativeJsdocTag {
+  rawType?: string;
+  subjectName?: string;
+  resolvedType?: NativeTypeExpr;
+}
+
+export interface NativeResolvedJsdocBlock {
+  description?: string;
+  tags?: NativeResolvedJsdocTag[];
+}
+
+export interface NativeResolvedMacroMeta {
+  macroIndex: number;
+  macroKind: string;
+  typeName: string;
+  importSource: string;
+  declaration: NativeResolvedTypeDeclaration;
+  nativeProps?: NativeResolvedNativeProp[];
+  props?: NativeResolvedPropField[];
+  emits?: NativeResolvedEmitField[];
+  slots?: NativeResolvedSlotField[];
+  jsdoc?: NativeResolvedJsdocBlock;
+}
+
+export interface NativeComponentMetaResolution {
+  mode: "type" | "expanded";
+  macros: NativeResolvedMacroMeta[];
+}
+
+export interface NativeComponentPropUsage {
   name: string;
   isBound: boolean;
   constness: "const" | "dynamic" | "unknown";
 }
 
-interface NativeComponentUsage {
+export interface NativeComponentUsage {
   name: string;
   importSource?: string;
   isDynamic: boolean;
@@ -77,24 +172,24 @@ interface NativeComponentUsage {
   vModels: string[];
 }
 
-interface NativeTemplateRefMeta {
+export interface NativeTemplateRefMeta {
   name: string;
   isDynamic: boolean;
   targetTag: string;
 }
 
-interface NativeImportBindingMeta {
+export interface NativeImportBindingMeta {
   name: string;
   isTypeOnly: boolean;
 }
 
-interface NativeImportMeta {
+export interface NativeImportMeta {
   source: string;
   isTypeOnly: boolean;
   bindings: NativeImportBindingMeta[];
 }
 
-interface NativeBindingMeta {
+export interface NativeBindingMeta {
   name: string;
   kind: "const" | "let" | "var" | "function" | "asyncFunction" | "class";
   reactivityKind: "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable";
@@ -103,17 +198,17 @@ interface NativeBindingMeta {
   usedInStyle: boolean;
 }
 
-interface NativeVueApiCallMeta {
+export interface NativeVueApiCallMeta {
   api: string;
   argValue?: string;
 }
 
-interface NativeSelectorMeta {
+export interface NativeSelectorMeta {
   text: string;
   specificity: [number, number, number];
 }
 
-interface NativeStyleMeta {
+export interface NativeStyleMeta {
   lang: string;
   scoped: boolean;
   isModule: boolean;
@@ -125,7 +220,7 @@ interface NativeStyleMeta {
   selectors: NativeSelectorMeta[];
 }
 
-interface NativeComponentFlags {
+export interface NativeComponentFlags {
   asyncSetup: boolean;
   hasReactiveState: boolean;
   hasComputed: boolean;
@@ -136,6 +231,155 @@ interface NativeComponentFlags {
   hasInheritAttrsFalse: boolean;
   hasStoreUsage: boolean;
 }
+
+// ── Fallthrough surface native types ─────────────────────────────
+
+export interface NativeAcceptedPropMeta {
+  name: string;
+  type: NativeTypeExpr;
+  rawType?: string;
+  required: boolean;
+  provenance: NativeMemberProvenance;
+  availability: NativeMemberAvailability;
+  kind: "declaredProp" | "attr";
+}
+
+export interface NativeAcceptedEventMeta {
+  name: string;
+  payload: NativeTypeExpr;
+  rawSignature?: string;
+  provenance: NativeMemberProvenance;
+  availability: NativeMemberAvailability;
+  kind: "declaredEmit" | "listener";
+}
+
+export type NativeMemberProvenance =
+  | { kind: "declared" }
+  | { kind: "inherited"; sources: NativeInheritedSource[] };
+
+export type NativeInheritedSource =
+  | { kind: "nativeTag"; tag: string }
+  | { kind: "component"; canonicalId: string };
+
+export type NativeMemberAvailability =
+  | { kind: "always" }
+  | { kind: "conditional"; branchKeys: string[] };
+
+export type NativeAcceptedSurfaceCompleteness = "exact" | "lowerBound";
+
+export type NativeRootReachability =
+  | { kind: "noFallthrough"; reason: NativeNoFallthroughReason }
+  | { kind: "branches"; branches: NativeRootBranch[] };
+
+export type NativeNoFallthroughReason =
+  | "inheritAttrsFalse"
+  | "multiRoot"
+  | "branchNotSingleRoot"
+  | "rootVFor"
+  | "noTemplate"
+  | "emptyTemplate"
+  | "textOrInterpolationRoot";
+
+export interface NativeRootBranch {
+  branchIndex: number;
+  conditionText?: string;
+  target: NativeRootTargetRef;
+  consumed: NativeConsumedRootBindings;
+  hasUnknownSpread: boolean;
+}
+
+export type NativeRootTargetRef =
+  | { kind: "nativeElement"; elementIndex: number; tag: string }
+  | { kind: "dynamicComponentUsage"; elementIndex: number; usageIndex: number }
+  | {
+      kind: "componentUsage";
+      elementIndex: number;
+      usageIndex: number;
+      name: string;
+      importSource?: string;
+    }
+  | {
+      kind: "unresolvedTarget";
+      elementIndex: number;
+      tag: string;
+      reason: NativeUnresolvedRootTargetReason;
+    };
+
+export type NativeUnresolvedRootTargetReason =
+  | { kind: "dynamicComponentIs" }
+  | { kind: "slotOutlet" }
+  | { kind: "unsupportedBuiltin"; tag: string }
+  | { kind: "missingUsageLink" }
+  | { kind: "unresolvedImport" }
+  | { kind: "unknownRootTarget" };
+
+export interface NativeConsumedRootBindings {
+  attrs: string[];
+  listeners: string[];
+  hasDynamicAttrName: boolean;
+  hasDynamicListenerName: boolean;
+}
+
+export type NativeFallthroughSurface =
+  | { kind: "none"; reason: NativeNoFallthroughReason }
+  | { kind: "branches"; branches: NativeFallthroughBranch[] };
+
+export type NativeGenericResolutionFailure =
+  | "spreadInput"
+  | "dynamicKey"
+  | "missingType"
+  | "unsupportedExpression"
+  | "missingUsageLink"
+  | "unresolvedChildGenericSurface";
+
+export type NativePartialBranchReason =
+  | { kind: "dynamicAttrName" }
+  | { kind: "dynamicListenerName" }
+  | { kind: "unknownSpread" }
+  | { kind: "genericResolution"; failure: NativeGenericResolutionFailure };
+
+export type NativeUnresolvedBranchReason =
+  | { kind: "cycle"; canonicalId: string }
+  | { kind: "dynamicComponentIs" }
+  | { kind: "childResolutionFailed" }
+  | { kind: "unresolvedChildImport"; importSource?: string }
+  | { kind: "rootTarget"; reason: NativeUnresolvedRootTargetReason }
+  | { kind: "genericResolution"; failure: NativeGenericResolutionFailure };
+
+export interface NativeFallthroughPropEntry {
+  name: string;
+  type: NativeTypeExpr;
+  rawType?: string;
+  sources: NativeInheritedSource[];
+}
+
+export interface NativeFallthroughEventEntry {
+  name: string;
+  payload: NativeTypeExpr;
+  rawSignature?: string;
+  sources: NativeInheritedSource[];
+}
+
+export type NativeBranchStatus =
+  | { kind: "resolved" }
+  | { kind: "partiallyUnresolved"; reasons: NativePartialBranchReason[] }
+  | { kind: "unresolved"; reason: NativeUnresolvedBranchReason };
+
+export type NativeResolvedRootStep =
+  | { kind: "nativeTag"; tag: string }
+  | { kind: "component"; canonicalId: string; componentName: string }
+  | { kind: "unresolved"; tag: string; reason: NativeUnresolvedBranchReason };
+
+export interface NativeFallthroughBranch {
+  branchKey: string;
+  conditionText?: string;
+  props: NativeFallthroughPropEntry[];
+  events: NativeFallthroughEventEntry[];
+  rootChain: NativeResolvedRootStep[];
+  status: NativeBranchStatus;
+}
+
+// ── Top-level native result ─────────────────────────────────────
 
 export interface NativeComponentMetaResult {
   props: NativePropMeta[];
@@ -151,8 +395,14 @@ export interface NativeComponentMetaResult {
   vueApiCalls: NativeVueApiCallMeta[];
   styles: NativeStyleMeta[];
   flags: NativeComponentFlags;
+  acceptedProps: NativeAcceptedPropMeta[];
+  acceptedEvents: NativeAcceptedEventMeta[];
+  acceptedSurfaceCompleteness: NativeAcceptedSurfaceCompleteness;
+  rootReachability: NativeRootReachability;
+  fallthroughSurface: NativeFallthroughSurface;
   optionsApi: boolean;
   filePath: string;
+  resolution?: NativeComponentMetaResolution;
 }
 
 function deriveComponentName(filePath: string): string {
@@ -257,7 +507,66 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
         specificity: selector.specificity,
       })),
     })),
+    acceptedProps: mapNativeAcceptedProps(meta.acceptedProps),
+    acceptedEvents: mapNativeAcceptedEvents(meta.acceptedEvents),
+    acceptedSurfaceCompleteness: meta.acceptedSurfaceCompleteness as AcceptedSurfaceCompleteness,
+    rootReachability: meta.rootReachability as RootReachability,
+    fallthroughSurface: mapNativeFallthroughSurface(meta.fallthroughSurface),
     flags: meta.flags,
+  };
+}
+
+function mapNativeAcceptedProps(props: NativeAcceptedPropMeta[]): AcceptedPropMeta[] {
+  return props.map((p) => ({
+    name: p.name,
+    type: typeExprToDescriptor(p.type),
+    ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
+    required: p.required,
+    provenance: p.provenance,
+    availability: p.availability,
+    kind: p.kind,
+  }));
+}
+
+function mapNativeAcceptedEvents(events: NativeAcceptedEventMeta[]): AcceptedEventMeta[] {
+  return events.map((e) => ({
+    name: e.name,
+    payload: typeExprToDescriptor(e.payload),
+    ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
+    provenance: e.provenance,
+    availability: e.availability,
+    kind: e.kind,
+  }));
+}
+
+function mapNativeFallthroughSurface(surface: NativeFallthroughSurface): FallthroughSurface {
+  if (surface.kind === "none") {
+    return surface;
+  }
+  return {
+    kind: "branches",
+    branches: surface.branches.map(mapNativeFallthroughBranch),
+  };
+}
+
+function mapNativeFallthroughBranch(branch: NativeFallthroughBranch): FallthroughBranch {
+  return {
+    branchKey: branch.branchKey,
+    ...(branch.conditionText !== undefined ? { conditionText: branch.conditionText } : {}),
+    props: branch.props.map((p) => ({
+      name: p.name,
+      type: typeExprToDescriptor(p.type),
+      ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
+      sources: p.sources,
+    })),
+    events: branch.events.map((e) => ({
+      name: e.name,
+      payload: typeExprToDescriptor(e.payload),
+      ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
+      sources: e.sources,
+    })),
+    rootChain: branch.rootChain,
+    status: branch.status,
   };
 }
 

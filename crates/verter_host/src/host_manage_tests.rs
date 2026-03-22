@@ -176,8 +176,7 @@ defineProps<ChildProps>()
 
     let snapshot = host
         .get_analysis_snapshot_internal("/src/App.vue", None)
-        .expect("analysis snapshot should exist")
-        .snapshot;
+        .expect("analysis snapshot should exist");
     let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
     let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
 
@@ -317,8 +316,7 @@ defineProps<ChildProps>()
     let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
     let snapshot = host
         .get_analysis_snapshot_internal("/src/App.vue", None)
-        .expect("analysis snapshot should exist")
-        .snapshot;
+        .expect("analysis snapshot should exist");
     let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
     let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
     for dep_source in &inputs.sources {
@@ -1649,6 +1647,25 @@ fn get_semantic_hash_changes_on_content_change() {
     assert_ne!(h1, h2, "semantic hash should change when content changes");
 }
 
+fn resolve_expanded_state(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+) -> crate::meta_resolve::ResolvedComponentMetaState {
+    host.resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)
+        .expect("expanded resolved state should exist")
+}
+
+fn resolved_macro_by_type<'a>(
+    state: &'a crate::meta_resolve::ResolvedComponentMetaState,
+    type_name: &str,
+) -> &'a crate::meta_resolve::ResolvedMacroMeta {
+    state
+        .resolved_macros
+        .iter()
+        .find(|meta| meta.type_name == type_name)
+        .unwrap_or_else(|| panic!("missing resolved macro for {type_name}"))
+}
+
 #[test]
 fn resolve_imported_type_from_ts_dep() {
     let host = make_host();
@@ -1668,28 +1685,28 @@ defineProps<ButtonProps>()
 </script><template><div /></template>"#,
     );
 
-    let types = host.resolve_imported_types("/Button.vue");
-    assert_eq!(types.len(), 1, "should resolve one imported type");
-    assert_eq!(types[0].name, "ButtonProps");
+    let state = resolve_expanded_state(&host, "/Button.vue");
+    let resolved = resolved_macro_by_type(&state, "ButtonProps");
+    let props: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+
     assert!(
-        types[0].expanded.contains("label"),
-        "expanded should contain 'label', got: {}",
-        types[0].expanded
+        props.contains(&"label"),
+        "expanded props should contain 'label', got: {:?}",
+        props
     );
     assert!(
-        types[0].expanded.contains("size"),
-        "expanded should contain 'size', got: {}",
-        types[0].expanded
-    );
-    // Negative: should not return empty or unresolved
-    assert!(
-        !types[0].expanded.is_empty(),
-        "expanded should not be empty"
+        props.contains(&"size"),
+        "expanded props should contain 'size', got: {:?}",
+        props
     );
 }
 
 #[test]
-fn resolve_imported_types_returns_empty_for_no_deps() {
+fn resolve_component_meta_returns_no_resolved_macros_for_no_imported_type_deps() {
     let host = make_host();
     upsert_vue(
         &host,
@@ -1698,10 +1715,10 @@ fn resolve_imported_types_returns_empty_for_no_deps() {
 defineProps<{ count: number }>()
 </script><template><div /></template>"#,
     );
-    let types = host.resolve_imported_types("/Simple.vue");
+    let state = resolve_expanded_state(&host, "/Simple.vue");
     assert!(
-        types.is_empty(),
-        "should return empty when no imported types"
+        state.resolved_macros.is_empty(),
+        "should not resolve any cross-file macros when there are no imported type deps"
     );
 }
 
@@ -1719,26 +1736,27 @@ fn resolve_imported_type_from_vue_dep() {
         "<script setup lang=\"ts\">\nimport type { Props } from './types.vue'\ndefineProps<Props>()\n</script>\n<template><div /></template>",
     );
 
-    let types = host.resolve_imported_types("/Comp.vue");
-    assert_eq!(
-        types.len(),
-        1,
-        "should resolve exactly one imported type, got: {types:?}"
-    );
-    assert_eq!(types[0].name, "Props");
+    let state = resolve_expanded_state(&host, "/Comp.vue");
+    let resolved = resolved_macro_by_type(&state, "Props");
+    let props: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
-        types[0].expanded.contains("label"),
-        "expanded should contain 'label', got: {}",
-        types[0].expanded
-    );
-    assert!(
-        !types[0].expanded.contains("<template>"),
-        "expanded must NOT contain '<template>' — raw SFC leaked into type resolution, got: {}",
-        types[0].expanded
+        props.contains(&"label"),
+        "expanded props should contain 'label', got: {:?}",
+        props
     );
     assert!(
-        !types[0].expanded.is_empty(),
-        "expanded should not be empty"
+        !resolved
+            .declaration
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("<template>"),
+        "declaration text must not leak raw SFC markup, got: {:?}",
+        resolved.declaration.text
     );
 }
 
@@ -1756,21 +1774,17 @@ fn resolve_imported_type_from_dual_script_vue_dep() {
         "<script setup lang=\"ts\">\nimport type { DualProps } from './types.vue'\ndefineProps<DualProps>()\n</script>\n<template><div /></template>",
     );
 
-    let types = host.resolve_imported_types("/Comp.vue");
-    assert_eq!(
-        types.len(),
-        1,
-        "should resolve exactly one imported type, got: {types:?}"
-    );
-    assert_eq!(types[0].name, "DualProps");
+    let state = resolve_expanded_state(&host, "/Comp.vue");
+    let resolved = resolved_macro_by_type(&state, "DualProps");
+    let props: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
-        types[0].expanded.contains("title"),
-        "expanded should contain 'title' from companion script, got: {}",
-        types[0].expanded
-    );
-    assert!(
-        !types[0].expanded.is_empty(),
-        "expanded should not be empty"
+        props.contains(&"title"),
+        "expanded props should contain 'title' from companion script, got: {:?}",
+        props
     );
 }
 
@@ -1797,27 +1811,32 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
         "<script setup lang=\"ts\">\nimport type { Props } from './types.vue'\ndefineProps<Props>()\n</script>\n<template><div /></template>",
     );
 
-    let types = host.resolve_imported_types("/Comp.vue");
-    assert_eq!(
-        types.len(),
-        1,
-        "should resolve the Vue dependency by file kind even without a .vue suffix, got: {types:?}"
-    );
-    assert_eq!(types[0].name, "Props");
+    let state = resolve_expanded_state(&host, "/Comp.vue");
+    let resolved = resolved_macro_by_type(&state, "Props");
+    let props: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
-        types[0].expanded.contains("label"),
-        "expanded should contain 'label', got: {}",
-        types[0].expanded
+        props.contains(&"label"),
+        "expanded props should contain 'label', got: {:?}",
+        props
     );
     assert!(
-        !types[0].expanded.contains("<template>"),
-        "expanded must NOT contain raw SFC markup, got: {}",
-        types[0].expanded
+        !resolved
+            .declaration
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("<template>"),
+        "declaration text must NOT contain raw SFC markup, got: {:?}",
+        resolved.declaration.text
     );
 }
 
 #[test]
-fn resolve_imported_types_uses_workspace_type_resolution_for_package_declarations() {
+fn resolve_component_meta_uses_workspace_type_resolution_for_package_declarations() {
     let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
         verter_vfs::MemoryOptions::default(),
     ));
@@ -1850,35 +1869,23 @@ fn resolve_imported_types_uses_workspace_type_resolution_for_package_declaration
         "<script setup lang=\"ts\">\nimport type { FancyProps } from 'fancy'\ndefineProps<FancyProps>()\n</script>\n<template><div /></template>",
     );
 
-    let types = host.resolve_imported_types("/workspace/src/Consumer.vue");
-    assert_eq!(
-        types.len(),
-        1,
-        "resolve_imported_types should use the workspace/package resolver for package declarations, got: {types:?}"
-    );
-    assert_eq!(types[0].name, "FancyProps");
+    let state = resolve_expanded_state(&host, "/workspace/src/Consumer.vue");
+    let resolved = resolved_macro_by_type(&state, "FancyProps");
+    let props: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
-        types[0].expanded.contains("open"),
-        "expanded should contain fields from the package declaration entrypoint, got: {}",
-        types[0].expanded
-    );
-    assert!(
-        !types[0].expanded.contains("runtimeOnly"),
-        "expanded should come from the declaration entrypoint, not the runtime js file, got: {}",
-        types[0].expanded
+        props.contains(&"open"),
+        "expanded props should contain fields from the package declaration entrypoint, got: {:?}",
+        props
     );
 }
 
 // ═══════════════════════════════════════════════════════════
 // enrich_imported_types tests
 // ═══════════════════════════════════════════════════════════
-
-fn make_deep_host() -> VerterHost {
-    VerterHost::new_standalone(HostConfig {
-        deep_macro_resolution_type: true,
-        ..HostConfig::default()
-    })
-}
 
 fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
     host.upsert(UpsertRequest {
@@ -1891,10 +1898,10 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
     .unwrap();
 }
 
-/// @ai-generated - enrich_imported_types populates prop_fields from imported interface
+/// resolve_component_meta(Expanded) populates prop fields from imported interface
 #[test]
 fn enrich_basic_imported_interface() {
-    let host = make_deep_host();
+    let host = make_host();
     upsert_non_sfc(
         &host,
         "/src/types.ts",
@@ -1910,58 +1917,38 @@ defineProps<Props>()
 <template><div /></template>"#,
     );
 
+    let state = host
+        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("should return resolved state");
+    let props: Vec<&str> = state
+        .resolved_macros
+        .iter()
+        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .flat_map(|m| m.props.iter())
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        props.contains(&"label"),
+        "props should include 'label': {:?}",
+        props
+    );
+    // Negative: get_analysis must NOT have enriched the snapshot
     let analysis = host.get_analysis("/src/Comp.vue").unwrap();
     let dp = analysis
         .macros
         .iter()
         .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
-        .expect("should have DefineProps macro");
-    assert!(
-        !dp.prop_fields.is_empty(),
-        "prop_fields should be populated by enrichment"
-    );
-    assert_eq!(dp.prop_fields[0].name, "label");
-    assert!(
-        dp.resolved_local_types.iter().any(|r| r.name == "Props"),
-        "resolved_local_types should include 'Props'"
-    );
-}
-
-/// @ai-generated - enrichment is skipped when deep_macro_resolution_type is false
-#[test]
-fn enrich_skips_when_disabled() {
-    let host = make_host(); // default config, deep_macro_resolution_type = false
-    upsert_non_sfc(
-        &host,
-        "/src/types.ts",
-        "export interface Props { label: string }",
-    );
-    upsert_vue(
-        &host,
-        "/src/Comp.vue",
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-    );
-
-    let analysis = host.get_analysis("/src/Comp.vue").unwrap();
-    let dp = analysis
-        .macros
-        .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
-        .expect("should have DefineProps macro");
+        .unwrap();
     assert!(
         dp.prop_fields.is_empty(),
-        "prop_fields should be empty when enrichment is disabled"
+        "get_analysis must NOT enrich prop_fields"
     );
 }
 
-/// @ai-generated - intersection types merge props from all deps
+/// resolve_component_meta(Expanded) merges props from intersection types
 #[test]
 fn enrich_intersection_merges_all_deps() {
-    let host = make_deep_host();
+    let host = make_host();
     upsert_non_sfc(&host, "/src/a.ts", "export interface A { x: string }");
     upsert_non_sfc(&host, "/src/b.ts", "export interface B { y: number }");
     upsert_vue(
@@ -1975,21 +1962,23 @@ defineProps<A & B>()
 <template><div /></template>"#,
     );
 
-    let analysis = host.get_analysis("/src/Comp.vue").unwrap();
-    let dp = analysis
-        .macros
+    let state = host
+        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("should return resolved state");
+    let names: Vec<&str> = state
+        .resolved_macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
-        .expect("should have DefineProps macro");
-    let names: Vec<&str> = dp.prop_fields.iter().map(|f| f.name.as_str()).collect();
+        .flat_map(|m| m.props.iter())
+        .map(|p| p.name.as_str())
+        .collect();
     assert!(names.contains(&"x"), "should have 'x' from A: {:?}", names);
     assert!(names.contains(&"y"), "should have 'y' from B: {:?}", names);
 }
 
-/// @ai-generated - call-signature emit payloads are wrapped in brackets
+/// resolve_component_meta(Expanded) wraps call-signature emit payloads in brackets
 #[test]
 fn enrich_emit_call_signature_wraps_brackets() {
-    let host = make_deep_host();
+    let host = make_host();
     upsert_non_sfc(
         &host,
         "/src/events.ts",
@@ -2005,14 +1994,16 @@ defineEmits<Events>()
 <template><div /></template>"#,
     );
 
-    let analysis = host.get_analysis("/src/Comp.vue").unwrap();
-    let de = analysis
-        .macros
+    let state = host
+        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("should return resolved state");
+    let emits: Vec<_> = state
+        .resolved_macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineEmits)
-        .expect("should have DefineEmits macro");
-    assert!(!de.emit_fields.is_empty(), "should have emit fields");
-    let change = de.emit_fields.iter().find(|e| e.name == "change");
+        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineEmits)
+        .flat_map(|m| m.emits.iter())
+        .collect();
+    let change = emits.iter().find(|e| e.name == "change");
     assert!(change.is_some(), "should have 'change' emit");
     let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
     assert!(
@@ -2021,10 +2012,10 @@ defineEmits<Events>()
     );
 }
 
-/// @ai-generated - imported defineSlots extracts bindings from type_text
+/// resolve_component_meta(Expanded) extracts slot bindings from imported type
 #[test]
 fn enrich_slot_bindings_from_imported_type() {
-    let host = make_deep_host();
+    let host = make_host();
     upsert_non_sfc(
         &host,
         "/src/slots.ts",
@@ -2040,37 +2031,36 @@ defineSlots<Slots>()
 <template><div /></template>"#,
     );
 
-    let analysis = host.get_analysis("/src/Comp.vue").unwrap();
-    let ds = analysis
-        .macros
+    let state = host
+        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("should return resolved state");
+    let slots: Vec<_> = state
+        .resolved_macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
-        .expect("should have DefineSlots macro");
-    assert!(!ds.slot_fields.is_empty(), "should have slot fields");
-    let default_slot = ds.slot_fields.iter().find(|s| s.name == "default");
+        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .flat_map(|m| m.slots.iter())
+        .collect();
+    let default_slot = slots.iter().find(|s| s.name == "default");
     assert!(default_slot.is_some(), "should have 'default' slot");
     let bindings = &default_slot.unwrap().bindings;
-    assert!(
-        !bindings.is_empty(),
-        "slot should have bindings from the imported type"
-    );
+    assert!(!bindings.is_empty(), "slot should have bindings");
     let binding_names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert!(
         binding_names.contains(&"row"),
-        "should have 'row' binding: {:?}",
+        "should have 'row': {:?}",
         binding_names
     );
     assert!(
         binding_names.contains(&"index"),
-        "should have 'index' binding: {:?}",
+        "should have 'index': {:?}",
         binding_names
     );
 }
 
-/// @ai-generated - method-style slot signatures (call signatures) are also captured
+/// resolve_component_meta(Expanded) captures method-style slot signatures
 #[test]
 fn enrich_slot_method_style() {
-    let host = make_deep_host();
+    let host = make_host();
     upsert_non_sfc(
         &host,
         "/src/slots.ts",
@@ -2086,29 +2076,32 @@ defineSlots<Slots>()
 <template><div /></template>"#,
     );
 
-    let analysis = host.get_analysis("/src/Comp.vue").unwrap();
-    let ds = analysis
-        .macros
+    let state = host
+        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("should return resolved state");
+    let slot_names: Vec<&str> = state
+        .resolved_macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
-        .expect("should have DefineSlots macro");
-    let slot_names: Vec<&str> = ds.slot_fields.iter().map(|s| s.name.as_str()).collect();
+        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .flat_map(|m| m.slots.iter())
+        .map(|s| s.name.as_str())
+        .collect();
     assert!(
         slot_names.contains(&"default"),
-        "should have 'default' slot from method signature: {:?}",
+        "should have 'default': {:?}",
         slot_names
     );
     assert!(
         slot_names.contains(&"header"),
-        "should have 'header' slot from method signature: {:?}",
+        "should have 'header': {:?}",
         slot_names
     );
 }
 
-/// @ai-generated - nested types from same import source added to resolved_local_types
+/// resolve_component_meta(Expanded) resolves nested type references
 #[test]
 fn enrich_nested_type_expansion() {
-    let host = make_deep_host();
+    let host = make_host();
     upsert_non_sfc(
         &host,
         "/src/types.ts",
@@ -2125,33 +2118,36 @@ defineProps<Props>()
 <template><div /></template>"#,
     );
 
-    let analysis = host.get_analysis("/src/Comp.vue").unwrap();
-    let dp = analysis
-        .macros
+    let state = host
+        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("should return resolved state");
+    let prop_names: Vec<&str> = state
+        .resolved_macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
-        .expect("should have DefineProps macro");
-    let rlt_names: Vec<&str> = dp
-        .resolved_local_types
-        .iter()
-        .map(|r| r.name.as_str())
+        .flat_map(|m| m.props.iter())
+        .map(|p| p.name.as_str())
         .collect();
     assert!(
-        rlt_names.contains(&"Props"),
-        "should have 'Props' in resolved_local_types: {:?}",
-        rlt_names
+        prop_names.contains(&"name"),
+        "should have 'name': {:?}",
+        prop_names
     );
     assert!(
-        rlt_names.contains(&"Status"),
-        "should have nested 'Status' in resolved_local_types: {:?}",
-        rlt_names
+        prop_names.contains(&"status"),
+        "should have 'status': {:?}",
+        prop_names
+    );
+    // Negative: props should not contain 'Status' as a prop (it's a type, not a prop)
+    assert!(
+        !prop_names.contains(&"Status"),
+        "Status is a type, not a prop"
     );
 }
 
-/// @ai-generated - slot return types are extracted for strict slots support
+/// resolve_component_meta(Expanded) extracts slot return types
 #[test]
 fn enrich_slot_return_type_property_style() {
-    let host = make_deep_host();
+    let host = make_host();
     upsert_non_sfc(
         &host,
         "/src/slots.ts",
@@ -2167,21 +2163,24 @@ defineSlots<Slots>()
 <template><div /></template>"#,
     );
 
-    let analysis = host.get_analysis("/src/Comp.vue").unwrap();
-    let ds = analysis
-        .macros
+    let state = host
+        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("should return resolved state");
+    let slots: Vec<_> = state
+        .resolved_macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
-        .expect("should have DefineSlots macro");
+        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .flat_map(|m| m.slots.iter())
+        .collect();
 
-    let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
+    let default_slot = slots.iter().find(|s| s.name == "default").unwrap();
     assert_eq!(
         default_slot.return_type.as_deref(),
         Some("VNode[]"),
         "default slot should have return type VNode[]"
     );
 
-    let header_slot = ds.slot_fields.iter().find(|s| s.name == "header").unwrap();
+    let header_slot = slots.iter().find(|s| s.name == "header").unwrap();
     assert_eq!(
         header_slot.return_type.as_deref(),
         Some("any"),
@@ -2336,7 +2335,7 @@ fn template_slots_persisted_across_calls() {
 /// @ai-generated - template slots computed even when type deps are unresolved
 #[test]
 fn template_slots_with_unresolved_type_deps() {
-    let host = make_deep_host();
+    let host = make_host();
     // Don't upsert ./types.ts — the dep is unresolved
     upsert_vue(
         &host,

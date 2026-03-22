@@ -7,22 +7,9 @@ import { ComponentMetaChecker } from "./checker.js";
 
 describe("ComponentMetaChecker session requirement", () => {
   it("rejects adapter-only getComponentMeta calls instead of rebuilding metadata from snapshots", async () => {
-    const getAnalysis = vi.fn(() => {
-      throw new Error("legacy getAnalysis should not be called");
-    });
-    const resolveImportedTypes = vi.fn(() => {
-      throw new Error("legacy resolveImportedTypes should not be called");
-    });
-    const evaluateTypes = vi.fn(() => {
-      throw new Error("legacy evaluateTypes should not be called");
-    });
-
     const checker = new ComponentMetaChecker(
       {
         upsert: vi.fn(),
-        getAnalysis,
-        resolveImportedTypes,
-        evaluateTypes,
       },
       "/project",
     );
@@ -33,9 +20,6 @@ describe("ComponentMetaChecker session requirement", () => {
     );
 
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/runtime session/i);
-    expect(getAnalysis).not.toHaveBeenCalled();
-    expect(resolveImportedTypes).not.toHaveBeenCalled();
-    expect(evaluateTypes).not.toHaveBeenCalled();
   });
 
   it("normalizes session-backed canonical ids before querying native metadata", async () => {
@@ -64,12 +48,16 @@ describe("ComponentMetaChecker session requirement", () => {
         hasInheritAttrsFalse: false,
         hasStoreUsage: false,
       },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "exact",
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
     }));
 
     const checker = new ComponentMetaChecker(
       {
         upsert: vi.fn(),
-        getAnalysis: vi.fn(),
       },
       "C:\\project",
       {},

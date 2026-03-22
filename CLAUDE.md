@@ -148,6 +148,36 @@ ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Com
 
 **Key files**: `ide/template/mod.rs` (`StrictSlotEntry`, `collect_strict_slot_children`, `emit_strict_slot_checks`), `ide/script.rs` (ambient `strictRenderSlot` type declarations).
 
+### Fallthrough / Root Inheritance (CRITICAL)
+
+The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_analysis` extracts root reachability facts only. `verter_host` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
+
+**Public contract** (on `ComponentMetaAnalysis` / `FfiComponentMeta` / `ComponentMeta`):
+- `props` / `events` — declared component surface only (unchanged)
+- `acceptedProps` / `acceptedEvents` — computed call-site acceptance surface (declared + inherited)
+- `acceptedSurfaceCompleteness` — `Exact` or `LowerBound` (if any branch is partial/unresolved)
+- `rootReachability` — structural root classification before inheritance resolution
+- `fallthroughSurface` — branch-structured inherited surface after host resolution
+
+**Semantic rules**:
+- `inheritAttrs: false` → no inherited surface
+- Unconditional multi-root (fragment) → no inherited surface
+- Root `v-for` → no inherited surface
+- Single native root → intrinsic attrs/listeners minus declared props/events minus consumed root bindings
+- Single component root → recursive propagation through the child's full public surface
+- Conditional single-root branches → exact union of branch surfaces
+- Cycles → terminate safely as unresolved branches, no invented members
+- Unsupported roots (`<component :is>`, `<slot>`, Vue built-ins) → unresolved branches
+- `class` and `style` are never consumed (Vue always merges them)
+- `@click` and `:onClick` normalize to the same canonical listener name (`click`)
+- Declared props/events always take precedence over inherited names
+
+**Authority chain**: analysis extracts `RootReachability` → host resolves `FallthroughResolution` → `get_component_meta()` populates `accepted_*` and `fallthrough_surface` → FFI maps to JSON → TS consumes.
+
+**Compat**: mapping-only. Flat Volar `props/events` stay on declared surfaces. Branch-structured inherited data is on `_verter`.
+
+**Key files**: `verter_analysis/src/component_meta.rs` (types + root extraction), `verter_analysis/src/html_intrinsics.rs` (native intrinsic catalog), `verter_host/src/host_manage.rs` (resolver + cache), `verter_ffi/src/types.rs` + `convert.rs` (FFI), `packages/component-meta/src/types.ts` (TS types).
+
 ### CodeTransform Is the Single Source of Truth (CRITICAL)
 
 **All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content that was produced by a `CodeTransform`.
