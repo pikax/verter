@@ -690,6 +690,7 @@ impl Scheduler {
     }
 
     /// Handle a new request submission.
+    #[allow(clippy::too_many_arguments)]
     fn handle_new_request(
         &self,
         file_id: String,

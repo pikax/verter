@@ -699,139 +699,74 @@ fn lower_type_param_decls(
 // Snapshot evaluation: evaluate type annotations from an analysis snapshot
 // ---------------------------------------------------------------------------
 
-/// Evaluated type annotations for a component's metadata fields.
+/// Convenience wrapper: expand all macro type annotations from source.
 ///
-/// Serialized alongside the analysis snapshot so JS consumers can
-/// use structured types instead of parsing raw type annotation strings.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvaluatedComponentTypes {
-    /// Evaluated prop types, keyed by prop name.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub props: Vec<EvaluatedField>,
-    /// Evaluated full defineProps object shapes keyed by macro index.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub define_props: Vec<EvaluatedMacroProps>,
-    /// Evaluated emit payload types, keyed by event name.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub emits: Vec<EvaluatedField>,
-    /// Evaluated slot binding types, keyed by "slotName.bindingName".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub slot_bindings: Vec<EvaluatedField>,
-    /// Evaluated binding types (for expose/value lookups), keyed by binding name.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub bindings: Vec<EvaluatedField>,
-}
-
-/// A single evaluated type field.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvaluatedField {
-    /// The field name (prop name, event name, or slot.binding key).
-    pub name: String,
-    /// The evaluated type expression.
-    pub r#type: TypeExpr,
-    /// Whether the source field is optional.
-    #[serde(default)]
-    pub optional: bool,
-}
-
-/// Evaluated full prop object for a specific defineProps macro.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvaluatedMacroProps {
-    pub macro_index: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<EvaluatedField>,
-}
-
-/// Evaluate all type annotations in the given macros list.
-///
-/// Builds an `EvalEnv` from the source, then evaluates each prop/emit/slot
-/// type annotation and returns the structured results.
-///
-/// Works with macros from either `ScriptAnalysisSnapshot` or `FileAnalysisSnapshot`.
+/// Builds an `EvalEnv` from the source, then expands each prop/emit/slot
+/// type annotation using the new expansion service with default budget.
 pub fn evaluate_macro_types(
     macros: &[crate::types::AnalyzedMacro],
     source: &str,
-) -> EvaluatedComponentTypes {
+) -> crate::type_expand::ExpandedComponentTypes {
     let mut env = parse_and_build_env(source);
-    evaluate_macro_types_with_env_and_source(macros, source, &mut env)
+    let budget = crate::type_expand::ExpansionBudget::default();
+    expand_macro_types(macros, Some(source), &mut env, None, &budget)
 }
 
-/// Evaluate all macro-backed type annotations with a caller-provided environment.
+// ---------------------------------------------------------------------------
+// Expansion-based macro type evaluation
+// ---------------------------------------------------------------------------
+
+/// Expand all macro-backed type annotations using the new expander service.
 ///
-/// This lets higher layers extend the environment with imported declarations
-/// or cached project state before evaluating the macro type annotations.
-pub fn evaluate_macro_types_with_env(
-    macros: &[crate::types::AnalyzedMacro],
-    env: &mut EvalEnv,
-) -> EvaluatedComponentTypes {
-    evaluate_macro_types_impl(macros, None, env, None)
-}
-
-/// Evaluate macro-backed type annotations and the full defineProps macro type.
-///
-/// Parses the source to recover each defineProps type parameter so callers can
-/// synthesize prop names even when `AnalyzedMacro.prop_fields` is empty or partial.
-pub fn evaluate_macro_types_with_env_and_source(
-    macros: &[crate::types::AnalyzedMacro],
-    source: &str,
-    env: &mut EvalEnv,
-) -> EvaluatedComponentTypes {
-    evaluate_macro_types_impl(macros, Some(source), env, None)
-}
-
-pub fn evaluate_macro_types_with_env_and_source_and_local_bindings(
-    macros: &[crate::types::AnalyzedMacro],
-    source: &str,
-    env: &mut EvalEnv,
-    local_binding_names: &rustc_hash::FxHashSet<String>,
-) -> EvaluatedComponentTypes {
-    evaluate_macro_types_impl(macros, Some(source), env, Some(local_binding_names))
-}
-
-fn evaluate_macro_types_impl(
+/// Replaces `evaluate_macro_types_impl`. Uses `expand_object_shape` for
+/// defineProps type parameters and `expand_normalized_expr` for individual
+/// prop/emit/slot/binding annotations.
+pub fn expand_macro_types(
     macros: &[crate::types::AnalyzedMacro],
     source: Option<&str>,
     env: &mut EvalEnv,
     local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
-) -> EvaluatedComponentTypes {
-    use crate::type_eval::evaluate;
+    budget: &crate::type_expand::ExpansionBudget,
+) -> crate::type_expand::ExpandedComponentTypes {
+    use crate::type_expand::{
+        expand_normalized_expr, expand_object_shape, ExpandedComponentTypes, ExpandedField,
+        ExpandedMacroProps,
+    };
     use crate::type_expr_lower::parse_type_annotation;
 
-    let mut result = EvaluatedComponentTypes::default();
+    let mut result = ExpandedComponentTypes::default();
     let define_props_type_params = source.map(collect_define_props_type_params);
     let mut define_props_index = 0usize;
 
     for (macro_index, m) in macros.iter().enumerate() {
-        // Evaluate prop field types
+        // Expand prop field type annotations
         for field in &m.prop_fields {
             if let Some(ref type_ann) = field.type_annotation {
                 let parsed = parse_type_annotation(type_ann);
                 if !parsed.is_unknown() {
-                    let evaluated = evaluate(&parsed, env);
-                    result.props.push(EvaluatedField {
+                    let expanded = expand_normalized_expr(&parsed, env, budget);
+                    result.props.push(ExpandedField {
                         name: field.name.clone(),
-                        r#type: evaluated,
+                        r#type: expanded.value.expr,
                         optional: field.is_optional,
+                        completeness: expanded.completeness,
+                        diagnostics: expanded.diagnostics,
                     });
                 }
             }
         }
 
+        // Expand defineProps<T>() type parameter into object shape
         if m.kind == crate::types::AnalyzedMacroKind::DefineProps && m.is_type_based {
             if let Some(type_params) = define_props_type_params.as_ref() {
                 if let Some(lowered) = type_params.get(define_props_index) {
-                    let saved_max_depth = env.limits.max_depth;
-                    env.limits.max_depth = env.limits.max_depth.min(8);
-                    let evaluated = evaluate(lowered, env);
-                    env.limits.max_depth = saved_max_depth;
-                    let fields = collect_define_props_fields(&evaluated);
-                    if !fields.is_empty() {
-                        result.define_props.push(EvaluatedMacroProps {
+                    let shape_result = expand_object_shape(lowered, env, budget);
+                    if !shape_result.value.properties.is_empty()
+                        || !shape_result.value.index_signatures.is_empty()
+                    {
+                        result.define_props.push(ExpandedMacroProps {
                             macro_index,
-                            fields,
+                            result: shape_result,
                         });
                     }
                 }
@@ -839,32 +774,36 @@ fn evaluate_macro_types_impl(
             define_props_index += 1;
         }
 
-        // Evaluate emit payload types
+        // Expand emit payload types
         for field in &m.emit_fields {
             if let Some(ref payload) = field.payload_type {
                 let parsed = parse_type_annotation(payload);
                 if !parsed.is_unknown() {
-                    let evaluated = evaluate(&parsed, env);
-                    result.emits.push(EvaluatedField {
+                    let expanded = expand_normalized_expr(&parsed, env, budget);
+                    result.emits.push(ExpandedField {
                         name: field.name.clone(),
-                        r#type: evaluated,
+                        r#type: expanded.value.expr,
                         optional: false,
+                        completeness: expanded.completeness,
+                        diagnostics: expanded.diagnostics,
                     });
                 }
             }
         }
 
-        // Evaluate slot binding types
+        // Expand slot binding types (no skip heuristic — expander handles complexity)
         for slot in &m.slot_fields {
             for binding in &slot.bindings {
                 if let Some(ref type_ann) = binding.type_annotation {
                     let parsed = parse_type_annotation(type_ann);
-                    if !parsed.is_unknown() && should_evaluate_slot_binding_type(&parsed) {
-                        let evaluated = evaluate(&parsed, env);
-                        result.slot_bindings.push(EvaluatedField {
+                    if !parsed.is_unknown() {
+                        let expanded = expand_normalized_expr(&parsed, env, budget);
+                        result.slot_bindings.push(ExpandedField {
                             name: format!("{}.{}", slot.name, binding.name),
-                            r#type: evaluated,
+                            r#type: expanded.value.expr,
                             optional: false,
+                            completeness: expanded.completeness,
+                            diagnostics: expanded.diagnostics,
                         });
                     }
                 }
@@ -872,7 +811,7 @@ fn evaluate_macro_types_impl(
         }
     }
 
-    // Evaluate binding type annotations (for expose/value lookups)
+    // Expand binding type annotations (for expose/value lookups)
     let binding_entries: Vec<(String, TypeExpr)> = env
         .value_symbols
         .iter()
@@ -888,141 +827,17 @@ fn evaluate_macro_types_impl(
         })
         .collect();
     for (name, type_ann) in binding_entries {
-        let evaluated = evaluate(&type_ann, env);
-        result.bindings.push(EvaluatedField {
+        let expanded = expand_normalized_expr(&type_ann, env, budget);
+        result.bindings.push(ExpandedField {
             name,
-            r#type: evaluated,
+            r#type: expanded.value.expr,
             optional: false,
+            completeness: expanded.completeness,
+            diagnostics: expanded.diagnostics,
         });
     }
 
     result
-}
-
-fn should_evaluate_slot_binding_type(ty: &TypeExpr) -> bool {
-    match ty {
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => true,
-        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
-            should_evaluate_slot_binding_type(inner)
-        }
-        TypeExpr::Array { element, .. } => should_evaluate_slot_binding_type(element),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .all(|element| should_evaluate_slot_binding_type(&element.ty)),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            types.iter().all(should_evaluate_slot_binding_type)
-        }
-        TypeExpr::Object(obj) => obj.properties.iter().all(|member| match member {
-            ObjectMember::Property(prop) => should_evaluate_slot_binding_type(&prop.ty),
-            ObjectMember::Method(method) => {
-                method
-                    .function
-                    .parameters
-                    .iter()
-                    .all(|param| should_evaluate_slot_binding_type(&param.ty))
-                    && method
-                        .function
-                        .return_type
-                        .as_ref()
-                        .map(|ret| should_evaluate_slot_binding_type(ret))
-                        .unwrap_or(true)
-            }
-            ObjectMember::IndexSignature(sig) => {
-                should_evaluate_slot_binding_type(&sig.key_type)
-                    && should_evaluate_slot_binding_type(&sig.value_type)
-            }
-            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                func.parameters
-                    .iter()
-                    .all(|param| should_evaluate_slot_binding_type(&param.ty))
-                    && func
-                        .return_type
-                        .as_ref()
-                        .map(|ret| should_evaluate_slot_binding_type(ret))
-                        .unwrap_or(true)
-            }
-        }),
-        TypeExpr::Function(func) => {
-            func.parameters
-                .iter()
-                .all(|param| should_evaluate_slot_binding_type(&param.ty))
-                && func
-                    .return_type
-                    .as_ref()
-                    .map(|ret| should_evaluate_slot_binding_type(ret))
-                    .unwrap_or(true)
-        }
-        TypeExpr::Ref { .. }
-        | TypeExpr::KeyOf(_)
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::IndexedAccess { .. }
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::Infer { .. } => false,
-    }
-}
-
-fn collect_define_props_fields(ty: &TypeExpr) -> Vec<EvaluatedField> {
-    let variants = collect_define_props_variants(ty);
-    if variants.is_empty() {
-        return Vec::new();
-    }
-
-    #[derive(Default)]
-    struct FieldState {
-        present_in: usize,
-        optional: bool,
-        types: Vec<TypeExpr>,
-    }
-
-    let mut order = Vec::<String>::new();
-    let mut states = std::collections::HashMap::<String, FieldState>::new();
-
-    for variant in &variants {
-        let mut seen_in_variant = std::collections::HashSet::<String>::new();
-        for member in &variant.properties {
-            let ObjectMember::Property(prop) = member else {
-                continue;
-            };
-
-            let state = states.entry(prop.name.clone()).or_insert_with(|| {
-                order.push(prop.name.clone());
-                FieldState::default()
-            });
-            if seen_in_variant.insert(prop.name.clone()) {
-                state.present_in += 1;
-            }
-            state.optional |= prop.optional;
-            if !state.types.iter().any(|existing| existing == &prop.ty) {
-                state.types.push(prop.ty.clone());
-            }
-        }
-    }
-
-    let variant_count = variants.len();
-    order
-        .into_iter()
-        .filter_map(|name| {
-            let state = states.remove(&name)?;
-            Some(EvaluatedField {
-                name,
-                r#type: TypeExpr::union(state.types),
-                optional: state.optional || state.present_in < variant_count,
-            })
-        })
-        .collect()
-}
-
-fn collect_define_props_variants(ty: &TypeExpr) -> Vec<ObjectExpr> {
-    match ty {
-        TypeExpr::Union(types) => types
-            .iter()
-            .flat_map(collect_define_props_variants)
-            .collect(),
-        TypeExpr::Parenthesized(inner) => collect_define_props_variants(inner),
-        _ => extract_object_shape(ty).into_iter().collect(),
-    }
 }
 
 fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {

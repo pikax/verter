@@ -825,9 +825,7 @@ fn resolve_declaration_companion(
         return None;
     };
 
-    let Some(stem) = normalized.strip_suffix(runtime_ext) else {
-        return None;
-    };
+    let stem = normalized.strip_suffix(runtime_ext)?;
 
     for companion_ext in companion_exts {
         let companion = format!("{stem}{companion_ext}");

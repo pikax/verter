@@ -252,6 +252,106 @@ describe("nativeComponentMetaToComponentMeta", () => {
     expect(meta.props.map((prop) => prop.name)).toEqual(["visible"]);
   });
 
+  it("preserves native expansion metadata on mapped public members", () => {
+    const meta = nativeComponentMetaToComponentMeta({
+      filePath: "/project/src/App.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "items",
+          type: { kind: "ref", name: "Items", typeArguments: [] },
+          typeExpansion: {
+            completeness: "partial",
+            diagnostics: [
+              {
+                reason: "unresolvedReference",
+                context: "unresolved type reference 'Items'",
+              },
+            ],
+          },
+          required: false,
+          hasDefault: false,
+        },
+      ],
+      events: [
+        {
+          name: "select",
+          payload: { kind: "ref", name: "Payload", typeArguments: [] },
+          payloadExpansion: {
+            completeness: "partial",
+            diagnostics: [
+              {
+                reason: "unsupportedOperator",
+                context: "indexed access was preserved symbolically",
+              },
+            ],
+          },
+        },
+      ],
+      slots: [
+        {
+          name: "default",
+          isScoped: true,
+          isRequired: false,
+          bindings: [
+            {
+              name: "row",
+              type: { kind: "ref", name: "Row", typeArguments: [] },
+              typeExpansion: {
+                completeness: "partial",
+                diagnostics: [
+                  {
+                    reason: "mappedDepthExceeded",
+                    context: "mapped type was preserved symbolically",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+      models: [],
+      exposed: [
+        {
+          name: "api",
+          type: { kind: "ref", name: "Api", typeArguments: [] },
+          typeExpansion: {
+            completeness: "partial",
+            diagnostics: [
+              {
+                reason: "budgetExceeded",
+                context: "symbolic work limit reached during normalization",
+              },
+            ],
+          },
+        },
+      ],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      ...defaultFallthroughFields,
+    } as any);
+
+    expect(meta.props[0].typeExpansion?.completeness).toBe("partial");
+    expect(meta.events[0].payloadExpansion?.completeness).toBe("partial");
+    expect(meta.slots[0].bindings[0].typeExpansion?.completeness).toBe("partial");
+    expect(meta.exposed[0].typeExpansion?.completeness).toBe("partial");
+  });
+
   it("preserves raw type-registry provenance while compat mapping still uses the expanded type", () => {
     const native = {
       filePath: "/project/src/App.vue",

@@ -55,7 +55,7 @@ pub struct ComponentMetaInput<'a> {
     pub store_usages: &'a [StoreUsage],
     pub resolved_macros: &'a [ResolvedMacroInput],
     pub resolved_type_registry: &'a [ResolvedTypeAnalysis],
-    pub evaluated_types: Option<&'a crate::type_eval_build::EvaluatedComponentTypes>,
+    pub evaluated_types: Option<&'a crate::type_expand::ExpandedComponentTypes>,
     pub file_path: &'a str,
 }
 
@@ -101,6 +101,8 @@ pub struct PropAnalysis {
     pub name: String,
     /// Resolved via priority chain: evaluated TypeExpr > raw annotation > Unknown.
     pub type_expr: TypeExpr,
+    /// Completeness and diagnostics from native expansion when available.
+    pub type_expansion: Option<crate::type_expand::ExpansionMetadata>,
     /// Original annotation text from the source.
     pub raw_type: Option<String>,
     pub required: bool,
@@ -115,6 +117,7 @@ pub struct PropAnalysis {
 pub struct EventAnalysis {
     pub name: String,
     pub payload: TypeExpr,
+    pub payload_expansion: Option<crate::type_expand::ExpansionMetadata>,
     pub raw_signature: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<JsdocTag>,
@@ -136,6 +139,7 @@ pub struct SlotAnalysis {
 pub struct SlotBindingAnalysis {
     pub name: String,
     pub type_expr: TypeExpr,
+    pub type_expansion: Option<crate::type_expand::ExpansionMetadata>,
     pub raw_type: Option<String>,
 }
 
@@ -151,6 +155,7 @@ pub struct ModelAnalysis {
 pub struct ExposedAnalysis {
     pub name: String,
     pub type_expr: TypeExpr,
+    pub type_expansion: Option<crate::type_expand::ExpansionMetadata>,
     pub description: Option<String>,
 }
 
@@ -159,6 +164,7 @@ pub struct ExposedAnalysis {
 pub struct ResolvedTypeAnalysis {
     pub name: String,
     pub type_expr: TypeExpr,
+    pub type_expansion: Option<crate::type_expand::ExpansionMetadata>,
 }
 
 /// A component usage discovered in the template.
@@ -1111,10 +1117,10 @@ fn extract_props_from_macro(
     prop_fields: &[AnalyzedPropField],
     default_keys: &std::collections::HashSet<&str>,
     default_values: &std::collections::HashMap<&str, &str>,
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<PropAnalysis>,
 ) {
-    if let Some(eval_fields) = evaluated_define_props_fields(evaluated, macro_index) {
+    if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
         if !eval_fields.is_empty() {
             for field in eval_fields {
                 let source_field = prop_fields.iter().find(|prop| prop.name == field.name);
@@ -1125,7 +1131,12 @@ fn extract_props_from_macro(
 
                 out.push(PropAnalysis {
                     name: field.name.clone(),
-                    type_expr: field.r#type.clone(),
+                    type_expr: field.ty.clone(),
+                    type_expansion: define_props_property_expansion_metadata(
+                        evaluated,
+                        macro_index,
+                        field.name.as_str(),
+                    ),
                     raw_type: source_field.and_then(|prop| prop.type_annotation.clone()),
                     required: !field.optional && !has_default,
                     has_default,
@@ -1145,7 +1156,7 @@ fn extract_props_from_macro(
     }
 
     for field in prop_fields {
-        let type_expr = resolve_prop_type(field, evaluated);
+        let (type_expr, type_expansion) = resolve_prop_type(field, evaluated);
         let has_default = default_keys.contains(field.name.as_str());
         let default_value = default_values
             .get(field.name.as_str())
@@ -1154,6 +1165,7 @@ fn extract_props_from_macro(
         out.push(PropAnalysis {
             name: field.name.clone(),
             type_expr,
+            type_expansion,
             raw_type: field.type_annotation.clone(),
             required: !field.is_optional && !has_default,
             has_default,
@@ -1163,7 +1175,7 @@ fn extract_props_from_macro(
         });
     }
 
-    if let Some(eval_fields) = evaluated_define_props_fields(evaluated, macro_index) {
+    if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
         let mut seen: std::collections::HashSet<String> =
             prop_fields.iter().map(|field| field.name.clone()).collect();
         for field in eval_fields {
@@ -1178,7 +1190,12 @@ fn extract_props_from_macro(
 
             out.push(PropAnalysis {
                 name: field.name.clone(),
-                type_expr: field.r#type.clone(),
+                type_expr: field.ty.clone(),
+                type_expansion: define_props_property_expansion_metadata(
+                    evaluated,
+                    macro_index,
+                    field.name.as_str(),
+                ),
                 raw_type: None,
                 required: !field.optional && !has_default,
                 has_default,
@@ -1190,15 +1207,51 @@ fn extract_props_from_macro(
     }
 }
 
-fn evaluated_define_props_fields(
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+fn expanded_define_props_fields(
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
-) -> Option<&[crate::type_eval_build::EvaluatedField]> {
+) -> Option<&[crate::type_expand::ExpandedProperty]> {
     evaluated?
         .define_props
         .iter()
         .find(|entry| entry.macro_index == macro_index)
-        .map(|entry| entry.fields.as_slice())
+        .map(|entry| entry.result.value.properties.as_slice())
+}
+
+fn field_expansion_metadata(
+    field: &crate::type_expand::ExpandedField,
+) -> crate::type_expand::ExpansionMetadata {
+    crate::type_expand::ExpansionMetadata {
+        completeness: field.completeness,
+        diagnostics: field.diagnostics.clone(),
+    }
+}
+
+fn define_props_property_expansion_metadata(
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
+    macro_index: usize,
+    prop_name: &str,
+) -> Option<crate::type_expand::ExpansionMetadata> {
+    let entry = evaluated?
+        .define_props
+        .iter()
+        .find(|entry| entry.macro_index == macro_index)?;
+
+    let diagnostics = entry
+        .result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.property_name.is_none()
+                || diagnostic.property_name.as_deref() == Some(prop_name)
+        })
+        .cloned()
+        .collect();
+
+    Some(crate::type_expand::ExpansionMetadata {
+        completeness: entry.result.completeness,
+        diagnostics,
+    })
 }
 
 /// Resolve prop type via priority chain:
@@ -1246,16 +1299,16 @@ fn merged_resolved_macro_input(
 
 fn resolve_prop_type(
     field: &AnalyzedPropField,
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
-) -> TypeExpr {
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
+) -> (TypeExpr, Option<crate::type_expand::ExpansionMetadata>) {
     if let Some(eval) = evaluated {
         if let Some(ef) = eval.props.iter().find(|f| f.name == field.name) {
-            return ef.r#type.clone();
+            return (ef.r#type.clone(), Some(field_expansion_metadata(ef)));
         }
     }
     match &field.type_annotation {
-        Some(raw) => unknown_type(raw.clone()),
-        None => unknown_type("unknown".to_string()),
+        Some(raw) => (unknown_type(raw.clone()), None),
+        None => (unknown_type("unknown".to_string()), None),
     }
 }
 
@@ -1263,29 +1316,30 @@ fn resolve_prop_type(
 
 fn extract_events_from_macro(
     emit_fields: &[crate::types::AnalyzedEmitField],
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<EventAnalysis>,
 ) {
     for field in emit_fields {
-        let payload = if let Some(eval) = evaluated {
+        let (payload, payload_expansion) = if let Some(eval) = evaluated {
             eval.emits
                 .iter()
                 .find(|f| f.name == field.name)
-                .map(|f| f.r#type.clone())
+                .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
                 .unwrap_or_else(|| match &field.payload_type {
-                    Some(raw) => unknown_type(raw.clone()),
-                    None => unknown_type("unknown".to_string()),
+                    Some(raw) => (unknown_type(raw.clone()), None),
+                    None => (unknown_type("unknown".to_string()), None),
                 })
         } else {
             match &field.payload_type {
-                Some(raw) => unknown_type(raw.clone()),
-                None => unknown_type("unknown".to_string()),
+                Some(raw) => (unknown_type(raw.clone()), None),
+                None => (unknown_type("unknown".to_string()), None),
             }
         };
 
         out.push(EventAnalysis {
             name: field.name.clone(),
             payload,
+            payload_expansion,
             raw_signature: field.payload_type.clone(),
             description: field.description.clone(),
             tags: field.tags.clone(),
@@ -1297,7 +1351,7 @@ fn extract_events_from_macro(
 
 fn extract_slots_from_macro(
     slot_fields: &[crate::types::AnalyzedSlotField],
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<SlotAnalysis>,
 ) {
     for field in slot_fields {
@@ -1305,26 +1359,27 @@ fn extract_slots_from_macro(
             .bindings
             .iter()
             .map(|b| {
-                let type_expr = if let Some(eval) = evaluated {
-                    // Slot bindings are keyed as "slotName.bindingName" in EvaluatedComponentTypes
+                let (type_expr, type_expansion) = if let Some(eval) = evaluated {
+                    // Slot bindings are keyed as "slotName.bindingName" in ExpandedComponentTypes
                     let key = format!("{}.{}", field.name, b.name);
                     eval.slot_bindings
                         .iter()
                         .find(|f| f.name == key)
-                        .map(|f| f.r#type.clone())
+                        .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
                         .unwrap_or_else(|| match &b.type_annotation {
-                            Some(raw) => unknown_type(raw.clone()),
-                            None => unknown_type("unknown".to_string()),
+                            Some(raw) => (unknown_type(raw.clone()), None),
+                            None => (unknown_type("unknown".to_string()), None),
                         })
                 } else {
                     match &b.type_annotation {
-                        Some(raw) => unknown_type(raw.clone()),
-                        None => unknown_type("unknown".to_string()),
+                        Some(raw) => (unknown_type(raw.clone()), None),
+                        None => (unknown_type("unknown".to_string()), None),
                     }
                 };
                 SlotBindingAnalysis {
                     name: b.name.clone(),
                     type_expr,
+                    type_expansion,
                     raw_type: b.type_annotation.clone(),
                 }
             })
@@ -1364,7 +1419,7 @@ fn merge_template_slots(
 fn extract_model_from_macro(
     mac: &AnalyzedMacro,
     prop_fields: &[AnalyzedPropField],
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<ModelAnalysis>,
 ) {
     let name = mac
@@ -1397,7 +1452,7 @@ fn extract_model_from_macro(
 fn synthesize_model_prop_and_event(
     mac: &AnalyzedMacro,
     prop_fields: &[AnalyzedPropField],
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     props: &mut Vec<PropAnalysis>,
     events: &mut Vec<EventAnalysis>,
 ) {
@@ -1441,6 +1496,12 @@ fn synthesize_model_prop_and_event(
         props.push(PropAnalysis {
             name: name.clone(),
             type_expr,
+            type_expansion: evaluated.and_then(|eval| {
+                eval.props
+                    .iter()
+                    .find(|field| field.name == name)
+                    .map(field_expansion_metadata)
+            }),
             raw_type: prop_raw_type,
             required: !has_default,
             has_default,
@@ -1467,8 +1528,14 @@ fn synthesize_model_prop_and_event(
         .unwrap_or_else(|| unknown_type("unknown".to_string()));
 
     events.push(EventAnalysis {
-        name: event_name,
+        name: event_name.clone(),
         payload,
+        payload_expansion: evaluated.and_then(|eval| {
+            eval.emits
+                .iter()
+                .find(|field| field.name == event_name)
+                .map(field_expansion_metadata)
+        }),
         raw_signature,
         description: None,
         tags: Vec::new(),
@@ -1478,7 +1545,7 @@ fn synthesize_model_prop_and_event(
 fn extract_exposed_from_macro(
     mac: &AnalyzedMacro,
     bindings: &[AnalyzedBinding],
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<ExposedAnalysis>,
 ) {
     for field in &mac.expose_fields {
@@ -1486,6 +1553,12 @@ fn extract_exposed_from_macro(
         out.push(ExposedAnalysis {
             name: field.name.clone(),
             type_expr,
+            type_expansion: evaluated.and_then(|eval| {
+                eval.bindings
+                    .iter()
+                    .find(|binding| binding.name == field.name)
+                    .map(field_expansion_metadata)
+            }),
             description: None,
         });
     }
@@ -1494,7 +1567,7 @@ fn extract_exposed_from_macro(
 fn resolve_exposed_type(
     name: &str,
     bindings: &[AnalyzedBinding],
-    evaluated: Option<&crate::type_eval_build::EvaluatedComponentTypes>,
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
 ) -> TypeExpr {
     if let Some(eval) = evaluated {
         if let Some(f) = eval.bindings.iter().find(|f| f.name == name) {
@@ -1587,6 +1660,7 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
                     })
                 })
                 .unwrap_or_else(|| unknown_type("unknown".to_string())),
+            type_expansion: None,
             raw_type,
             required: prop.is_required,
             has_default: prop.has_default,
@@ -1605,6 +1679,7 @@ fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAna
                 Some(raw) => unknown_type(raw.clone()),
                 None => unknown_type("unknown".to_string()),
             },
+            payload_expansion: None,
             raw_signature: field.payload_type.clone(),
             description: field.description.clone(),
             tags: field.tags.clone(),

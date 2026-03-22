@@ -657,7 +657,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     let Some(sync) = project_sync else {
         return false;
     };
-    let snapshot = match {
+    let snapshot = {
         let ws = vfs_workspace.read();
         ws.as_ref().and_then(|ws| {
             let published = ws.load_published()?;
@@ -666,7 +666,8 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 ownership_ready: published.ownership_ready,
             })
         })
-    } {
+    };
+    let snapshot = match snapshot {
         Some(s) => s,
         None => return false,
     };

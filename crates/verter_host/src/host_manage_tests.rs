@@ -221,6 +221,61 @@ defineProps<ChildProps>()
 }
 
 #[test]
+fn imported_eval_inputs_keep_structured_type_expr_for_resolved_types() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string; count?: number }",
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let resolved = inputs
+        .resolved_types
+        .iter()
+        .find(|ty| ty.name == "Props")
+        .expect("resolved imported type should be captured");
+
+    match resolved.type_expr.as_ref() {
+        Some(verter_analysis::type_expr::TypeExpr::Object(obj)) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    verter_analysis::type_expr::ObjectMember::Property(prop) => {
+                        Some(prop.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(names, vec!["label", "count"]);
+        }
+        other => panic!("expected structured object type for imported Props, got {other:?}"),
+    }
+}
+
+#[test]
 fn evaluated_child_props_preserve_inherited_omit_fields_from_imported_key_aliases() {
     let host = make_host();
     let _ = host

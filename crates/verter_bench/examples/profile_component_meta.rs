@@ -497,7 +497,7 @@ fn collect_snapshot_counts(snapshot: &FileAnalysisSnapshot) -> SnapshotCounts {
 }
 
 fn collect_evaluated_counts(
-    evaluated: &verter_analysis::type_eval_build::EvaluatedComponentTypes,
+    evaluated: &verter_analysis::type_expand::ExpandedComponentTypes,
 ) -> EvaluatedCounts {
     let mut prop_names = BTreeSet::new();
     for field in &evaluated.props {

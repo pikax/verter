@@ -99,11 +99,13 @@ fn props_use_evaluated_type_when_available() {
         Some("string"),
         false,
     )])];
-    let evaluated = crate::type_eval_build::EvaluatedComponentTypes {
-        props: vec![crate::type_eval_build::EvaluatedField {
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: vec![crate::type_expand::ExpandedField {
             name: "label".to_string(),
             r#type: TypeExpr::Primitive(PrimitiveName::String),
             optional: false,
+            completeness: crate::type_expand::ExpansionCompleteness::Exact,
+            diagnostics: Vec::new(),
         }],
         define_props: Vec::new(),
         emits: Vec::new(),
@@ -122,6 +124,58 @@ fn props_use_evaluated_type_when_available() {
         TypeExpr::Primitive(PrimitiveName::String),
         "should prefer evaluated type over raw annotation"
     );
+    assert_eq!(
+        result.props[0]
+            .type_expansion
+            .as_ref()
+            .map(|meta| meta.completeness),
+        Some(crate::type_expand::ExpansionCompleteness::Exact)
+    );
+}
+
+#[test]
+fn props_preserve_expansion_metadata_when_available() {
+    let macros = vec![make_define_props(vec![make_prop(
+        "label",
+        Some("Missing"),
+        false,
+    )])];
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: vec![crate::type_expand::ExpandedField {
+            name: "label".to_string(),
+            r#type: TypeExpr::named("Missing"),
+            optional: false,
+            completeness: crate::type_expand::ExpansionCompleteness::Partial,
+            diagnostics: vec![crate::type_expand::ExpansionDiagnostic {
+                reason: crate::type_expand::ExpansionStopReason::UnresolvedReference,
+                context: "unresolved type reference 'Missing'".to_string(),
+                property_name: None,
+            }],
+        }],
+        define_props: Vec::new(),
+        emits: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let expansion = result.props[0]
+        .type_expansion
+        .as_ref()
+        .expect("expansion metadata should be preserved");
+
+    assert_eq!(
+        expansion.completeness,
+        crate::type_expand::ExpansionCompleteness::Partial
+    );
+    assert!(expansion
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.reason
+            == crate::type_expand::ExpansionStopReason::UnresolvedReference));
 }
 
 #[test]
@@ -131,11 +185,13 @@ fn evaluated_types_are_used_when_supplied() {
         Some("MyType"),
         false,
     )])];
-    let evaluated = crate::type_eval_build::EvaluatedComponentTypes {
-        props: vec![crate::type_eval_build::EvaluatedField {
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: vec![crate::type_expand::ExpandedField {
             name: "label".to_string(),
             r#type: TypeExpr::Primitive(PrimitiveName::String),
             optional: false,
+            completeness: crate::type_expand::ExpansionCompleteness::Exact,
+            diagnostics: Vec::new(),
         }],
         define_props: Vec::new(),
         emits: Vec::new(),
@@ -180,22 +236,30 @@ fn props_fall_back_to_unknown_when_no_evaluated_type() {
 #[test]
 fn define_props_eval_supplements_missing_prop_fields() {
     let macros = vec![make_define_props(Vec::new())];
-    let evaluated = crate::type_eval_build::EvaluatedComponentTypes {
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
         props: Vec::new(),
-        define_props: vec![crate::type_eval_build::EvaluatedMacroProps {
+        define_props: vec![crate::type_expand::ExpandedMacroProps {
             macro_index: 0,
-            fields: vec![
-                crate::type_eval_build::EvaluatedField {
-                    name: "x".to_string(),
-                    r#type: TypeExpr::Primitive(PrimitiveName::Number),
-                    optional: false,
+            result: crate::type_expand::ExpansionResult::exact(
+                crate::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        crate::type_expand::ExpandedProperty {
+                            name: "x".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::Number),
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::type_expand::ExpandedProperty {
+                            name: "y".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
                 },
-                crate::type_eval_build::EvaluatedField {
-                    name: "y".to_string(),
-                    r#type: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: true,
-                },
-            ],
+            ),
         }],
         emits: Vec::new(),
         slot_bindings: Vec::new(),
@@ -528,6 +592,7 @@ fn type_registry_comes_from_resolved_inputs_not_macro_local_types() {
     let registry = vec![ResolvedTypeAnalysis {
         name: "ImportedProps".to_string(),
         type_expr: TypeExpr::Primitive(PrimitiveName::String),
+        type_expansion: None,
     }];
 
     let mut input = empty_input(&macros);

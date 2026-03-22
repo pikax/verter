@@ -9,6 +9,7 @@ import type {
   RootReachability,
   FallthroughSurface,
   FallthroughBranch,
+  TypeExpansionMeta,
 } from "./types.js";
 import type { TypeDescriptor } from "./type-ir.js";
 import type { NativeTypeExpr } from "./type-expr-bridge.js";
@@ -18,9 +19,26 @@ export interface NativeJsdocTag {
   text?: string;
 }
 
+export interface NativeExpansionDiagnostic {
+  reason:
+    | "budgetExceeded"
+    | "mappedDepthExceeded"
+    | "unresolvedReference"
+    | "indeterminateConditional"
+    | "infiniteKeySpace"
+    | "unsupportedOperator";
+  context: string;
+  propertyName?: string;
+}
+
+export interface NativeExpansionMetadata extends TypeExpansionMeta {
+  diagnostics: NativeExpansionDiagnostic[];
+}
+
 export interface NativePropMeta {
   name: string;
   type: NativeTypeExpr;
+  typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
   required: boolean;
   hasDefault: boolean;
@@ -32,6 +50,7 @@ export interface NativePropMeta {
 export interface NativeEventMeta {
   name: string;
   payload: NativeTypeExpr;
+  payloadExpansion?: NativeExpansionMetadata;
   rawSignature?: string;
   description?: string;
   tags?: NativeJsdocTag[];
@@ -40,6 +59,7 @@ export interface NativeEventMeta {
 export interface NativeSlotBindingMeta {
   name: string;
   type: NativeTypeExpr;
+  typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
 }
 
@@ -60,6 +80,7 @@ export interface NativeModelMeta {
 export interface NativeExposedMeta {
   name: string;
   type: NativeTypeExpr;
+  typeExpansion?: NativeExpansionMetadata;
   description?: string;
 }
 
@@ -70,6 +91,7 @@ export interface NativeResolvedTypeMeta {
    * This is what compat/public mapping consumes.
    */
   type: NativeTypeExpr;
+  typeExpansion?: NativeExpansionMetadata;
   /**
    * Pre-expansion source form retained for native callers that need to inspect
    * what the expanded type came from.
@@ -417,6 +439,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     props: meta.props.map((prop) => ({
       name: prop.name,
       type: typeExprToDescriptor(prop.type),
+      ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
       required: prop.required,
       hasDefault: prop.hasDefault,
       ...(prop.rawType !== undefined ? { rawType: prop.rawType } : {}),
@@ -427,6 +450,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     events: meta.events.map((event) => ({
       name: event.name,
       payload: typeExprToDescriptor(event.payload),
+      ...(event.payloadExpansion !== undefined ? { payloadExpansion: event.payloadExpansion } : {}),
       hasValidator: false,
       isDeclared: true,
       ...(event.rawSignature !== undefined ? { rawSignature: event.rawSignature } : {}),
@@ -439,6 +463,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       bindings: slot.bindings.map((binding) => ({
         name: binding.name,
         type: typeExprToDescriptor(binding.type),
+        ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
         ...(binding.rawType !== undefined ? { rawType: binding.rawType } : {}),
       })),
       isRequired: slot.isRequired,
@@ -452,6 +477,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     exposed: meta.exposed.map((exposed) => ({
       name: exposed.name,
       type: typeExprToDescriptor(exposed.type),
+      ...(exposed.typeExpansion !== undefined ? { typeExpansion: exposed.typeExpansion } : {}),
       ...(exposed.description !== undefined ? { description: exposed.description } : {}),
     })),
     components: meta.components.map((component) => ({

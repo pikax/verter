@@ -825,6 +825,7 @@ impl VerterHost {
         Ok(None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scan_barrel_export_surface_recursive(
         &self,
         root_specifier: &str,
@@ -2568,6 +2569,7 @@ impl VerterHost {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn template_converter_inputs(
     imports: &[verter_analysis::AnalyzedImport],
     macros: &[verter_analysis::AnalyzedMacro],

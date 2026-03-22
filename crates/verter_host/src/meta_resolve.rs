@@ -69,8 +69,8 @@ pub struct ResolvedComponentMetaState {
     pub resolved_type_registry: Vec<verter_analysis::component_meta::ResolvedTypeAnalysis>,
     /// Native declaration metadata for each resolved type-registry entry.
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
-    /// Evaluated types (populated in `Expanded` mode only).
-    pub evaluated_types: Option<verter_analysis::type_eval_build::EvaluatedComponentTypes>,
+    /// Expanded types (populated in `Expanded` mode only).
+    pub evaluated_types: Option<verter_analysis::type_expand::ExpandedComponentTypes>,
     /// Cached imported eval inputs from `resolve_component_meta(Expanded)`.
     /// Threaded through to `build_fallthrough_eval_env_with_inputs` to avoid
     /// a redundant second `imported_eval_inputs()` call in the fallthrough path.
@@ -237,7 +237,7 @@ impl VerterHost {
                     });
                 }
                 ResolverMode::Expanded => {
-                    if should_ignore_external_macro_type(&dep) {
+                    if should_ignore_external_macro_type(dep) {
                         resolved_macros.push(ResolvedMacroMeta {
                             macro_index,
                             macro_kind: dep.macro_kind,
@@ -279,17 +279,11 @@ impl VerterHost {
                                 &elements,
                             );
                             if seen_registry_names.insert(dep.type_name.clone()) {
-                                let expanded =
-                                    crate::host_manage::resolved_elements_to_expanded_text_via_type_text(
-                                        &elements,
-                                    );
                                 resolved_type_registry.push(
                                     verter_analysis::component_meta::ResolvedTypeAnalysis {
                                         name: dep.type_name.clone(),
-                                        type_expr:
-                                            verter_analysis::type_expr_lower::parse_type_annotation(
-                                                &expanded,
-                                            ),
+                                        type_expr: crate::host_manage::resolved_elements_to_type_expr_via_type_text(&elements),
+                                        type_expansion: None,
                                     },
                                 );
                                 resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
@@ -338,9 +332,12 @@ impl VerterHost {
                         resolved_type_registry.push(
                             verter_analysis::component_meta::ResolvedTypeAnalysis {
                                 name: resolved.name.clone(),
-                                type_expr: verter_analysis::type_expr_lower::parse_type_annotation(
-                                    &resolved.expanded,
-                                ),
+                                type_expr: resolved.type_expr.clone().unwrap_or_else(|| {
+                                    verter_analysis::type_expr_lower::parse_type_annotation(
+                                        &resolved.expanded,
+                                    )
+                                }),
+                                type_expansion: None,
                             },
                         );
                         resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
@@ -899,6 +896,7 @@ fn find_top_level_semicolon(source: &str, start: usize) -> Option<usize> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_jsdoc_block(
     host: &VerterHost,
     canonical_source: &str,
@@ -943,6 +941,7 @@ fn resolve_jsdoc_block(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn map_jsdoc_tag(
     host: &VerterHost,
     canonical_source: &str,
@@ -1098,10 +1097,7 @@ fn resolve_jsdoc_tag_type(
             &companion_types,
             &resolve_alloc,
         )?;
-    let expanded = crate::host_manage::resolved_elements_to_expanded_text_via_type_text(&resolved);
-    Some(verter_analysis::type_expr_lower::parse_type_annotation(
-        &expanded,
-    ))
+    Some(crate::host_manage::resolved_elements_to_type_expr_via_type_text(&resolved))
 }
 
 #[cfg(test)]

@@ -343,8 +343,18 @@ describe("buildEvaluatedTypeMap", () => {
 
   it("builds map from evaluated fields", () => {
     const fields: NativeEvaluatedField[] = [
-      { name: "count", type: { kind: "primitive", name: "number" } },
-      { name: "label", type: { kind: "primitive", name: "string" } },
+      {
+        name: "count",
+        type: { kind: "primitive", name: "number" },
+        completeness: "exact",
+        diagnostics: [],
+      },
+      {
+        name: "label",
+        type: { kind: "primitive", name: "string" },
+        completeness: "exact",
+        diagnostics: [],
+      },
     ];
     const map = buildEvaluatedTypeMap(fields);
     expect(map.size).toBe(2);
@@ -361,6 +371,8 @@ describe("buildEvaluatedTypeMap", () => {
           element: { kind: "primitive", name: "string" },
           readonly: false,
         },
+        completeness: "exact",
+        diagnostics: [],
       },
     ];
     const map = buildEvaluatedTypeMap(fields);

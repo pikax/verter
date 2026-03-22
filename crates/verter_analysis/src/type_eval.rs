@@ -90,6 +90,10 @@ pub struct EvalEnv {
     pub limits: EvalLimits,
     /// Current recursion depth.
     depth: usize,
+    /// Current mapped type nesting depth.
+    mapped_depth: usize,
+    /// Total evaluation steps consumed (monotonically increasing).
+    steps: usize,
 }
 
 /// Configurable limits for the evaluator.
@@ -98,6 +102,10 @@ pub struct EvalLimits {
     pub max_depth: usize,
     pub max_union_expansion: usize,
     pub max_mapped_keys: usize,
+    /// Maximum nested `evaluate_mapped()` calls. Default: 3.
+    pub max_mapped_depth: usize,
+    /// Safety-net total step limit. Default: 50_000.
+    pub max_steps: usize,
 }
 
 impl Default for EvalLimits {
@@ -106,6 +114,8 @@ impl Default for EvalLimits {
             max_depth: 32,
             max_union_expansion: 64,
             max_mapped_keys: 128,
+            max_mapped_depth: 3,
+            max_steps: 50_000,
         }
     }
 }
@@ -121,6 +131,8 @@ impl EvalEnv {
             active: FxHashSet::default(),
             limits: EvalLimits::default(),
             depth: 0,
+            mapped_depth: 0,
+            steps: 0,
         }
     }
 
@@ -140,6 +152,28 @@ impl EvalEnv {
     /// Register a value declaration.
     pub fn add_value(&mut self, decl: ValueDeclInfo) {
         self.value_symbols.insert(decl.name.clone(), decl);
+    }
+
+    /// Returns the total number of evaluation steps consumed so far.
+    pub fn steps(&self) -> usize {
+        self.steps
+    }
+
+    /// Returns whether the step budget has been exhausted.
+    pub fn budget_exhausted(&self) -> bool {
+        self.steps >= self.limits.max_steps
+    }
+
+    /// Configure limits from an `ExpansionBudget`.
+    pub fn apply_expansion_budget(&mut self, budget: &crate::type_expand::ExpansionBudget) {
+        self.limits.max_depth = budget.max_depth;
+        self.limits.max_union_expansion = budget.max_union_expansion;
+        self.limits.max_mapped_keys = budget.max_mapped_keys;
+        self.limits.max_mapped_depth = budget.max_mapped_depth;
+        self.limits.max_steps = budget.max_symbolic_work;
+        self.depth = 0;
+        self.mapped_depth = 0;
+        self.steps = 0;
     }
 
     /// Merge declarations from another environment without overwriting
@@ -177,10 +211,11 @@ fn ref_cache_key(name: &str, args: &[TypeExpr]) -> String {
 ///
 /// Returns a normalized `TypeExpr` with references resolved where possible.
 pub fn evaluate(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
-    if env.depth > env.limits.max_depth {
+    if env.depth > env.limits.max_depth || env.steps >= env.limits.max_steps {
         return expr.clone();
     }
     env.depth += 1;
+    env.steps += 1;
     let result = evaluate_inner(expr, env);
     env.depth -= 1;
     result
@@ -278,12 +313,16 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
             } else if is_definitely_not_assignable(&check_eval, &extends_eval) {
                 evaluate(false_type, env)
             } else {
-                // Can't determine — return unevaluated
+                // Can't determine — return with UNEVALUATED branches.
+                // Do NOT evaluate both branches: that causes 2^N blowup on
+                // nested indeterminate conditionals, and consumers that handle
+                // Conditional nodes (extract_object_shape, etc.) ignore them
+                // entirely, making the branch evaluation wasted work.
                 TypeExpr::Conditional {
                     check: Box::new(check_eval),
                     extends: Box::new(extends_eval),
-                    true_type: Box::new(evaluate(true_type, env)),
-                    false_type: Box::new(evaluate(false_type, env)),
+                    true_type: true_type.clone(),
+                    false_type: false_type.clone(),
                 }
             }
         }
@@ -978,10 +1017,24 @@ fn evaluate_mapped(
     name_type: &Option<Box<TypeExpr>>,
     env: &mut EvalEnv,
 ) -> TypeExpr {
+    // Check mapped nesting depth limit
+    if env.mapped_depth >= env.limits.max_mapped_depth {
+        return TypeExpr::Mapped {
+            parameter: parameter.to_string(),
+            source: Box::new(evaluate(source, env)),
+            value: Box::new(value.clone()),
+            optional,
+            readonly,
+            name_type: name_type.clone(),
+        };
+    }
+    env.mapped_depth += 1;
+
     let resolved_source = evaluate(source, env);
     let keys = extract_string_keys_recursive(&resolved_source);
 
     if keys.is_empty() || keys.len() > env.limits.max_mapped_keys {
+        env.mapped_depth -= 1;
         return TypeExpr::Mapped {
             parameter: parameter.to_string(),
             source: Box::new(resolved_source),
@@ -1031,6 +1084,7 @@ fn evaluate_mapped(
         env.type_bindings.remove(parameter);
     }
 
+    env.mapped_depth -= 1;
     TypeExpr::Object(ObjectExpr { properties })
 }
 
@@ -1289,7 +1343,7 @@ fn extract_literal_strings(ty: &TypeExpr) -> Vec<String> {
 
 /// Simple assignability check for conditional type evaluation.
 /// Returns true when we can definitively prove T extends U.
-fn is_assignable_to(check: &TypeExpr, target: &TypeExpr) -> bool {
+pub(crate) fn is_assignable_to(check: &TypeExpr, target: &TypeExpr) -> bool {
     // Same type
     if check == target {
         return true;
@@ -1326,7 +1380,7 @@ fn is_assignable_to(check: &TypeExpr, target: &TypeExpr) -> bool {
 }
 
 /// Check if T is definitely NOT assignable to U.
-fn is_definitely_not_assignable(check: &TypeExpr, target: &TypeExpr) -> bool {
+pub(crate) fn is_definitely_not_assignable(check: &TypeExpr, target: &TypeExpr) -> bool {
     match (check, target) {
         // Distinct primitives
         (TypeExpr::Primitive(a), TypeExpr::Primitive(b)) => {

@@ -630,7 +630,7 @@ defineProps<typeof config>()
     let result = evaluate_macro_types(&snapshot.macros, source);
 
     assert_eq!(result.define_props.len(), 1);
-    let fields = &result.define_props[0].fields;
+    let fields = &result.define_props[0].result.value.properties;
     let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
     assert!(names.contains(&"x"));
     assert!(names.contains(&"y"));
@@ -652,7 +652,7 @@ defineProps<MyProps>()
     let result = evaluate_macro_types(&snapshot.macros, source);
 
     assert_eq!(result.define_props.len(), 1);
-    let fields = &result.define_props[0].fields;
+    let fields = &result.define_props[0].result.value.properties;
     let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
     assert!(names.contains(&"a"));
     assert!(names.contains(&"b"));
@@ -686,7 +686,7 @@ defineProps<Props>()
     let result = evaluate_macro_types(&snapshot.macros, source);
 
     assert_eq!(result.define_props.len(), 1);
-    let fields = &result.define_props[0].fields;
+    let fields = &result.define_props[0].result.value.properties;
     let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
     assert!(names.contains(&"layout"));
     assert!(names.contains(&"editor"));
@@ -730,7 +730,7 @@ defineProps<Props>()
     let result = evaluate_macro_types(&snapshot.macros, source);
 
     assert_eq!(result.define_props.len(), 1);
-    let fields = &result.define_props[0].fields;
+    let fields = &result.define_props[0].result.value.properties;
     let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
     assert!(names.contains(&"id"));
     assert!(names.contains(&"disabled"));
@@ -759,7 +759,7 @@ defineProps<Props>()
     let result = evaluate_macro_types(&snapshot.macros, source);
 
     assert_eq!(result.define_props.len(), 1);
-    let fields = &result.define_props[0].fields;
+    let fields = &result.define_props[0].result.value.properties;
     let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
     assert!(
         names.contains(&"id"),
@@ -793,7 +793,7 @@ defineProps<Props>()
     let result = evaluate_macro_types(&snapshot.macros, source);
 
     assert_eq!(result.define_props.len(), 1);
-    let fields = &result.define_props[0].fields;
+    let fields = &result.define_props[0].result.value.properties;
     let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
     assert!(
         names.contains(&"id"),
@@ -823,13 +823,14 @@ const localLabel: string = 'hello'
         "export const importedLabel: string = 'world'",
     ));
 
-    let result =
-        super::type_eval_build::evaluate_macro_types_with_env_and_source_and_local_bindings(
-            &snapshot.macros,
-            source,
-            &mut env,
-            &local_binding_names,
-        );
+    let budget = super::type_expand::ExpansionBudget::default();
+    let result = super::type_eval_build::expand_macro_types(
+        &snapshot.macros,
+        Some(source),
+        &mut env,
+        Some(&local_binding_names),
+        &budget,
+    );
 
     let names: Vec<&str> = result
         .bindings
@@ -863,8 +864,15 @@ defineSlots<{
     let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
     let result = evaluate_macro_types(&snapshot.macros, source);
 
+    // The new expander evaluates slot binding types that the old code skipped.
+    // Button['ui'] resolves to string because Button = { ui: string }.
     assert!(
-        result.slot_bindings.is_empty(),
-        "complex slot binding types should remain raw"
+        !result.slot_bindings.is_empty(),
+        "slot binding types should now be expanded"
+    );
+    assert_eq!(
+        result.slot_bindings[0].r#type,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "Button['ui'] should resolve to string"
     );
 }

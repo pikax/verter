@@ -71,12 +71,33 @@ export interface JsdocTag {
   text?: string;
 }
 
+/** Diagnostic explaining why a type expansion is partial. */
+export interface TypeExpansionDiagnostic {
+  reason:
+    | "budgetExceeded"
+    | "mappedDepthExceeded"
+    | "unresolvedReference"
+    | "indeterminateConditional"
+    | "infiniteKeySpace"
+    | "unsupportedOperator";
+  context: string;
+  propertyName?: string;
+}
+
+/** Completeness and diagnostics from native type expansion. */
+export interface TypeExpansionMeta {
+  completeness: "exact" | "partial";
+  diagnostics: TypeExpansionDiagnostic[];
+}
+
 /** Metadata for a single component prop. */
 export interface PropMeta {
   /** Prop name as declared in `defineProps` or Options API. */
   name: string;
   /** Parsed type descriptor. */
   type: TypeDescriptor;
+  /** Native expansion completeness for the prop type, when available. */
+  typeExpansion?: TypeExpansionMeta;
   /** Whether the prop is required (no default, no `?`). */
   required: boolean;
   /** Whether the prop has a default value (via `withDefaults` or Options API). */
@@ -99,6 +120,8 @@ export interface EventMeta {
   name: string;
   /** Payload type descriptor. */
   payload: TypeDescriptor;
+  /** Native expansion completeness for the payload type, when available. */
+  payloadExpansion?: TypeExpansionMeta;
   /** Whether the event has a runtime validator function. */
   hasValidator: boolean;
   /** Whether the event is explicitly declared (vs. inferred from template usage). */
@@ -137,6 +160,8 @@ export interface SlotBinding {
   name: string;
   /** Type descriptor for the binding value. */
   type: TypeDescriptor;
+  /** Native expansion completeness for the binding type, when available. */
+  typeExpansion?: TypeExpansionMeta;
   /** The expression text (e.g. `"row"`, `"i"`) — may differ from `name`. */
   expression?: string;
   /** Original TS type annotation string (e.g. `"string"`, `"MyItem"`). */
@@ -157,6 +182,8 @@ export interface ExposedMeta {
   name: string;
   /** Type descriptor for the exposed value. */
   type: TypeDescriptor;
+  /** Native expansion completeness for the exposed type, when available. */
+  typeExpansion?: TypeExpansionMeta;
   /** JSDoc description from the leading `/** ... *​/` comment. */
   description?: string;
 }

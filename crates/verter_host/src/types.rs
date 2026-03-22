@@ -1428,6 +1428,7 @@ pub(crate) struct RegistryRoute {
     /// Canonical IDs of all files traversed during route discovery.
     pub tracked_deps: Vec<String>,
     /// Every file whose registry content determined the route, with its hash.
+    #[allow(dead_code)]
     pub route_hashes: Vec<(String, Hash16)>,
 }
 

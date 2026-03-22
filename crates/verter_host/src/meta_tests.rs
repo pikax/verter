@@ -2,7 +2,7 @@ use super::*;
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::Arc;
-use verter_analysis::type_eval_build::EvaluatedComponentTypes;
+use verter_analysis::type_expand::ExpandedComponentTypes;
 use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
 fn make_project() -> Arc<MetaProject> {
@@ -51,7 +51,7 @@ fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
         .collect()
 }
 
-fn evaluated_prop_type<'a>(types: &'a EvaluatedComponentTypes, name: &str) -> &'a TypeExpr {
+fn evaluated_prop_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a TypeExpr {
     &types
         .props
         .iter()
@@ -1776,16 +1776,13 @@ defineProps<FancyProps>()
     let open_field = evaluated
         .define_props
         .iter()
-        .flat_map(|entry| entry.fields.iter())
+        .flat_map(|entry| entry.result.value.properties.iter())
         .find(|field| field.name == "open")
         .expect("evaluated defineProps should include imported declaration prop");
     assert!(
-        matches!(
-            open_field.r#type,
-            TypeExpr::Primitive(PrimitiveName::Boolean)
-        ),
+        matches!(open_field.ty, TypeExpr::Primitive(PrimitiveName::Boolean)),
         "evaluate_types should resolve declaration-entrypoint prop types, got: {:?}",
-        open_field.r#type
+        open_field.ty
     );
 }
 

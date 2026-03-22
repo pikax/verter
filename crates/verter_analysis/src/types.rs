@@ -1062,16 +1062,31 @@ pub struct AnalyzedDefaultValue {
 }
 
 /// A locally resolved type expansion referenced by macro type parameters.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedLocalType {
     /// The type name as referenced in the macro (e.g., `"Props"`).
     pub name: String,
     /// The expanded type text (e.g., `"{ count: number; label?: string }"`).
     pub expanded: String,
+    /// Structured expanded object form retained for consumers that need
+    /// canonical IR instead of reparsing `expanded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr: Option<crate::type_expr::TypeExpr>,
     /// SFC-absolute byte span of the type declaration.
     pub span: Span,
 }
+
+impl PartialEq for ResolvedLocalType {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.expanded == other.expanded
+            && self.type_expr == other.type_expr
+            && self.span == other.span
+    }
+}
+
+impl Eq for ResolvedLocalType {}
 
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).
 #[derive(Debug, Clone, PartialEq, Eq)]

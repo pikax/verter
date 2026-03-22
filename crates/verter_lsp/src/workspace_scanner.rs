@@ -545,7 +545,7 @@ async fn sync_non_vue_file_to_provider(
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) -> Vec<crate::project_resolver::ResolveResult> {
-    let snapshot = match {
+    let snapshot = {
         let ws = vfs_workspace.read();
         ws.as_ref().and_then(|ws| {
             let published = ws.load_published()?;
@@ -554,7 +554,8 @@ async fn sync_non_vue_file_to_provider(
                 ownership_ready: published.ownership_ready,
             })
         })
-    } {
+    };
+    let snapshot = match snapshot {
         Some(s) => s,
         None => return Vec::new(),
     };

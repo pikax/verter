@@ -76,14 +76,10 @@ impl VerterHost {
             .unwrap_or_else(|| source.to_string())
     }
 
-    fn is_evaluated_types_empty(
-        result: &verter_analysis::type_eval_build::EvaluatedComponentTypes,
+    fn is_expanded_types_empty(
+        result: &verter_analysis::type_expand::ExpandedComponentTypes,
     ) -> bool {
-        result.props.is_empty()
-            && result.define_props.is_empty()
-            && result.emits.is_empty()
-            && result.slot_bindings.is_empty()
-            && result.bindings.is_empty()
+        result.is_empty()
     }
 
     fn current_eval_state(
@@ -259,6 +255,7 @@ impl VerterHost {
                     resolved_types.push(verter_analysis::ResolvedLocalType {
                         name: dep.type_name.clone(),
                         expanded: resolved_elements_to_expanded_text_via_type_text(resolved),
+                        type_expr: Some(resolved_elements_to_type_expr_via_type_text(resolved)),
                         span: verter_span::Span::default(),
                     });
                 }
@@ -349,7 +346,7 @@ impl VerterHost {
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: &ImportedEvalInputs,
-    ) -> Option<verter_analysis::type_eval_build::EvaluatedComponentTypes> {
+    ) -> Option<verter_analysis::type_expand::ExpandedComponentTypes> {
         let (source, cached_parse, _) = self.current_eval_state(canonical)?;
 
         let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
@@ -360,11 +357,6 @@ impl VerterHost {
         // deduplicated by canonical path (via `seen: FxHashSet` in
         // `imported_eval_inputs()`), cycle-safe, and deterministically ordered
         // (macro_type_deps phase first, then full import graph walk).
-        //
-        // Previously only `sources[..type_reachable_count]` was used, but this
-        // starved eval of imported sources needed for local utility heritage
-        // (e.g., `extends Omit<ImportedType, keys>`). See Bug 3 in
-        // soft-singing-conway plan.
         for dep_source in &imported_inputs.sources {
             env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
                 dep_source,
@@ -374,7 +366,9 @@ impl VerterHost {
             if env.type_symbols.contains_key(&resolved.name) {
                 continue;
             }
-            let body = verter_analysis::type_expr_lower::parse_type_annotation(&resolved.expanded);
+            let body = resolved.type_expr.clone().unwrap_or_else(|| {
+                verter_analysis::type_expr_lower::parse_type_annotation(&resolved.expanded)
+            });
             if body.is_unknown() {
                 continue;
             }
@@ -389,13 +383,15 @@ impl VerterHost {
             );
         }
 
-        let result = verter_analysis::type_eval_build::evaluate_macro_types_with_env_and_source_and_local_bindings(
+        let budget = verter_analysis::type_expand::ExpansionBudget::default();
+        let result = verter_analysis::type_eval_build::expand_macro_types(
             snapshot.macros.as_ref(),
-            &eval_source,
+            Some(&eval_source),
             &mut env,
-            &local_binding_names,
+            Some(&local_binding_names),
+            &budget,
         );
-        if Self::is_evaluated_types_empty(&result) {
+        if Self::is_expanded_types_empty(&result) {
             None
         } else {
             Some(result)
@@ -405,7 +401,7 @@ impl VerterHost {
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
-    ) -> Option<verter_analysis::type_eval_build::EvaluatedComponentTypes> {
+    ) -> Option<verter_analysis::type_expand::ExpandedComponentTypes> {
         self.provenance
             .evaluate_types_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1389,6 +1385,7 @@ impl VerterHost {
     }
 
     #[cfg(feature = "scheduler")]
+    #[allow(clippy::too_many_arguments)]
     fn build_template_analysis(
         &self,
         canonical: &str,
@@ -4194,6 +4191,39 @@ pub(crate) fn resolved_elements_to_expanded_text_via_type_text(
         parts.push(format!("{}{}: {}", name, opt, ty));
     }
     format!("{{ {} }}", parts.join("; "))
+}
+
+/// Convert `ResolvedElements` props to a structured `TypeExpr::Object`
+/// using the pre-resolved `type_text` for each member.
+pub(crate) fn resolved_elements_to_type_expr_via_type_text(
+    resolved: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
+) -> verter_analysis::type_expr::TypeExpr {
+    use verter_analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+
+    let properties = resolved
+        .props
+        .iter()
+        .map(|prop| {
+            let ty = prop
+                .type_text
+                .as_deref()
+                .map(verter_analysis::type_expr_lower::parse_type_annotation)
+                .unwrap_or(TypeExpr::Unknown {
+                    raw: "unknown".to_string(),
+                });
+            ObjectMember::Property(ObjectProperty {
+                name: prop
+                    .key_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                ty,
+                optional: prop.optional,
+                readonly: false,
+            })
+        })
+        .collect();
+
+    TypeExpr::Object(ObjectExpr { properties })
 }
 
 #[cfg(test)]

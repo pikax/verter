@@ -475,10 +475,29 @@ pub struct FfiComponentMeta {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct FfiExpansionDiagnostic {
+    pub reason: String,
+    pub context: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub property_name: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiExpansionMetadata {
+    pub completeness: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<FfiExpansionDiagnostic>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct FfiPropMeta {
     pub name: String,
     /// Structured type IR (passes through unchanged — TypeExpr implements Serialize).
     pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     pub required: bool,
@@ -496,6 +515,8 @@ pub struct FfiPropMeta {
 pub struct FfiEventMeta {
     pub name: String,
     pub payload: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -523,6 +544,8 @@ pub struct FfiSlotBindingMeta {
     pub name: String,
     pub r#type: verter_analysis::type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_expansion: Option<FfiExpansionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
 }
 
@@ -539,6 +562,8 @@ pub struct FfiExposedMeta {
     pub name: String,
     pub r#type: verter_analysis::type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_expansion: Option<FfiExpansionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
@@ -547,6 +572,8 @@ pub struct FfiExposedMeta {
 pub struct FfiResolvedTypeMeta {
     pub name: String,
     pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

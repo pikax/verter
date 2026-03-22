@@ -32,6 +32,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
             .map(|p| FfiPropMeta {
                 name: p.name,
                 r#type: p.type_expr,
+                type_expansion: p.type_expansion.map(expansion_metadata_to_ffi),
                 raw_type: p.raw_type,
                 required: p.required,
                 has_default: p.has_default,
@@ -46,6 +47,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
             .map(|e| FfiEventMeta {
                 name: e.name,
                 payload: e.payload,
+                payload_expansion: e.payload_expansion.map(expansion_metadata_to_ffi),
                 raw_signature: e.raw_signature,
                 description: e.description,
                 tags: e.tags.into_iter().map(jsdoc_to_ffi).collect(),
@@ -63,6 +65,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                     .map(|b| FfiSlotBindingMeta {
                         name: b.name,
                         r#type: b.type_expr,
+                        type_expansion: b.type_expansion.map(expansion_metadata_to_ffi),
                         raw_type: b.raw_type,
                     })
                     .collect(),
@@ -85,6 +88,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
             .map(|e| FfiExposedMeta {
                 name: e.name,
                 r#type: e.type_expr,
+                type_expansion: e.type_expansion.map(expansion_metadata_to_ffi),
                 description: e.description,
             })
             .collect(),
@@ -112,6 +116,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                 FfiResolvedTypeMeta {
                     name: entry.name,
                     r#type: entry.type_expr,
+                    type_expansion: entry.type_expansion.map(expansion_metadata_to_ffi),
                     raw_type: declaration
                         .as_ref()
                         .and_then(|declaration| declaration.text.clone()),
@@ -244,6 +249,57 @@ fn jsdoc_to_ffi(tag: verter_analysis::types::JsdocTag) -> FfiJsdocTag {
     FfiJsdocTag {
         name: tag.name,
         text: tag.text,
+    }
+}
+
+fn expansion_metadata_to_ffi(
+    metadata: verter_analysis::type_expand::ExpansionMetadata,
+) -> FfiExpansionMetadata {
+    FfiExpansionMetadata {
+        completeness: expansion_completeness_to_string(metadata.completeness),
+        diagnostics: metadata
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| FfiExpansionDiagnostic {
+                reason: expansion_stop_reason_to_string(diagnostic.reason),
+                context: diagnostic.context,
+                property_name: diagnostic.property_name,
+            })
+            .collect(),
+    }
+}
+
+fn expansion_completeness_to_string(
+    completeness: verter_analysis::type_expand::ExpansionCompleteness,
+) -> String {
+    match completeness {
+        verter_analysis::type_expand::ExpansionCompleteness::Exact => "exact".to_string(),
+        verter_analysis::type_expand::ExpansionCompleteness::Partial => "partial".to_string(),
+    }
+}
+
+fn expansion_stop_reason_to_string(
+    reason: verter_analysis::type_expand::ExpansionStopReason,
+) -> String {
+    match reason {
+        verter_analysis::type_expand::ExpansionStopReason::BudgetExceeded => {
+            "budgetExceeded".to_string()
+        }
+        verter_analysis::type_expand::ExpansionStopReason::MappedDepthExceeded => {
+            "mappedDepthExceeded".to_string()
+        }
+        verter_analysis::type_expand::ExpansionStopReason::UnresolvedReference => {
+            "unresolvedReference".to_string()
+        }
+        verter_analysis::type_expand::ExpansionStopReason::IndeterminateConditional => {
+            "indeterminateConditional".to_string()
+        }
+        verter_analysis::type_expand::ExpansionStopReason::InfiniteKeySpace => {
+            "infiniteKeySpace".to_string()
+        }
+        verter_analysis::type_expand::ExpansionStopReason::UnsupportedOperator => {
+            "unsupportedOperator".to_string()
+        }
     }
 }
 
@@ -1650,6 +1706,7 @@ mod tests {
                 type_expr: verter_analysis::type_expr::TypeExpr::Unknown {
                     raw: "{ label: string }".to_string(),
                 },
+                type_expansion: None,
             }],
             components: Vec::new(),
             template_refs: Vec::new(),

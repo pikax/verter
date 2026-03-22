@@ -12,18 +12,13 @@ pub enum ProviderPathKind {
 ///
 /// Replaces the `"__provisional__"` magic string sentinel. Bootstrap state
 /// is now explicitly typed instead of encoded in a string comparison.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ProviderOwnerBinding {
     /// Pre-snapshot provisional state: file synced before ownership is known.
+    #[default]
     Provisional,
     /// Owner-aware state: file bound to a real project (tsconfig path or root).
     Owned(String),
-}
-
-impl Default for ProviderOwnerBinding {
-    fn default() -> Self {
-        Self::Provisional
-    }
 }
 
 impl ProviderOwnerBinding {

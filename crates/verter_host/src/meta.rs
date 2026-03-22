@@ -506,7 +506,7 @@ impl MetaSession {
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_analysis::type_eval_build::EvaluatedComponentTypes>, MetaError> {
+    ) -> Result<Option<verter_analysis::type_expand::ExpandedComponentTypes>, MetaError> {
         self.check_alive()?;
         self.with_overlay_context(|host| host.evaluate_types(canonical_or_alias))
     }

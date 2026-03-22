@@ -21,25 +21,66 @@ import {
 
 // ── Native TypeExpr shape (mirrors Rust serde output) ─────────
 
-/** Mirrors `EvaluatedComponentTypes` from Rust. */
+/** Mirrors `ExpandedComponentTypes` from Rust. */
 export interface NativeEvaluatedTypes {
-  props?: NativeEvaluatedField[];
-  defineProps?: NativeEvaluatedMacroProps[];
-  emits?: NativeEvaluatedField[];
-  slotBindings?: NativeEvaluatedField[];
-  bindings?: NativeEvaluatedField[];
+  props?: NativeExpandedField[];
+  defineProps?: NativeExpandedMacroProps[];
+  emits?: NativeExpandedField[];
+  slotBindings?: NativeExpandedField[];
+  bindings?: NativeExpandedField[];
 }
 
-export interface NativeEvaluatedField {
+export interface NativeExpandedField {
   name: string;
   type: NativeTypeExpr;
   optional?: boolean;
+  completeness: "exact" | "partial";
+  diagnostics: NativeExpansionDiagnostic[];
 }
 
-export interface NativeEvaluatedMacroProps {
+/** Mirrors `ExpandedMacroProps` from Rust. */
+export interface NativeExpandedMacroProps {
   macroIndex: number;
-  fields: NativeEvaluatedField[];
+  result: NativeExpansionResult<NativeExpandedObjectShape>;
 }
+
+/** Mirrors `ExpansionResult<T>` from Rust. */
+export interface NativeExpansionResult<T> {
+  value: T;
+  completeness: "exact" | "partial";
+  diagnostics: NativeExpansionDiagnostic[];
+}
+
+/** Mirrors `ExpandedObjectShape` from Rust. */
+export interface NativeExpandedObjectShape {
+  properties: NativeExpandedProperty[];
+  indexSignatures: NativeExpandedIndexSignature[];
+  callSignatures: unknown[];
+}
+
+export interface NativeExpandedProperty {
+  name: string;
+  ty: NativeTypeExpr;
+  optional: boolean;
+  readonly: boolean;
+}
+
+export interface NativeExpandedIndexSignature {
+  keyType: NativeTypeExpr;
+  valueType: NativeTypeExpr;
+  readonly: boolean;
+}
+
+export interface NativeExpansionDiagnostic {
+  reason: string;
+  context: string;
+  propertyName?: string;
+}
+
+/** @deprecated Use NativeExpandedField instead */
+export type NativeEvaluatedField = NativeExpandedField;
+/** @deprecated Use NativeExpandedMacroProps instead */
+export type NativeEvaluatedMacroProps = NativeExpandedMacroProps;
 
 /**
  * Mirrors the Rust `TypeExpr` enum serialized with `#[serde(tag = "kind")]`.

@@ -672,6 +672,7 @@ fn resolve_local_define_props(
                         resolved_types.push(ResolvedLocalType {
                             name: type_ref.clone(),
                             expanded,
+                            type_expr: Some(build_expanded_type_expr(&ref_fields)),
                             span,
                         });
                     }
@@ -697,6 +698,7 @@ fn resolve_local_define_props(
                     resolved_types.push(ResolvedLocalType {
                         name: type_ref.clone(),
                         expanded,
+                        type_expr: Some(build_expanded_type_expr(&fields)),
                         span,
                     });
                     mac.prop_fields = fields;
@@ -920,6 +922,7 @@ impl NamedField for AnalyzedSlotField {
 ///
 /// Termination behavior: does not emit partial/guessed fields, does not fall back
 /// to host resolution. Leaves the branch empty for unresolvable types.
+#[allow(clippy::type_complexity)]
 fn resolve_type_to_fields<T: NamedField + Clone>(
     ts_type: &TSType<'_>,
     registry: &FxHashMap<String, LocalTypeDecl<'_>>,
@@ -1021,6 +1024,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
 }
 
 /// Generic interface declaration resolver. Shared by emit/slot resolution.
+#[allow(clippy::type_complexity)]
 fn resolve_interface_decl_generic<T: NamedField + Clone>(
     name: &str,
     decl: &LocalTypeDecl<'_>,
@@ -1127,6 +1131,32 @@ fn build_expanded_type_text(fields: &[AnalyzedPropField]) -> String {
         parts.push(format!("{}{}: {}", f.name, opt, ty));
     }
     format!("{{ {} }}", parts.join("; "))
+}
+
+/// Build a structured expanded object from resolved prop fields.
+fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> crate::type_expr::TypeExpr {
+    use crate::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+
+    let properties = fields
+        .iter()
+        .map(|field| {
+            let ty = field
+                .type_annotation
+                .as_deref()
+                .map(crate::type_expr_lower::parse_type_annotation)
+                .unwrap_or(TypeExpr::Unknown {
+                    raw: "unknown".to_string(),
+                });
+            ObjectMember::Property(ObjectProperty {
+                name: field.name.clone(),
+                ty,
+                optional: field.is_optional,
+                readonly: false,
+            })
+        })
+        .collect();
+
+    TypeExpr::Object(ObjectExpr { properties })
 }
 
 /// Try to extract macros from an expression statement.
