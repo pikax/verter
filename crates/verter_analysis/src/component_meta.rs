@@ -1639,12 +1639,46 @@ fn merged_slot_fields(
     resolved: Option<&ResolvedMacroInput>,
 ) -> Vec<crate::types::AnalyzedSlotField> {
     let mut fields = mac.slot_fields.clone();
-    let mut seen: rustc_hash::FxHashSet<String> =
-        fields.iter().map(|field| field.name.clone()).collect();
     if let Some(resolved) = resolved {
-        for slot in &resolved.slots {
-            if seen.insert(slot.name.clone()) {
-                fields.push(slot.clone());
+        if fields.is_empty() {
+            fields = resolved.slots.clone();
+        } else {
+            let mut seen_slots: rustc_hash::FxHashSet<String> =
+                fields.iter().map(|field| field.name.clone()).collect();
+            for field in &mut fields {
+                let Some(resolved_slot) =
+                    resolved.slots.iter().find(|slot| slot.name == field.name)
+                else {
+                    continue;
+                };
+
+                let mut seen_bindings: rustc_hash::FxHashSet<String> = field
+                    .bindings
+                    .iter()
+                    .map(|binding| binding.name.clone())
+                    .collect();
+                for binding in &resolved_slot.bindings {
+                    if seen_bindings.insert(binding.name.clone()) {
+                        field.bindings.push(binding.clone());
+                    }
+                }
+
+                if field.return_type.is_none() {
+                    field.return_type = resolved_slot.return_type.clone();
+                }
+                if field.description.is_none() {
+                    field.description = resolved_slot.description.clone();
+                }
+                if field.tags.is_empty() {
+                    field.tags = resolved_slot.tags.clone();
+                }
+                field.is_required |= resolved_slot.is_required;
+            }
+
+            for resolved_slot in &resolved.slots {
+                if seen_slots.insert(resolved_slot.name.clone()) {
+                    fields.push(resolved_slot.clone());
+                }
             }
         }
     }

@@ -13,7 +13,11 @@ import {
   mapComponentMeta,
 } from "./checker.js";
 import { openMetaProject } from "../project.js";
-import { getMetaRuntime, shutdownMetaRuntime } from "../runtime/index.js";
+import {
+  getMetaRuntime,
+  normalizePath as runtimeNormalizePath,
+  shutdownMetaRuntime,
+} from "../runtime/index.js";
 import { primitive, unknown } from "../type-ir.js";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 
@@ -557,6 +561,50 @@ defineEmits<{
     expect(meta._verter).toBeDefined();
     expect(meta._verter!.filePath).toBeDefined();
     expect(meta._verter!.componentName).toBeDefined();
+  });
+
+  it("uses the full native query even when a compat query exists", async () => {
+    const canonicalId = "Fast.vue";
+    const getComponentMetaCompat = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
+    const getComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
+    const checker = new ComponentMetaChecker(
+      {} as any,
+      "/project",
+      undefined,
+      {
+        engine: { state: "active" as const },
+        getComponentMetaCompat,
+        getComponentMeta,
+        close() {},
+        getEffectiveSource() {
+          return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+        },
+        hasFile() {
+          return true;
+        },
+        trackedFileIds() {
+          return [canonicalId];
+        },
+        get overlayGeneration() {
+          return 0;
+        },
+        get closed() {
+          return false;
+        },
+      } as any,
+      undefined,
+      {
+        closeSession() {},
+      } as any,
+    );
+
+    const meta = await checker.getComponentMeta(canonicalId);
+
+    expect(getComponentMetaCompat).not.toHaveBeenCalled();
+    expect(getComponentMeta).toHaveBeenCalledWith(
+      runtimeNormalizePath(resolve("/project", canonicalId)),
+    );
+    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
 
   it("getExportNames returns ['default'] for SFC", async () => {

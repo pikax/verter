@@ -3,6 +3,10 @@
 //! Walks top-level declarations and populates the type and value
 //! symbol tables so the evaluator can resolve references.
 
+use std::io::Write;
+use std::sync::OnceLock;
+use std::time::Instant;
+
 use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement,
     Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters, Function,
@@ -18,6 +22,22 @@ use crate::type_expr::{
     PrimitiveName, TypeExpr, TypeParam, ValueRef,
 };
 use crate::type_expr_lower::{has_immediate_vue_ignore_comment, lower_ts_type, property_key_name};
+
+fn type_expand_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
+            || std::env::var_os("VERTER_META_DEBUG").is_some()
+    })
+}
+
+fn type_expand_debug(message: impl FnOnce() -> String) {
+    if type_expand_debug_enabled() {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "[verter-type-expand] {}", message());
+        let _ = stderr.flush();
+    }
+}
 
 /// Build an evaluation environment from an OXC program AST.
 ///
@@ -762,6 +782,18 @@ pub fn expand_macro_types(
     let mut result = ExpandedComponentTypes::default();
     let define_props_type_params = source.map(collect_define_props_type_params);
     let mut define_props_index = 0usize;
+    let started = Instant::now();
+    let start_steps = env.steps();
+
+    type_expand_debug(|| {
+        format!(
+            "expand_macro_types:start macros={} source_present={} local_binding_filter={} steps={}",
+            macros.len(),
+            source.is_some(),
+            local_binding_names.map(|names| names.len()).unwrap_or(0),
+            start_steps,
+        )
+    });
 
     for (macro_index, m) in macros.iter().enumerate() {
         // Expand prop field type annotations
@@ -861,6 +893,20 @@ pub fn expand_macro_types(
             diagnostics: expanded.diagnostics,
         });
     }
+
+    type_expand_debug(|| {
+        format!(
+            "expand_macro_types:end props={} define_props={} emits={} slot_bindings={} bindings={} steps_delta={} budget_exhausted={} took {:?}",
+            result.props.len(),
+            result.define_props.len(),
+            result.emits.len(),
+            result.slot_bindings.len(),
+            result.bindings.len(),
+            env.steps().saturating_sub(start_steps),
+            env.budget_exhausted(),
+            started.elapsed(),
+        )
+    });
 
     result
 }

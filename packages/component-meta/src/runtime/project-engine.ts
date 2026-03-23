@@ -1,5 +1,5 @@
 /**
- * ProjectEngine — wraps one native MetaProject and tracks leases/activity.
+ * ProjectEngine wraps one native MetaProject and tracks leases/activity.
  *
  * The engine is the shared, heavy, long-lived unit in the pool.
  * It is never exposed to public callers directly.
@@ -42,9 +42,9 @@ export interface NativeMetaSession {
   close(): void;
   readonly isClosed: boolean;
   readonly overlayGeneration: number;
-  /** Single native component-meta query — returns JSON with complete metadata. */
+  /** Single native component-meta query. Returns JSON with complete metadata. */
   getComponentMeta(canonicalOrAlias: string): string | null;
-  /** Provenance counters for observability — returns JSON. */
+  /** Provenance counters for observability. Returns JSON. */
   getProvenance?(): string;
 }
 
@@ -136,7 +136,7 @@ export class ProjectEngine {
     try {
       this._nativeProject.shutdown();
     } catch {
-      // Best-effort — mark closed anyway
+      // Best-effort: mark closed anyway.
     }
     this._state = "closed";
     this._liveLeases.clear();

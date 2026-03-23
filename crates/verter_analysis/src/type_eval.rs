@@ -75,6 +75,7 @@ pub struct FunctionSignature {
 // ---------------------------------------------------------------------------
 
 /// Evaluation environment holding symbol tables and evaluation state.
+#[derive(Debug, Clone)]
 pub struct EvalEnv {
     /// Type declarations: interfaces, type aliases.
     pub type_symbols: FxHashMap<String, TypeDeclInfo>,
@@ -816,8 +817,9 @@ fn apply_pick(ty: &TypeExpr, keys: &TypeExpr) -> TypeExpr {
         let properties = obj
             .properties
             .iter()
-            .filter(|m| match m {
-                ObjectMember::Property(p) => key_set.contains(&p.name),
+            .filter(|member| match member {
+                ObjectMember::Property(prop) => key_set.contains(&prop.name),
+                ObjectMember::Method(method) => key_set.contains(&method.name),
                 _ => false,
             })
             .cloned()
@@ -840,9 +842,10 @@ fn apply_omit(ty: &TypeExpr, keys: &TypeExpr) -> TypeExpr {
         let properties = obj
             .properties
             .iter()
-            .filter(|m| match m {
-                ObjectMember::Property(p) => !key_set.contains(&p.name),
-                _ => true, // Keep index signatures, methods, etc.
+            .filter(|member| match member {
+                ObjectMember::Property(prop) => !key_set.contains(&prop.name),
+                ObjectMember::Method(method) => !key_set.contains(&method.name),
+                _ => true, // Keep index signatures and signatures.
             })
             .cloned()
             .collect();
@@ -1193,12 +1196,55 @@ fn try_lazy_member_lookup(object: &TypeExpr, key: &str, env: &mut EvalEnv) -> Op
         TypeExpr::Ref {
             name,
             type_arguments,
-        } => with_bound_type_decl(name, type_arguments, env, |decl, env| {
-            try_lazy_member_lookup(&decl.body, key, env)
-        })
-        .flatten(),
+        } => {
+            if let Some(result) =
+                try_lazy_builtin_member_lookup(name.as_str(), type_arguments, key, env)
+            {
+                return Some(result);
+            }
+
+            with_bound_type_decl(name, type_arguments, env, |decl, env| {
+                try_lazy_member_lookup(&decl.body, key, env)
+            })
+            .flatten()
+        }
         TypeExpr::Parenthesized(inner) => try_lazy_member_lookup(inner, key, env),
         _ => None, // Can't short-circuit — fall back to eager evaluation
+    }
+}
+
+fn try_lazy_builtin_member_lookup(
+    name: &str,
+    type_arguments: &[TypeExpr],
+    key: &str,
+    env: &mut EvalEnv,
+) -> Option<TypeExpr> {
+    match name {
+        // These wrappers only change property modifiers, not the property type.
+        "Partial" | "Required" | "Readonly" if type_arguments.len() == 1 => {
+            try_lazy_member_lookup(&type_arguments[0], key, env)
+        }
+        "Pick" if type_arguments.len() == 2 => {
+            let keys = evaluate(&type_arguments[1], env);
+            let key_set: rustc_hash::FxHashSet<String> =
+                extract_string_keys_recursive(&keys).into_iter().collect();
+            if key_set.contains(key) {
+                try_lazy_member_lookup(&type_arguments[0], key, env)
+            } else {
+                None
+            }
+        }
+        "Omit" if type_arguments.len() == 2 => {
+            let keys = evaluate(&type_arguments[1], env);
+            let key_set: rustc_hash::FxHashSet<String> =
+                extract_string_keys_recursive(&keys).into_iter().collect();
+            if !key_set.contains(key) {
+                try_lazy_member_lookup(&type_arguments[0], key, env)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 

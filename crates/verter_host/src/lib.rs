@@ -135,6 +135,12 @@ pub struct VerterHost {
     /// Bounded to RESOLVED_TYPE_CACHE_CAP entries; cleared on close/clear_compile_cache.
     pub(crate) resolved_type_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
+    /// Cached pristine eval environments keyed by canonical id + whole_hash.
+    /// Stored pre-evaluation and cloned per query to avoid reparsing the same
+    /// script/declaration sources across component-meta requests.
+    pub(crate) eval_env_cache: parking_lot::Mutex<
+        rustc_hash::FxHashMap<String, (Hash16, Arc<verter_analysis::type_eval::EvalEnv>)>,
+    >,
     /// Optional project-local HTML intrinsic override extracted from the
     /// consumer project's installed TS/Vue JSX surface.
     pub(crate) html_intrinsics_catalog: parking_lot::RwLock<
@@ -188,6 +194,7 @@ impl VerterHost {
             compile_cache: dashmap::DashMap::new(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
@@ -210,6 +217,7 @@ impl VerterHost {
             metrics: HostMetrics::default(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
@@ -516,6 +524,7 @@ impl VerterHost {
             }
         }
         self.resolved_type_cache.lock().clear();
+        self.eval_env_cache.lock().clear();
     }
 
     /// Clear only cached fallthrough surfaces.
@@ -600,6 +609,7 @@ impl VerterHost {
             self.scheduler.restart_driver();
         }
         self.resolved_type_cache.lock().clear();
+        self.eval_env_cache.lock().clear();
         self.provenance.reset();
     }
 

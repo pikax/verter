@@ -19,10 +19,13 @@
 //!        host_resolve.rs  (declaration graph traversal, shared cache)
 //! ```
 
-use crate::host_manage::extract_slot_info_from_type_text;
+use crate::host_manage::{
+    component_meta_debug, component_meta_debug_enabled, extract_slot_info_from_type_text,
+};
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Native declaration kind for the resolved pre-expansion type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,10 +163,19 @@ impl VerterHost {
         canonical_or_alias: &str,
         mode: ResolverMode,
     ) -> Option<ResolvedComponentMetaState> {
+        let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let whole_hash = self.get_whole_hash(&canonical).unwrap_or_default();
 
         if let Some(cached) = self.try_get_cached_resolved_meta(&canonical, whole_hash, mode) {
+            if let Some(started) = started {
+                component_meta_debug(format!(
+                    "resolve_component_meta owner={} mode={:?} cached took {:?}",
+                    canonical,
+                    mode,
+                    started.elapsed(),
+                ));
+            }
             return Some(cached);
         }
 
@@ -174,9 +186,6 @@ impl VerterHost {
         // Step 1: Get the raw analysis snapshot (without enrichment).
         let snapshot = self.get_raw_analysis_snapshot(&canonical)?;
 
-        // Step 2: Resolve macro type deps through the shared traversal.
-        let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
-            snapshot.macro_type_deps.iter().cloned().collect();
         let mut resolved_macros = Vec::new();
         let mut resolved_type_registry = Vec::new();
         let mut resolved_type_registry_meta = Vec::new();
@@ -186,6 +195,60 @@ impl VerterHost {
         let mut tracked_deps = std::collections::BTreeSet::new();
         let kind = verter_vfs::ResolveRequestKind::TypeImport;
 
+        // Step 2: Compute evaluated types first (Expanded mode only).
+        // This lets us skip redundant external macro resolution when the
+        // analysis-owned extractor can already produce authoritative output from
+        // evaluated fields and/or local macro surfaces.
+        let (evaluated_types, cached_eval_inputs) = if mode == ResolverMode::Expanded {
+            let eval_started = component_meta_debug_enabled().then(Instant::now);
+            if component_meta_debug_enabled() {
+                component_meta_debug(format!(
+                    "resolve_component_meta owner={} mode={:?} step=evaluated_types:start imports={} macro_type_deps={}",
+                    canonical,
+                    mode,
+                    snapshot.imports.len(),
+                    snapshot.macro_type_deps.len(),
+                ));
+            }
+            let dep_resolutions = self.dependency_resolutions_for_eval(&canonical);
+            let imported_inputs =
+                Arc::new(self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions));
+            if component_meta_debug_enabled() {
+                component_meta_debug(format!(
+                    "resolve_component_meta owner={} mode={:?} step=evaluated_types:imported_inputs_done sources={} type_aliases={} tracked_deps={}",
+                    canonical,
+                    mode,
+                    imported_inputs.sources.len(),
+                    imported_inputs.type_aliases.len(),
+                    imported_inputs.canonical_dependencies.len(),
+                ));
+            }
+            tracked_deps.extend(imported_inputs.canonical_dependencies.iter().cloned());
+            tracked_deps.extend(self.cache_dependency_candidates_from_snapshot(
+                &canonical,
+                &snapshot,
+                &dep_resolutions,
+            ));
+            let eval_types =
+                self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs);
+            if let Some(eval_started) = eval_started {
+                component_meta_debug(format!(
+                    "resolve_component_meta owner={} mode={:?} evaluated_types took {:?} has_output={}",
+                    canonical,
+                    mode,
+                    eval_started.elapsed(),
+                    eval_types.as_ref().is_some_and(|types| !types.is_empty()),
+                ));
+            }
+            (eval_types, Some(imported_inputs))
+        } else {
+            (None, None)
+        };
+
+        // Step 3: Resolve only the external macro surfaces that are still needed.
+        let macro_resolution_started = component_meta_debug_enabled().then(Instant::now);
+        let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
+            snapshot.macro_type_deps.iter().cloned().collect();
         for dep in &macro_type_deps {
             let macro_index = dep.macro_index;
             // Resolve the canonical path of the dependency file.
@@ -235,7 +298,8 @@ impl VerterHost {
                     });
                 }
                 ResolverMode::Expanded => {
-                    if should_ignore_external_macro_type(dep) {
+                    let skip_external = should_ignore_external_macro_type(dep);
+                    if skip_external {
                         resolved_macros.push(ResolvedMacroMeta {
                             macro_index,
                             macro_kind: dep.macro_kind,
@@ -322,6 +386,15 @@ impl VerterHost {
                 }
             }
         }
+        if let Some(macro_resolution_started) = macro_resolution_started {
+            component_meta_debug(format!(
+                "resolve_component_meta owner={} mode={:?} macro_resolution deps={} took {:?}",
+                canonical,
+                mode,
+                macro_type_deps.len(),
+                macro_resolution_started.elapsed(),
+            ));
+        }
 
         if mode == ResolverMode::Expanded {
             for mac in snapshot.macros.iter() {
@@ -351,27 +424,6 @@ impl VerterHost {
             }
         }
 
-        // Step 3: Compute evaluated types (Expanded mode only).
-        // Pre-compute imported eval inputs once and cache them on the state so
-        // the fallthrough path can reuse them via `build_fallthrough_eval_env_with_inputs`
-        // instead of calling `imported_eval_inputs()` a second time.
-        let (evaluated_types, cached_eval_inputs) = if mode == ResolverMode::Expanded {
-            let dep_resolutions = self.dependency_resolutions_for_eval(&canonical);
-            let imported_inputs =
-                Arc::new(self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions));
-            tracked_deps.extend(imported_inputs.canonical_dependencies.iter().cloned());
-            tracked_deps.extend(self.cache_dependency_candidates_from_snapshot(
-                &canonical,
-                &snapshot,
-                &dep_resolutions,
-            ));
-            let eval_types =
-                self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs);
-            (eval_types, Some(imported_inputs))
-        } else {
-            (None, None)
-        };
-
         // Sync transitive macro type dependencies for invalidation tracking.
         self.sync_transitive_macro_type_dependencies(&canonical, &tracked_deps);
 
@@ -387,6 +439,14 @@ impl VerterHost {
             cached_eval_inputs,
         };
         self.store_cached_resolved_meta(&canonical, mode, &state, &dependency_hashes);
+        if let Some(started) = started {
+            component_meta_debug(format!(
+                "resolve_component_meta owner={} mode={:?} total took {:?}",
+                canonical,
+                mode,
+                started.elapsed(),
+            ));
+        }
         Some(state)
     }
 
@@ -394,7 +454,10 @@ impl VerterHost {
     ///
     /// This bypasses any legacy `get_analysis()` enrichment path, returning only the base snapshot
     /// with resolved imports and destructured bindings.
-    fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
+    pub(crate) fn get_raw_analysis_snapshot(
+        &self,
+        canonical: &str,
+    ) -> Option<FileAnalysisSnapshot> {
         // Eviction gate (scheduler path)
         #[cfg(feature = "scheduler")]
         {
@@ -680,6 +743,40 @@ pub(crate) fn resolve_type_declaration(
     let (kind, span, text) = read_full_source(host, canonical_source.as_str())
         .map(|source| extract_declaration_details(&source, export_span, resolved_name.as_str()))
         .unwrap_or((ResolvedDeclarationKind::Unknown, export_span, None));
+
+    // Some declaration entrypoints only re-export a type they imported from a
+    // sibling declaration file, e.g. `import { Foo } from "./inner.js"; export
+    // type { Foo };`. `resolve_exports()` sees the export surface, but not the
+    // imported declaration owner. When the selected source does not actually
+    // contain a declaration for `resolved_name`, follow the direct type reexport
+    // chain and retry against the concrete declaration owner.
+    if kind == ResolvedDeclarationKind::Unknown
+        && text.is_none()
+        && canonical_source == dep_canonical
+    {
+        if let Some((followed_canonical, followed_name)) =
+            follow_direct_type_reexport_chain(host, dep_canonical, requested_name)
+        {
+            if followed_canonical != canonical_source || followed_name != resolved_name {
+                if let Some(source) = read_full_source(host, followed_canonical.as_str()) {
+                    let followed_details =
+                        extract_declaration_details(&source, export_span, followed_name.as_str());
+                    if followed_details.0 != ResolvedDeclarationKind::Unknown
+                        || followed_details.2.is_some()
+                    {
+                        return ResolvedTypeDeclaration {
+                            requested_name: requested_name.to_string(),
+                            resolved_name: followed_name,
+                            canonical_source: followed_canonical,
+                            span: followed_details.1,
+                            kind: followed_details.0,
+                            text: followed_details.2,
+                        };
+                    }
+                }
+            }
+        }
+    }
 
     ResolvedTypeDeclaration {
         requested_name: requested_name.to_string(),

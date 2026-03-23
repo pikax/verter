@@ -1785,6 +1785,60 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
     );
 }
 
+/// Utility-wrapper indexed access should still use the lazy member path.
+/// `Required<Config>['cheap']` must not evaluate unrelated siblings on Config.
+#[test]
+fn lazy_indexed_access_through_required_wrapper_skips_unrelated_members() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "ExpensiveRequiredLayer", 512);
+
+    env.add_type(TypeDeclInfo {
+        name: "Config".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "cheap".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "expensive".to_string(),
+                    ty: TypeExpr::named(&expensive_name),
+                    optional: true,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    let result = evaluate(
+        &TypeExpr::IndexedAccess {
+            object: Box::new(TypeExpr::named_with_args(
+                "Required",
+                vec![TypeExpr::named("Config")],
+            )),
+            index: Box::new(TypeExpr::Literal(LiteralValue::String("cheap".to_string()))),
+        },
+        &mut env,
+    );
+
+    assert!(
+        matches!(result, TypeExpr::Primitive(PrimitiveName::String)),
+        "Required<Config>['cheap'] should resolve to string, got: {:?}",
+        result
+    );
+    assert!(
+        env.steps() < 120,
+        "Required-wrapped indexed access should not evaluate unrelated expensive members (steps={})",
+        env.steps()
+    );
+}
+
 /// Pick should project from the raw object/ref surface and avoid evaluating
 /// omitted siblings.
 #[test]
@@ -1893,6 +1947,57 @@ fn pick_projection_keeps_selected_methods() {
     assert!(
         matches!(&obj.properties[0], ObjectMember::Method(method) if method.name == "render"),
         "Pick should preserve selected method members, got: {:?}",
+        obj.properties
+    );
+}
+
+/// Omit projection should drop selected methods rather than keeping them.
+#[test]
+fn omit_projection_drops_selected_methods() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "Config".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Method(MethodSignature {
+                    name: "render".to_string(),
+                    function: FunctionExpr {
+                        parameters: vec![],
+                        return_type: Some(Box::new(TypeExpr::Primitive(PrimitiveName::String))),
+                        type_parameters: vec![],
+                    },
+                    optional: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "other".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Number),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    let result = evaluate(
+        &TypeExpr::named_with_args(
+            "Omit",
+            vec![
+                TypeExpr::named("Config"),
+                TypeExpr::Literal(LiteralValue::String("render".to_string())),
+            ],
+        ),
+        &mut env,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("Omit should resolve to an object");
+    };
+    assert_eq!(obj.properties.len(), 1);
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Property(prop) if prop.name == "other"),
+        "Omit should drop selected method members, got: {:?}",
         obj.properties
     );
 }

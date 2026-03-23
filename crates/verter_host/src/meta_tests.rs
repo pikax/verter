@@ -1207,6 +1207,740 @@ defineProps<{
 }
 
 #[test]
+fn get_component_meta_merges_local_eval_surface_with_imported_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface ExternalProps {
+  id: string
+  label?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ExternalProps } from './types'
+
+interface LocalProps extends Pick<ExternalProps, 'id' | 'label'> {
+  own?: boolean
+}
+
+defineProps<LocalProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().provenance().reset();
+    let meta = get_meta(&project, "/App.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert_eq!(prop_names, vec!["id", "label", "own"]);
+}
+
+#[test]
+fn get_component_meta_uses_evaluated_define_props_from_split_script_sfc() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/index.ts",
+            "export * from '../Link.vue'\nexport * from '../icons'",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/icons.ts",
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Link.vue",
+            r#"<script lang="ts">
+interface RouterLinkOptions {
+  replace?: boolean
+  activeClass?: string
+  ariaCurrentValue?: string
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  custom?: boolean
+}
+
+export interface LinkProps extends RouterLinkProps {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps, UseComponentIconsProps } from './types'
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/Button.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"icon"),
+        "split-script defineProps should include imported interface members, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"loading"),
+        "split-script defineProps should include imported interface members, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"href"),
+        "split-script defineProps should include imported Omit survivors, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"replace"),
+        "split-script defineProps should include inherited base props, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"label") && prop_names.contains(&"color"),
+        "split-script defineProps should keep local props, got: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"raw") && !prop_names.contains(&"custom"),
+        "split-script defineProps should respect Omit, got: {prop_names:?}"
+    );
+}
+
+#[test]
+fn get_component_meta_uses_evaluated_types_for_imported_define_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface ExternalProps {
+  id: string
+  label?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ExternalProps } from './types'
+
+defineProps<ExternalProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert_eq!(prop_names, vec!["id", "label"]);
+}
+
+#[test]
+fn get_component_meta_includes_imported_define_emits_members() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export type ExternalEmits = {
+  change: [event: Event]
+  "update:modelValue": [value: string]
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ExternalEmits } from './types'
+
+defineEmits<ExternalEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+
+    assert!(
+        event_names.contains(&"change"),
+        "full meta should keep direct emit members, got: {event_names:?}"
+    );
+    assert!(
+        event_names.contains(&"update:modelValue"),
+        "full meta should include imported emit members from the resolved macro surface, got: {event_names:?}"
+    );
+}
+
+#[test]
+fn get_component_meta_keeps_imported_members_from_local_emit_aliases() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export type ModelEmits<T = string> = {
+  "update:modelValue": [value: T]
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ModelEmits } from './types'
+
+type AppEmits = {
+  change: [event: Event]
+} & ModelEmits
+
+defineEmits<AppEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+
+    assert!(
+        event_names.contains(&"change"),
+        "full meta should keep direct emit members, got: {event_names:?}"
+    );
+    assert!(
+        event_names.contains(&"update:modelValue"),
+        "full meta should not drop imported emit members from local aliases, got: {event_names:?}"
+    );
+}
+
+#[test]
+fn get_component_meta_resolves_imported_helper_aliases_without_dep_env_merge() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"type Status = 'idle' | 'busy'
+
+export interface ExternalProps {
+  status: Status
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ExternalProps } from './types'
+
+defineProps<ExternalProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let status = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "status")
+        .expect("status prop should be present");
+
+    assert_eq!(
+        status.type_expr,
+        TypeExpr::Union(vec![
+            TypeExpr::string_literal("idle"),
+            TypeExpr::string_literal("busy"),
+        ]),
+        "full meta should preserve the resolved helper alias shape"
+    );
+}
+
+#[test]
+fn get_component_meta_preserves_barrel_cycle_utility_heritage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/index.ts",
+            r#"export * from '../Link.vue'
+export * from '../Button.vue'"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+interface RouterLinkOptions {
+  replace?: boolean
+  activeClass?: string
+  ariaCurrentValue?: string
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  custom?: boolean
+  exactActiveClass?: string
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: string
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  as?: any
+  class?: any
+  raw?: boolean
+}
+
+export type LinkPropsKeys = 'to' | 'replace' | 'activeClass' | 'ariaCurrentValue'
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+  variant?: string
+  size?: string
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'icon' | 'color' | 'variant'> {
+  status?: string
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../Link.vue".to_string(),
+                resolved_canonical_id: Some("/src/Link.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../Button.vue".to_string(),
+                resolved_canonical_id: Some("/src/Button.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("full meta should resolve");
+    let mut prop_names: Vec<String> = meta.props.iter().map(|prop| prop.name.clone()).collect();
+    prop_names.sort();
+
+    assert!(
+        prop_names.iter().any(|name| name == "loading"),
+        "full meta should preserve inherited imported props, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.iter().any(|name| name == "href"),
+        "full meta should preserve surviving imported utility props, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.iter().any(|name| name == "status"),
+        "full meta should preserve local additions, got: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.iter().any(|name| name == "icon"),
+        "full meta should keep omitted props removed, got: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.iter().any(|name| name == "replace"),
+        "full meta should keep omitted key-alias props removed, got: {prop_names:?}"
+    );
+}
+
+#[test]
+fn evaluate_types_only_expands_surface_requested_bindings() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface HiddenPayload {
+  deep: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { HiddenPayload } from './types'
+
+const hidden: HiddenPayload = { deep: 'x' }
+const shown: number = 1
+
+defineProps<{ label: string }>()
+defineExpose({ shown })
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let evaluated = project
+        .host()
+        .evaluate_types("/App.vue")
+        .expect("evaluated types should exist");
+
+    let binding_names: Vec<&str> = evaluated
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+
+    assert_eq!(
+        binding_names,
+        vec!["shown"],
+        "only bindings requested by the component surface should be expanded"
+    );
+}
+
+#[test]
+fn get_component_meta_resolves_workspace_only_barrel_dependencies_for_define_props() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/runtime/types/index.ts".to_string(),
+        Arc::from("export * from '../components/Link.vue'\nexport * from '../icons'"),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/icons.ts".to_string(),
+        Arc::from(
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/Link.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+interface RouterLinkOptions {
+  replace?: boolean
+  activeClass?: string
+  ariaCurrentValue?: string
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  custom?: boolean
+}
+
+export interface LinkProps extends RouterLinkProps {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/Button.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { LinkProps, UseComponentIconsProps } from '../types'
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(
+        project
+            .ensure_loaded("/workspace/src/runtime/components/Button.vue")
+            .unwrap(),
+        "workspace owner should load into the shared base project"
+    );
+
+    let meta = get_meta(&project, "/workspace/src/runtime/components/Button.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"icon") && prop_names.contains(&"loading"),
+        "workspace-only deps should preserve imported icon props, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"href") && prop_names.contains(&"replace"),
+        "workspace-only deps should preserve imported LinkProps survivors, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"label") && prop_names.contains(&"color"),
+        "workspace-only deps should preserve local props, got: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"raw") && !prop_names.contains(&"custom"),
+        "workspace-only deps should still respect Omit, got: {prop_names:?}"
+    );
+}
+
+#[test]
+fn get_component_meta_recurses_workspace_only_imports_of_imported_vue_types() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/runtime/types/index.ts".to_string(),
+        Arc::from("export * from '../components/Link.vue'\nexport * from '../icons'"),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/router.ts".to_string(),
+        Arc::from(
+            r#"export interface RouterLinkProps {
+  replace?: boolean
+  activeClass?: string
+  custom?: boolean
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts".to_string(),
+        Arc::from(
+            r#"export interface AnchorHTMLAttributes {
+  href?: string
+  download?: string
+  ping?: string
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/icons.ts".to_string(),
+        Arc::from(
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/Link.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { RouterLinkProps } from '../types/router'
+import type { AnchorHTMLAttributes } from '../types/html'
+
+export interface LinkProps extends Omit<RouterLinkProps, 'custom'>, Omit<AnchorHTMLAttributes, 'href'> {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/Button.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { LinkProps, UseComponentIconsProps } from '../types'
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw'> {
+  label?: string
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(
+        project
+            .ensure_loaded("/workspace/src/runtime/components/Button.vue")
+            .unwrap(),
+        "workspace owner should load into the shared base project"
+    );
+
+    let meta = get_meta(&project, "/workspace/src/runtime/components/Button.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"icon"),
+        "workspace-only nested imports should keep icon props, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"replace") && prop_names.contains(&"activeClass"),
+        "workspace-only nested imports should recurse into imported router types, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"download") && prop_names.contains(&"ping"),
+        "workspace-only nested imports should recurse into imported html attrs, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"href") && prop_names.contains(&"label"),
+        "workspace-only nested imports should preserve direct survivors and locals, got: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"raw") && !prop_names.contains(&"custom"),
+        "workspace-only nested imports should still respect Omit, got: {prop_names:?}"
+    );
+}
+
+#[test]
+fn get_component_meta_keeps_local_slot_surface_without_imported_helper_pollution() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/tv.ts",
+            r#"export type DynamicSlots<T extends Record<string, any>> = {
+  [K in keyof T]?: (props: {}) => any
+}
+
+export type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: (props: {}) => any
+}
+
+export type ComponentConfig<T extends { slots?: Record<string, any> }, A extends Record<string, any>> = {
+  appConfig: A
+  slots: ComponentSlots<T>
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/schema.ts",
+            r#"export interface AppConfig {
+  ui?: { variant: string }
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/theme.ts",
+            r#"export default {
+  slots: {
+    leading: 'leading',
+    trailing: 'trailing'
+  }
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ComponentConfig, DynamicSlots } from './tv'
+import type { AppConfig } from './schema'
+import theme from './theme'
+
+type Accordion = ComponentConfig<typeof theme, AppConfig>
+
+interface Slots extends DynamicSlots<Accordion['slots']> {
+  default(props: { item: string }): any
+  leading?(): any
+  trailing?(): any
+}
+
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().provenance().reset();
+    let meta = get_meta(&project, "/App.vue");
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(slot_names, vec!["default", "leading", "trailing"]);
+    assert!(
+        !slot_names.contains(&"appConfig") && !slot_names.contains(&"slots"),
+        "defineSlots output should not be polluted by imported helper object members: {slot_names:?}"
+    );
+}
+
+#[test]
 fn evaluate_types_invalidates_cached_results_when_dependency_changes() {
     let project = make_project();
     project
@@ -4036,6 +4770,61 @@ import Child from './Child.vue'
 }
 
 #[test]
+fn non_vue_component_root_stops_fallthrough_recursion_at_the_boundary() {
+    let project = make_project();
+
+    project
+        .upsert_base(
+            "/Child.ts",
+            r#"export default function Child() {
+  return null
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child'
+defineProps<{ parentProp: string }>()
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "parentProp"),
+        "declared props must remain on the accepted surface"
+    );
+    assert!(
+        !meta.accepted_props.iter().any(|p| p.name == "id"),
+        "non-Vue child roots must not invent inherited attrs"
+    );
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::LowerBound,
+        "non-Vue child roots should degrade completeness instead of recursing"
+    );
+
+    let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("expected FallthroughSurface::Branches");
+    };
+    assert!(
+        branches.iter().any(|branch| {
+            matches!(
+                &branch.status,
+                BranchStatus::Unresolved {
+                    reason: UnresolvedBranchReason::ChildResolutionFailed,
+                }
+            )
+        }),
+        "non-Vue child roots should stop at an unresolved branch"
+    );
+}
+
+#[test]
 fn cycle_terminates_without_invented_members() {
     let project = make_project();
 
@@ -4563,11 +5352,14 @@ const msg = format('hello')
         .expect("expanded resolved state should retain cached eval inputs");
 
     assert!(
-        imported_inputs
-            .sources
-            .iter()
-            .any(|source| source.contains("interface ButtonProps")),
-        "full eval sources should include the macro type source"
+        imported_inputs.sources.iter().any(|source| {
+            source.canonical_id == "/src/types.ts" && source.source.contains("interface ButtonProps")
+        }) || imported_inputs.type_aliases.iter().any(|alias| {
+            alias.local_name == "ButtonProps"
+                && alias.source_canonical_id == "/src/types.ts"
+                && alias.exported_name == "ButtonProps"
+        }),
+        "cached eval inputs should preserve the macro type through either source merging or alias materialization"
     );
     assert!(
         imported_inputs.canonical_dependencies.contains("/src/utils.ts"),

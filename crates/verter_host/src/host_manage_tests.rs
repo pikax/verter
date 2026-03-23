@@ -45,6 +45,32 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
         .unwrap();
 }
 
+fn object_with_props(names: &[&str]) -> verter_analysis::type_expr::TypeExpr {
+    use verter_analysis::type_expr::{
+        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
+    };
+
+    TypeExpr::Object(ObjectExpr {
+        properties: names
+            .iter()
+            .map(|name| {
+                ObjectMember::Property(ObjectProperty {
+                    name: (*name).to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })
+            })
+            .collect(),
+    })
+}
+
+fn empty_object() -> verter_analysis::type_expr::TypeExpr {
+    verter_analysis::type_expr::TypeExpr::Object(verter_analysis::type_expr::ObjectExpr {
+        properties: Vec::new(),
+    })
+}
+
 #[cfg(not(feature = "scheduler"))]
 fn mutate_lazy_analysis_source(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
@@ -89,6 +115,202 @@ defineProps<Props>()
     assert!(
         !extracted.contains("<template>"),
         "template markup must not be passed into type evaluation, got: {extracted}"
+    );
+}
+
+#[test]
+fn choose_preferred_imported_type_body_prefers_more_specific_shapes() {
+    let resolved_body = Some(verter_analysis::type_expr::TypeExpr::named("Props"));
+    let decl_body = Some(object_with_props(&["label", "count"]));
+
+    let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
+
+    assert_eq!(
+        chosen, decl_body,
+        "the body with the richer concrete surface should win"
+    );
+}
+
+#[test]
+fn choose_preferred_imported_type_body_keeps_existing_body_on_equal_specificity() {
+    let left = object_with_props(&["label"]);
+    let right = object_with_props(&["count"]);
+
+    let chosen = choose_preferred_imported_type_body(Some(left.clone()), Some(right));
+
+    assert_eq!(
+        chosen,
+        Some(left),
+        "equal scores should preserve the first successful resolution"
+    );
+}
+
+#[test]
+fn choose_preferred_imported_type_body_rejects_empty_object_placeholders() {
+    use verter_analysis::type_expr::{LiteralValue, TypeExpr};
+
+    let resolved_body = Some(empty_object());
+    let decl_body = Some(TypeExpr::union(vec![
+        TypeExpr::Literal(LiteralValue::String("to".to_string())),
+        TypeExpr::Literal(LiteralValue::String("replace".to_string())),
+    ]));
+
+    let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
+
+    assert_eq!(
+        chosen, decl_body,
+        "empty-object placeholders must not outrank concrete literal-union aliases"
+    );
+}
+
+#[test]
+fn imported_type_body_specificity_prefers_object_surfaces_over_refs_and_typeof() {
+    let typeof_score = imported_type_body_specificity_score(
+        &verter_analysis::type_expr::TypeExpr::TypeOf(verter_analysis::type_expr::ValueRef {
+            path: vec!["theme".to_string()],
+        }),
+    );
+    let ref_score =
+        imported_type_body_specificity_score(&verter_analysis::type_expr::TypeExpr::named("Props"));
+    let object_score = imported_type_body_specificity_score(&object_with_props(&["label"]));
+
+    assert!(
+        typeof_score < ref_score && ref_score < object_score,
+        "specificity ordering should keep typeof < ref < object, got typeof={typeof_score} ref={ref_score} object={object_score}"
+    );
+}
+
+#[test]
+fn imported_type_body_specificity_rewards_richer_object_surfaces() {
+    let small = imported_type_body_specificity_score(&object_with_props(&["label"]));
+    let large = imported_type_body_specificity_score(&object_with_props(&["label", "count"]));
+
+    assert!(
+        large > small,
+        "object surfaces with more top-level members should score higher, got small={small} large={large}"
+    );
+}
+
+#[test]
+fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested_members() {
+    let resolved_body = Some(object_with_props(&["next"]));
+    let decl_body = Some(verter_analysis::type_expr::TypeExpr::Object(
+        verter_analysis::type_expr::ObjectExpr {
+            properties: vec![
+                verter_analysis::type_expr::ObjectMember::Property(
+                    verter_analysis::type_expr::ObjectProperty {
+                        name: "base".to_string(),
+                        ty: verter_analysis::type_expr::TypeExpr::Primitive(
+                            verter_analysis::type_expr::PrimitiveName::String,
+                        ),
+                        optional: true,
+                        readonly: false,
+                    },
+                ),
+                verter_analysis::type_expr::ObjectMember::Property(
+                    verter_analysis::type_expr::ObjectProperty {
+                        name: "current".to_string(),
+                        ty: verter_analysis::type_expr::TypeExpr::named("T"),
+                        optional: true,
+                        readonly: false,
+                    },
+                ),
+                verter_analysis::type_expr::ObjectMember::Property(
+                    verter_analysis::type_expr::ObjectProperty {
+                        name: "next".to_string(),
+                        ty: verter_analysis::type_expr::TypeExpr::Primitive(
+                            verter_analysis::type_expr::PrimitiveName::Number,
+                        ),
+                        optional: true,
+                        readonly: false,
+                    },
+                ),
+            ],
+        },
+    ));
+
+    let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
+
+    assert_eq!(
+        chosen, decl_body,
+        "a richer concrete object surface should beat a smaller local-eval object even when one member type stays symbolic"
+    );
+}
+
+#[test]
+fn owner_env_resolution_is_skipped_for_simple_concrete_bodies() {
+    let decl = verter_analysis::type_eval::TypeDeclInfo {
+        name: "Props".to_string(),
+        kind: verter_analysis::type_eval::TypeDeclKind::Alias,
+        type_parameters: Vec::new(),
+        body: object_with_props(&["label"]),
+    };
+    let resolved_body = object_with_props(&["label", "count"]);
+
+    assert!(
+        !should_attempt_owner_env_resolution(&decl, Some(&resolved_body)),
+        "a richer concrete body does not need a second owner-env pass"
+    );
+}
+
+#[test]
+fn owner_env_resolution_is_retained_for_top_level_non_object_surfaces() {
+    let decl = verter_analysis::type_eval::TypeDeclInfo {
+        name: "Props".to_string(),
+        kind: verter_analysis::type_eval::TypeDeclKind::Alias,
+        type_parameters: Vec::new(),
+        body: verter_analysis::type_expr::TypeExpr::Intersection(vec![
+            object_with_props(&["label"]),
+            verter_analysis::type_expr::TypeExpr::named("Shared"),
+        ]),
+    };
+    let resolved_body = object_with_props(&["label"]);
+
+    assert!(
+        should_attempt_owner_env_resolution(&decl, Some(&resolved_body)),
+        "top-level non-object surfaces still need the owner env to recover missing members"
+    );
+}
+
+#[test]
+fn owner_env_resolution_is_retained_for_nested_heritage_like_surfaces() {
+    let decl = verter_analysis::type_eval::TypeDeclInfo {
+        name: "EditorOptions".to_string(),
+        kind: verter_analysis::type_eval::TypeDeclKind::Interface,
+        type_parameters: Vec::new(),
+        body: verter_analysis::type_expr::TypeExpr::intersection(vec![
+            verter_analysis::type_expr::TypeExpr::named_with_args(
+                "UnionCommands",
+                vec![verter_analysis::type_expr::TypeExpr::Primitive(
+                    verter_analysis::type_expr::PrimitiveName::String,
+                )],
+            ),
+            object_with_props(&["next"]),
+        ]),
+    };
+    let resolved_body = object_with_props(&["next"]);
+
+    assert!(
+        should_attempt_owner_env_resolution(&decl, Some(&resolved_body)),
+        "nested heritage-like declaration bodies should still force the owner-env pass even when the local resolver produced a small concrete object"
+    );
+}
+
+#[test]
+fn owner_env_resolution_is_retained_for_empty_object_placeholders() {
+    use verter_analysis::type_expr::{LiteralValue, TypeExpr};
+
+    let decl = verter_analysis::type_eval::TypeDeclInfo {
+        name: "LinkPropsKeys".to_string(),
+        kind: verter_analysis::type_eval::TypeDeclKind::Alias,
+        type_parameters: Vec::new(),
+        body: TypeExpr::Literal(LiteralValue::String("replace".to_string())),
+    };
+    let resolved_body = empty_object();
+
+    assert!(
+        should_attempt_owner_env_resolution(&decl, Some(&resolved_body)),
+        "empty-object placeholders must force a second pass when the declared alias is not actually {{}}"
     );
 }
 
@@ -297,6 +519,93 @@ defineProps<Record<PropKeys, string>>()
 }
 
 #[test]
+fn imported_eval_inputs_follow_transitive_imports_through_repeated_local_aliases() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface Base { base?: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/commands.ts",
+        r#"import type { Base } from './base'
+
+type Commands<T> = Base & { current?: T }
+type ValuesOf<T> = Pick<Commands<T>, keyof Commands<T>>
+type UnionToIntersection<I> = ValuesOf<I> & ValuesOf<I>
+type UnionCommands<T> = UnionToIntersection<T>
+
+export interface EditorOptions extends UnionCommands<string> {
+  next?: number
+}"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { EditorOptions } from './commands'
+
+interface Props extends Partial<EditorOptions> {
+  label?: string
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./commands".to_string(),
+            resolved_canonical_id: Some("/src/commands.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/commands.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./base".to_string(),
+            resolved_canonical_id: Some("/src/base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("owner env builder should evaluate imported props through repeated local aliases");
+    let names: Vec<String> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert!(
+        inputs.canonical_dependencies.contains("/src/base.ts"),
+        "transitive imported declaration sources must be tracked for invalidation, got: {:?}",
+        inputs.canonical_dependencies
+    );
+    assert!(
+        names.iter().any(|name| name == "base"),
+        "evaluated props should preserve transitive imported fields, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "current"),
+        "evaluated props should preserve repeated local alias fields, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "next"),
+        "evaluated props should preserve direct interface fields, got: {names:?}"
+    );
+}
+
+#[test]
 fn evaluated_child_props_preserve_inherited_omit_fields_from_imported_key_aliases() {
     let host = make_host();
     let _ = host
@@ -434,6 +743,244 @@ defineProps<ChildProps>()
     assert!(
         !names.iter().any(|name| name == "replace"),
         "evaluated ChildProps should omit imported key alias members, got: {names:?}"
+    );
+}
+
+#[test]
+fn evaluated_child_props_preserve_imported_heritage_when_base_uses_local_component_config_types() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/app-config.ts",
+        r#"export interface AppConfig {
+  ui?: {
+    button?: {
+      variants?: {
+        color?: { primary?: string }
+        variant?: { solid?: string }
+        size?: { md?: string }
+      }
+    }
+  }
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/theme.ts",
+        r#"export default {
+  slots: {
+    base: '',
+    label: ''
+  },
+  variants: {
+    color: {
+      primary: ''
+    },
+    variant: {
+      solid: ''
+    },
+    size: {
+      md: ''
+    }
+  }
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/tv.ts",
+        r#"type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: string
+}
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = {
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}
+
+export type ComponentConfig<
+  T extends Record<string, any>,
+  A extends Record<string, any>,
+  K extends string
+> = {
+  AppConfig: A
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/icons.ts",
+        r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  raw?: boolean
+  custom?: boolean
+  replace?: boolean
+}
+
+export type LinkPropsKeys = 'replace'
+</script>
+<template><div /></template>"#,
+    );
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types/index.ts".to_string(),
+            source: Arc::from("export * from '../Link.vue'\nexport * from '../Button.vue'"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { AppConfig } from './app-config'
+import theme from './theme'
+import type { LinkProps } from './types'
+import type { UseComponentIconsProps } from './icons'
+import type { ComponentConfig } from './tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: Button['variants']['color']
+  variant?: Button['variants']['variant']
+  size?: Button['variants']['size']
+  ui?: Button['slots']
+}
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  side?: 'left' | 'right'
+  ui?: { base?: any }
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./app-config".to_string(),
+                resolved_canonical_id: Some("/src/app-config.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./icons".to_string(),
+                resolved_canonical_id: Some("/src/icons.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../Link.vue".to_string(),
+                resolved_canonical_id: Some("/src/Link.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../Button.vue".to_string(),
+                resolved_canonical_id: Some("/src/Button.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("shared owner env builder should evaluate ChildProps");
+    let names: Vec<String> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "loading"),
+        "evaluated ChildProps should keep imported icon props, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "label"),
+        "evaluated ChildProps should keep imported local props, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "size"),
+        "evaluated ChildProps should keep imported indexed-access props, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "href"),
+        "evaluated ChildProps should keep imported link survivors, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "side"),
+        "evaluated ChildProps should keep local additions, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "replace"),
+        "evaluated ChildProps should omit imported key alias members, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "color"),
+        "evaluated ChildProps should omit explicitly removed imported members, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "variant"),
+        "evaluated ChildProps should omit explicitly removed imported members, got: {names:?}"
     );
 }
 
@@ -596,7 +1143,7 @@ fn get_analysis_resolves_relative_import() {
 }
 
 #[test]
-fn imported_eval_inputs_capture_type_imports_used_only_in_binding_annotations() {
+fn imported_eval_inputs_ignore_type_imports_used_only_in_unexposed_binding_annotations() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -628,12 +1175,59 @@ const rootAttrs: RootAttrs = { id: 'app' }
     let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
     let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
 
+    assert!(
+        inputs
+            .type_aliases
+            .iter()
+            .all(|alias| alias.local_name != "RootAttrs"),
+        "non-exposed binding annotations should not seed component-surface eval inputs, got: {:?}",
+        inputs.type_aliases
+    );
+}
+
+#[test]
+fn imported_eval_inputs_capture_type_imports_used_by_exposed_bindings() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface PublicApi { id: string; close(): void }",
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { PublicApi } from './types'
+
+const api: PublicApi = { id: 'app', close() {} }
+
+defineExpose({
+  api
+})
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+
     let alias = inputs
         .type_aliases
         .iter()
-        .find(|alias| alias.local_name == "RootAttrs")
-        .expect("binding annotation import should be captured for eval inputs");
-    assert_eq!(alias.exported_name, "RootAttrs");
+        .find(|alias| alias.local_name == "PublicApi")
+        .expect("defineExpose binding annotation import should be captured for eval inputs");
+    assert_eq!(alias.exported_name, "PublicApi");
     assert_eq!(alias.source_canonical_id, "/src/types.ts");
 }
 
@@ -1728,6 +2322,46 @@ fn resolve_exports_follows_reexport_chains() {
     assert_eq!(
         button.source_name, "default",
         "Button maps to 'default' in the source file"
+    );
+}
+
+#[test]
+fn resolve_exports_reads_workspace_only_barrels_and_vue_targets() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/runtime/types/index.ts".to_string(),
+        Arc::from("export * from '../components/Link.vue'"),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/Link.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  replace?: boolean
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws);
+    let exports = host.resolve_exports("/workspace/src/runtime/types/index.ts");
+    let link_props = exports
+        .iter()
+        .find(|export| export.name == "LinkProps")
+        .expect("workspace-only barrel should expose LinkProps");
+
+    assert_eq!(
+        link_props.source_canonical_id.as_deref(),
+        Some("/workspace/src/runtime/components/Link.vue"),
+        "workspace-only re-export should resolve to the Vue declaration owner"
+    );
+    assert_eq!(
+        link_props.source_name, "LinkProps",
+        "workspace-only re-export should preserve the exported declaration name"
     );
 }
 

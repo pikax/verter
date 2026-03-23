@@ -452,6 +452,91 @@ fn extracts_slots_from_define_slots() {
     assert_eq!(result.slots[0].bindings[0].name, "item");
 }
 
+#[test]
+fn resolved_slots_merge_local_details_and_append_new_slots() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![crate::types::AnalyzedSlotField {
+            name: "default".to_string(),
+            is_required: false,
+            span: verter_span::Span::default(),
+            bindings: vec![crate::types::AnalyzedSlotFieldBinding {
+                name: "item".to_string(),
+                type_annotation: Some("string".to_string()),
+                span: verter_span::Span::default(),
+            }],
+            return_type: None,
+            description: None,
+            tags: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let resolved_macros = vec![ResolvedMacroInput {
+        macro_index: 0,
+        props: Vec::new(),
+        emits: Vec::new(),
+        slots: vec![
+            crate::types::AnalyzedSlotField {
+                name: "default".to_string(),
+                is_required: true,
+                span: verter_span::Span::default(),
+                bindings: vec![crate::types::AnalyzedSlotFieldBinding {
+                    name: "row".to_string(),
+                    type_annotation: Some("number".to_string()),
+                    span: verter_span::Span::default(),
+                }],
+                return_type: Some("VNode[]".to_string()),
+                description: Some("resolved default slot".to_string()),
+                tags: Vec::new(),
+            },
+            crate::types::AnalyzedSlotField {
+                name: "header".to_string(),
+                is_required: false,
+                span: verter_span::Span::default(),
+                bindings: Vec::new(),
+                return_type: Some("any".to_string()),
+                description: Some("resolved header slot".to_string()),
+                tags: Vec::new(),
+            },
+        ],
+    }];
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+
+    let result = extract_component_meta(input);
+    let slot_names: Vec<&str> = result.slots.iter().map(|slot| slot.name.as_str()).collect();
+    let default_slot = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should exist");
+
+    assert!(
+        slot_names.contains(&"default") && slot_names.contains(&"header"),
+        "resolved-only slots should be appended, got: {slot_names:?}"
+    );
+    assert!(
+        default_slot.is_required,
+        "resolved metadata should upgrade required status"
+    );
+    assert_eq!(
+        default_slot.description.as_deref(),
+        Some("resolved default slot"),
+        "resolved descriptions should fill missing local docs"
+    );
+    let binding_names: Vec<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert_eq!(
+        binding_names,
+        vec!["item", "row"],
+        "resolved bindings should merge without dropping local bindings"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
