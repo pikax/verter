@@ -537,6 +537,7 @@ impl verter_analysis::type_eval::EvalLookup for ImportedEvalLookup<'_> {
                 self.project_value_member_path(&mut dep_env, &decl, &target.remaining_path)?;
             Some(verter_analysis::type_eval::ValueDeclInfo {
                 name: target.local_name,
+                declaration_id: 0,
                 kind: decl.kind,
                 type_annotation: Some(projected),
                 function_signature: None,
@@ -702,7 +703,10 @@ impl VerterHost {
         env
     }
 
-    fn base_eval_env(&self, canonical_id: &str) -> Option<verter_analysis::type_eval::EvalEnv> {
+    pub(crate) fn base_eval_env(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_analysis::type_eval::EvalEnv> {
         if let Some((source, cached_parse, whole_hash)) = self.current_eval_state(canonical_id) {
             if let Some(cached_env) = self.clone_cached_eval_env(canonical_id, whole_hash) {
                 return Some(cached_env);
@@ -2500,7 +2504,7 @@ impl VerterHost {
 
                 let mut alias = dep_value;
                 alias.name = binding.name.clone();
-                env.value_symbols.insert(binding.name.clone(), alias);
+                env.add_value(alias);
             }
         }
         if component_meta_debug_enabled() {
@@ -7346,16 +7350,14 @@ fn inject_prop_type_overrides(
     overrides: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
 ) {
     for (name, ty) in overrides {
-        env.value_symbols.insert(
-            name.clone(),
-            verter_analysis::type_eval::ValueDeclInfo {
-                name: name.clone(),
-                kind: verter_analysis::type_eval::ValueDeclKind::Const,
-                type_annotation: Some(ty.clone()),
-                function_signature: None,
-                object_shape: None,
-            },
-        );
+        env.add_value(verter_analysis::type_eval::ValueDeclInfo {
+            name: name.clone(),
+            declaration_id: 0,
+            kind: verter_analysis::type_eval::ValueDeclKind::Const,
+            type_annotation: Some(ty.clone()),
+            function_signature: None,
+            object_shape: None,
+        });
     }
 }
 

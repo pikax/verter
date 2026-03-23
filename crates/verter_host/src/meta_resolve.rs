@@ -122,6 +122,8 @@ pub enum ResolvedDeclarationKind {
 pub struct ResolvedTypeDeclaration {
     /// Name requested at the import site.
     pub requested_name: String,
+    /// Stable declaration id assigned by the analysis-owned eval environment.
+    pub declaration_id: Option<verter_analysis::type_eval::DeclarationId>,
     /// Final declaration name after alias/re-export traversal.
     pub resolved_name: String,
     /// Canonical path of the declaration owner.
@@ -1045,6 +1047,9 @@ pub(crate) fn resolve_type_declaration(
     let (kind, span, text) = read_full_source(host, canonical_source.as_str())
         .map(|source| extract_declaration_details(&source, export_span, resolved_name.as_str()))
         .unwrap_or((ResolvedDeclarationKind::Unknown, export_span, None));
+    let declaration_id = host
+        .base_eval_env(canonical_source.as_str())
+        .and_then(|env| env.type_declaration_id(resolved_name.as_str()));
 
     // Some declaration entrypoints only re-export a type they imported from a
     // sibling declaration file, e.g. `import { Foo } from "./inner.js"; export
@@ -1068,6 +1073,9 @@ pub(crate) fn resolve_type_declaration(
                     {
                         return ResolvedTypeDeclaration {
                             requested_name: requested_name.to_string(),
+                            declaration_id: host
+                                .base_eval_env(followed_canonical.as_str())
+                                .and_then(|env| env.type_declaration_id(followed_name.as_str())),
                             resolved_name: followed_name,
                             canonical_source: followed_canonical,
                             span: followed_details.1,
@@ -1082,6 +1090,7 @@ pub(crate) fn resolve_type_declaration(
 
     ResolvedTypeDeclaration {
         requested_name: requested_name.to_string(),
+        declaration_id,
         resolved_name,
         canonical_source,
         span,
@@ -1138,9 +1147,13 @@ fn resolve_local_type_declaration(
     let (kind, resolved_span, text) = read_full_source(host, canonical_source)
         .map(|source| extract_declaration_details(&source, span, resolved.name.as_str()))
         .unwrap_or((ResolvedDeclarationKind::Unknown, span, None));
+    let declaration_id = host
+        .base_eval_env(canonical_source)
+        .and_then(|env| env.type_declaration_id(resolved.name.as_str()));
 
     ResolvedTypeDeclaration {
         requested_name: resolved.name.clone(),
+        declaration_id,
         resolved_name: resolved.name.clone(),
         canonical_source: canonical_source.to_string(),
         span: resolved_span,

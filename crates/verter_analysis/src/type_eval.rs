@@ -27,6 +27,7 @@ pub type DeclarationId = u64;
 #[derive(Debug, Clone)]
 pub struct TypeDeclInfo {
     pub name: String,
+    pub declaration_id: DeclarationId,
     pub kind: TypeDeclKind,
     pub type_parameters: Vec<TypeParam>,
     pub body: TypeExpr,
@@ -44,6 +45,7 @@ pub enum TypeDeclKind {
 #[derive(Debug, Clone)]
 pub struct ValueDeclInfo {
     pub name: String,
+    pub declaration_id: DeclarationId,
     pub kind: ValueDeclKind,
     /// Explicit type annotation, if present.
     pub type_annotation: Option<TypeExpr>,
@@ -157,23 +159,19 @@ impl EvalEnv {
     }
 
     /// Register a type declaration.
-    pub fn add_type(&mut self, decl: TypeDeclInfo) {
+    pub fn add_type(&mut self, mut decl: TypeDeclInfo) {
         let name = decl.name.clone();
+        let decl_id = self.stabilize_type_declaration_id(&name, decl.declaration_id);
+        decl.declaration_id = decl_id;
         self.type_symbols.insert(name.clone(), decl);
-        if !self.type_decl_ids.contains_key(&name) {
-            let decl_id = self.allocate_declaration_id();
-            self.type_decl_ids.insert(name, decl_id);
-        }
     }
 
     /// Register a value declaration.
-    pub fn add_value(&mut self, decl: ValueDeclInfo) {
+    pub fn add_value(&mut self, mut decl: ValueDeclInfo) {
         let name = decl.name.clone();
+        let decl_id = self.stabilize_value_declaration_id(&name, decl.declaration_id);
+        decl.declaration_id = decl_id;
         self.value_symbols.insert(name.clone(), decl);
-        if !self.value_decl_ids.contains_key(&name) {
-            let decl_id = self.allocate_declaration_id();
-            self.value_decl_ids.insert(name, decl_id);
-        }
     }
 
     /// Returns the total number of evaluation steps consumed so far.
@@ -202,16 +200,36 @@ impl EvalEnv {
     /// declarations already present in `self`.
     pub fn extend_missing(&mut self, other: EvalEnv) {
         for (name, decl) in other.type_symbols {
-            self.type_symbols.entry(name).or_insert(decl);
+            if !self.type_symbols.contains_key(&name) {
+                self.add_type(decl);
+            }
         }
         for (name, decl) in other.value_symbols {
-            self.value_symbols.entry(name).or_insert(decl);
+            if !self.value_symbols.contains_key(&name) {
+                self.add_value(decl);
+            }
         }
         for (name, decl_id) in other.type_decl_ids {
-            self.type_decl_ids.entry(name).or_insert(decl_id);
+            if decl_id == 0 {
+                continue;
+            }
+            let stable_id = self.stabilize_type_declaration_id(&name, decl_id);
+            if let Some(decl) = self.type_symbols.get_mut(&name) {
+                if decl.declaration_id == 0 {
+                    decl.declaration_id = stable_id;
+                }
+            }
         }
         for (name, decl_id) in other.value_decl_ids {
-            self.value_decl_ids.entry(name).or_insert(decl_id);
+            if decl_id == 0 {
+                continue;
+            }
+            let stable_id = self.stabilize_value_declaration_id(&name, decl_id);
+            if let Some(decl) = self.value_symbols.get_mut(&name) {
+                if decl.declaration_id == 0 {
+                    decl.declaration_id = stable_id;
+                }
+            }
         }
         self.next_declaration_id = self.next_declaration_id.max(other.next_declaration_id);
     }
@@ -222,6 +240,48 @@ impl EvalEnv {
 
     pub fn value_declaration_id(&self, name: &str) -> Option<DeclarationId> {
         self.value_decl_ids.get(name).copied()
+    }
+
+    fn stabilize_type_declaration_id(
+        &mut self,
+        name: &str,
+        declaration_id: DeclarationId,
+    ) -> DeclarationId {
+        if declaration_id != 0 {
+            let stable_id = *self
+                .type_decl_ids
+                .entry(name.to_string())
+                .or_insert(declaration_id);
+            self.next_declaration_id = self.next_declaration_id.max(stable_id);
+            stable_id
+        } else if let Some(existing) = self.type_decl_ids.get(name).copied() {
+            existing
+        } else {
+            let decl_id = self.allocate_declaration_id();
+            self.type_decl_ids.insert(name.to_string(), decl_id);
+            decl_id
+        }
+    }
+
+    fn stabilize_value_declaration_id(
+        &mut self,
+        name: &str,
+        declaration_id: DeclarationId,
+    ) -> DeclarationId {
+        if declaration_id != 0 {
+            let stable_id = *self
+                .value_decl_ids
+                .entry(name.to_string())
+                .or_insert(declaration_id);
+            self.next_declaration_id = self.next_declaration_id.max(stable_id);
+            stable_id
+        } else if let Some(existing) = self.value_decl_ids.get(name).copied() {
+            existing
+        } else {
+            let decl_id = self.allocate_declaration_id();
+            self.value_decl_ids.insert(name.to_string(), decl_id);
+            decl_id
+        }
     }
 
     fn allocate_declaration_id(&mut self) -> DeclarationId {

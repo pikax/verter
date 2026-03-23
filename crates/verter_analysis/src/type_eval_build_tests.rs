@@ -57,6 +57,41 @@ fn parse_and_build_env_assigns_stable_type_declaration_ids_for_unchanged_source(
         env_a.type_declaration_id("User"),
         env_b.type_declaration_id("User")
     );
+    assert_eq!(
+        env_a.type_symbols["Box"].declaration_id,
+        env_b.type_symbols["Box"].declaration_id
+    );
+    assert_eq!(
+        env_a.type_symbols["User"].declaration_id,
+        env_b.type_symbols["User"].declaration_id
+    );
+    assert_ne!(env_a.type_symbols["Box"].declaration_id, 0);
+    assert_ne!(env_a.type_symbols["User"].declaration_id, 0);
+}
+
+#[test]
+fn parse_and_build_env_assigns_stable_value_declaration_ids_for_unchanged_source() {
+    let env_a = parse_and_build_env("const count: number = 1\nfunction greet(): string { return '' }");
+    let env_b = parse_and_build_env("const count: number = 1\nfunction greet(): string { return '' }");
+
+    assert_eq!(
+        env_a.value_declaration_id("count"),
+        env_b.value_declaration_id("count")
+    );
+    assert_eq!(
+        env_a.value_declaration_id("greet"),
+        env_b.value_declaration_id("greet")
+    );
+    assert_eq!(
+        env_a.value_symbols["count"].declaration_id,
+        env_b.value_symbols["count"].declaration_id
+    );
+    assert_eq!(
+        env_a.value_symbols["greet"].declaration_id,
+        env_b.value_symbols["greet"].declaration_id
+    );
+    assert_ne!(env_a.value_symbols["count"].declaration_id, 0);
+    assert_ne!(env_a.value_symbols["greet"].declaration_id, 0);
 }
 
 // =============================================================================
@@ -929,6 +964,7 @@ defineProps<RemoteProps>()
         "RemoteProps".to_string(),
         TypeDeclInfo {
             name: "RemoteProps".to_string(),
+            declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
             body: TypeExpr::Object(ObjectExpr {

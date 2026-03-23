@@ -1277,6 +1277,10 @@ defineProps<Props>()
         "native declaration metadata should preserve the canonical declaration source"
     );
     assert!(
+        props_macro.declaration.declaration_id.is_some(),
+        "native declaration metadata should preserve a stable declaration id"
+    );
+    assert!(
         props_macro.declaration.span.end > props_macro.declaration.span.start,
         "native declaration metadata should preserve a non-empty declaration span"
     );
@@ -1288,6 +1292,52 @@ defineProps<Props>()
             .unwrap_or("")
             .contains("export interface Props"),
         "native declaration metadata should preserve declaration text before expansion"
+    );
+}
+
+#[test]
+fn resolved_declaration_metadata_carries_stable_declaration_ids() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export interface Props {
+  label: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let first = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("first resolve should succeed");
+    let second = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("second resolve should succeed");
+
+    let first_decl = &first.resolved_macros[0].declaration;
+    let second_decl = &second.resolved_macros[0].declaration;
+
+    assert_eq!(
+        first_decl.declaration_id, second_decl.declaration_id,
+        "declaration ids should be stable across repeated resolution of unchanged source"
+    );
+    assert!(
+        first_decl.declaration_id.is_some(),
+        "resolved declarations should carry a stable id"
     );
 }
 

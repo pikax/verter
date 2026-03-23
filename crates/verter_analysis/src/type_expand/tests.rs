@@ -50,6 +50,7 @@ fn expand_object_shape_simple_interface() {
     // interface User { name: string; age: number; active?: boolean }
     let user = TypeDeclInfo {
         name: "User".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -99,6 +100,7 @@ fn expand_object_shape_generic_instantiation() {
     // type Wrapper<T> = { value: T; label: string }
     let wrapper = TypeDeclInfo {
         name: "Wrapper".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -142,6 +144,7 @@ fn expand_object_shape_mapped_type() {
     // type Flags = { [K in "a" | "b" | "c"]: boolean }
     let flags = TypeDeclInfo {
         name: "Flags".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Mapped {
@@ -182,6 +185,7 @@ fn expand_object_shape_indeterminate_conditional_no_hang() {
     // SomeRef is unresolved — conditional is indeterminate
     let t = TypeDeclInfo {
         name: "T".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "X".to_string(),
@@ -269,6 +273,7 @@ fn expand_object_shape_nested_mapped_depth_limit() {
     // Level 1 (outermost): { [K in Keys]: Level2 }
     let level1_type = TypeDeclInfo {
         name: "Nested".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Mapped {
@@ -426,6 +431,7 @@ fn expand_recursive_generic_terminates() {
     // type Tree<T> = { value: T; children: Tree<T>[] }
     let tree = TypeDeclInfo {
         name: "Tree".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),

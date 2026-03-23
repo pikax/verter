@@ -241,6 +241,7 @@ fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested
 fn owner_env_resolution_is_skipped_for_simple_concrete_bodies() {
     let decl = verter_analysis::type_eval::TypeDeclInfo {
         name: "Props".to_string(),
+        declaration_id: 0,
         kind: verter_analysis::type_eval::TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: object_with_props(&["label"]),
@@ -257,6 +258,7 @@ fn owner_env_resolution_is_skipped_for_simple_concrete_bodies() {
 fn owner_env_resolution_is_retained_for_top_level_non_object_surfaces() {
     let decl = verter_analysis::type_eval::TypeDeclInfo {
         name: "Props".to_string(),
+        declaration_id: 0,
         kind: verter_analysis::type_eval::TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: verter_analysis::type_expr::TypeExpr::Intersection(vec![
@@ -276,6 +278,7 @@ fn owner_env_resolution_is_retained_for_top_level_non_object_surfaces() {
 fn owner_env_resolution_is_retained_for_nested_heritage_like_surfaces() {
     let decl = verter_analysis::type_eval::TypeDeclInfo {
         name: "EditorOptions".to_string(),
+        declaration_id: 0,
         kind: verter_analysis::type_eval::TypeDeclKind::Interface,
         type_parameters: Vec::new(),
         body: verter_analysis::type_expr::TypeExpr::intersection(vec![
@@ -302,6 +305,7 @@ fn owner_env_resolution_is_retained_for_empty_object_placeholders() {
 
     let decl = verter_analysis::type_eval::TypeDeclInfo {
         name: "LinkPropsKeys".to_string(),
+        declaration_id: 0,
         kind: verter_analysis::type_eval::TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: TypeExpr::Literal(LiteralValue::String("replace".to_string())),

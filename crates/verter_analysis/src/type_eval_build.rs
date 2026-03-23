@@ -135,6 +135,7 @@ fn extract_type_alias(decl: &TSTypeAliasDeclaration<'_>, source: &str, env: &mut
 
     env.add_type(TypeDeclInfo {
         name,
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters,
         body,
@@ -189,6 +190,7 @@ fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut 
 
     env.add_type(TypeDeclInfo {
         name,
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters,
         body,
@@ -262,6 +264,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
 
     env.add_type(TypeDeclInfo {
         name: name.clone(),
+        declaration_id: 0,
         kind: TypeDeclKind::Class,
         type_parameters,
         body,
@@ -283,6 +286,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
 
     env.add_value(ValueDeclInfo {
         name,
+        declaration_id: 0,
         kind: ValueDeclKind::Class,
         type_annotation: None,
         function_signature: Some(constructor_signature),
@@ -309,6 +313,7 @@ fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
 
     env.add_value(ValueDeclInfo {
         name,
+        declaration_id: 0,
         kind,
         type_annotation: None,
         function_signature: Some(sig),
@@ -369,6 +374,7 @@ fn extract_variable(
 
     env.add_value(ValueDeclInfo {
         name,
+        declaration_id: 0,
         kind: var_kind,
         type_annotation,
         function_signature,
@@ -390,6 +396,7 @@ fn extract_default_expression(expr: &Expression<'_>, source: &str, env: &mut Eva
 
     env.add_value(ValueDeclInfo {
         name: "default".to_string(),
+        declaration_id: 0,
         kind: ValueDeclKind::Const,
         type_annotation,
         function_signature,

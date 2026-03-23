@@ -8,6 +8,7 @@ fn env_with_user_type() -> EvalEnv {
     // interface User { id: number; name: string; email: string; password: string }
     env.add_type(TypeDeclInfo {
         name: "User".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -40,6 +41,98 @@ fn env_with_user_type() -> EvalEnv {
         }),
     });
     env
+}
+
+#[test]
+fn add_type_preserves_existing_stable_declaration_id_on_reinsert() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "User".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr { properties: vec![] }),
+    });
+    let stable_id = env.type_symbols["User"].declaration_id;
+
+    env.add_type(TypeDeclInfo {
+        name: "User".to_string(),
+        declaration_id: stable_id + 41,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr { properties: vec![] }),
+    });
+
+    assert_eq!(
+        env.type_symbols["User"].declaration_id,
+        stable_id,
+        "reinserted declarations should keep the existing stable id"
+    );
+    assert_eq!(env.type_declaration_id("User"), Some(stable_id));
+}
+
+#[test]
+fn add_value_with_explicit_declaration_id_advances_allocator_without_collision() {
+    let mut env = EvalEnv::new();
+    env.add_value(ValueDeclInfo {
+        name: "remoteValue".to_string(),
+        declaration_id: 42,
+        kind: ValueDeclKind::Const,
+        type_annotation: Some(TypeExpr::Primitive(PrimitiveName::Number)),
+        function_signature: None,
+        object_shape: None,
+    });
+    env.add_value(ValueDeclInfo {
+        name: "localValue".to_string(),
+        declaration_id: 0,
+        kind: ValueDeclKind::Const,
+        type_annotation: Some(TypeExpr::Primitive(PrimitiveName::String)),
+        function_signature: None,
+        object_shape: None,
+    });
+
+    assert_eq!(env.value_symbols["remoteValue"].declaration_id, 42);
+    assert_eq!(env.value_declaration_id("remoteValue"), Some(42));
+    assert!(
+        env.value_symbols["localValue"].declaration_id > 42,
+        "allocator should not reuse ids below the highest explicit declaration id"
+    );
+}
+
+#[test]
+fn extend_missing_preserves_and_synchronizes_declaration_ids() {
+    let mut base = EvalEnv::new();
+    base.add_type(TypeDeclInfo {
+        name: "Local".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Primitive(PrimitiveName::String),
+    });
+
+    let mut imported = EvalEnv::new();
+    imported.add_type(TypeDeclInfo {
+        name: "Remote".to_string(),
+        declaration_id: 17,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Primitive(PrimitiveName::Number),
+    });
+    imported.add_value(ValueDeclInfo {
+        name: "remoteValue".to_string(),
+        declaration_id: 23,
+        kind: ValueDeclKind::Const,
+        type_annotation: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+        function_signature: None,
+        object_shape: None,
+    });
+
+    base.extend_missing(imported);
+
+    assert_eq!(base.type_symbols["Remote"].declaration_id, 17);
+    assert_eq!(base.type_declaration_id("Remote"), Some(17));
+    assert_eq!(base.value_symbols["remoteValue"].declaration_id, 23);
+    assert_eq!(base.value_declaration_id("remoteValue"), Some(23));
 }
 
 #[derive(Default)]
@@ -140,6 +233,7 @@ fn eval_ref_cycle_detection() {
     // type A = A (self-referential)
     env.add_type(TypeDeclInfo {
         name: "A".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::named("A"),
@@ -157,6 +251,7 @@ fn eval_with_lookup_resolves_external_type_reference() {
         "RemoteProps".to_string(),
         TypeDeclInfo {
             name: "RemoteProps".to_string(),
+            declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
             body: TypeExpr::Object(ObjectExpr {
@@ -190,6 +285,7 @@ fn eval_with_lookup_resolves_external_typeof() {
         "remoteConfig".to_string(),
         ValueDeclInfo {
             name: "remoteConfig".to_string(),
+            declaration_id: 0,
             kind: ValueDeclKind::Const,
             type_annotation: Some(TypeExpr::Object(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
@@ -229,6 +325,7 @@ fn eval_with_lookup_resolves_lazy_member_projection_from_external_ref() {
         "RemoteProps".to_string(),
         TypeDeclInfo {
             name: "RemoteProps".to_string(),
+            declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
             body: TypeExpr::Object(ObjectExpr {
@@ -273,6 +370,7 @@ fn eval_with_lookup_allows_shadowing_builtin_pick() {
         "Pick".to_string(),
         TypeDeclInfo {
             name: "Pick".to_string(),
+            declaration_id: 0,
             kind: TypeDeclKind::Alias,
             type_parameters: vec![TypeParam {
                 name: "T".to_string(),
@@ -311,6 +409,7 @@ fn eval_with_lookup_instantiates_generic_with_external_argument() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {
         name: "Box".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -332,6 +431,7 @@ fn eval_with_lookup_instantiates_generic_with_external_argument() {
         "RemoteProps".to_string(),
         TypeDeclInfo {
             name: "RemoteProps".to_string(),
+            declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
             body: TypeExpr::Object(ObjectExpr {
@@ -377,6 +477,7 @@ fn eval_generic_alias() {
     // type Box<T> = { value: T }
     env.add_type(TypeDeclInfo {
         name: "Box".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -413,6 +514,7 @@ fn eval_generic_with_default() {
     // type Wrapper<T = number> = { data: T }
     env.add_type(TypeDeclInfo {
         name: "Wrapper".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -489,6 +591,7 @@ fn eval_required() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -607,6 +710,7 @@ fn eval_omit_with_nested_literal_union_keys() {
     let mut env = env_with_user_type();
     env.add_type(TypeDeclInfo {
         name: "SensitiveKeys".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Union(vec![
@@ -823,6 +927,7 @@ fn eval_typeof_function() {
     let mut env = EvalEnv::new();
     env.add_value(ValueDeclInfo {
         name: "createConfig".to_string(),
+        declaration_id: 0,
         kind: ValueDeclKind::Function,
         type_annotation: None,
         function_signature: Some(FunctionSignature {
@@ -860,6 +965,7 @@ fn eval_typeof_const_object() {
     let mut env = EvalEnv::new();
     env.add_value(ValueDeclInfo {
         name: "defaults".to_string(),
+        declaration_id: 0,
         kind: ValueDeclKind::Const,
         type_annotation: None,
         function_signature: None,
@@ -894,6 +1000,7 @@ fn eval_return_type() {
     let mut env = EvalEnv::new();
     env.add_value(ValueDeclInfo {
         name: "createConfig".to_string(),
+        declaration_id: 0,
         kind: ValueDeclKind::Function,
         type_annotation: None,
         function_signature: Some(FunctionSignature {
@@ -953,6 +1060,7 @@ fn eval_parameters() {
     let mut env = EvalEnv::new();
     env.add_value(ValueDeclInfo {
         name: "greet".to_string(),
+        declaration_id: 0,
         kind: ValueDeclKind::Function,
         type_annotation: None,
         function_signature: Some(FunctionSignature {
@@ -1005,6 +1113,7 @@ fn eval_constructor_parameters_from_class_typeof() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {
         name: "Widget".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Class,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -1018,6 +1127,7 @@ fn eval_constructor_parameters_from_class_typeof() {
     });
     env.add_value(ValueDeclInfo {
         name: "Widget".to_string(),
+        declaration_id: 0,
         kind: ValueDeclKind::Class,
         type_annotation: None,
         function_signature: Some(FunctionSignature {
@@ -1067,6 +1177,7 @@ fn eval_instance_type_from_class_typeof() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {
         name: "Widget".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Class,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -1088,6 +1199,7 @@ fn eval_instance_type_from_class_typeof() {
     });
     env.add_value(ValueDeclInfo {
         name: "Widget".to_string(),
+        declaration_id: 0,
         kind: ValueDeclKind::Class,
         type_annotation: None,
         function_signature: Some(FunctionSignature {
@@ -1292,6 +1404,7 @@ fn eval_mapped_keyof() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {
         name: "T".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -1424,6 +1537,7 @@ fn eval_respects_depth_limit() {
     // type Deep = { inner: Deep }
     env.add_type(TypeDeclInfo {
         name: "Deep".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -1444,6 +1558,7 @@ fn add_deep_alias_chain(env: &mut EvalEnv, prefix: &str, depth: usize) -> String
     let leaf_name = format!("{prefix}{depth}");
     env.add_type(TypeDeclInfo {
         name: leaf_name.clone(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Primitive(PrimitiveName::String),
@@ -1458,6 +1573,7 @@ fn add_deep_alias_chain(env: &mut EvalEnv, prefix: &str, depth: usize) -> String
         };
         env.add_type(TypeDeclInfo {
             name,
+            declaration_id: 0,
             kind: TypeDeclKind::Alias,
             type_parameters: vec![],
             body: TypeExpr::named(&next),
@@ -1479,6 +1595,7 @@ fn opaque_typeof_arg_bails_generic_instantiation_quickly() {
     // Define a ComponentConfig-like type with 4 members
     env.add_type(TypeDeclInfo {
         name: "ComponentConfig".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![
             TypeParam {
@@ -1555,6 +1672,7 @@ fn opaque_typeof_bailout_skips_unrelated_expensive_generic_args() {
 
     env.add_type(TypeDeclInfo {
         name: "ComponentConfig".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![
             TypeParam {
@@ -1611,6 +1729,7 @@ fn nested_opaque_typeof_in_arg_bails_generic() {
     // type Container<T> = { data: T }
     env.add_type(TypeDeclInfo {
         name: "Container".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -1665,6 +1784,7 @@ fn unresolved_ref_arg_bails_generic() {
     // type Wrapper<T, U> = { value: T, other: U }
     env.add_type(TypeDeclInfo {
         name: "Wrapper".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![
             TypeParam {
@@ -1731,6 +1851,7 @@ fn nested_missing_type_inside_structural_arg_bails_generic() {
 
     env.add_type(TypeDeclInfo {
         name: "Wrapper".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![
             TypeParam {
@@ -1802,6 +1923,7 @@ fn resolved_typeof_arg_still_expands_generic() {
     // Register `theme` as a concrete value
     env.add_value(ValueDeclInfo {
         name: "theme".to_string(),
+        declaration_id: 0,
         type_annotation: Some(TypeExpr::Object(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "color".to_string(),
@@ -1818,6 +1940,7 @@ fn resolved_typeof_arg_still_expands_generic() {
     // Simple generic: type Wrapper<T> = { value: T }
     env.add_type(TypeDeclInfo {
         name: "Wrapper".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -1859,6 +1982,7 @@ fn lazy_indexed_access_only_evaluates_requested_member() {
     // type Config<T> = { expensive: ExpensiveType<T>, cheap: string }
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -1909,6 +2033,7 @@ fn indexed_access_with_non_literal_index_falls_back() {
 
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -1948,6 +2073,7 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
 
     env.add_type(TypeDeclInfo {
         name: "ComponentSlots".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
@@ -1966,6 +2092,7 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
 
     env.add_type(TypeDeclInfo {
         name: "ComponentConfig".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![
             TypeParam {
@@ -2016,6 +2143,7 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
 
     env.add_type(TypeDeclInfo {
         name: "Accordion".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::named_with_args(
@@ -2061,6 +2189,7 @@ fn lazy_indexed_access_through_required_wrapper_skips_unrelated_members() {
 
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -2115,6 +2244,7 @@ fn pick_skips_unselected_expensive_members() {
 
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -2171,6 +2301,7 @@ fn pick_projection_keeps_selected_methods() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -2222,6 +2353,7 @@ fn omit_projection_drops_selected_methods() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -2277,6 +2409,7 @@ fn omit_skips_removed_expensive_members() {
 
     env.add_type(TypeDeclInfo {
         name: "Config".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -2333,6 +2466,7 @@ fn omit_projection_keeps_nested_utility_members() {
 
     env.add_type(TypeDeclInfo {
         name: "LinkPropsKeys".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
         body: TypeExpr::Union(vec![
@@ -2343,6 +2477,7 @@ fn omit_projection_keeps_nested_utility_members() {
     });
     env.add_type(TypeDeclInfo {
         name: "RouterLinkOptions".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -2370,6 +2505,7 @@ fn omit_projection_keeps_nested_utility_members() {
     });
     env.add_type(TypeDeclInfo {
         name: "LinkProps".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Intersection(vec![
@@ -2400,6 +2536,7 @@ fn omit_projection_keeps_nested_utility_members() {
     });
     env.add_type(TypeDeclInfo {
         name: "UseComponentIconsProps".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Object(ObjectExpr {
@@ -2421,6 +2558,7 @@ fn omit_projection_keeps_nested_utility_members() {
     });
     env.add_type(TypeDeclInfo {
         name: "ButtonProps".to_string(),
+        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
         body: TypeExpr::Intersection(vec![
