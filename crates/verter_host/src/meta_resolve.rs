@@ -177,7 +177,6 @@ impl VerterHost {
         // Step 2: Resolve macro type deps through the shared traversal.
         let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
             snapshot.macro_type_deps.iter().cloned().collect();
-
         let mut resolved_macros = Vec::new();
         let mut resolved_type_registry = Vec::new();
         let mut resolved_type_registry_meta = Vec::new();
@@ -191,8 +190,7 @@ impl VerterHost {
             let macro_index = dep.macro_index;
             // Resolve the canonical path of the dependency file.
             let dep_canonical = self
-                .resolve_loaded_dependency_canonical(&canonical, &dep.import_source, kind)
-                .or_else(|| self.resolve_import(&canonical, &dep.import_source))
+                .resolve_type_dependency_canonical(&canonical, &dep.import_source)
                 .unwrap_or_default();
             let declaration =
                 resolve_type_declaration(self, &dep_canonical, dep.type_name.as_str());
@@ -362,6 +360,11 @@ impl VerterHost {
             let imported_inputs =
                 Arc::new(self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions));
             tracked_deps.extend(imported_inputs.canonical_dependencies.iter().cloned());
+            tracked_deps.extend(self.cache_dependency_candidates_from_snapshot(
+                &canonical,
+                &snapshot,
+                &dep_resolutions,
+            ));
             let eval_types =
                 self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs);
             (eval_types, Some(imported_inputs))
@@ -516,9 +519,7 @@ impl VerterHost {
 
     fn dependency_hashes_match(&self, dependency_hashes: &[(String, Hash16)]) -> bool {
         dependency_hashes.iter().all(|(canonical, expected_hash)| {
-            self.get_whole_hash(canonical.as_str())
-                .map(|hash| hash == *expected_hash)
-                .unwrap_or(false)
+            self.get_whole_hash(canonical.as_str()).unwrap_or_default() == *expected_hash
         })
     }
 }
@@ -651,7 +652,7 @@ fn member_jsdoc(
     verter_analysis::jsdoc::extract_jsdoc_near_offset(source, span.start)
 }
 
-fn resolve_type_declaration(
+pub(crate) fn resolve_type_declaration(
     host: &VerterHost,
     dep_canonical: &str,
     requested_name: &str,
@@ -661,14 +662,17 @@ fn resolve_type_declaration(
         .into_iter()
         .find(|export| export.name == requested_name);
 
-    let canonical_source = resolved_export
-        .as_ref()
-        .and_then(|export| export.source_canonical_id.clone())
-        .unwrap_or_else(|| dep_canonical.to_string());
-    let resolved_name = resolved_export
-        .as_ref()
-        .map(|export| export.source_name.clone())
-        .unwrap_or_else(|| requested_name.to_string());
+    let (canonical_source, resolved_name) = if let Some(export) = resolved_export {
+        (
+            export
+                .source_canonical_id
+                .unwrap_or_else(|| dep_canonical.to_string()),
+            export.source_name,
+        )
+    } else {
+        follow_direct_type_reexport_chain(host, dep_canonical, requested_name)
+            .unwrap_or_else(|| (dep_canonical.to_string(), requested_name.to_string()))
+    };
     let export_span = host
         .get_export_span_follow_reexports(dep_canonical, requested_name)
         .map(|(_, start, end)| verter_span::Span::new(start, end))
@@ -684,6 +688,45 @@ fn resolve_type_declaration(
         span,
         kind,
         text,
+    }
+}
+
+fn follow_direct_type_reexport_chain(
+    host: &VerterHost,
+    dep_canonical: &str,
+    requested_name: &str,
+) -> Option<(String, String)> {
+    let mut current_canonical = dep_canonical.to_string();
+    let mut current_name = requested_name.to_string();
+    let mut visited = rustc_hash::FxHashSet::default();
+
+    loop {
+        if !visited.insert((current_canonical.clone(), current_name.clone())) {
+            return Some((current_canonical, current_name));
+        }
+
+        let source = read_full_source(host, current_canonical.as_str())?;
+        let alloc = oxc_allocator::Allocator::new();
+        let extracted = verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
+            &source, &alloc,
+        );
+
+        let Some(reexport) = extracted
+            .reexport_bindings
+            .iter()
+            .find(|binding| binding.local_name == current_name)
+        else {
+            return Some((current_canonical, current_name));
+        };
+
+        let Some(next_canonical) =
+            host.resolve_type_dependency_canonical(&current_canonical, &reexport.source)
+        else {
+            return Some((current_canonical, current_name));
+        };
+
+        current_canonical = next_canonical;
+        current_name = reexport.imported_name.clone();
     }
 }
 

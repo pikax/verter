@@ -1,6 +1,6 @@
 //! ObjectShape expansion: extracts a materialized object surface from a `TypeExpr`.
 
-use crate::type_eval::{evaluate, EvalEnv};
+use crate::type_eval::{evaluate, with_bound_type_decl, EvalEnv};
 use crate::type_expr::{ObjectExpr, ObjectMember, TypeExpr};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -85,8 +85,20 @@ fn extract_shape(
             merge_union_shapes_vue(shapes)
         }
 
-        // Type reference — evaluate to resolve, then extract shape from result
-        TypeExpr::Ref { .. } => {
+        // Type reference — prefer structural extraction from the declared body
+        // when the ref itself is known. This preserves targeted expansion and
+        // diagnostics for generic bodies even when evaluation bails out early
+        // on opaque args such as missing imported types.
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if let Some(shape) = with_bound_type_decl(name, type_arguments, env, |decl, env| {
+                extract_shape(&decl.body, env, diagnostics)
+            }) {
+                return shape;
+            }
+
             let evaluated = evaluate(expr, env);
             if env.budget_exhausted() {
                 diagnostics.push(ExpansionDiagnostic {

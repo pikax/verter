@@ -9,6 +9,8 @@
 
 export interface AnalyzedImportBinding {
   name: string;
+  kind: "named" | "default" | "namespace";
+  importedName: string | null;
   isTypeOnly: boolean;
   vueApi: string | null;
   spanStart: number;

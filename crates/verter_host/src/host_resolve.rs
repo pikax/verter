@@ -101,6 +101,25 @@ impl VerterHost {
             .map(|r| r.source_id)
     }
 
+    pub(crate) fn resolve_type_dependency_canonical(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        self.resolve_loaded_dependency_canonical(
+            owner_canonical,
+            import_source,
+            verter_vfs::ResolveRequestKind::TypeImport,
+        )
+        .or_else(|| {
+            self.resolve_loaded_dependency_canonical(
+                owner_canonical,
+                import_source,
+                verter_vfs::ResolveRequestKind::EsmImport,
+            )
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_external_type_from_loaded_files(
         &self,
@@ -128,9 +147,11 @@ impl VerterHost {
                 last_dep: owner_canonical.to_string(),
             });
         }
-        let Some(dep_canonical) =
+        let Some(dep_canonical) = (if kind == verter_vfs::ResolveRequestKind::TypeImport {
+            self.resolve_type_dependency_canonical(owner_canonical, import_source)
+        } else {
             self.resolve_loaded_dependency_canonical(owner_canonical, import_source, kind)
-        else {
+        }) else {
             return if required_root_dep {
                 Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
             } else {
@@ -719,8 +740,11 @@ impl VerterHost {
         let specifier_to_canonical: Vec<(String, String)> = wildcard_sources
             .iter()
             .filter_map(|spec| {
-                let canonical =
-                    self.resolve_loaded_dependency_canonical(barrel_canonical, spec, kind)?;
+                let canonical = if kind == verter_vfs::ResolveRequestKind::TypeImport {
+                    self.resolve_type_dependency_canonical(barrel_canonical, spec)?
+                } else {
+                    self.resolve_loaded_dependency_canonical(barrel_canonical, spec, kind)?
+                };
                 Some((spec.clone(), canonical))
             })
             .collect();

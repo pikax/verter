@@ -4,7 +4,7 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 
 use crate::classify::classify_vue_api;
-use crate::types::{AnalyzedImport, AnalyzedImportBinding, ImportSourceInfo};
+use crate::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind, ImportSourceInfo};
 
 /// Extract lightweight import source info from script content.
 /// Returns source strings and binding names for each import declaration.
@@ -97,6 +97,8 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                     };
                     bindings.push(AnalyzedImportBinding {
                         name: local_name,
+                        kind: ImportBindingKind::Named,
+                        imported_name: Some(s.imported.name().to_string()),
                         is_type_only: spec_type_only,
                         vue_api,
                         span: s.local.span.into(),
@@ -105,6 +107,8 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
                     bindings.push(AnalyzedImportBinding {
                         name: s.local.name.to_string(),
+                        kind: ImportBindingKind::Default,
+                        imported_name: Some("default".to_string()),
                         is_type_only,
                         vue_api: None,
                         span: s.local.span.into(),
@@ -113,6 +117,8 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
                     bindings.push(AnalyzedImportBinding {
                         name: s.local.name.to_string(),
+                        kind: ImportBindingKind::Namespace,
+                        imported_name: None,
                         is_type_only,
                         vue_api: None,
                         span: s.local.span.into(),
@@ -277,6 +283,11 @@ mod tests {
     fn type_only_default_import() {
         let imports = analyze_imports("import type Foo from './types';");
         assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].bindings[0].kind, ImportBindingKind::Default);
+        assert_eq!(
+            imports[0].bindings[0].imported_name.as_deref(),
+            Some("default")
+        );
         assert!(
             imports[0].bindings[0].is_type_only,
             "default import from `import type` should be type-only"
@@ -289,6 +300,8 @@ mod tests {
     fn type_only_namespace_import() {
         let imports = analyze_imports("import type * as Utils from './utils';");
         assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].bindings[0].kind, ImportBindingKind::Namespace);
+        assert_eq!(imports[0].bindings[0].imported_name, None);
         assert!(
             imports[0].bindings[0].is_type_only,
             "namespace import from `import type` should be type-only"
@@ -301,6 +314,11 @@ mod tests {
     fn value_default_import_not_type_only() {
         let imports = analyze_imports("import Foo from './types';");
         assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].bindings[0].kind, ImportBindingKind::Default);
+        assert_eq!(
+            imports[0].bindings[0].imported_name.as_deref(),
+            Some("default")
+        );
         assert!(
             !imports[0].bindings[0].is_type_only,
             "value default import should not be type-only"
@@ -312,6 +330,8 @@ mod tests {
     fn value_namespace_import_not_type_only() {
         let imports = analyze_imports("import * as Utils from './utils';");
         assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].bindings[0].kind, ImportBindingKind::Namespace);
+        assert_eq!(imports[0].bindings[0].imported_name, None);
         assert!(
             !imports[0].bindings[0].is_type_only,
             "value namespace import should not be type-only"
@@ -340,6 +360,10 @@ mod tests {
         let imports = analyze_imports("import { type Foo, Bar } from './types';");
         assert_eq!(imports.len(), 1);
         assert!(!imports[0].is_type_only, "declaration is not type-only");
+        assert_eq!(imports[0].bindings[0].kind, ImportBindingKind::Named);
+        assert_eq!(imports[0].bindings[0].imported_name.as_deref(), Some("Foo"));
+        assert_eq!(imports[0].bindings[1].kind, ImportBindingKind::Named);
+        assert_eq!(imports[0].bindings[1].imported_name.as_deref(), Some("Bar"));
         assert!(
             imports[0].bindings[0].is_type_only,
             "Foo with specifier-level `type` should be type-only"
@@ -358,6 +382,13 @@ mod tests {
         // Local name is the alias
         assert_eq!(imports[0].bindings[0].name, "myRef");
         assert_eq!(imports[0].bindings[1].name, "calc");
+        assert_eq!(imports[0].bindings[0].kind, ImportBindingKind::Named);
+        assert_eq!(imports[0].bindings[0].imported_name.as_deref(), Some("ref"));
+        assert_eq!(imports[0].bindings[1].kind, ImportBindingKind::Named);
+        assert_eq!(
+            imports[0].bindings[1].imported_name.as_deref(),
+            Some("computed")
+        );
         // But Vue API classification must be based on the imported (original) name
         assert_eq!(
             imports[0].bindings[0].vue_api,

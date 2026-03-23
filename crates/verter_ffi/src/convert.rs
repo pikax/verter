@@ -166,6 +166,16 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                     .into_iter()
                     .map(|binding| FfiImportBindingMeta {
                         name: binding.name,
+                        kind: match binding.kind {
+                            verter_analysis::types::ImportBindingKind::Named => "named".to_string(),
+                            verter_analysis::types::ImportBindingKind::Default => {
+                                "default".to_string()
+                            }
+                            verter_analysis::types::ImportBindingKind::Namespace => {
+                                "namespace".to_string()
+                            }
+                        },
+                        imported_name: binding.imported_name,
                         is_type_only: binding.is_type_only,
                     })
                     .collect(),

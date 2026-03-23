@@ -63,8 +63,20 @@ fn log_snapshot_debug(
 #[derive(Debug)]
 pub struct ImportedEvalInputs {
     pub(crate) sources: Vec<String>,
-    pub(crate) resolved_types: Vec<verter_analysis::ResolvedLocalType>,
+    pub(crate) type_aliases: Vec<ImportedTypeAlias>,
     pub(crate) canonical_dependencies: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ImportedTypeAlias {
+    pub(crate) local_name: String,
+    pub(crate) source_canonical_id: String,
+    pub(crate) exported_name: String,
+}
+
+struct OwnerEvalEnvBuild {
+    env: verter_analysis::type_eval::EvalEnv,
+    local_value_names: rustc_hash::FxHashSet<String>,
 }
 
 impl VerterHost {
@@ -178,38 +190,6 @@ impl VerterHost {
         None
     }
 
-    fn collect_eval_dependency_sources_recursive(
-        &self,
-        canonical_id: &str,
-        seen: &mut rustc_hash::FxHashSet<String>,
-        out: &mut Vec<String>,
-        canonical_dependencies: &mut std::collections::BTreeSet<String>,
-    ) {
-        let mut pending: Vec<String> =
-            Self::resolved_dependency_targets(&self.dependency_resolutions_for_eval(canonical_id))
-                .into_iter()
-                .collect();
-        while let Some(dep) = pending.pop() {
-            if !seen.insert(dep.clone()) {
-                continue;
-            }
-
-            canonical_dependencies.insert(dep.clone());
-
-            if let Some(source) = self.read_eval_dependency_source_with_fallback(&dep) {
-                out.push(source);
-            }
-
-            for next in
-                Self::resolved_dependency_targets(&self.dependency_resolutions_for_eval(&dep))
-            {
-                if !seen.contains(&next) {
-                    pending.push(next);
-                }
-            }
-        }
-    }
-
     pub(crate) fn imported_eval_inputs(
         &self,
         owner_canonical_id: &str,
@@ -221,121 +201,321 @@ impl VerterHost {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut seen = rustc_hash::FxHashSet::default();
         let mut inputs = Vec::new();
-        let mut resolved_type_names = rustc_hash::FxHashSet::default();
-        let mut resolved_types = Vec::new();
+        let mut alias_names = rustc_hash::FxHashSet::default();
+        let mut type_aliases = Vec::new();
         let mut canonical_dependencies = std::collections::BTreeSet::new();
-        let mut cache = rustc_hash::FxHashMap::default();
-        let mut visiting = rustc_hash::FxHashSet::default();
-
-        for dep in snapshot.macro_type_deps.iter() {
-            let mut tracked_deps = std::collections::BTreeSet::new();
-            let mut resolution_deps = std::collections::BTreeSet::new();
-            // use_host_cache: true — safe because profile_hash is None here,
-            // so host-cache freshness is governed solely by dep_source_hash.
-            // The meta_resolve path warms this cache earlier in the same
-            // resolve_component_meta(Expanded) call.
-            let resolved = self.resolve_external_type_from_loaded_files(
-                owner_canonical_id,
-                &dep.import_source,
-                &dep.type_name,
-                &mut tracked_deps,
-                &mut resolution_deps,
-                &mut cache,
-                &mut visiting,
-                false,
-                verter_vfs::ResolveRequestKind::TypeImport,
-                true,
-                None,
-                0,
-            );
-            let mut pushed_tracked_source = false;
-
-            if let Ok(Some(resolved)) = &resolved {
-                if resolved_type_names.insert(dep.type_name.clone()) {
-                    resolved_types.push(verter_analysis::ResolvedLocalType {
-                        name: dep.type_name.clone(),
-                        expanded: resolved_elements_to_expanded_text_via_type_text(resolved),
-                        type_expr: Some(resolved_elements_to_type_expr_via_type_text(resolved)),
-                        span: verter_span::Span::default(),
-                    });
-                }
-            }
-
-            if matches!(resolved, Ok(Some(_)) | Ok(None)) {
-                for tracked_dep in tracked_deps {
-                    if !seen.insert(tracked_dep.clone()) {
-                        continue;
-                    }
-                    canonical_dependencies.insert(tracked_dep.clone());
-                    let Some(source) = self.read_eval_dependency_source_with_fallback(&tracked_dep)
-                    else {
-                        continue;
-                    };
-                    pushed_tracked_source = true;
-                    inputs.push(source);
-                }
-            }
-
-            if pushed_tracked_source {
-                continue;
-            }
-
-            let dep_canonical = if dep.import_source.starts_with('.') {
-                self.resolve_loaded_dependency_canonical(
-                    owner_canonical_id,
-                    &dep.import_source,
-                    verter_vfs::ResolveRequestKind::TypeImport,
-                )
-                .or_else(|| {
-                    Some(crate::id::resolve_external(
-                        owner_canonical_id,
-                        &dep.import_source,
-                    ))
-                })
-            } else if let Some(import) = snapshot
-                .imports
-                .iter()
-                .find(|import| import.source == dep.import_source)
-            {
-                import.resolved_canonical_id.clone()
-            } else if let Some(resolved) = self.resolve_loaded_dependency_canonical(
-                owner_canonical_id,
-                &dep.import_source,
-                verter_vfs::ResolveRequestKind::TypeImport,
-            ) {
-                Some(resolved)
-            } else {
-                dep_resolutions
-                    .get(&dep.import_source)
-                    .and_then(|resolution| resolution.resolved_canonical_id.clone())
-            };
-            let Some(dep_canonical) = dep_canonical else {
-                continue;
-            };
-            if !seen.insert(dep_canonical.clone()) {
-                continue;
-            }
-            canonical_dependencies.insert(dep_canonical.clone());
-
-            let Some(source) = self.read_eval_dependency_source_with_fallback(&dep_canonical)
-            else {
-                continue;
-            };
-            inputs.push(source);
-        }
-
-        self.collect_eval_dependency_sources_recursive(
+        let mut visited_type_roots = rustc_hash::FxHashSet::default();
+        let mut snapshot_cache = rustc_hash::FxHashMap::default();
+        let mut eval_source_cache = rustc_hash::FxHashMap::default();
+        let owner_eval_source = self
+            .current_eval_state(owner_canonical_id)
+            .map(|(source, cached_parse, _)| {
+                Self::build_eval_script_source(&source, cached_parse.as_deref())
+            })
+            .unwrap_or_default();
+        let required_import_names =
+            collect_required_owner_import_names(snapshot, owner_eval_source.as_str());
+        self.track_direct_eval_dependencies(
             owner_canonical_id,
-            &mut seen,
-            &mut inputs,
+            snapshot,
+            dep_resolutions,
             &mut canonical_dependencies,
         );
 
+        for import in &snapshot.imports {
+            for binding in import.bindings.iter().filter(|binding| {
+                required_import_names.contains(&binding.name)
+                    && !matches!(
+                        binding.kind,
+                        verter_analysis::types::ImportBindingKind::Namespace
+                    )
+            }) {
+                let imported_name = binding
+                    .imported_name
+                    .as_deref()
+                    .unwrap_or(binding.name.as_str());
+                let Some(dep_canonical) = self
+                    .resolve_type_dependency_canonical(owner_canonical_id, &import.source)
+                    .or_else(|| import.resolved_canonical_id.clone())
+                    .or_else(|| {
+                        dep_resolutions
+                            .get(&import.source)
+                            .and_then(|resolution| resolution.resolved_canonical_id.clone())
+                    })
+                    .or_else(|| {
+                        import.source.starts_with('.').then(|| {
+                            crate::id::resolve_external(owner_canonical_id, &import.source)
+                        })
+                    })
+                else {
+                    continue;
+                };
+
+                canonical_dependencies.insert(dep_canonical.clone());
+                let declaration = crate::meta_resolve::resolve_type_declaration(
+                    self,
+                    &dep_canonical,
+                    imported_name,
+                );
+                let source_canonical_id = if declaration.canonical_source.is_empty() {
+                    dep_canonical.clone()
+                } else {
+                    declaration.canonical_source.clone()
+                };
+                let exported_name = if declaration.resolved_name.is_empty() {
+                    imported_name.to_string()
+                } else {
+                    declaration.resolved_name.clone()
+                };
+
+                self.record_relevant_type_eval_inputs_recursive(
+                    &source_canonical_id,
+                    &exported_name,
+                    &mut seen,
+                    &mut inputs,
+                    &mut canonical_dependencies,
+                    &mut visited_type_roots,
+                    &mut snapshot_cache,
+                    &mut eval_source_cache,
+                );
+
+                if alias_names.insert(binding.name.clone()) {
+                    type_aliases.push(ImportedTypeAlias {
+                        local_name: binding.name.clone(),
+                        source_canonical_id,
+                        exported_name,
+                    });
+                }
+            }
+        }
+
+        if component_meta_debug_enabled() {
+            component_meta_debug(format!(
+                "imported_eval_inputs owner={} required_bindings=[{}] type_aliases=[{}] sources={}",
+                owner_canonical_id,
+                required_import_names
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                type_aliases
+                    .iter()
+                    .map(|alias| format!(
+                        "{}<-{}#{}",
+                        alias.local_name, alias.source_canonical_id, alias.exported_name
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                inputs.len(),
+            ));
+        }
+
         ImportedEvalInputs {
             sources: inputs,
-            resolved_types,
+            type_aliases,
             canonical_dependencies,
         }
+    }
+
+    fn track_direct_eval_dependencies(
+        &self,
+        owner_canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+        canonical_dependencies: &mut std::collections::BTreeSet<String>,
+    ) {
+        for dep in snapshot.macro_type_deps.iter() {
+            if let Some(dep_canonical) = self
+                .resolve_type_dependency_canonical(owner_canonical_id, &dep.import_source)
+                .or_else(|| {
+                    dep_resolutions
+                        .get(&dep.import_source)
+                        .and_then(|resolution| resolution.resolved_canonical_id.clone())
+                })
+                .or_else(|| {
+                    dep.import_source.starts_with('.').then(|| {
+                        crate::id::resolve_external(owner_canonical_id, &dep.import_source)
+                    })
+                })
+            {
+                canonical_dependencies.insert(dep_canonical);
+            }
+        }
+
+        for import in snapshot
+            .imports
+            .iter()
+            .filter(|import| !import.is_type_only)
+        {
+            if let Some(dep_canonical) = import
+                .resolved_canonical_id
+                .clone()
+                .or_else(|| {
+                    dep_resolutions
+                        .get(&import.source)
+                        .and_then(DependencyResolution::effective_target)
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    import
+                        .source
+                        .starts_with('.')
+                        .then(|| crate::id::resolve_external(owner_canonical_id, &import.source))
+                })
+            {
+                canonical_dependencies.insert(dep_canonical);
+            }
+        }
+    }
+
+    fn record_eval_input_source(
+        &self,
+        canonical_id: &str,
+        seen_sources: &mut rustc_hash::FxHashSet<String>,
+        inputs: &mut Vec<String>,
+        canonical_dependencies: &mut std::collections::BTreeSet<String>,
+    ) {
+        canonical_dependencies.insert(canonical_id.to_string());
+        if !seen_sources.insert(canonical_id.to_string()) {
+            return;
+        }
+
+        if let Some(source) = self.read_eval_dependency_source_with_fallback(canonical_id) {
+            inputs.push(source);
+        }
+    }
+
+    fn record_relevant_type_eval_inputs_recursive(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        seen_sources: &mut rustc_hash::FxHashSet<String>,
+        inputs: &mut Vec<String>,
+        canonical_dependencies: &mut std::collections::BTreeSet<String>,
+        visited_type_roots: &mut rustc_hash::FxHashSet<(String, String)>,
+        snapshot_cache: &mut rustc_hash::FxHashMap<String, Option<FileAnalysisSnapshot>>,
+        eval_source_cache: &mut rustc_hash::FxHashMap<String, Option<String>>,
+    ) {
+        let visit_key = (canonical_id.to_string(), exported_name.to_string());
+        if !visited_type_roots.insert(visit_key) {
+            return;
+        }
+
+        self.record_eval_input_source(canonical_id, seen_sources, inputs, canonical_dependencies);
+
+        let eval_source = eval_source_cache
+            .entry(canonical_id.to_string())
+            .or_insert_with(|| {
+                self.current_eval_state(canonical_id)
+                    .map(|(source, cached_parse, _)| {
+                        Self::build_eval_script_source(&source, cached_parse.as_deref())
+                    })
+            })
+            .clone();
+        let Some(eval_source) = eval_source else {
+            return;
+        };
+
+        let alloc = oxc_allocator::Allocator::new();
+        let required_import_names =
+            verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
+                exported_name,
+                eval_source.as_str(),
+                &alloc,
+            );
+        if required_import_names.is_empty() {
+            return;
+        }
+
+        let snapshot = snapshot_cache
+            .entry(canonical_id.to_string())
+            .or_insert_with(|| self.get_analysis_snapshot_internal(canonical_id, None))
+            .clone();
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+
+        for import in &snapshot.imports {
+            for binding in import.bindings.iter().filter(|binding| {
+                required_import_names.contains(&binding.name)
+                    && !matches!(
+                        binding.kind,
+                        verter_analysis::types::ImportBindingKind::Namespace
+                    )
+            }) {
+                let imported_name = binding
+                    .imported_name
+                    .as_deref()
+                    .unwrap_or(binding.name.as_str());
+                let Some(dep_canonical) = import.resolved_canonical_id.clone().or_else(|| {
+                    import
+                        .source
+                        .starts_with('.')
+                        .then(|| crate::id::resolve_external(canonical_id, &import.source))
+                }) else {
+                    continue;
+                };
+
+                canonical_dependencies.insert(dep_canonical.clone());
+                let declaration = crate::meta_resolve::resolve_type_declaration(
+                    self,
+                    &dep_canonical,
+                    imported_name,
+                );
+                let next_canonical = if declaration.canonical_source.is_empty() {
+                    dep_canonical
+                } else {
+                    declaration.canonical_source
+                };
+                let next_exported_name = if declaration.resolved_name.is_empty() {
+                    imported_name.to_string()
+                } else {
+                    declaration.resolved_name
+                };
+
+                self.record_relevant_type_eval_inputs_recursive(
+                    &next_canonical,
+                    &next_exported_name,
+                    seen_sources,
+                    inputs,
+                    canonical_dependencies,
+                    visited_type_roots,
+                    snapshot_cache,
+                    eval_source_cache,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn cache_dependency_candidates_from_snapshot(
+        &self,
+        owner_canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+    ) -> std::collections::BTreeSet<String> {
+        let mut candidates = std::collections::BTreeSet::new();
+
+        for import in &snapshot.imports {
+            if let Some(resolved) = import.resolved_canonical_id.as_deref() {
+                candidates.insert(resolved.to_string());
+                continue;
+            }
+
+            if let Some(target) = dep_resolutions
+                .get(&import.source)
+                .and_then(DependencyResolution::effective_target)
+            {
+                candidates.insert(target.to_string());
+                continue;
+            }
+
+            if import.source.starts_with('.') {
+                candidates
+                    .extend(self.expand_relative_candidates(owner_canonical_id, &import.source));
+            }
+        }
+
+        candidates
     }
 
     /// Compute evaluated types using pre-computed imported eval inputs.
@@ -348,49 +528,30 @@ impl VerterHost {
         imported_inputs: &ImportedEvalInputs,
     ) -> Option<verter_analysis::type_expand::ExpandedComponentTypes> {
         let (source, cached_parse, _) = self.current_eval_state(canonical)?;
-
         let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
-        let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
-        let local_binding_names: rustc_hash::FxHashSet<String> =
-            env.value_symbols.keys().cloned().collect();
-        // Use the full import source set for evaluation. Sources are already
-        // deduplicated by canonical path (via `seen: FxHashSet` in
-        // `imported_eval_inputs()`), cycle-safe, and deterministically ordered
-        // (macro_type_deps phase first, then full import graph walk).
-        for dep_source in &imported_inputs.sources {
-            env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
-                dep_source,
-            ));
-        }
-        for resolved in &imported_inputs.resolved_types {
-            if env.type_symbols.contains_key(&resolved.name) {
-                continue;
-            }
-            let body = resolved.type_expr.clone().unwrap_or_else(|| {
-                verter_analysis::type_expr_lower::parse_type_annotation(&resolved.expanded)
-            });
-            if body.is_unknown() {
-                continue;
-            }
-            env.type_symbols.insert(
-                resolved.name.clone(),
-                verter_analysis::type_eval::TypeDeclInfo {
-                    name: resolved.name.clone(),
-                    kind: verter_analysis::type_eval::TypeDeclKind::Alias,
-                    type_parameters: Vec::new(),
-                    body,
-                },
-            );
-        }
+        let built =
+            self.build_owner_eval_env_with_inputs(canonical, snapshot, imported_inputs, None)?;
+        let mut env = built.env;
 
         let budget = verter_analysis::type_expand::ExpansionBudget::default();
         let result = verter_analysis::type_eval_build::expand_macro_types(
             snapshot.macros.as_ref(),
             Some(&eval_source),
             &mut env,
-            Some(&local_binding_names),
+            Some(&built.local_value_names),
             &budget,
         );
+        if component_meta_debug_enabled() {
+            component_meta_debug(format!(
+                "compute_evaluated_types owner={} props={} define_props={} emits={} slot_bindings={} bindings={}",
+                canonical,
+                result.props.len(),
+                result.define_props.len(),
+                result.emits.len(),
+                result.slot_bindings.len(),
+                result.bindings.len(),
+            ));
+        }
         if Self::is_expanded_types_empty(&result) {
             None
         } else {
@@ -623,6 +784,7 @@ impl VerterHost {
                 let mut eval_env = if let Some(ref cached_inputs) = resolved.cached_eval_inputs {
                     self.build_fallthrough_eval_env_with_inputs(
                         canonical_id,
+                        &resolved.snapshot,
                         prop_type_overrides,
                         cached_inputs,
                     )
@@ -975,6 +1137,7 @@ impl VerterHost {
         let imported_inputs = self.imported_eval_inputs(canonical_id, snapshot, &dep_resolutions);
         self.build_fallthrough_eval_env_with_inputs(
             canonical_id,
+            snapshot,
             prop_type_overrides,
             &imported_inputs,
         )
@@ -983,23 +1146,145 @@ impl VerterHost {
     fn build_fallthrough_eval_env_with_inputs(
         &self,
         canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
         prop_type_overrides: Option<
             &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
         >,
         imported_inputs: &ImportedEvalInputs,
     ) -> Option<verter_analysis::type_eval::EvalEnv> {
+        Some(
+            self.build_owner_eval_env_with_inputs(
+                canonical_id,
+                snapshot,
+                imported_inputs,
+                prop_type_overrides,
+            )?
+            .env,
+        )
+    }
+
+    fn build_owner_eval_env_with_inputs(
+        &self,
+        canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        imported_inputs: &ImportedEvalInputs,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+    ) -> Option<OwnerEvalEnvBuild> {
         let (source, cached_parse, _) = self.current_eval_state(canonical_id)?;
         let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
         let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
+        let local_type_names: rustc_hash::FxHashSet<String> =
+            env.type_symbols.keys().cloned().collect();
+        let local_value_names: rustc_hash::FxHashSet<String> =
+            env.value_symbols.keys().cloned().collect();
         for dep_source in &imported_inputs.sources {
             env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
                 dep_source,
             ));
         }
+        self.inject_imported_type_aliases(&mut env, &local_type_names, imported_inputs);
+        self.materialize_imported_runtime_values_into_env(snapshot, &local_value_names, &mut env);
         if let Some(overrides) = prop_type_overrides {
             inject_prop_type_overrides(&mut env, overrides);
         }
-        Some(env)
+        Some(OwnerEvalEnvBuild {
+            env,
+            local_value_names,
+        })
+    }
+
+    fn inject_imported_type_aliases(
+        &self,
+        env: &mut verter_analysis::type_eval::EvalEnv,
+        owner_local_type_names: &rustc_hash::FxHashSet<String>,
+        imported_inputs: &ImportedEvalInputs,
+    ) {
+        let mut dep_env_cache: rustc_hash::FxHashMap<
+            String,
+            Option<verter_analysis::type_eval::EvalEnv>,
+        > = rustc_hash::FxHashMap::default();
+
+        for alias in &imported_inputs.type_aliases {
+            if owner_local_type_names.contains(&alias.local_name) {
+                continue;
+            }
+            let dep_env = dep_env_cache
+                .entry(alias.source_canonical_id.clone())
+                .or_insert_with(|| {
+                    self.read_eval_dependency_source_with_fallback(&alias.source_canonical_id)
+                        .map(|source| {
+                            verter_analysis::type_eval_build::parse_and_build_env(&source)
+                        })
+                });
+            let Some(dep_env) = dep_env.as_ref() else {
+                continue;
+            };
+            let Some(mut decl) = dep_env.type_symbols.get(&alias.exported_name).cloned() else {
+                continue;
+            };
+
+            decl.name = alias.local_name.clone();
+            env.type_symbols.insert(alias.local_name.clone(), decl);
+        }
+    }
+
+    fn materialize_imported_runtime_values_into_env(
+        &self,
+        snapshot: &FileAnalysisSnapshot,
+        owner_local_value_names: &rustc_hash::FxHashSet<String>,
+        env: &mut verter_analysis::type_eval::EvalEnv,
+    ) {
+        let mut dep_env_cache: rustc_hash::FxHashMap<
+            String,
+            Option<verter_analysis::type_eval::EvalEnv>,
+        > = rustc_hash::FxHashMap::default();
+
+        for import in &snapshot.imports {
+            if import.is_type_only {
+                continue;
+            }
+            let Some(dep_canonical_id) = import.resolved_canonical_id.as_deref() else {
+                continue;
+            };
+
+            let dep_env = dep_env_cache
+                .entry(dep_canonical_id.to_string())
+                .or_insert_with(|| {
+                    self.read_eval_dependency_source_with_fallback(dep_canonical_id)
+                        .map(|source| {
+                            verter_analysis::type_eval_build::parse_and_build_env(&source)
+                        })
+                });
+            let Some(dep_env) = dep_env.as_ref() else {
+                continue;
+            };
+
+            for binding in &import.bindings {
+                if binding.is_type_only
+                    || matches!(
+                        binding.kind,
+                        verter_analysis::types::ImportBindingKind::Namespace
+                    )
+                {
+                    continue;
+                }
+                if owner_local_value_names.contains(&binding.name) {
+                    continue;
+                }
+                let Some(imported_name) = binding.imported_name.as_deref() else {
+                    continue;
+                };
+                let Some(dep_value) = dep_env.value_symbols.get(imported_name).cloned() else {
+                    continue;
+                };
+
+                let mut alias = dep_value;
+                alias.name = binding.name.clone();
+                env.value_symbols.insert(binding.name.clone(), alias);
+            }
+        }
     }
 
     fn build_generic_child_prop_overrides(
@@ -3070,13 +3355,7 @@ impl VerterHost {
                 if let (Some(ref source), Some(ref local_name)) =
                     (&sig.reexport_source, &sig.reexport_local)
                 {
-                    let resolved_target = {
-                        let ctx = verter_vfs::ResolutionContext {
-                            phase: verter_vfs::ResolvePhase::ProviderGraph,
-                            kind: verter_vfs::ResolveRequestKind::EsmImport,
-                        };
-                        self.resolve_via_vfs(canonical_id, source, ctx)
-                    };
+                    let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
                     if let Some(target_canonical) = resolved_target {
                         return self.follow_reexport_chain(&target_canonical, local_name, visited);
                     }
@@ -3115,13 +3394,7 @@ impl VerterHost {
                 if let (Some(ref source), Some(ref local_name)) =
                     (&sig.reexport_source, &sig.reexport_local)
                 {
-                    let resolved_target = {
-                        let ctx = verter_vfs::ResolutionContext {
-                            phase: verter_vfs::ResolvePhase::ProviderGraph,
-                            kind: verter_vfs::ResolveRequestKind::EsmImport,
-                        };
-                        self.resolve_via_vfs(canonical_id, source, ctx)
-                    };
+                    let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
                     if let Some(target_canonical) = resolved_target {
                         return self.follow_reexport_chain(&target_canonical, local_name, visited);
                     }
@@ -3230,27 +3503,20 @@ impl VerterHost {
 
         let mut results = Vec::new();
 
-        if file_kind == crate::FileKind::VueSfc {
+        let has_default_signature = export_signatures.iter().any(|sig| sig.name == "default");
+        if file_kind == crate::FileKind::VueSfc && !has_default_signature {
             results.push(ResolvedExport {
                 name: "default".to_string(),
                 is_type: false,
                 source_canonical_id: None,
                 source_name: "default".to_string(),
             });
-            visiting.remove(canonical_id);
-            return results;
         }
 
         for sig in &export_signatures {
             if sig.name == "*" {
                 if let Some(ref source) = sig.reexport_source {
-                    let resolved_target = {
-                        let ctx = verter_vfs::ResolutionContext {
-                            phase: verter_vfs::ResolvePhase::ProviderGraph,
-                            kind: verter_vfs::ResolveRequestKind::EsmImport,
-                        };
-                        self.resolve_via_vfs(canonical_id, source, ctx)
-                    };
+                    let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
                     if let Some(target) = resolved_target {
                         let nested = self.collect_resolved_exports(&target, visiting);
                         for mut export in nested {
@@ -3267,13 +3533,7 @@ impl VerterHost {
             if let (Some(ref source), Some(ref local_name)) =
                 (&sig.reexport_source, &sig.reexport_local)
             {
-                let resolved_target = {
-                    let ctx = verter_vfs::ResolutionContext {
-                        phase: verter_vfs::ResolvePhase::ProviderGraph,
-                        kind: verter_vfs::ResolveRequestKind::EsmImport,
-                    };
-                    self.resolve_via_vfs(canonical_id, source, ctx)
-                };
+                let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
                 if let Some(target) = resolved_target {
                     let resolved = self.resolve_single_export(&target, local_name, visiting);
                     let (src_id, src_name) = match resolved {
@@ -3342,7 +3602,13 @@ impl VerterHost {
         };
 
         if file_kind == crate::FileKind::VueSfc {
-            return Some((canonical_id.to_string(), name.to_string()));
+            if name == "default" {
+                return Some((canonical_id.to_string(), name.to_string()));
+            }
+            if export_signatures.iter().any(|sig| sig.name == name) {
+                return Some((canonical_id.to_string(), name.to_string()));
+            }
+            return None;
         }
 
         let sig = export_signatures.iter().find(|s| s.name == name)?;
@@ -3352,13 +3618,7 @@ impl VerterHost {
                 return Some((canonical_id.to_string(), name.to_string()));
             }
             visiting.insert(canonical_id.to_string());
-            let target = {
-                let ctx = verter_vfs::ResolutionContext {
-                    phase: verter_vfs::ResolvePhase::ProviderGraph,
-                    kind: verter_vfs::ResolveRequestKind::EsmImport,
-                };
-                self.resolve_via_vfs(canonical_id, source, ctx)
-            };
+            let target = resolve_reexport_target(self, canonical_id, source, sig);
             visiting.remove(canonical_id);
 
             if let Some(target_id) = target {
@@ -3370,6 +3630,409 @@ impl VerterHost {
         } else {
             Some((canonical_id.to_string(), name.to_string()))
         }
+    }
+}
+
+fn collect_required_owner_import_names(
+    snapshot: &FileAnalysisSnapshot,
+    owner_eval_source: &str,
+) -> rustc_hash::FxHashSet<String> {
+    let mut required = rustc_hash::FxHashSet::default();
+    if owner_eval_source.is_empty() {
+        return required;
+    }
+
+    let owner_env = verter_analysis::type_eval_build::parse_and_build_env(owner_eval_source);
+    let define_props_type_params =
+        verter_analysis::type_eval_build::collect_define_props_type_params(owner_eval_source);
+    let mut define_props_index = 0usize;
+    let type_bindings = rustc_hash::FxHashMap::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+
+    for mac in snapshot.macros.as_ref() {
+        for field in &mac.prop_fields {
+            if let Some(type_ann) = field.type_annotation.as_deref() {
+                let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                if !expr.is_unknown() {
+                    collect_surface_eval_import_names_from_expr(
+                        &expr,
+                        &owner_env,
+                        &type_bindings,
+                        &mut active_locals,
+                        &mut required,
+                    );
+                }
+            }
+        }
+
+        if mac.kind == verter_analysis::types::AnalyzedMacroKind::DefineProps && mac.is_type_based {
+            if let Some(expr) = define_props_type_params.get(define_props_index) {
+                collect_surface_eval_import_names_from_expr(
+                    expr,
+                    &owner_env,
+                    &type_bindings,
+                    &mut active_locals,
+                    &mut required,
+                );
+            }
+            define_props_index += 1;
+        }
+
+        for field in &mac.emit_fields {
+            if let Some(payload) = field.payload_type.as_deref() {
+                let expr = verter_analysis::type_expr_lower::parse_type_annotation(payload);
+                if !expr.is_unknown() {
+                    collect_surface_eval_import_names_from_expr(
+                        &expr,
+                        &owner_env,
+                        &type_bindings,
+                        &mut active_locals,
+                        &mut required,
+                    );
+                }
+            }
+        }
+
+        for slot in &mac.slot_fields {
+            for binding in &slot.bindings {
+                if let Some(type_ann) = binding.type_annotation.as_deref() {
+                    let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                    if !expr.is_unknown() {
+                        collect_surface_eval_import_names_from_expr(
+                            &expr,
+                            &owner_env,
+                            &type_bindings,
+                            &mut active_locals,
+                            &mut required,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    for binding in &snapshot.bindings {
+        if let Some(type_ann) = binding.type_annotation.as_deref() {
+            let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+            if !expr.is_unknown() {
+                collect_surface_eval_import_names_from_expr(
+                    &expr,
+                    &owner_env,
+                    &type_bindings,
+                    &mut active_locals,
+                    &mut required,
+                );
+            }
+        }
+    }
+
+    required
+}
+
+fn collect_surface_eval_import_names_from_expr(
+    expr: &verter_analysis::type_expr::TypeExpr,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    active_locals: &mut rustc_hash::FxHashSet<String>,
+    required: &mut rustc_hash::FxHashSet<String>,
+) {
+    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Infer { .. }
+        | TypeExpr::Unknown { .. } => {}
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            for ty in types {
+                collect_surface_eval_import_names_from_expr(
+                    ty,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element)
+        | TypeExpr::Parenthesized(element) => collect_surface_eval_import_names_from_expr(
+            element,
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        ),
+        TypeExpr::Tuple { elements, .. } => {
+            for element in elements {
+                collect_surface_eval_import_names_from_expr(
+                    &element.ty,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                match member {
+                    ObjectMember::Property(prop) => collect_surface_eval_import_names_from_expr(
+                        &prop.ty,
+                        owner_env,
+                        type_bindings,
+                        active_locals,
+                        required,
+                    ),
+                    ObjectMember::IndexSignature(idx) => {
+                        collect_surface_eval_import_names_from_expr(
+                            &idx.key_type,
+                            owner_env,
+                            type_bindings,
+                            active_locals,
+                            required,
+                        );
+                        collect_surface_eval_import_names_from_expr(
+                            &idx.value_type,
+                            owner_env,
+                            type_bindings,
+                            active_locals,
+                            required,
+                        );
+                    }
+                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        collect_surface_eval_import_names_from_function(
+                            func,
+                            owner_env,
+                            type_bindings,
+                            active_locals,
+                            required,
+                        );
+                    }
+                    ObjectMember::Method(method) => {
+                        collect_surface_eval_import_names_from_function(
+                            &method.function,
+                            owner_env,
+                            type_bindings,
+                            active_locals,
+                            required,
+                        );
+                    }
+                }
+            }
+        }
+        TypeExpr::Function(func) => collect_surface_eval_import_names_from_function(
+            func,
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        ),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if let Some(bound) = type_bindings.get(name) {
+                collect_surface_eval_import_names_from_expr(
+                    bound,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+                return;
+            }
+
+            if let Some(decl) = owner_env.type_symbols.get(name) {
+                if !active_locals.insert(name.clone()) {
+                    return;
+                }
+
+                let mut local_bindings = type_bindings.clone();
+                for (index, param) in decl.type_parameters.iter().enumerate() {
+                    let arg = type_arguments
+                        .get(index)
+                        .cloned()
+                        .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
+                    if let Some(arg) = arg {
+                        local_bindings.insert(param.name.clone(), arg);
+                    }
+                }
+
+                collect_surface_eval_import_names_from_expr(
+                    &decl.body,
+                    owner_env,
+                    &local_bindings,
+                    active_locals,
+                    required,
+                );
+                active_locals.remove(name);
+                return;
+            }
+
+            required.insert(name.clone());
+            if should_recurse_surface_type_arguments(name) {
+                for arg in type_arguments {
+                    collect_surface_eval_import_names_from_expr(
+                        arg,
+                        owner_env,
+                        type_bindings,
+                        active_locals,
+                        required,
+                    );
+                }
+            }
+        }
+        TypeExpr::TypeOf(_) => {}
+        TypeExpr::IndexedAccess { object, .. } => collect_surface_eval_import_names_from_expr(
+            object,
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        ),
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            for ty in [check, extends, true_type, false_type] {
+                collect_surface_eval_import_names_from_expr(
+                    ty,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            collect_surface_eval_import_names_from_expr(
+                source,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+            collect_surface_eval_import_names_from_expr(
+                value,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+            if let Some(name_type) = name_type.as_deref() {
+                collect_surface_eval_import_names_from_expr(
+                    name_type,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            for expr in expressions {
+                collect_surface_eval_import_names_from_expr(
+                    expr,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+    }
+}
+
+fn collect_surface_eval_import_names_from_function(
+    func: &verter_analysis::type_expr::FunctionExpr,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    active_locals: &mut rustc_hash::FxHashSet<String>,
+    required: &mut rustc_hash::FxHashSet<String>,
+) {
+    for param in &func.parameters {
+        collect_surface_eval_import_names_from_expr(
+            &param.ty,
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        );
+    }
+    if let Some(return_type) = func.return_type.as_deref() {
+        collect_surface_eval_import_names_from_expr(
+            return_type,
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        );
+    }
+    for type_param in &func.type_parameters {
+        if let Some(constraint) = type_param.constraint.as_deref() {
+            collect_surface_eval_import_names_from_expr(
+                constraint,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+        }
+        if let Some(default) = type_param.default.as_deref() {
+            collect_surface_eval_import_names_from_expr(
+                default,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+        }
+    }
+}
+
+fn should_recurse_surface_type_arguments(name: &str) -> bool {
+    matches!(
+        name,
+        "Partial"
+            | "Required"
+            | "Readonly"
+            | "Pick"
+            | "Omit"
+            | "Record"
+            | "Extract"
+            | "Exclude"
+            | "NonNullable"
+            | "ReturnType"
+            | "Parameters"
+            | "ConstructorParameters"
+            | "InstanceType"
+            | "Awaited"
+    )
+}
+
+fn resolve_reexport_target(
+    host: &VerterHost,
+    canonical_id: &str,
+    source: &str,
+    sig: &verter_analysis::ExportSignature,
+) -> Option<String> {
+    if sig.is_type {
+        host.resolve_type_dependency_canonical(canonical_id, source)
+    } else {
+        let ctx = verter_vfs::ResolutionContext {
+            phase: verter_vfs::ResolvePhase::ProviderGraph,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+        };
+        host.resolve_via_vfs(canonical_id, source, ctx)
     }
 }
 
@@ -4173,24 +4836,6 @@ pub(crate) fn extract_slot_info_from_type_text(
         .collect();
 
     (bindings, return_type)
-}
-
-/// Convert `ResolvedElements` props to an expanded type text string
-/// using pre-resolved `type_text` (set by `finalize_external_resolution`).
-///
-/// Preferred over `resolved_elements_to_expanded_text` for cross-file types
-/// where spans may reference different source files.
-pub(crate) fn resolved_elements_to_expanded_text_via_type_text(
-    resolved: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
-) -> String {
-    let mut parts = Vec::new();
-    for prop in &resolved.props {
-        let name = prop.key_name.as_deref().unwrap_or("unknown");
-        let opt = if prop.optional { "?" } else { "" };
-        let ty = prop.type_text.as_deref().unwrap_or("unknown");
-        parts.push(format!("{}{}: {}", name, opt, ty));
-    }
-    format!("{{ {} }}", parts.join("; "))
 }
 
 /// Convert `ResolvedElements` props to a structured `TypeExpr::Object`

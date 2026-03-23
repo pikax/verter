@@ -237,6 +237,42 @@ fn extracts_exported_interfaces() {
     assert!(env.type_symbols.contains_key("Config"));
 }
 
+#[test]
+fn extracts_export_default_object_expression_as_default_value() {
+    let env = parse_and_build_env(
+        r#"
+        export default {
+            item: "item",
+            body: "body",
+        }
+        "#,
+    );
+
+    let decl = env
+        .value_symbols
+        .get("default")
+        .expect("export default object should register a synthetic default value");
+
+    let ty = decl
+        .type_annotation
+        .as_ref()
+        .expect("default export should preserve a lowered type annotation");
+    let TypeExpr::Object(obj) = ty else {
+        panic!("expected default export type to be an object, got {ty:?}");
+    };
+
+    let names: Vec<&str> = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(names.contains(&"item"));
+    assert!(names.contains(&"body"));
+}
+
 // =============================================================================
 // End-to-end: build env then evaluate
 // =============================================================================

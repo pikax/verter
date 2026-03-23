@@ -202,6 +202,8 @@ export interface NativeTemplateRefMeta {
 
 export interface NativeImportBindingMeta {
   name: string;
+  kind: "named" | "default" | "namespace";
+  importedName?: string | null;
   isTypeOnly: boolean;
 }
 
@@ -504,6 +506,8 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       isTypeOnly: imp.isTypeOnly,
       bindings: imp.bindings.map((binding) => ({
         name: binding.name,
+        kind: binding.kind,
+        importedName: binding.importedName ?? null,
         isTypeOnly: binding.isTypeOnly,
       })),
     })),

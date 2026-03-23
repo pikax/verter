@@ -353,6 +353,12 @@ pub(crate) fn parse_vue_snapshot(
             Vec::new()
         };
 
+    // Vue SFCs are still modules: we need named export signatures from the
+    // script content even when full script analysis is disabled so barrel
+    // re-export resolution can find `export type Foo = ...` in `.vue` files.
+    let (export_signatures, export_panic_diag) =
+        build_export_signatures_from_parsed_with_diagnostic(&parsed, source);
+
     // Build script analysis from script block contents (when script analysis flags are set)
     let (mut script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
         build_script_analysis_from_parsed_with_diagnostic(&parsed, source)
@@ -366,10 +372,17 @@ pub(crate) fn parse_vue_snapshot(
     }
 
     // Merge any panic diagnostic into parse diagnostics
-    let parse_diagnostics = if let Some(diag) = script_panic_diag {
-        parse_diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![diag]))
-    } else {
+    let mut extra_diags = Vec::new();
+    if let Some(diag) = export_panic_diag {
+        extra_diags.push(diag);
+    }
+    if let Some(diag) = script_panic_diag {
+        extra_diags.push(diag);
+    }
+    let parse_diagnostics = if extra_diags.is_empty() {
         parse_diagnostics
+    } else {
+        parse_diagnostics.merge(DiagnosticsSnapshot::from_vec(extra_diags))
     };
 
     // Build preprocessor requests for non-native languages
@@ -406,7 +419,7 @@ pub(crate) fn parse_vue_snapshot(
             src_blocks,
             parse_diagnostics,
             script_analysis,
-            export_signatures: Vec::new(),
+            export_signatures,
             style_analyses,
             preprocessor_requests,
         },
@@ -616,6 +629,43 @@ fn catch_analysis_panic<T: Default>(
     }
 }
 
+fn collect_sfc_script_content(parsed: &ParsedSfc, source: &str) -> (String, Vec<(u32, u32)>) {
+    let mut combined_content = String::new();
+    let mut block_ranges: Vec<(u32, u32)> = Vec::new();
+
+    for script in [parsed.script(), parsed.script_setup()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(span) = script.content {
+            let content = &source[span.start as usize..span.end as usize];
+            if !combined_content.is_empty() {
+                combined_content.push('\n');
+            }
+            block_ranges.push((span.start, span.end - span.start));
+            combined_content.push_str(content);
+        }
+    }
+
+    (combined_content, block_ranges)
+}
+
+fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
+    let lang = [parsed.script(), parsed.script_setup()]
+        .into_iter()
+        .flatten()
+        .find_map(|script| {
+            find_attr(&extract_attrs(&script.attributes, source), "lang").filter(|v| v != "true")
+        });
+
+    match lang.as_deref().map(|value| value.to_ascii_lowercase()) {
+        Some(lang) if lang == "tsx" => SourceType::tsx(),
+        Some(lang) if lang == "jsx" => SourceType::jsx(),
+        Some(lang) if lang == "js" => SourceType::script(),
+        _ => SourceType::ts(),
+    }
+}
+
 /// Build script analysis from an already-parsed SFC. Concatenates script block
 /// contents and runs OXC analysis with catch_unwind for panic safety.
 /// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
@@ -630,34 +680,44 @@ fn build_script_analysis_from_parsed_with_diagnostic(
     verter_analysis::ScriptAnalysisSnapshot,
     Option<HostDiagnostic>,
 ) {
-    let mut combined_content = String::new();
-    // Track (sfc_content_start, content_length) for each block in the concatenation
-    let mut block_ranges: Vec<(u32, u32)> = Vec::new();
-    for script in [parsed.script(), parsed.script_setup()]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(span) = script.content {
-            let content = &source[span.start as usize..span.end as usize];
-            if !combined_content.is_empty() {
-                combined_content.push('\n');
-            }
-            block_ranges.push((span.start, (span.end - span.start)));
-            combined_content.push_str(content);
-        }
-    }
+    let (combined_content, block_ranges) = collect_sfc_script_content(parsed, source);
     if combined_content.is_empty() {
         return (verter_analysis::ScriptAnalysisSnapshot::default(), None);
     }
+    let source_type = sfc_script_source_type(parsed, source);
     let alloc = Allocator::new();
     let (mut analysis, diag) = catch_analysis_panic(
         "script analysis",
         std::panic::AssertUnwindSafe(|| {
-            verter_analysis::build_script_analysis(&combined_content, SourceType::ts(), &alloc)
+            verter_analysis::build_script_analysis(&combined_content, source_type, &alloc)
         }),
     );
     adjust_analysis_spans(&mut analysis, &block_ranges);
     (analysis, diag)
+}
+
+fn build_export_signatures_from_parsed_with_diagnostic(
+    parsed: &ParsedSfc,
+    source: &str,
+) -> (
+    Vec<verter_analysis::ExportSignature>,
+    Option<HostDiagnostic>,
+) {
+    let (combined_content, block_ranges) = collect_sfc_script_content(parsed, source);
+    if combined_content.is_empty() {
+        return (Vec::new(), None);
+    }
+
+    let source_type = sfc_script_source_type(parsed, source);
+    let alloc = Allocator::new();
+    let (mut export_signatures, diag) = catch_analysis_panic(
+        "export signature analysis",
+        std::panic::AssertUnwindSafe(|| {
+            verter_analysis::build_export_signatures(&combined_content, source_type, &alloc)
+        }),
+    );
+    adjust_export_signature_spans(&mut export_signatures, &block_ranges);
+    (export_signatures, diag)
 }
 
 /// Map a byte offset in the concatenated script content to the SFC-absolute offset.
@@ -794,6 +854,29 @@ fn adjust_analysis_spans(
     for nested in &mut analysis.nested_macro_calls {
         nested.span.start = map(nested.span.start);
         nested.span.end = map(nested.span.end);
+    }
+}
+
+fn adjust_export_signature_spans(
+    export_signatures: &mut [verter_analysis::ExportSignature],
+    block_ranges: &[(u32, u32)],
+) {
+    if block_ranges.is_empty() {
+        return;
+    }
+    if block_ranges.len() == 1 && block_ranges[0].0 == 0 {
+        return;
+    }
+
+    let map = |offset: u32| combined_offset_to_sfc(offset, block_ranges);
+
+    for sig in export_signatures {
+        sig.span.start = map(sig.span.start);
+        sig.span.end = map(sig.span.end);
+        if let Some(local_span) = sig.local_span.as_mut() {
+            local_span.start = map(local_span.start);
+            local_span.end = map(local_span.end);
+        }
     }
 }
 
@@ -1139,6 +1222,64 @@ mod tests {
         assert_eq!(snap.descriptor.script_count, 1);
         assert_eq!(snap.descriptor.template_count, 1);
         assert_eq!(snap.descriptor.style_count, 1);
+    }
+
+    #[test]
+    fn parse_vue_snapshot_collects_named_export_signatures_from_script() {
+        let source = r#"<script lang="ts">
+export interface Props {
+  label: string
+}
+
+export type Keys = 'label'
+</script>
+<template><div /></template>"#;
+
+        let (snap, _parsed) = parse_vue_snapshot("Comp.vue", source, AnalysisScope::NONE);
+        let names: Vec<&str> = snap
+            .export_signatures
+            .iter()
+            .map(|sig| sig.name.as_str())
+            .collect();
+
+        assert!(
+            names.contains(&"Props"),
+            "Vue SFC export signatures should include named type exports, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"Keys"),
+            "Vue SFC export signatures should include named aliases, got: {names:?}"
+        );
+
+        let props_sig = snap
+            .export_signatures
+            .iter()
+            .find(|sig| sig.name == "Props")
+            .expect("Props export signature should exist");
+        let expected_start = source
+            .find("Props")
+            .expect("Props identifier should exist in source") as u32;
+        assert_eq!(
+            props_sig.span.start, expected_start,
+            "export signature span should be remapped to SFC-absolute offsets"
+        );
+    }
+
+    #[test]
+    fn parse_vue_snapshot_uses_script_lang_for_script_analysis() {
+        let source = r#"<script setup lang="tsx">
+const view = <div className="card">hello</div>
+</script>
+<template><div /></template>"#;
+
+        let (snap, _parsed) = parse_vue_snapshot("Comp.vue", source, AnalysisScope::LSP);
+        assert!(
+            snap.script_analysis
+                .bindings
+                .iter()
+                .any(|binding| binding.name == "view"),
+            "TSX script analysis should respect the SFC script lang and retain bindings"
+        );
     }
 
     /// @ai-generated - Multiple styles: correct count and langs

@@ -297,6 +297,11 @@ impl<'de> serde::Deserialize<'de> for AnalyzedImport {
 pub struct AnalyzedImportBinding {
     /// Local binding name as used in the script.
     pub name: String,
+    /// Import syntax kind (`named`, `default`, `namespace`).
+    pub kind: ImportBindingKind,
+    /// Imported/exported name for this binding when applicable.
+    /// For default imports this is `"default"`.
+    pub imported_name: Option<String>,
     /// Whether this specifier is type-only (`import { type Foo }`).
     pub is_type_only: bool,
     /// Vue API classification if the import source is 'vue'.
@@ -305,11 +310,21 @@ pub struct AnalyzedImportBinding {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImportBindingKind {
+    Named,
+    Default,
+    Namespace,
+}
+
 impl serde::Serialize for AnalyzedImportBinding {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("AnalyzedImportBinding", 5)?;
+        let mut s = serializer.serialize_struct("AnalyzedImportBinding", 7)?;
         s.serialize_field("name", &self.name)?;
+        s.serialize_field("kind", &self.kind)?;
+        s.serialize_field("importedName", &self.imported_name)?;
         s.serialize_field("isTypeOnly", &self.is_type_only)?;
         s.serialize_field("vueApi", &self.vue_api)?;
         s.serialize_field("spanStart", &self.span.start)?;
@@ -324,6 +339,10 @@ impl<'de> serde::Deserialize<'de> for AnalyzedImportBinding {
         #[serde(rename_all = "camelCase")]
         struct Wire {
             name: String,
+            #[serde(default)]
+            kind: Option<ImportBindingKind>,
+            #[serde(default)]
+            imported_name: Option<String>,
             is_type_only: bool,
             vue_api: Option<VueApiClassification>,
             #[serde(default)]
@@ -334,6 +353,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedImportBinding {
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
             name: w.name,
+            kind: w.kind.unwrap_or(ImportBindingKind::Named),
+            imported_name: w.imported_name,
             is_type_only: w.is_type_only,
             vue_api: w.vue_api,
             span: Span::new(w.span_start, w.span_end),

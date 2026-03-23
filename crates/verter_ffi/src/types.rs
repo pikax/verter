@@ -745,6 +745,8 @@ pub struct FfiImportMeta {
 #[serde(rename_all = "camelCase")]
 pub struct FfiImportBindingMeta {
     pub name: String,
+    pub kind: String,
+    pub imported_name: Option<String>,
     pub is_type_only: bool,
 }
 

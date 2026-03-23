@@ -1174,3 +1174,951 @@ fn eval_respects_depth_limit() {
     let result = evaluate(&TypeExpr::named("Deep"), &mut env);
     assert!(!result.is_unknown());
 }
+
+fn add_deep_alias_chain(env: &mut EvalEnv, prefix: &str, depth: usize) -> String {
+    let leaf_name = format!("{prefix}{depth}");
+    env.add_type(TypeDeclInfo {
+        name: leaf_name.clone(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Primitive(PrimitiveName::String),
+    });
+
+    for index in (0..depth).rev() {
+        let name = format!("{prefix}{index}");
+        let next = if index + 1 == depth {
+            leaf_name.clone()
+        } else {
+            format!("{prefix}{}", index + 1)
+        };
+        env.add_type(TypeDeclInfo {
+            name,
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![],
+            body: TypeExpr::named(&next),
+        });
+    }
+
+    format!("{prefix}0")
+}
+
+// ── Opaque typeof bailout + lazy indexed access tests ──────────────────
+
+/// Test 0 (regression gate): A ComponentConfig-shaped generic with an
+/// unresolved `typeof theme` arg must NOT hang. It should bail out quickly
+/// and return the reference with evaluated args, not brute-force the body.
+#[test]
+fn opaque_typeof_arg_bails_generic_instantiation_quickly() {
+    let mut env = EvalEnv::new();
+
+    // Define a ComponentConfig-like type with 4 members
+    env.add_type(TypeDeclInfo {
+        name: "ComponentConfig".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![
+            TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            },
+            TypeParam {
+                name: "A".to_string(),
+                constraint: None,
+                default: None,
+            },
+        ],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "slots".to_string(),
+                    ty: TypeExpr::named_with_args("SlotsHelper", vec![TypeExpr::named("T")]),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "variants".to_string(),
+                    ty: TypeExpr::named_with_args("VariantsHelper", vec![TypeExpr::named("T")]),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "ui".to_string(),
+                    ty: TypeExpr::named_with_args("UIHelper", vec![TypeExpr::named("T")]),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    // `typeof theme` — theme is NOT in value_symbols → opaque
+    let typeof_theme = TypeExpr::TypeOf(ValueRef {
+        path: vec!["theme".to_string()],
+    });
+
+    // ComponentConfig<typeof theme, AppConfig>
+    let expr = TypeExpr::named_with_args(
+        "ComponentConfig",
+        vec![typeof_theme, TypeExpr::named("AppConfig")],
+    );
+
+    let result = evaluate(&expr, &mut env);
+
+    // Must complete without exhausting budget
+    assert!(
+        !env.budget_exhausted(),
+        "opaque typeof arg should bail immediately, not exhaust step budget (steps={})",
+        env.steps(),
+    );
+
+    // Result should be the symbolic ref, not an expanded object
+    assert!(
+        !matches!(result, TypeExpr::Object(_)),
+        "should NOT eagerly expand the generic body with opaque args; got object"
+    );
+}
+
+/// Regression: the motivating case includes an opaque `typeof theme` arg and an
+/// unrelated but very expensive second arg (`AppConfig`). Bailout must happen
+/// before eagerly evaluating that unrelated arg.
+#[test]
+fn opaque_typeof_bailout_skips_unrelated_expensive_generic_args() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "AppConfigLayer", 512);
+
+    env.add_type(TypeDeclInfo {
+        name: "ComponentConfig".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![
+            TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            },
+            TypeParam {
+                name: "A".to_string(),
+                constraint: None,
+                default: None,
+            },
+        ],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "slots".to_string(),
+                ty: TypeExpr::named("T"),
+                optional: false,
+                readonly: false,
+            })],
+        }),
+    });
+
+    let result = evaluate(
+        &TypeExpr::named_with_args(
+            "ComponentConfig",
+            vec![
+                TypeExpr::TypeOf(ValueRef {
+                    path: vec!["theme".to_string()],
+                }),
+                TypeExpr::named(&expensive_name),
+            ],
+        ),
+        &mut env,
+    );
+
+    assert!(
+        env.steps() < 100,
+        "opaque bailout should happen before evaluating unrelated expensive args (steps={})",
+        env.steps()
+    );
+    assert!(
+        matches!(result, TypeExpr::Ref { .. }),
+        "opaque bailout should return a symbolic ref, got: {:?}",
+        result
+    );
+}
+
+/// Nested opaque typeof in type arg: Container<Pick<typeof theme, 'key'>> should bail.
+#[test]
+fn nested_opaque_typeof_in_arg_bails_generic() {
+    let mut env = EvalEnv::new();
+
+    // type Container<T> = { data: T }
+    env.add_type(TypeDeclInfo {
+        name: "Container".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+        }],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "data".to_string(),
+                ty: TypeExpr::named("T"),
+                optional: false,
+                readonly: false,
+            })],
+        }),
+    });
+
+    // Container<Pick<typeof theme, 'key'>> — typeof theme is opaque
+    let typeof_theme = TypeExpr::TypeOf(ValueRef {
+        path: vec!["theme".to_string()],
+    });
+    let pick_typeof = TypeExpr::named_with_args(
+        "Pick",
+        vec![
+            typeof_theme,
+            TypeExpr::Literal(LiteralValue::String("key".to_string())),
+        ],
+    );
+    let expr = TypeExpr::named_with_args("Container", vec![pick_typeof]);
+
+    let result = evaluate(&expr, &mut env);
+
+    assert!(
+        !env.budget_exhausted(),
+        "nested opaque typeof should bail (steps={})",
+        env.steps(),
+    );
+    assert!(
+        !matches!(result, TypeExpr::Object(_)),
+        "should NOT expand generic with nested opaque typeof arg"
+    );
+}
+
+/// Unresolved Ref args should also bail — they provide no usable structure and
+/// should not trigger expansion of unrelated generic siblings.
+#[test]
+fn unresolved_ref_arg_bails_generic() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "AppConfigLayer", 512);
+
+    // type Wrapper<T, U> = { value: T, other: U }
+    env.add_type(TypeDeclInfo {
+        name: "Wrapper".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![
+            TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            },
+            TypeParam {
+                name: "U".to_string(),
+                constraint: None,
+                default: None,
+            },
+        ],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "value".to_string(),
+                    ty: TypeExpr::named("T"),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "other".to_string(),
+                    ty: TypeExpr::named("U"),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    // Wrapper<SomeUnknownType, Expensive> — unresolved ref should bail before
+    // forcing evaluation of the unrelated expensive arg.
+    let expr = TypeExpr::named_with_args(
+        "Wrapper",
+        vec![
+            TypeExpr::named("SomeUnknownType"),
+            TypeExpr::named(&expensive_name),
+        ],
+    );
+
+    let result = evaluate(&expr, &mut env);
+
+    assert!(
+        env.steps() < 100,
+        "unresolved ref arg should bail before unrelated expensive evaluation (steps={})",
+        env.steps()
+    );
+    assert!(
+        matches!(result, TypeExpr::Ref { .. }),
+        "unresolved ref arg should trigger symbolic bailout, got: {:?}",
+        result
+    );
+}
+
+/// Missing types nested inside structural wrappers should still trigger the
+/// same early bailout instead of leaking through and expanding the generic.
+#[test]
+fn nested_missing_type_inside_structural_arg_bails_generic() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "AppConfigLayer", 512);
+
+    env.add_type(TypeDeclInfo {
+        name: "Wrapper".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![
+            TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            },
+            TypeParam {
+                name: "U".to_string(),
+                constraint: None,
+                default: None,
+            },
+        ],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "value".to_string(),
+                    ty: TypeExpr::named("T"),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "other".to_string(),
+                    ty: TypeExpr::named("U"),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    let nested_missing = TypeExpr::Array {
+        element: Box::new(TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "item".to_string(),
+                ty: TypeExpr::named("MissingType"),
+                optional: false,
+                readonly: false,
+            })],
+        })),
+        readonly: false,
+    };
+
+    let result = evaluate(
+        &TypeExpr::named_with_args(
+            "Wrapper",
+            vec![nested_missing, TypeExpr::named(&expensive_name)],
+        ),
+        &mut env,
+    );
+
+    assert!(
+        env.steps() < 100,
+        "nested structural missing types should bail before unrelated expensive evaluation (steps={})",
+        env.steps()
+    );
+    assert!(
+        matches!(result, TypeExpr::Ref { .. }),
+        "nested structural missing types should trigger symbolic bailout, got: {:?}",
+        result
+    );
+}
+
+/// Negative test: a generic with fully resolved args should still expand normally.
+#[test]
+fn resolved_typeof_arg_still_expands_generic() {
+    let mut env = EvalEnv::new();
+
+    // Register `theme` as a concrete value
+    env.add_value(ValueDeclInfo {
+        name: "theme".to_string(),
+        type_annotation: Some(TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "color".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::String),
+                optional: false,
+                readonly: false,
+            })],
+        })),
+        kind: ValueDeclKind::Const,
+        function_signature: None,
+        object_shape: None,
+    });
+
+    // Simple generic: type Wrapper<T> = { value: T }
+    env.add_type(TypeDeclInfo {
+        name: "Wrapper".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+        }],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "value".to_string(),
+                ty: TypeExpr::named("T"),
+                optional: false,
+                readonly: false,
+            })],
+        }),
+    });
+
+    // Wrapper<typeof theme> — theme IS resolvable
+    let typeof_theme = TypeExpr::TypeOf(ValueRef {
+        path: vec!["theme".to_string()],
+    });
+    let expr = TypeExpr::named_with_args("Wrapper", vec![typeof_theme]);
+
+    let result = evaluate(&expr, &mut env);
+
+    // Should expand to { value: { color: string } }
+    assert!(
+        matches!(result, TypeExpr::Object(_)),
+        "resolved typeof arg should expand the generic body normally"
+    );
+}
+
+/// Lazy indexed access: `{ a: X, b: Y, c: Z }['b']` should return Y
+/// without evaluating X or Z.
+#[test]
+fn lazy_indexed_access_only_evaluates_requested_member() {
+    let mut env = EvalEnv::new();
+
+    // Define a type with an expensive member and a cheap member
+    // type Config<T> = { expensive: ExpensiveType<T>, cheap: string }
+    env.add_type(TypeDeclInfo {
+        name: "Config".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+        }],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "expensive".to_string(),
+                    ty: TypeExpr::named_with_args("UnknownExpensive", vec![TypeExpr::named("T")]),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "cheap".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    // Config<SomeType>['cheap'] — should get `string` without touching `expensive`
+    let expr = TypeExpr::IndexedAccess {
+        object: Box::new(TypeExpr::named_with_args(
+            "Config",
+            vec![TypeExpr::named("SomeArg")],
+        )),
+        index: Box::new(TypeExpr::Literal(LiteralValue::String("cheap".to_string()))),
+    };
+
+    let result = evaluate(&expr, &mut env);
+
+    // Should resolve to `string`
+    assert!(
+        matches!(result, TypeExpr::Primitive(PrimitiveName::String)),
+        "lazy indexed access should resolve 'cheap' to string, got: {:?}",
+        result
+    );
+}
+
+/// Non-literal index must fall back to eager evaluation.
+#[test]
+fn indexed_access_with_non_literal_index_falls_back() {
+    let mut env = EvalEnv::new();
+
+    env.add_type(TypeDeclInfo {
+        name: "Config".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "a".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::Number),
+                optional: false,
+                readonly: false,
+            })],
+        }),
+    });
+
+    // Config[keyof Config] — non-literal index, should still work via fallback
+    let expr = TypeExpr::IndexedAccess {
+        object: Box::new(TypeExpr::named("Config")),
+        index: Box::new(TypeExpr::KeyOf(Box::new(TypeExpr::named("Config")))),
+    };
+
+    let result = evaluate(&expr, &mut env);
+
+    // Should fall back to eager and produce number
+    assert!(
+        matches!(result, TypeExpr::Primitive(PrimitiveName::Number)),
+        "non-literal index should fall back to eager evaluation, got: {:?}",
+        result
+    );
+}
+
+/// Regression: `Accordion['slots']` should not evaluate an unrelated expensive
+/// `AppConfig`-like generic arg when lazy member lookup can target `slots`.
+#[test]
+fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "AppConfigLayer", 512);
+
+    env.add_type(TypeDeclInfo {
+        name: "ComponentSlots".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+        }],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "header".to_string(),
+                ty: TypeExpr::named("T"),
+                optional: false,
+                readonly: false,
+            })],
+        }),
+    });
+
+    env.add_type(TypeDeclInfo {
+        name: "ComponentConfig".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![
+            TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            },
+            TypeParam {
+                name: "A".to_string(),
+                constraint: None,
+                default: None,
+            },
+            TypeParam {
+                name: "K".to_string(),
+                constraint: None,
+                default: None,
+            },
+        ],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "AppConfig".to_string(),
+                    ty: TypeExpr::named("A"),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "variants".to_string(),
+                    ty: TypeExpr::named("A"),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "slots".to_string(),
+                    ty: TypeExpr::named_with_args("ComponentSlots", vec![TypeExpr::named("T")]),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "ui".to_string(),
+                    ty: TypeExpr::named("A"),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    env.add_type(TypeDeclInfo {
+        name: "Accordion".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::named_with_args(
+            "ComponentConfig",
+            vec![
+                TypeExpr::TypeOf(ValueRef {
+                    path: vec!["theme".to_string()],
+                }),
+                TypeExpr::named(&expensive_name),
+                TypeExpr::Literal(LiteralValue::String("accordion".to_string())),
+            ],
+        ),
+    });
+
+    let result = evaluate(
+        &TypeExpr::IndexedAccess {
+            object: Box::new(TypeExpr::named("Accordion")),
+            index: Box::new(TypeExpr::Literal(LiteralValue::String("slots".to_string()))),
+        },
+        &mut env,
+    );
+
+    assert!(
+        env.steps() < 160,
+        "lazy indexed access should not evaluate unrelated expensive generic args (steps={})",
+        env.steps()
+    );
+    assert!(
+        matches!(result, TypeExpr::Ref { ref name, .. } if name == "ComponentSlots"),
+        "should still resolve the targeted slots member symbolically, got: {:?}",
+        result
+    );
+}
+
+/// Pick should project from the raw object/ref surface and avoid evaluating
+/// omitted siblings.
+#[test]
+fn pick_skips_unselected_expensive_members() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "ExpensivePickLayer", 512);
+
+    env.add_type(TypeDeclInfo {
+        name: "Config".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "keep".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "omit".to_string(),
+                    ty: TypeExpr::named(&expensive_name),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    let result = evaluate(
+        &TypeExpr::named_with_args(
+            "Pick",
+            vec![
+                TypeExpr::named("Config"),
+                TypeExpr::Literal(LiteralValue::String("keep".to_string())),
+            ],
+        ),
+        &mut env,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("Pick should resolve to an object");
+    };
+    let names: Vec<&str> = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec!["keep"]);
+    assert!(
+        env.steps() < 120,
+        "Pick should not evaluate omitted expensive members (steps={})",
+        env.steps()
+    );
+}
+
+/// Pick projection should preserve selected methods, not just plain properties.
+#[test]
+fn pick_projection_keeps_selected_methods() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "Config".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Method(MethodSignature {
+                    name: "render".to_string(),
+                    function: FunctionExpr {
+                        parameters: vec![],
+                        return_type: Some(Box::new(TypeExpr::Primitive(PrimitiveName::String))),
+                        type_parameters: vec![],
+                    },
+                    optional: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "other".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Number),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    let result = evaluate(
+        &TypeExpr::named_with_args(
+            "Pick",
+            vec![
+                TypeExpr::named("Config"),
+                TypeExpr::Literal(LiteralValue::String("render".to_string())),
+            ],
+        ),
+        &mut env,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("Pick should resolve to an object");
+    };
+    assert_eq!(obj.properties.len(), 1);
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Method(method) if method.name == "render"),
+        "Pick should preserve selected method members, got: {:?}",
+        obj.properties
+    );
+}
+
+/// Omit should also avoid evaluating the removed members.
+#[test]
+fn omit_skips_removed_expensive_members() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "ExpensiveOmitLayer", 512);
+
+    env.add_type(TypeDeclInfo {
+        name: "Config".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "keep".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "omit".to_string(),
+                    ty: TypeExpr::named(&expensive_name),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+
+    let result = evaluate(
+        &TypeExpr::named_with_args(
+            "Omit",
+            vec![
+                TypeExpr::named("Config"),
+                TypeExpr::Literal(LiteralValue::String("omit".to_string())),
+            ],
+        ),
+        &mut env,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("Omit should resolve to an object");
+    };
+    let names: Vec<&str> = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec!["keep"]);
+    assert!(
+        env.steps() < 120,
+        "Omit should not evaluate removed expensive members (steps={})",
+        env.steps()
+    );
+}
+
+#[test]
+fn omit_projection_keeps_nested_utility_members() {
+    let mut env = EvalEnv::new();
+
+    env.add_type(TypeDeclInfo {
+        name: "LinkPropsKeys".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Union(vec![
+            TypeExpr::Literal(LiteralValue::String("replace".to_string())),
+            TypeExpr::Literal(LiteralValue::String("activeClass".to_string())),
+            TypeExpr::Literal(LiteralValue::String("ariaCurrentValue".to_string())),
+        ]),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "RouterLinkOptions".to_string(),
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "replace".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "activeClass".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "ariaCurrentValue".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "LinkProps".to_string(),
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Intersection(vec![
+            TypeExpr::named("RouterLinkOptions"),
+            TypeExpr::Object(ObjectExpr {
+                properties: vec![
+                    ObjectMember::Property(ObjectProperty {
+                        name: "href".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: true,
+                        readonly: false,
+                    }),
+                    ObjectMember::Property(ObjectProperty {
+                        name: "raw".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                        optional: true,
+                        readonly: false,
+                    }),
+                    ObjectMember::Property(ObjectProperty {
+                        name: "custom".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                        optional: true,
+                        readonly: false,
+                    }),
+                ],
+            }),
+        ]),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "UseComponentIconsProps".to_string(),
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "icon".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "loading".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                    optional: true,
+                    readonly: false,
+                }),
+            ],
+        }),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "ButtonProps".to_string(),
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Intersection(vec![
+            TypeExpr::named("UseComponentIconsProps"),
+            TypeExpr::named_with_args(
+                "Omit",
+                vec![
+                    TypeExpr::named("LinkProps"),
+                    TypeExpr::Union(vec![
+                        TypeExpr::Literal(LiteralValue::String("raw".to_string())),
+                        TypeExpr::Literal(LiteralValue::String("custom".to_string())),
+                    ]),
+                ],
+            ),
+            TypeExpr::Object(ObjectExpr {
+                properties: vec![
+                    ObjectMember::Property(ObjectProperty {
+                        name: "label".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: true,
+                        readonly: false,
+                    }),
+                    ObjectMember::Property(ObjectProperty {
+                        name: "color".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: true,
+                        readonly: false,
+                    }),
+                ],
+            }),
+        ]),
+    });
+
+    let result = evaluate(
+        &parse_type_annotation("Omit<ButtonProps, LinkPropsKeys | \"icon\" | \"color\">"),
+        &mut env,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("nested Omit projection should resolve to an object");
+    };
+    let names: Vec<&str> = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        names.contains(&"loading"),
+        "loading should survive, got {names:?}"
+    );
+    assert!(
+        names.contains(&"label"),
+        "label should survive, got {names:?}"
+    );
+    assert!(
+        names.contains(&"href"),
+        "nested utility-derived members should survive projection, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"icon"),
+        "icon should be omitted, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"replace"),
+        "nested utility-derived omitted keys should stay omitted, got {names:?}"
+    );
+}

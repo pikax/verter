@@ -239,7 +239,12 @@ export interface ImportMeta {
   /** Whether the entire import is type-only (`import type ...`). */
   isTypeOnly: boolean;
   /** Individual imported bindings. */
-  bindings: { name: string; isTypeOnly: boolean }[];
+  bindings: {
+    name: string;
+    kind: "named" | "default" | "namespace";
+    importedName?: string | null;
+    isTypeOnly: boolean;
+  }[];
 }
 
 /** A script-level binding (variable, function, class, etc.). */

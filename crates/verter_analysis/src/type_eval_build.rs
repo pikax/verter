@@ -64,7 +64,11 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
                     extract_interface(iface, source, &mut env);
                 }
-                _ => {}
+                other => {
+                    if let Some(expr) = other.as_expression() {
+                        extract_default_expression(expr, source, &mut env);
+                    }
+                }
             },
             _ => {}
         }
@@ -346,6 +350,27 @@ fn extract_variable(
     env.add_value(ValueDeclInfo {
         name,
         kind: var_kind,
+        type_annotation,
+        function_signature,
+        object_shape,
+    });
+}
+
+fn extract_default_expression(expr: &Expression<'_>, source: &str, env: &mut EvalEnv) {
+    let function_signature = match expr {
+        Expression::ArrowFunctionExpression(arrow) => Some(extract_arrow_signature(arrow, source)),
+        Expression::FunctionExpression(func) => Some(extract_function_signature(func, source)),
+        _ => None,
+    };
+    let object_shape = match expr {
+        Expression::ObjectExpression(obj) => Some(extract_object_literal(obj, source)),
+        _ => None,
+    };
+    let type_annotation = Some(lower_value_expression(expr, source));
+
+    env.add_value(ValueDeclInfo {
+        name: "default".to_string(),
+        kind: ValueDeclKind::Const,
         type_annotation,
         function_signature,
         object_shape,
@@ -840,7 +865,7 @@ pub fn expand_macro_types(
     result
 }
 
-fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
+pub fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;

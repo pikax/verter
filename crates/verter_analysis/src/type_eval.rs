@@ -81,7 +81,7 @@ pub struct EvalEnv {
     /// Value declarations: functions, constants, classes.
     pub value_symbols: FxHashMap<String, ValueDeclInfo>,
     /// Memoized evaluations for non-generic type references.
-    resolved_refs: FxHashMap<String, TypeExpr>,
+    resolved_refs: FxHashMap<RefCacheKey, TypeExpr>,
     /// Generic type parameter bindings for the current instantiation.
     pub type_bindings: FxHashMap<String, TypeExpr>,
     /// Currently being evaluated (cycle detection).
@@ -194,12 +194,37 @@ impl Default for EvalEnv {
     }
 }
 
-fn ref_cache_key(name: &str, args: &[TypeExpr]) -> String {
-    if args.is_empty() {
-        return name.to_string();
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RefCacheKey {
+    name: String,
+    args: Vec<TypeExpr>,
+}
 
-    format!("{name}::{args:?}")
+fn ref_cache_key(name: &str, args: &[TypeExpr]) -> RefCacheKey {
+    RefCacheKey {
+        name: name.to_string(),
+        args: args.to_vec(),
+    }
+}
+
+fn is_builtin_utility_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Partial"
+            | "Required"
+            | "Readonly"
+            | "Pick"
+            | "Omit"
+            | "Record"
+            | "Extract"
+            | "Exclude"
+            | "NonNullable"
+            | "ReturnType"
+            | "Parameters"
+            | "ConstructorParameters"
+            | "InstanceType"
+            | "Awaited"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -294,8 +319,20 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
 
         // T[K]
         TypeExpr::IndexedAccess { object, index } => {
-            let obj = evaluate(object, env);
             let idx = evaluate(index, env);
+
+            // Lazy path: if the index is a string literal, try to look up the
+            // member directly without eagerly evaluating ALL members of the object.
+            // This avoids evaluating expensive sibling members (e.g., ComponentConfig
+            // has 4 members but we only need 'slots').
+            if let TypeExpr::Literal(LiteralValue::String(key)) = &idx {
+                if let Some(result) = try_lazy_member_lookup(object, key, env) {
+                    return result;
+                }
+            }
+
+            // Fallback: eager evaluation
+            let obj = evaluate(object, env);
             evaluate_indexed_access(&obj, &idx)
         }
 
@@ -365,6 +402,24 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
         }
     }
 
+    // Built-in utilities may be able to operate on the raw argument surface
+    // and avoid eagerly evaluating expensive siblings.
+    if let Some(result) = try_builtin_utility(name, type_arguments, env) {
+        return result;
+    }
+
+    // Early opaque-arg bailout on the RAW arguments. This must happen before
+    // eager argument evaluation, otherwise a case like
+    // `ComponentConfig<typeof theme, AppConfig, ...>` still fully evaluates the
+    // unrelated `AppConfig` arg before we ever get a chance to short-circuit.
+    if !type_arguments.is_empty()
+        && type_arguments
+            .iter()
+            .any(|arg| is_opaque_for_instantiation(arg, env))
+    {
+        return TypeExpr::named_with_args(name, type_arguments.to_vec());
+    }
+
     let evaluated_args = if type_arguments.is_empty() {
         Vec::new()
     } else {
@@ -373,11 +428,6 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
     let cache_key = ref_cache_key(name, &evaluated_args);
     if let Some(cached) = env.resolved_refs.get(&cache_key).cloned() {
         return cached;
-    }
-
-    // Try built-in utility types
-    if let Some(result) = try_builtin_utility(name, &evaluated_args, env) {
-        return result;
     }
 
     // Look up in type symbol table
@@ -407,9 +457,147 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
     }
 }
 
+/// Check if a type argument is opaque for generic instantiation.
+///
+/// An argument is opaque if it contains an unresolved `typeof` — meaning
+/// a runtime value import that couldn't be resolved. This is the specific
+/// case that causes pathological expansion: `typeof theme` from an unresolvable
+/// import gets substituted into mapped types that try `keyof typeof theme`,
+/// producing unbounded work.
+///
+/// Regular unresolved `Ref` inputs are also treated as opaque unless they are:
+/// - an in-scope generic parameter binding
+/// - a declared type symbol in the current environment
+/// - a built-in utility wrapper whose own arguments can still be inspected
+///
+/// This lets us fail fast on missing imported types or missing dependency files
+/// without eagerly instantiating unrelated expensive generic arguments.
+///
+/// Recurses into type arguments and structural positions to catch nested opaque
+/// inputs (e.g., `Pick<typeof theme, 'key'>` or `Foo<MissingType>`).
+fn is_opaque_for_instantiation(expr: &TypeExpr, env: &EvalEnv) -> bool {
+    match expr {
+        // typeof X where X is not in value_symbols
+        TypeExpr::TypeOf(vr) => vr.path.len() == 1 && !env.value_symbols.contains_key(&vr.path[0]),
+        // Bail on unresolved references that are neither declared symbols nor
+        // in-scope generic bindings. Utility wrappers recurse into their args.
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if is_builtin_utility_name(name) {
+                return type_arguments
+                    .iter()
+                    .any(|a| is_opaque_for_instantiation(a, env));
+            }
+            if env.type_bindings.contains_key(name.as_str()) || env.type_symbols.contains_key(name)
+            {
+                return type_arguments
+                    .iter()
+                    .any(|a| is_opaque_for_instantiation(a, env));
+            }
+            true
+        }
+        // Indexed access on an opaque object
+        TypeExpr::IndexedAccess { object, index } => {
+            is_opaque_for_instantiation(object, env) || is_opaque_for_instantiation(index, env)
+        }
+        // KeyOf on an opaque type
+        TypeExpr::KeyOf(inner) => is_opaque_for_instantiation(inner, env),
+        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
+            is_opaque_for_instantiation(inner, env)
+        }
+        TypeExpr::Array { element, .. } => is_opaque_for_instantiation(element, env),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| is_opaque_for_instantiation(&element.ty, env)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types.iter().any(|ty| is_opaque_for_instantiation(ty, env))
+        }
+        TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
+            ObjectMember::Property(prop) => is_opaque_for_instantiation(&prop.ty, env),
+            ObjectMember::IndexSignature(sig) => {
+                is_opaque_for_instantiation(&sig.key_type, env)
+                    || is_opaque_for_instantiation(&sig.value_type, env)
+            }
+            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                is_function_opaque_for_instantiation(func, env)
+            }
+            ObjectMember::Method(method) => {
+                is_function_opaque_for_instantiation(&method.function, env)
+            }
+        }),
+        TypeExpr::Function(func) => is_function_opaque_for_instantiation(func, env),
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => [check, extends, true_type, false_type]
+            .into_iter()
+            .any(|ty| is_opaque_for_instantiation(ty, env)),
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            is_opaque_for_instantiation(source, env)
+                || is_opaque_for_instantiation(value, env)
+                || name_type
+                    .as_deref()
+                    .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|expr| is_opaque_for_instantiation(expr, env)),
+        _ => false,
+    }
+}
+
+fn is_function_opaque_for_instantiation(func: &FunctionExpr, env: &EvalEnv) -> bool {
+    func.parameters
+        .iter()
+        .any(|param| is_opaque_for_instantiation(&param.ty, env))
+        || func
+            .return_type
+            .as_deref()
+            .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+        || func.type_parameters.iter().any(|param| {
+            param
+                .constraint
+                .as_deref()
+                .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+                || param
+                    .default
+                    .as_deref()
+                    .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+        })
+}
+
 fn instantiate_generic(decl: &TypeDeclInfo, args: &[TypeExpr], env: &mut EvalEnv) -> TypeExpr {
+    // Opaque-argument bailout: if any evaluated type argument is opaque
+    // (e.g., unresolved `typeof theme`), skip body expansion and return
+    // the symbolic reference with evaluated args. This prevents unbounded
+    // expansion of complex generics when an argument can't be resolved.
+    if args.iter().any(|a| is_opaque_for_instantiation(a, env)) {
+        return TypeExpr::named_with_args(&decl.name, args.to_vec());
+    }
+
+    let saved = bind_type_parameters(decl, args, env);
+    let result = evaluate(&decl.body, env);
+    restore_type_parameters(saved, env);
+
+    result
+}
+
+pub(crate) fn bind_type_parameters(
+    decl: &TypeDeclInfo,
+    args: &[TypeExpr],
+    env: &mut EvalEnv,
+) -> Vec<(String, Option<TypeExpr>)> {
     // Save current bindings
-    let saved: Vec<(String, Option<TypeExpr>)> = decl
+    let saved = decl
         .type_parameters
         .iter()
         .map(|p| (p.name.clone(), env.type_bindings.get(&p.name).cloned()))
@@ -427,9 +615,10 @@ fn instantiate_generic(decl: &TypeDeclInfo, args: &[TypeExpr], env: &mut EvalEnv
         env.type_bindings.insert(param.name.clone(), arg);
     }
 
-    let result = evaluate(&decl.body, env);
+    saved
+}
 
-    // Restore bindings
+pub(crate) fn restore_type_parameters(saved: Vec<(String, Option<TypeExpr>)>, env: &mut EvalEnv) {
     for (name, prev) in saved {
         if let Some(prev) = prev {
             env.type_bindings.insert(name, prev);
@@ -437,8 +626,27 @@ fn instantiate_generic(decl: &TypeDeclInfo, args: &[TypeExpr], env: &mut EvalEnv
             env.type_bindings.remove(&name);
         }
     }
+}
 
-    result
+pub(crate) fn with_bound_type_decl<R, F>(
+    name: &str,
+    type_arguments: &[TypeExpr],
+    env: &mut EvalEnv,
+    f: F,
+) -> Option<R>
+where
+    F: FnOnce(&TypeDeclInfo, &mut EvalEnv) -> R,
+{
+    let decl = env.type_symbols.get(name)?.clone();
+    if env.active.contains(name) {
+        return None;
+    }
+    env.active.insert(name.to_string());
+    let saved = bind_type_parameters(&decl, type_arguments, env);
+    let result = f(&decl, env);
+    restore_type_parameters(saved, env);
+    env.active.remove(name);
+    Some(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -464,13 +672,30 @@ fn try_builtin_utility(
             Some(apply_readonly(&inner))
         }
         "Pick" if type_arguments.len() == 2 => {
-            let inner = evaluate(&type_arguments[0], env);
             let keys = evaluate(&type_arguments[1], env);
+            let key_set: rustc_hash::FxHashSet<String> =
+                extract_string_keys_recursive(&keys).into_iter().collect();
+            if !key_set.is_empty() {
+                if let Some(obj) =
+                    try_project_object_shape(&type_arguments[0], &key_set, false, env)
+                {
+                    return Some(TypeExpr::Object(obj));
+                }
+            }
+            let inner = evaluate(&type_arguments[0], env);
             Some(apply_pick(&inner, &keys))
         }
         "Omit" if type_arguments.len() == 2 => {
-            let inner = evaluate(&type_arguments[0], env);
             let keys = evaluate(&type_arguments[1], env);
+            let key_set: rustc_hash::FxHashSet<String> =
+                extract_string_keys_recursive(&keys).into_iter().collect();
+            if !key_set.is_empty() {
+                if let Some(obj) = try_project_object_shape(&type_arguments[0], &key_set, true, env)
+                {
+                    return Some(TypeExpr::Object(obj));
+                }
+            }
+            let inner = evaluate(&type_arguments[0], env);
             Some(apply_omit(&inner, &keys))
         }
         "Record" if type_arguments.len() == 2 => {
@@ -929,6 +1154,177 @@ fn resolve_typeof(value_ref: &ValueRef, env: &mut EvalEnv) -> Option<TypeExpr> {
 // ---------------------------------------------------------------------------
 // Indexed access: T[K]
 // ---------------------------------------------------------------------------
+
+/// Try to look up a member by name on a raw (unevaluated) type expression.
+///
+/// This avoids eagerly evaluating ALL members of large object types when only
+/// one member is needed. For `ComponentConfig<T, A, K>['slots']`, this resolves
+/// the generic body to find `slots` without evaluating `AppConfig`, `variants`,
+/// or `ui`.
+///
+/// Returns `Some(evaluated_member_type)` if the member can be found and evaluated
+/// directly. Returns `None` to fall back to eager evaluation.
+///
+/// Handles:
+/// - `TypeExpr::Object` — direct property scan
+/// - `TypeExpr::Ref` — resolve declaration body, bind generic params, recurse
+///
+/// Does NOT handle (falls back to eager):
+/// - Mapped types, conditionals, intersections, unions
+/// - Non-object bodies
+fn try_lazy_member_lookup(object: &TypeExpr, key: &str, env: &mut EvalEnv) -> Option<TypeExpr> {
+    match object {
+        TypeExpr::Object(obj) => {
+            // Direct object literal — look up the member without evaluating siblings
+            for member in &obj.properties {
+                if let ObjectMember::Property(p) = member {
+                    if p.name == key {
+                        return Some(evaluate(&p.ty, env));
+                    }
+                }
+                if let ObjectMember::Method(m) = member {
+                    if m.name == key {
+                        return Some(TypeExpr::Function(m.function.clone()));
+                    }
+                }
+            }
+            None // Member not found in this object
+        }
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => with_bound_type_decl(name, type_arguments, env, |decl, env| {
+            try_lazy_member_lookup(&decl.body, key, env)
+        })
+        .flatten(),
+        TypeExpr::Parenthesized(inner) => try_lazy_member_lookup(inner, key, env),
+        _ => None, // Can't short-circuit — fall back to eager evaluation
+    }
+}
+
+/// Project an object/ref surface to a subset of members without evaluating the
+/// omitted member types. `omit_mode = false` behaves like Pick; `true` behaves
+/// like Omit.
+fn try_project_object_shape(
+    object: &TypeExpr,
+    keys: &rustc_hash::FxHashSet<String>,
+    omit_mode: bool,
+    env: &mut EvalEnv,
+) -> Option<ObjectExpr> {
+    match object {
+        TypeExpr::Object(obj) => Some(project_object_members(obj, keys, omit_mode, env)),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if let Some(projected) = with_bound_type_decl(name, type_arguments, env, |decl, env| {
+                try_project_object_shape(&decl.body, keys, omit_mode, env)
+            })
+            .flatten()
+            {
+                return Some(projected);
+            }
+
+            let evaluated = evaluate(object, env);
+            if &evaluated == object {
+                None
+            } else {
+                try_project_object_shape(&evaluated, keys, omit_mode, env)
+            }
+        }
+        TypeExpr::Intersection(types) => {
+            let projected: Vec<ObjectExpr> = types
+                .iter()
+                .filter_map(|branch| try_project_object_shape(branch, keys, omit_mode, env))
+                .collect();
+            merge_object_branches(projected)
+        }
+        TypeExpr::Parenthesized(inner) => try_project_object_shape(inner, keys, omit_mode, env),
+        TypeExpr::IndexedAccess { .. } | TypeExpr::TypeOf(_) => {
+            let evaluated = evaluate(object, env);
+            if &evaluated == object {
+                None
+            } else {
+                try_project_object_shape(&evaluated, keys, omit_mode, env)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn project_object_members(
+    obj: &ObjectExpr,
+    keys: &rustc_hash::FxHashSet<String>,
+    omit_mode: bool,
+    env: &mut EvalEnv,
+) -> ObjectExpr {
+    let properties = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => {
+                let keep = if omit_mode {
+                    !keys.contains(&prop.name)
+                } else {
+                    keys.contains(&prop.name)
+                };
+                keep.then(|| {
+                    ObjectMember::Property(ObjectProperty {
+                        ty: evaluate(&prop.ty, env),
+                        ..prop.clone()
+                    })
+                })
+            }
+            ObjectMember::Method(method) => {
+                let keep = if omit_mode {
+                    !keys.contains(&method.name)
+                } else {
+                    keys.contains(&method.name)
+                };
+                keep.then(|| ObjectMember::Method(method.clone()))
+            }
+            ObjectMember::IndexSignature(sig) => {
+                omit_mode.then(|| ObjectMember::IndexSignature(sig.clone()))
+            }
+            ObjectMember::CallSignature(sig) => omit_mode.then(|| {
+                ObjectMember::CallSignature(FunctionExpr {
+                    parameters: sig
+                        .parameters
+                        .iter()
+                        .map(|param| FunctionParam {
+                            ty: evaluate(&param.ty, env),
+                            ..param.clone()
+                        })
+                        .collect(),
+                    return_type: sig
+                        .return_type
+                        .as_ref()
+                        .map(|ret| Box::new(evaluate(ret, env))),
+                    type_parameters: sig.type_parameters.clone(),
+                })
+            }),
+            ObjectMember::ConstructSignature(sig) => omit_mode.then(|| {
+                ObjectMember::ConstructSignature(FunctionExpr {
+                    parameters: sig
+                        .parameters
+                        .iter()
+                        .map(|param| FunctionParam {
+                            ty: evaluate(&param.ty, env),
+                            ..param.clone()
+                        })
+                        .collect(),
+                    return_type: sig
+                        .return_type
+                        .as_ref()
+                        .map(|ret| Box::new(evaluate(ret, env))),
+                    type_parameters: sig.type_parameters.clone(),
+                })
+            }),
+        })
+        .collect();
+
+    ObjectExpr { properties }
+}
 
 fn evaluate_indexed_access(object: &TypeExpr, index: &TypeExpr) -> TypeExpr {
     match (object, index) {

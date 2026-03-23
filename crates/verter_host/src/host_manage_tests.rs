@@ -22,25 +22,27 @@ fn make_lazy_host() -> VerterHost {
 }
 
 fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(src),
-        file_kind: FileKind::VueSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 }
 
 fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(src),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 }
 
 #[cfg(not(feature = "scheduler"))]
@@ -191,37 +193,25 @@ defineProps<ChildProps>()
     let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
     let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
 
+    let link_keys = inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "LinkPropsKeys")
+        .expect("imported key alias should be tracked");
     assert!(
-        inputs
-            .sources
-            .iter()
-            .any(|source| source.contains("export type LinkPropsKeys")),
-        "tracked eval sources should include extracted LinkPropsKeys alias, got: {:?}",
-        inputs.sources
+        link_keys.source_canonical_id == "/src/Link.vue",
+        "key alias should resolve to the Vue dependency source, got: {:?}",
+        link_keys
     );
-
-    let mut env = verter_analysis::type_eval_build::parse_and_build_env("");
-    for dep_source in &inputs.sources {
-        env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
-            dep_source,
-        ));
-    }
-    let link_keys = env
-        .type_symbols
-        .get("LinkPropsKeys")
-        .expect("eval env should contain LinkPropsKeys");
+    assert_eq!(link_keys.exported_name, "LinkPropsKeys");
     assert!(
-        matches!(
-            link_keys.body,
-            verter_analysis::type_expr::TypeExpr::Union(_)
-        ),
-        "LinkPropsKeys should lower to a literal union, got: {:?}",
-        link_keys.body
+        inputs.canonical_dependencies.contains("/src/Link.vue"),
+        "actual declaration source should be tracked for invalidation"
     );
 }
 
 #[test]
-fn imported_eval_inputs_keep_structured_type_expr_for_resolved_types() {
+fn imported_eval_inputs_capture_shallow_type_aliases() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -251,28 +241,59 @@ defineProps<Props>()
         .expect("analysis snapshot should exist");
     let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
     let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
-    let resolved = inputs
-        .resolved_types
+    let alias = inputs
+        .type_aliases
         .iter()
-        .find(|ty| ty.name == "Props")
-        .expect("resolved imported type should be captured");
+        .find(|alias| alias.local_name == "Props")
+        .expect("imported type alias should be captured");
 
-    match resolved.type_expr.as_ref() {
-        Some(verter_analysis::type_expr::TypeExpr::Object(obj)) => {
-            let names: Vec<&str> = obj
-                .properties
-                .iter()
-                .filter_map(|member| match member {
-                    verter_analysis::type_expr::ObjectMember::Property(prop) => {
-                        Some(prop.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(names, vec!["label", "count"]);
-        }
-        other => panic!("expected structured object type for imported Props, got {other:?}"),
-    }
+    assert_eq!(alias.exported_name, "Props");
+    assert_eq!(alias.source_canonical_id, "/src/types.ts");
+    assert!(
+        inputs.canonical_dependencies.contains("/src/types.ts"),
+        "declaration source should be tracked for invalidation"
+    );
+}
+
+#[test]
+fn imported_eval_inputs_recurse_into_record_type_arguments() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export type PropKeys = 'label' | 'size'",
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { PropKeys } from './types'
+defineProps<Record<PropKeys, string>>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+
+    let alias = inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "PropKeys")
+        .expect("imported aliases nested inside utility wrappers should be captured");
+    assert_eq!(alias.exported_name, "PropKeys");
+    assert_eq!(alias.source_canonical_id, "/src/types.ts");
 }
 
 #[test]
@@ -375,40 +396,19 @@ defineProps<ChildProps>()
         ],
     );
 
-    let (source, cached_parse, _) = host
-        .current_eval_state("/src/App.vue")
-        .expect("App eval state should exist");
-    let eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
-    let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
     let snapshot = host
         .get_analysis_snapshot_internal("/src/App.vue", None)
         .expect("analysis snapshot should exist");
     let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
     let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
-    for dep_source in &inputs.sources {
-        env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
-            dep_source,
-        ));
-    }
-
-    let child = env
-        .type_symbols
-        .get("ChildProps")
-        .expect("ChildProps should exist")
-        .body
-        .clone();
-    let evaluated = verter_analysis::type_eval::evaluate(&child, &mut env);
-    let child_shape = match evaluated {
-        verter_analysis::type_expr::TypeExpr::Object(obj) => obj,
-        other => panic!("ChildProps should evaluate to an object, got: {other:?}"),
-    };
-    let names: Vec<String> = child_shape
-        .properties
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("shared owner env builder should evaluate ChildProps");
+    let names: Vec<String> = evaluated
+        .define_props
         .iter()
-        .filter_map(|member| match member {
-            verter_analysis::type_expr::ObjectMember::Property(prop) => Some(prop.name.clone()),
-            _ => None,
-        })
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
         .collect();
 
     assert!(
@@ -438,7 +438,7 @@ defineProps<ChildProps>()
 }
 
 #[test]
-fn imported_eval_inputs_walks_deep_dependency_graph_without_truncation() {
+fn imported_eval_inputs_track_direct_runtime_deps_without_loading_value_graphs() {
     let host = make_host();
     upsert_vue(
         &host,
@@ -492,17 +492,20 @@ console.log(value0)
     let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
 
     assert!(
-        inputs.canonical_dependencies.contains("/src/dep39.ts"),
-        "deep dependency walk should reach the tail module, got: {:?}",
+        inputs.canonical_dependencies.contains("/src/dep0.ts"),
+        "direct runtime imports should still be tracked for invalidation, got: {:?}",
+        inputs.canonical_dependencies
+    );
+    assert_eq!(
+        inputs.canonical_dependencies.len(),
+        1,
+        "only the direct runtime import should be tracked when no macro-reachable types exist, got: {:?}",
         inputs.canonical_dependencies
     );
     assert!(
-        inputs
-            .sources
-            .iter()
-            .any(|source| source.contains("value39 = 39")),
-        "deep dependency walk should include the terminal source, got {} sources",
-        inputs.sources.len()
+        inputs.sources.is_empty(),
+        "non-macro value imports should not contribute eval sources, got: {:?}",
+        inputs.sources
     );
 }
 
@@ -589,6 +592,113 @@ fn get_analysis_resolves_relative_import() {
         child_import.resolved_canonical_id.as_deref(),
         Some("/project/Child.vue"),
         "relative import should resolve to canonical ID"
+    );
+}
+
+#[test]
+fn imported_eval_inputs_capture_type_imports_used_only_in_binding_annotations() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface RootAttrs { id: string; onClick?: () => void }",
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { RootAttrs } from './types'
+
+const rootAttrs: RootAttrs = { id: 'app' }
+</script>
+<template><div v-bind="rootAttrs" /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+
+    let alias = inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "RootAttrs")
+        .expect("binding annotation import should be captured for eval inputs");
+    assert_eq!(alias.exported_name, "RootAttrs");
+    assert_eq!(alias.source_canonical_id, "/src/types.ts");
+}
+
+#[test]
+fn imported_type_alias_injection_prefers_owner_import_name_over_merged_dep_symbol() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/a.ts",
+        "export interface Props { fromA: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/b.ts",
+        "export interface Props { fromB: number }",
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './a'
+import type { Props as OtherProps } from './b'
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./a".to_string(),
+                resolved_canonical_id: Some("/src/a.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./b".to_string(),
+                resolved_canonical_id: Some("/src/b.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("owner env builder should evaluate imported props");
+    let names: Vec<String> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "fromA"),
+        "owner import alias should win over merged dependency symbols, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "fromB"),
+        "merged dependency symbol must not shadow the owner's imported alias, got: {names:?}"
     );
 }
 
@@ -824,14 +934,15 @@ fn get_export_span_vue_unknown_binding() {
 #[test]
 fn get_export_span_ts_file() {
     let host = make_host();
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "utils.ts".to_string(),
-        source: Arc::from("export function helper() { return 1; }"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "utils.ts".to_string(),
+            source: Arc::from("export function helper() { return 1; }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 
     let span = host.get_export_span("utils.ts", "helper");
     assert!(span.is_some(), "should find 'helper' export in .ts file");
@@ -911,14 +1022,15 @@ fn resolve_import_public_method_handles_relative_full_paths() {
 }
 
 fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(src),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 }
 
 #[test]
@@ -1219,13 +1331,14 @@ fn follow_reexport_deep_chain_no_limit() {
 }
 
 fn compile_template(host: &VerterHost, id: &str) {
-    host.get_virtual_file(crate::types::VirtualQuery {
-        raw_id: Some(format!("{id}?vue&type=template")),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: crate::types::CompileProfile::default(),
-    })
-    .unwrap();
+    let _ = host
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: Some(format!("{id}?vue&type=template")),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: crate::types::CompileProfile::default(),
+        })
+        .unwrap();
 }
 
 #[test]

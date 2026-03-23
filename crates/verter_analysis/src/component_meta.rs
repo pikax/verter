@@ -14,13 +14,22 @@
 use crate::type_expr::TypeExpr;
 use crate::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedEmitField, AnalyzedImport, AnalyzedMacro,
-    AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, JsdocTag,
-    StoreUsage, VueApiCallSite,
+    AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
+    JsdocTag, StoreUsage, VueApiCallSite,
 };
 
 /// Convenience: build `TypeExpr::Unknown { raw }` from a string.
 fn unknown_type(raw: impl Into<String>) -> TypeExpr {
     TypeExpr::Unknown { raw: raw.into() }
+}
+
+fn parse_annotation_or_unknown(raw: &str) -> TypeExpr {
+    let parsed = crate::type_expr_lower::parse_type_annotation(raw);
+    if parsed.is_unknown() {
+        unknown_type(raw.to_string())
+    } else {
+        parsed
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -208,6 +217,8 @@ pub struct ImportAnalysis {
 #[derive(Debug, Clone)]
 pub struct ImportBindingAnalysis {
     pub name: String,
+    pub kind: ImportBindingKind,
+    pub imported_name: Option<String>,
     pub is_type_only: bool,
 }
 
@@ -1307,7 +1318,7 @@ fn resolve_prop_type(
         }
     }
     match &field.type_annotation {
-        Some(raw) => (unknown_type(raw.clone()), None),
+        Some(raw) => (parse_annotation_or_unknown(raw), None),
         None => (unknown_type("unknown".to_string()), None),
     }
 }
@@ -1326,12 +1337,12 @@ fn extract_events_from_macro(
                 .find(|f| f.name == field.name)
                 .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
                 .unwrap_or_else(|| match &field.payload_type {
-                    Some(raw) => (unknown_type(raw.clone()), None),
+                    Some(raw) => (parse_annotation_or_unknown(raw), None),
                     None => (unknown_type("unknown".to_string()), None),
                 })
         } else {
             match &field.payload_type {
-                Some(raw) => (unknown_type(raw.clone()), None),
+                Some(raw) => (parse_annotation_or_unknown(raw), None),
                 None => (unknown_type("unknown".to_string()), None),
             }
         };
@@ -1367,12 +1378,12 @@ fn extract_slots_from_macro(
                         .find(|f| f.name == key)
                         .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
                         .unwrap_or_else(|| match &b.type_annotation {
-                            Some(raw) => (unknown_type(raw.clone()), None),
+                            Some(raw) => (parse_annotation_or_unknown(raw), None),
                             None => (unknown_type("unknown".to_string()), None),
                         })
                 } else {
                     match &b.type_annotation {
-                        Some(raw) => (unknown_type(raw.clone()), None),
+                        Some(raw) => (parse_annotation_or_unknown(raw), None),
                         None => (unknown_type("unknown".to_string()), None),
                     }
                 };
@@ -1440,7 +1451,7 @@ fn extract_model_from_macro(
             .iter()
             .find(|f| f.name == name)
             .and_then(|f| f.type_annotation.as_ref())
-            .map(|raw| unknown_type(raw.clone()))
+            .map(|raw| parse_annotation_or_unknown(raw))
             .unwrap_or_else(|| unknown_type("unknown".to_string()))
     };
 
@@ -1474,7 +1485,11 @@ fn synthesize_model_prop_and_event(
                     .find(|field| field.name == name)
                     .map(|field| field.r#type.clone())
             })
-            .or_else(|| raw_type.as_ref().map(|raw| unknown_type(raw.clone())))
+            .or_else(|| {
+                raw_type
+                    .as_ref()
+                    .map(|raw| parse_annotation_or_unknown(raw))
+            })
             .unwrap_or_else(|| unknown_type("unknown".to_string()));
 
         let prop_raw_type = if has_default {
@@ -1577,7 +1592,7 @@ fn resolve_exposed_type(
     // Fall back to binding type annotation if available
     if let Some(binding) = bindings.iter().find(|b| b.name == name) {
         if let Some(ref ann) = binding.type_annotation {
-            return unknown_type(ann.clone());
+            return parse_annotation_or_unknown(ann);
         }
     }
     unknown_type("unknown".to_string())
@@ -1647,7 +1662,7 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
             type_expr: prop
                 .type_annotation
                 .as_ref()
-                .map(|raw| unknown_type(raw.clone()))
+                .map(|raw| parse_annotation_or_unknown(raw))
                 .or_else(|| {
                     prop.type_constructor.as_ref().map(|rt| match rt.as_str() {
                         "String" => TypeExpr::Primitive(crate::type_expr::PrimitiveName::String),
@@ -1676,7 +1691,7 @@ fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAna
         out.push(EventAnalysis {
             name: field.name.clone(),
             payload: match &field.payload_type {
-                Some(raw) => unknown_type(raw.clone()),
+                Some(raw) => parse_annotation_or_unknown(raw),
                 None => unknown_type("unknown".to_string()),
             },
             payload_expansion: None,
@@ -1753,6 +1768,8 @@ fn extract_imports(imports: &[AnalyzedImport]) -> Vec<ImportAnalysis> {
                 .iter()
                 .map(|binding| ImportBindingAnalysis {
                     name: binding.name.clone(),
+                    kind: binding.kind,
+                    imported_name: binding.imported_name.clone(),
                     is_type_only: binding.is_type_only,
                 })
                 .collect(),

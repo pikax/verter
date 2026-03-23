@@ -212,7 +212,7 @@ fn evaluated_types_are_used_when_supplied() {
 }
 
 #[test]
-fn props_fall_back_to_unknown_when_no_evaluated_type() {
+fn props_fall_back_to_parsed_annotation_when_no_evaluated_type() {
     let macros = vec![make_define_props(vec![make_prop(
         "label",
         Some("MyType"),
@@ -222,10 +222,7 @@ fn props_fall_back_to_unknown_when_no_evaluated_type() {
     let result = extract_component_meta(empty_input(&macros));
 
     assert_eq!(result.props.len(), 1);
-    match &result.props[0].type_expr {
-        TypeExpr::Unknown { raw } => assert_eq!(raw, "MyType"),
-        other => panic!("expected Unknown(\"MyType\"), got {other:?}"),
-    }
+    assert_eq!(result.props[0].type_expr, TypeExpr::named("MyType"));
     assert_eq!(
         result.props[0].raw_type.as_deref(),
         Some("MyType"),
@@ -694,8 +691,8 @@ fn options_api_prop_type_annotation_is_preserved() {
     assert_eq!(result.props.len(), 1);
     assert_eq!(
         result.props[0].type_expr,
-        unknown_type("HTMLCanvasElement".to_string()),
-        "PropType<T> annotation should survive Options API extraction"
+        TypeExpr::named("HTMLCanvasElement"),
+        "parseable PropType<T> annotations should survive Options API extraction as structured refs"
     );
     assert_eq!(
         result.props[0].raw_type.as_deref(),

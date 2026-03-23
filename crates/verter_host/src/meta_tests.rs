@@ -60,6 +60,16 @@ fn evaluated_prop_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a
         .r#type
 }
 
+fn evaluated_define_props_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a TypeExpr {
+    &types
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .find(|prop| prop.name == name)
+        .unwrap_or_else(|| panic!("missing defineProps property {name}"))
+        .ty
+}
+
 fn cached_resolved_state(
     project: &MetaProject,
     canonical: &str,
@@ -792,6 +802,119 @@ defineProps<Props>()
 }
 
 #[test]
+fn evaluate_types_resolves_imported_default_typeof() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/theme.ts",
+            r#"export default {
+  item: "item",
+  body: "body",
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import theme from './theme'
+
+defineProps<{
+  ui: typeof theme
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let analysis = session.get_analysis("/Comp.vue").unwrap().unwrap();
+    assert_eq!(analysis.imports.len(), 1);
+    assert_eq!(analysis.imports[0].bindings.len(), 1);
+    assert_eq!(
+        analysis.imports[0].bindings[0].kind,
+        verter_analysis::types::ImportBindingKind::Default
+    );
+    assert_eq!(
+        analysis.imports[0].bindings[0].imported_name.as_deref(),
+        Some("default")
+    );
+    assert!(
+        analysis.imports[0].resolved_canonical_id.is_some(),
+        "default import should already be resolved in the analysis snapshot"
+    );
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+
+    match evaluated_prop_type(&evaluated, "ui") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"item"));
+            assert!(names.contains(&"body"));
+        }
+        other => panic!("expected imported typeof theme to resolve to an object, got {other:?}"),
+    }
+}
+
+#[test]
+fn imported_default_typeof_recovers_after_dependency_is_added() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import theme from './theme'
+
+defineProps<{
+  ui: typeof theme
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let initial = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    assert!(
+        !matches!(evaluated_prop_type(&initial, "ui"), TypeExpr::Object(_)),
+        "missing dependency should not resolve imported typeof exactly"
+    );
+
+    project
+        .upsert_base(
+            "/theme.ts",
+            r#"export default {
+  item: "item",
+  body: "body",
+}"#,
+        )
+        .unwrap();
+
+    let reevaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    match evaluated_prop_type(&reevaluated, "ui") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"item"));
+            assert!(names.contains(&"body"));
+        }
+        other => panic!("expected imported typeof theme to recover to an object, got {other:?}"),
+    }
+}
+
+#[test]
 fn evaluate_types_resolves_imported_types_before_running_utilities() {
     let project = make_project();
     project
@@ -837,6 +960,250 @@ defineProps<{
         }
         other => panic!("expected imported utility to resolve to an object, got {other:?}"),
     }
+}
+
+#[test]
+fn evaluate_types_prunes_imported_eval_inputs_to_macro_reachable_deps() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/used.ts",
+            r#"export interface UsedProps {
+  title: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/unused-c.ts",
+            r#"export interface UnusedC {
+  c: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/unused-b.ts",
+            r#"import type { UnusedC } from './unused-c'
+export type UnusedB = UnusedC & { b: string }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/unused-a.ts",
+            r#"import type { UnusedB } from './unused-b'
+export type UnusedA = UnusedB & { a: string }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { UsedProps } from './used'
+import type { UnusedA } from './unused-a'
+
+defineProps<UsedProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    assert_eq!(
+        evaluated_define_props_type(&evaluated, "title"),
+        &TypeExpr::Primitive(PrimitiveName::String)
+    );
+
+    let state = cached_resolved_state(&project, "/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("evaluation should populate the resolved-meta cache");
+    let inputs = state
+        .cached_eval_inputs
+        .as_ref()
+        .expect("expanded resolution should cache imported eval inputs");
+
+    assert!(
+        inputs.canonical_dependencies.contains("/used.ts"),
+        "macro-reachable dependency should be tracked"
+    );
+    assert!(
+        !inputs.canonical_dependencies.contains("/unused-a.ts"),
+        "unused owner import should not be pulled into eval inputs"
+    );
+    assert!(
+        !inputs.canonical_dependencies.contains("/unused-b.ts"),
+        "transitive graph behind an unused import should stay pruned"
+    );
+    assert!(
+        !inputs.canonical_dependencies.contains("/unused-c.ts"),
+        "unreachable transitive dependency should stay pruned"
+    );
+}
+
+#[test]
+fn evaluate_types_resolve_relevant_transitive_imported_heritage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/base.ts",
+            r#"export interface BaseProps {
+  id: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/props.ts",
+            r#"import type { BaseProps } from './base'
+
+export interface Props extends BaseProps {
+  label: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './props'
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    match evaluated_define_props_type(&evaluated, "id") {
+        TypeExpr::Primitive(PrimitiveName::String) => {}
+        other => panic!("expected inherited prop 'id' to resolve to string, got {other:?}"),
+    }
+    match evaluated_define_props_type(&evaluated, "label") {
+        TypeExpr::Primitive(PrimitiveName::String) => {}
+        other => panic!("expected direct prop 'label' to resolve to string, got {other:?}"),
+    }
+
+    let state = cached_resolved_state(&project, "/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("evaluation should populate the resolved-meta cache");
+    let inputs = state
+        .cached_eval_inputs
+        .as_ref()
+        .expect("expanded resolution should cache imported eval inputs");
+
+    assert!(
+        inputs.canonical_dependencies.contains("/props.ts"),
+        "direct imported declaration source should be tracked"
+    );
+    assert!(
+        inputs.canonical_dependencies.contains("/base.ts"),
+        "relevant transitive heritage dependency should be tracked"
+    );
+}
+
+#[test]
+fn evaluate_types_skips_irrelevant_transitive_generic_arg_dependencies() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/tv.ts",
+            r#"export type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: string
+}
+
+export type ComponentConfig<T extends { slots?: Record<string, any> }, A extends Record<string, any>> = {
+  appConfig: A
+  slots: ComponentSlots<T>
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/schema-leaf.ts",
+            r#"export interface SchemaLeaf {
+  label: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/schema.ts",
+            r#"import type { SchemaLeaf } from './schema-leaf'
+
+export interface AppConfig {
+  ui?: SchemaLeaf
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/theme.ts",
+            r#"export default {
+  slots: {
+    item: 'item',
+    body: 'body'
+  }
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ComponentConfig } from './tv'
+import type { AppConfig } from './schema'
+import theme from './theme'
+
+type Accordion = ComponentConfig<typeof theme, AppConfig>
+
+defineProps<{
+  ui: Accordion['slots']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    match evaluated_prop_type(&evaluated, "ui") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"item"));
+            assert!(names.contains(&"body"));
+        }
+        other => panic!("expected ui slots object, got {other:?}"),
+    }
+
+    let state = cached_resolved_state(&project, "/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("evaluation should populate the resolved-meta cache");
+    let inputs = state
+        .cached_eval_inputs
+        .as_ref()
+        .expect("expanded resolution should cache imported eval inputs");
+
+    assert!(
+        inputs.canonical_dependencies.contains("/tv.ts"),
+        "ComponentConfig declaration source should be tracked"
+    );
+    assert!(
+        inputs.canonical_dependencies.contains("/schema.ts"),
+        "direct generic arg source should still be tracked for invalidation"
+    );
+    assert!(
+        !inputs.canonical_dependencies.contains("/schema-leaf.ts"),
+        "irrelevant transitive imports behind an unused generic arg should stay out of eval inputs"
+    );
 }
 
 #[test]
@@ -3905,11 +4272,12 @@ import Child from './Child.vue'
 // ── Fix 2: eval-path host cache reuse within single resolve_component_meta ──
 
 #[test]
-fn eval_path_benefits_from_host_cache_within_single_resolve() {
-    // The meta_resolve loop (step 2) calls resolve_external_type_from_loaded_files
-    // with use_host_cache: true, warming the cache. Then imported_eval_inputs (step 3)
-    // calls the same function. After Fix 2 (use_host_cache: true in eval path),
-    // the eval path should hit the cache warmed earlier in the same call.
+fn eval_path_reuses_cached_eval_inputs_within_single_resolve() {
+    // The Phase 2 architecture no longer expects the eval path to bounce back
+    // through resolve_external_type_from_loaded_files inside the same call.
+    // Instead, expanded resolution should build imported eval inputs once,
+    // cache them on the resolved state, and reuse that cached input set for the
+    // follow-up eval/fallthrough work within the same get_component_meta call.
     let project = make_project();
     let session = project.open_session().unwrap();
 
@@ -3940,7 +4308,7 @@ defineProps<ButtonProps>()
         }],
     );
 
-    // Reset counters, then query component meta once
+    // Reset counters, then query component meta once.
     project.host().provenance().reset();
     let meta = session
         .get_component_meta("/src/Button.vue")
@@ -3954,16 +4322,21 @@ defineProps<ButtonProps>()
         "should resolve the prop from cross-file type"
     );
     assert_eq!(meta.props[0].name, "label");
+    assert_eq!(
+        p.imported_eval_inputs_calls, 1,
+        "expanded resolution should build imported eval inputs once and reuse them within the same call, got calls={}",
+        p.imported_eval_inputs_calls,
+    );
 
-    // The eval path should have benefited from the host cache warmed by the
-    // meta_resolve path earlier in the same resolve_component_meta call.
-    // Before fix: hits == 0 (eval path passed use_host_cache: false)
-    // After fix: hits > 0 (eval path hits cache warmed by meta_resolve)
+    let state = cached_resolved_state(
+        &project,
+        "/src/Button.vue",
+        crate::types::ResolverMode::Expanded,
+    )
+    .expect("expanded resolved state should be cached");
     assert!(
-        p.resolved_external_type_cache_hits >= 1,
-        "eval path should hit host cache warmed by meta_resolve path within the same call, got hits={} misses={}",
-        p.resolved_external_type_cache_hits,
-        p.resolved_external_type_cache_misses,
+        state.cached_eval_inputs.is_some(),
+        "expanded resolved state should retain cached imported eval inputs"
     );
 }
 
@@ -4105,14 +4478,19 @@ defineProps<WidgetProps>()
 // ── Fix 4: full eval source set for utility heritage and fallthrough ─────────
 
 #[test]
-fn full_eval_sources_include_macro_and_value_dependencies() {
+fn cached_eval_inputs_track_macro_and_runtime_dependencies() {
     // Component with:
     // - a cross-file macro type dep (ButtonProps from ./types.ts)
     // - an imported value (rootAttrs from ./utils.ts) used in v-bind spread
     // - additional non-type imports (./helpers.ts)
     //
-    // The cached eval inputs should include both the macro type source and the
-    // broader value-only imports required by downstream evaluation.
+    // Phase 2 no longer requires value-only imports to be merged into
+    // `cached_eval_inputs.sources`. Runtime values are materialized from the
+    // owner snapshot's resolved imports when the owner eval env is built.
+    //
+    // The cached inputs should therefore:
+    // - keep the macro type source in `sources` for imported type eval
+    // - track runtime imports in `canonical_dependencies` for invalidation
     let project = make_project();
     project
         .upsert_base(
@@ -4192,42 +4570,8 @@ const msg = format('hello')
         "full eval sources should include the macro type source"
     );
     assert!(
-        imported_inputs
-            .sources
-            .iter()
-            .any(|source| source.contains("root-attrs-marker")),
-        "full eval sources should include the value-only utils import used by v-bind"
-    );
-
-    let mut full_env = verter_analysis::type_eval_build::parse_and_build_env("");
-    for dep_source in &imported_inputs.sources {
-        full_env.extend_missing(verter_analysis::type_eval_build::parse_and_build_env(
-            dep_source,
-        ));
-    }
-    let full_eval =
-        verter_analysis::type_eval_build::evaluate_value_expression("rootAttrs", &mut full_env)
-            .expect("value expression parsing should succeed");
-    let full_object = match full_eval {
-        verter_analysis::type_expr::TypeExpr::Object(obj) => obj,
-        other => panic!("full eval sources should resolve rootAttrs to an object, got: {other:?}"),
-    };
-    let full_keys: Vec<String> = full_object
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            verter_analysis::type_expr::ObjectMember::Property(prop) => Some(prop.name.clone()),
-            verter_analysis::type_expr::ObjectMember::Method(method) => Some(method.name.clone()),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        full_keys.iter().any(|key| key == "id"),
-        "full eval sources should expose attrs from the value-only utils import, got: {full_keys:?}"
-    );
-    assert!(
-        full_keys.iter().any(|key| key == "onClick"),
-        "full eval sources should expose listeners from the value-only utils import, got: {full_keys:?}"
+        imported_inputs.canonical_dependencies.contains("/src/utils.ts"),
+        "runtime imports should still be tracked for invalidation even when they are materialized outside imported source merging"
     );
 }
 

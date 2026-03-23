@@ -15,6 +15,7 @@
 
 use serde::ser::Serialize;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
 // Core AST
@@ -24,7 +25,7 @@ use std::fmt;
 ///
 /// Syntax-preserving — captures TypeScript type annotation structure
 /// without evaluating or normalizing it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     // -- Terminals --
     /// A primitive type name: `string`, `number`, `boolean`, `symbol`,
@@ -475,8 +476,33 @@ impl PartialEq for LiteralValue {
     }
 }
 
+impl Eq for LiteralValue {}
+
+impl Hash for LiteralValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::String(value) => {
+                0u8.hash(state);
+                value.hash(state);
+            }
+            Self::Number(value) => {
+                1u8.hash(state);
+                value.to_bits().hash(state);
+            }
+            Self::Boolean(value) => {
+                2u8.hash(state);
+                value.hash(state);
+            }
+            Self::BigInt(value) => {
+                3u8.hash(state);
+                value.hash(state);
+            }
+        }
+    }
+}
+
 /// A reference to a value binding (for `typeof` expressions).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValueRef {
     /// Dotted path segments: `typeof a.b.c` → `["a", "b", "c"]`.
@@ -484,7 +510,7 @@ pub struct ValueRef {
 }
 
 /// A single element in a tuple type.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TupleElement {
     /// Optional label name.
@@ -498,14 +524,14 @@ pub struct TupleElement {
 }
 
 /// An object type expression.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectExpr {
     pub properties: Vec<ObjectMember>,
 }
 
 /// A member of an object type.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "memberKind", rename_all = "camelCase")]
 pub enum ObjectMember {
     /// Named property: `name: Type` or `name?: Type`.
@@ -521,7 +547,7 @@ pub enum ObjectMember {
 }
 
 /// A named property in an object type.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectProperty {
     pub name: String,
@@ -531,7 +557,7 @@ pub struct ObjectProperty {
 }
 
 /// An index signature: `[key: KeyType]: ValueType`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexSignature {
     pub key_name: String,
@@ -541,7 +567,7 @@ pub struct IndexSignature {
 }
 
 /// A method signature in an object type.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MethodSignature {
     pub name: String,
@@ -550,7 +576,7 @@ pub struct MethodSignature {
 }
 
 /// A function type expression.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionExpr {
     pub parameters: Vec<FunctionParam>,
@@ -559,7 +585,7 @@ pub struct FunctionExpr {
 }
 
 /// A function parameter.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionParam {
     pub name: Option<String>,
@@ -569,7 +595,7 @@ pub struct FunctionParam {
 }
 
 /// A type parameter declaration: `T extends Constraint = Default`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeParam {
     pub name: String,
@@ -578,7 +604,7 @@ pub struct TypeParam {
 }
 
 /// Modifier for mapped type `optional` and `readonly` fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MappedModifier {
     /// No modifier applied.
