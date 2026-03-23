@@ -5700,3 +5700,105 @@ defineProps<FinalType>()
         meta.props.iter().map(|p| &p.name).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
+    let types = ExpandedComponentTypes {
+        props: vec![verter_analysis::type_expand::ExpandedField {
+            name: "label".to_string(),
+            r#type: TypeExpr::Primitive(PrimitiveName::String),
+            optional: false,
+            completeness: verter_analysis::type_expand::ExpansionCompleteness::Partial,
+            diagnostics: vec![verter_analysis::type_expand::ExpansionDiagnostic {
+                reason: verter_analysis::type_expand::ExpansionStopReason::BudgetExceeded,
+                context: "symbolic work limit reached".to_string(),
+                property_name: None,
+            }],
+        }],
+        ..ExpandedComponentTypes::default()
+    };
+
+    assert!(
+        component_meta_expansion_budget_exceeded(&types),
+        "budget-exceeded diagnostics should force an explicit component-meta error"
+    );
+}
+
+#[test]
+fn get_component_meta_errors_when_external_type_resolution_step_budget_is_exhausted() {
+    let project = make_project();
+
+    let import_count = 2_005usize;
+    let mut defs_source = String::new();
+    for index in 0..import_count {
+        defs_source.push_str(&format!(
+            "export interface T{index} {{ p{index}: string }}\n"
+        ));
+    }
+
+    let mut types_source = String::new();
+    types_source.push_str("import type { ");
+    for index in 0..import_count {
+        if index > 0 {
+            types_source.push_str(", ");
+        }
+        types_source.push_str(&format!("T{index}"));
+    }
+    types_source.push_str(" } from './defs'\n");
+    types_source.push_str("export interface Props extends ");
+    for index in 0..import_count {
+        if index > 0 {
+            types_source.push_str(", ");
+        }
+        types_source.push_str(&format!("T{index}"));
+    }
+    types_source.push_str(" {}\n");
+
+    project.upsert_base("/src/defs.ts", &defs_source).unwrap();
+    project.upsert_base("/src/types.ts", &types_source).unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from "./types"
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./defs".to_string(),
+            resolved_canonical_id: Some("/src/defs.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let err = session
+        .get_component_meta("/src/App.vue")
+        .expect_err("runaway external type resolution should fail with an explicit budget error");
+
+    match err {
+        MetaError::Host(message) => {
+            assert!(
+                message.contains("external type resolution step budget exceeded"),
+                "error should explain the traversal cap, got: {message}"
+            );
+            assert!(
+                message.contains("2000"),
+                "error should include the configured step cap, got: {message}"
+            );
+        }
+        other => panic!("expected host budget error, got {other:?}"),
+    }
+}

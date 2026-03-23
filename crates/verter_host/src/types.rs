@@ -1337,6 +1337,14 @@ pub(crate) const RESOLVED_TYPE_CACHE_CAP: usize = 4096;
 /// truly extreme input (e.g., 130+ nested `export *` chains).
 pub(crate) const MAX_RESOLVE_DEPTH: usize = 128;
 
+/// Maximum distinct `(canonical,type)` external-resolution pairs per request.
+///
+/// This is a hard safety cap for component-meta and macro type resolution.
+/// When a single imported surface fans out into an unexpectedly large graph,
+/// fail explicitly instead of continuing to allocate until the caller runs
+/// out of memory.
+pub(crate) const MAX_EXTERNAL_TYPE_RESOLVE_STEPS: usize = 2_000;
+
 /// Error from [`VerterHost::resolve_external_type_from_loaded_files`].
 #[derive(Debug, Clone)]
 pub(crate) enum ExternalTypeResolveError {
@@ -1344,6 +1352,12 @@ pub(crate) enum ExternalTypeResolveError {
     MissingRootDependency,
     /// Recursion depth exceeded the configured limit.
     DepthLimitExceeded {
+        limit: usize,
+        type_name: String,
+        last_dep: String,
+    },
+    /// Total distinct external-type resolution steps exceeded the hard limit.
+    StepLimitExceeded {
         limit: usize,
         type_name: String,
         last_dep: String,

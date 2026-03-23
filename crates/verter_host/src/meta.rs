@@ -38,6 +38,69 @@ pub enum MetaError {
     Host(String),
 }
 
+fn component_meta_expansion_budget_exceeded(
+    types: &verter_analysis::type_expand::ExpandedComponentTypes,
+) -> bool {
+    use verter_analysis::type_expand::ExpansionStopReason;
+
+    let field_has_budget = |field: &verter_analysis::type_expand::ExpandedField| {
+        field
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+    };
+    let macro_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroObjectShape| {
+        shape
+            .result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+    };
+    let props_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroProps| {
+        shape
+            .result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+    };
+
+    types.props.iter().any(field_has_budget)
+        || types.emits.iter().any(field_has_budget)
+        || types.slot_bindings.iter().any(field_has_budget)
+        || types.bindings.iter().any(field_has_budget)
+        || types.define_props.iter().any(props_has_budget)
+        || types.define_emits.iter().any(macro_has_budget)
+        || types.define_slots.iter().any(macro_has_budget)
+}
+
+fn component_meta_resolution_budget_error(
+    canonical_or_alias: &str,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> Option<MetaError> {
+    if let Some(message) = resolved
+        .cached_eval_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.overflow.as_ref())
+        .map(|overflow| overflow.message.clone())
+    {
+        return Some(MetaError::Host(message));
+    }
+
+    if resolved
+        .evaluated_types
+        .as_ref()
+        .is_some_and(component_meta_expansion_budget_exceeded)
+    {
+        return Some(MetaError::Host(format!(
+            "component-meta symbolic expansion budget exceeded (maxSteps={}) for '{}'",
+            crate::host_manage::component_meta_symbolic_step_budget(),
+            canonical_or_alias,
+        )));
+    }
+
+    None
+}
+
 // ---------------------------------------------------------------------------
 // SessionOverlay
 // ---------------------------------------------------------------------------
@@ -531,7 +594,21 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<Option<verter_analysis::component_meta::ComponentMetaAnalysis>, MetaError> {
         self.check_alive()?;
-        self.with_overlay_context(|host| host.get_component_meta(canonical_or_alias))
+        let resolved = self.with_overlay_context(|host| {
+            host.get_component_meta_with_resolution(canonical_or_alias)
+        })?;
+
+        match resolved {
+            Some((analysis, resolved)) => {
+                if let Some(err) = component_meta_resolution_budget_error(canonical_or_alias, &resolved)
+                {
+                    Err(err)
+                } else {
+                    Ok(Some(analysis))
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     /// Combined component-meta query: returns BOTH the analysis projection AND
@@ -550,9 +627,20 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        self.with_overlay_context(|host| {
+        let resolved = self.with_overlay_context(|host| {
             host.get_component_meta_with_resolution(canonical_or_alias)
-        })
+        })?;
+        match resolved {
+            Some((analysis, resolved)) => {
+                if let Some(err) = component_meta_resolution_budget_error(canonical_or_alias, &resolved)
+                {
+                    Err(err)
+                } else {
+                    Ok(Some((analysis, resolved)))
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     /// Return provenance counters for this session's host.

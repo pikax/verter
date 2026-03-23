@@ -180,4 +180,44 @@ describe("ComponentMetaChecker session requirement", () => {
     expect(store.size).toBe(1);
     expect(Array.from(store.keys())[0]).toContain("/project/src/App.vue");
   });
+
+  it("propagates native component-meta budget errors to callers", async () => {
+    const checker = new ComponentMetaChecker(
+      {
+        upsert: vi.fn(),
+      },
+      "/project",
+      {},
+      {
+        closed: false,
+        engine: { state: "active" as const },
+        upsert() {},
+        delete() {},
+        getComponentMeta() {
+          throw new Error(
+            "component-meta external type resolution step budget exceeded (maxSteps=2000)",
+          );
+        },
+        getEffectiveSource() {
+          return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+        },
+        hasFile() {
+          return true;
+        },
+        trackedFileIds() {
+          return [];
+        },
+        close() {},
+      } as any,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+    );
+
+    await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(
+      /step budget exceeded/i,
+    );
+  });
 });

@@ -315,6 +315,182 @@ fn owner_env_resolution_is_retained_for_empty_object_placeholders() {
 }
 
 #[test]
+fn collect_required_owner_import_names_ignores_define_slots_binding_value_imports() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { TiptapEditor } from "./editor"
+import type { EditorHandlers } from "./handlers"
+
+type Slots = {
+  default?(props: { editor: TiptapEditor; handlers: EditorHandlers }): any
+}
+
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let snapshot = host
+        .get_analysis("/Comp.vue")
+        .expect("analysis snapshot should exist");
+    let (source, cached_parse, _) = host
+        .current_eval_state("/Comp.vue")
+        .expect("eval source should exist");
+    let owner_eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+    let owner_env = host
+        .base_eval_env("/Comp.vue")
+        .expect("owner eval env should exist");
+
+    let required = collect_required_owner_import_names(&snapshot, &owner_eval_source, &owner_env);
+
+    assert!(
+        !required.contains("TiptapEditor"),
+        "slot binding value types must not drag editor imports into required eval inputs: {required:?}"
+    );
+    assert!(
+        !required.contains("EditorHandlers"),
+        "slot binding value types must not drag handler imports into required eval inputs: {required:?}"
+    );
+}
+
+#[test]
+fn collect_required_owner_import_names_keeps_define_slots_mapped_name_imports() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { SlotNames } from "./names"
+import type { Heavy } from "./heavy"
+
+type Slots = {
+  [K in SlotNames]?: (props: { value: Heavy }) => any
+}
+
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let snapshot = host
+        .get_analysis("/Comp.vue")
+        .expect("analysis snapshot should exist");
+    let (source, cached_parse, _) = host
+        .current_eval_state("/Comp.vue")
+        .expect("eval source should exist");
+    let owner_eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+    let owner_env = host
+        .base_eval_env("/Comp.vue")
+        .expect("owner eval env should exist");
+
+    let required = collect_required_owner_import_names(&snapshot, &owner_eval_source, &owner_env);
+
+    assert!(
+        required.contains("SlotNames"),
+        "mapped slot names still need their imported key source: {required:?}"
+    );
+    assert!(
+        !required.contains("Heavy"),
+        "mapped slot value types must not drag unrelated imports into required eval inputs: {required:?}"
+    );
+}
+
+#[test]
+fn collect_required_owner_import_names_keeps_define_slots_conditional_object_member_imports() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { Marker } from "./marker"
+import type { Heavy } from "./heavy"
+
+type SlotName =
+  { marker: Marker } extends { marker: Marker } ? "default" : never
+
+type Slots = {
+  [K in SlotName]?: (props: { value: Heavy }) => any
+}
+
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let snapshot = host
+        .get_analysis("/Comp.vue")
+        .expect("analysis snapshot should exist");
+    let (source, cached_parse, _) = host
+        .current_eval_state("/Comp.vue")
+        .expect("eval source should exist");
+    let owner_eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+    let owner_env = host
+        .base_eval_env("/Comp.vue")
+        .expect("owner eval env should exist");
+
+    let required = collect_required_owner_import_names(&snapshot, &owner_eval_source, &owner_env);
+
+    assert!(
+        required.contains("Marker"),
+        "conditional slot-name helpers still need imported object-member types: {required:?}"
+    );
+    assert!(
+        !required.contains("Heavy"),
+        "slot binding value types must stay out of conditional slot-name helper imports: {required:?}"
+    );
+}
+
+#[test]
+fn collect_required_owner_import_names_keeps_define_slots_conditional_function_imports() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import type { Marker } from "./marker"
+import type { Heavy } from "./heavy"
+
+type SlotName =
+  ((payload: Marker) => void) extends ((payload: Marker) => void)
+    ? "default"
+    : never
+
+type Slots = {
+  [K in SlotName]?: (props: { value: Heavy }) => any
+}
+
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let snapshot = host
+        .get_analysis("/Comp.vue")
+        .expect("analysis snapshot should exist");
+    let (source, cached_parse, _) = host
+        .current_eval_state("/Comp.vue")
+        .expect("eval source should exist");
+    let owner_eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+    let owner_env = host
+        .base_eval_env("/Comp.vue")
+        .expect("owner eval env should exist");
+
+    let required = collect_required_owner_import_names(&snapshot, &owner_eval_source, &owner_env);
+
+    assert!(
+        required.contains("Marker"),
+        "conditional slot-name helpers still need imported function-signature types: {required:?}"
+    );
+    assert!(
+        !required.contains("Heavy"),
+        "slot binding value types must stay out of conditional function helper imports: {required:?}"
+    );
+}
+
+#[test]
 fn imported_eval_inputs_parse_vue_dependency_key_aliases() {
     let host = make_host();
     let _ = host

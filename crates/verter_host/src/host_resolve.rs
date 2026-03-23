@@ -392,6 +392,15 @@ impl VerterHost {
             }
         }
 
+        let resolve_steps = cache.len() + visiting.len();
+        if resolve_steps >= crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS {
+            return Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
+                limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
+                type_name: type_name.to_string(),
+                last_dep: dep_canonical,
+            });
+        }
+
         if !visiting.insert(cache_key.clone()) {
             if debug_enabled {
                 external_type_debug(format!(
@@ -416,6 +425,15 @@ impl VerterHost {
                 &effective_source,
                 &import_alloc,
             );
+        let projected_steps = cache.len() + visiting.len() + required_import_names.len();
+        if projected_steps > crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS {
+            visiting.remove(&cache_key);
+            return Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
+                limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
+                type_name: type_name.to_string(),
+                last_dep: dep_canonical.clone(),
+            });
+        }
         if debug_enabled {
             let mut required_list = required_import_names.iter().cloned().collect::<Vec<_>>();
             required_list.sort();
@@ -1409,6 +1427,17 @@ impl VerterHost {
                             "HOST_EXTERNAL_TYPE_DEPTH_LIMIT".to_string(),
                             format!(
                                 "external type resolution depth limit ({}) exceeded for type '{}' (last dep: '{}')",
+                                limit, type_name, last_dep
+                            ),
+                        ),
+                        crate::types::ExternalTypeResolveError::StepLimitExceeded {
+                            limit,
+                            type_name,
+                            last_dep,
+                        } => (
+                            "HOST_EXTERNAL_TYPE_STEP_LIMIT".to_string(),
+                            format!(
+                                "external type resolution step budget ({}) exceeded for type '{}' (last dep: '{}')",
                                 limit, type_name, last_dep
                             ),
                         ),

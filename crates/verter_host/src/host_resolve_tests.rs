@@ -1930,6 +1930,98 @@ defineProps<FirstProps>()
     );
 }
 
+#[test]
+fn external_type_resolution_step_budget_errors_on_wide_import_graph() {
+    let host = strict_host();
+    let import_count = crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS + 5;
+
+    let mut defs_source = String::new();
+    for index in 0..import_count {
+        defs_source.push_str(&format!(
+            "export interface T{index} {{ p{index}: string }}\n"
+        ));
+    }
+
+    let mut types_source = String::from("import type { ");
+    for index in 0..import_count {
+        if index > 0 {
+            types_source.push_str(", ");
+        }
+        types_source.push_str(&format!("T{index}"));
+    }
+    types_source.push_str(" } from './defs'\nexport interface Props extends ");
+    for index in 0..import_count {
+        if index > 0 {
+            types_source.push_str(", ");
+        }
+        types_source.push_str(&format!("T{index}"));
+    }
+    types_source.push_str(" {}\n");
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>consumer</div></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/types.ts", &types_source);
+    upsert_non_sfc(&host, "/src/defs.ts", &defs_source);
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./defs".to_string(),
+            resolved_canonical_id: Some("/src/defs.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let err = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./types",
+            "Props",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect_err("wide imported graphs should fail with a hard step budget");
+
+    match err {
+        crate::types::ExternalTypeResolveError::StepLimitExceeded {
+            limit,
+            type_name,
+            last_dep,
+        } => {
+            assert_eq!(limit, crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS);
+            assert_eq!(type_name, "Props");
+            assert!(!last_dep.is_empty(), "last dep should explain where the cap tripped");
+        }
+        other => panic!("expected step-limit error, got {other:?}"),
+    }
+}
+
 #[cfg(feature = "scheduler")]
 #[test]
 fn barrel_scanned_vue_children_store_whole_hash_for_freshness() {

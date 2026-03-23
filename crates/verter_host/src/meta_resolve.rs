@@ -230,8 +230,11 @@ impl VerterHost {
                 &snapshot,
                 &dep_resolutions,
             ));
-            let eval_types =
-                self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs);
+            let eval_types = if imported_inputs.overflow.is_some() {
+                None
+            } else {
+                self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs)
+            };
             if let Some(eval_started) = eval_started {
                 component_meta_debug(format!(
                     "resolve_component_meta owner={} mode={:?} evaluated_types took {:?} has_output={}",
