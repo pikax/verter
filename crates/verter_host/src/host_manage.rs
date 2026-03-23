@@ -471,7 +471,7 @@ struct ImportedTypeAliasRequest<'a> {
 }
 
 impl VerterHost {
-    fn build_eval_script_source(
+    pub(crate) fn build_eval_script_source(
         source: &str,
         cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
     ) -> String {
@@ -479,7 +479,7 @@ impl VerterHost {
             .unwrap_or_else(|| source.to_string())
     }
 
-    fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
+    pub(crate) fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.get_source(canonical_id)
             .or_else(|| self.ws().read_file(canonical_id))
     }
@@ -611,7 +611,7 @@ impl VerterHost {
         result.is_empty()
     }
 
-    fn current_eval_state(
+    pub(crate) fn current_eval_state(
         &self,
         canonical_id: &str,
     ) -> Option<(
@@ -759,6 +759,23 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
     ) -> ImportedEvalInputs {
+        self.imported_eval_inputs_with_owner_context(
+            owner_canonical_id,
+            snapshot,
+            dep_resolutions,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn imported_eval_inputs_with_owner_context(
+        &self,
+        owner_canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+        owner_eval_source: Option<&str>,
+        owner_env: Option<&verter_analysis::type_eval::EvalEnv>,
+    ) -> ImportedEvalInputs {
         self.provenance
             .imported_eval_inputs_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -769,6 +786,8 @@ impl VerterHost {
             owner_canonical_id,
             snapshot,
             dep_resolutions,
+            owner_eval_source,
+            owner_env,
             None,
             &mut alias_env_stack,
             &mut budget,
@@ -780,6 +799,8 @@ impl VerterHost {
         owner_canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+        owner_eval_source: Option<&str>,
+        owner_env_override: Option<&verter_analysis::type_eval::EvalEnv>,
         additional_required_import_names: Option<&rustc_hash::FxHashSet<String>>,
         alias_env_stack: &mut rustc_hash::FxHashSet<String>,
         budget: &mut ImportedEvalTraversalBudget,
@@ -793,15 +814,21 @@ impl VerterHost {
         let mut visited_type_roots = rustc_hash::FxHashSet::default();
         let mut snapshot_cache = rustc_hash::FxHashMap::default();
         let mut eval_source_cache = rustc_hash::FxHashMap::default();
-        let owner_eval_source = self
-            .current_eval_state(owner_canonical_id)
-            .map(|(source, cached_parse, _)| {
-                Self::build_eval_script_source(&source, cached_parse.as_deref())
+        let owner_eval_source = owner_eval_source
+            .map(str::to_string)
+            .or_else(|| {
+                self.current_eval_state(owner_canonical_id)
+                    .map(|(source, cached_parse, _)| {
+                        Self::build_eval_script_source(&source, cached_parse.as_deref())
+                    })
             })
             .unwrap_or_default();
-        let owner_env = self.base_eval_env(owner_canonical_id).unwrap_or_else(|| {
-            verter_analysis::type_eval_build::parse_and_build_env(&owner_eval_source)
-        });
+        let owner_env = owner_env_override
+            .cloned()
+            .or_else(|| self.base_eval_env(owner_canonical_id))
+            .unwrap_or_else(|| {
+                verter_analysis::type_eval_build::parse_and_build_env(&owner_eval_source)
+            });
         let mut required_import_names =
             collect_required_owner_import_names(snapshot, owner_eval_source.as_str(), &owner_env);
         if let Some(additional) = additional_required_import_names {
@@ -1401,6 +1428,8 @@ impl VerterHost {
                 &resolved_source_canonical_id,
                 &snapshot,
                 &dep_resolutions,
+                Some(dep_eval_source.as_ref()),
+                Some(&dep_env),
                 Some(&decl_required_import_names),
                 alias_env_stack,
                 budget,
@@ -1483,10 +1512,36 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: &ImportedEvalInputs,
     ) -> Option<ComputedEvaluatedTypes> {
-        let (source, cached_parse, _) = self.current_eval_state(canonical)?;
-        let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
-        let built =
-            self.build_owner_eval_env_with_inputs(canonical, snapshot, imported_inputs, None)?;
+        self.compute_evaluated_types_with_tracking_from_owner_context(
+            canonical,
+            snapshot,
+            imported_inputs,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context(
+        &self,
+        canonical: &str,
+        snapshot: &FileAnalysisSnapshot,
+        imported_inputs: &ImportedEvalInputs,
+        owner_eval_source: Option<&str>,
+        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+    ) -> Option<ComputedEvaluatedTypes> {
+        let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
+            self.current_eval_state(canonical)
+                .map(|(source, cached_parse, _)| {
+                    Self::build_eval_script_source(&source, cached_parse.as_deref())
+                })
+        })?;
+        let built = self.build_owner_eval_env_with_inputs_from_owner_env(
+            canonical,
+            snapshot,
+            imported_inputs,
+            None,
+            owner_env,
+        )?;
         let mut env = built.env;
         let mut resolver = HostImportedEvalResolver::new(self, canonical);
         let mut lookup =
@@ -2194,8 +2249,27 @@ impl VerterHost {
             &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
         >,
     ) -> Option<OwnerEvalEnvBuild> {
+        self.build_owner_eval_env_with_inputs_from_owner_env(
+            canonical_id,
+            snapshot,
+            imported_inputs,
+            prop_type_overrides,
+            None,
+        )
+    }
+
+    fn build_owner_eval_env_with_inputs_from_owner_env(
+        &self,
+        canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        imported_inputs: &ImportedEvalInputs,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+    ) -> Option<OwnerEvalEnvBuild> {
         let started = component_meta_debug_enabled().then(Instant::now);
-        let mut env = self.base_eval_env(canonical_id)?;
+        let mut env = owner_env.or_else(|| self.base_eval_env(canonical_id))?;
         let local_type_names: rustc_hash::FxHashSet<String> =
             env.type_symbols.keys().cloned().collect();
         let local_value_names: rustc_hash::FxHashSet<String> =

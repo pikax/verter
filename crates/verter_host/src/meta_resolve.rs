@@ -31,11 +31,21 @@ use verter_resolver::{
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
+#[derive(Debug, Clone)]
+struct CapturedComponentMetaInputs {
+    whole_hash: Hash16,
+    snapshot: FileAnalysisSnapshot,
+    owner_eval_source: Option<String>,
+    owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+    dep_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
+}
+
 struct ComponentMetaRequestExecutor<'a> {
     host: &'a VerterHost,
     canonical: String,
     mode: ResolverMode,
     last_snapshot_epoch: Option<u64>,
+    captured_inputs: Option<CapturedComponentMetaInputs>,
 }
 
 impl<'a> ComponentMetaRequestExecutor<'a> {
@@ -45,7 +55,22 @@ impl<'a> ComponentMetaRequestExecutor<'a> {
             canonical,
             mode,
             last_snapshot_epoch: None,
+            captured_inputs: None,
         }
+    }
+
+    fn capture_owner_inputs(&self) -> Option<CapturedComponentMetaInputs> {
+        let snapshot = self.host.get_raw_analysis_snapshot(&self.canonical)?;
+        let (source, cached_parse, whole_hash) = self.host.current_eval_state(&self.canonical)?;
+        let owner_eval_source =
+            VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+        Some(CapturedComponentMetaInputs {
+            whole_hash,
+            snapshot,
+            owner_eval_source: Some(owner_eval_source),
+            owner_env: self.host.base_eval_env(&self.canonical),
+            dep_resolutions: self.host.dependency_resolutions_for_eval(&self.canonical),
+        })
     }
 }
 
@@ -61,8 +86,19 @@ impl<'a>
     }
 
     fn snapshot_view(&mut self) -> Self::View {
+        for _ in 0..STORE_VIEW_STABILITY_MAX_ATTEMPTS {
+            let view = self.host.resolver_store_view();
+            let captured_inputs = self.capture_owner_inputs();
+            if self.host.current_store_view_epoch() == view.mutation_epoch() {
+                self.last_snapshot_epoch = Some(view.mutation_epoch());
+                self.captured_inputs = captured_inputs;
+                return view;
+            }
+        }
+
         let view = self.host.resolver_store_view();
         self.last_snapshot_epoch = Some(view.mutation_epoch());
+        self.captured_inputs = self.capture_owner_inputs();
         view
     }
 
@@ -76,6 +112,14 @@ impl<'a>
         &mut self,
         _view: &Self::View,
     ) -> Result<Option<ResolvedComponentMetaState>, Self::Error> {
+        if let Some(captured) = self.captured_inputs.as_ref() {
+            return Ok(self.host.compute_component_meta_state_from_captured(
+                &self.canonical,
+                self.mode,
+                captured,
+            ));
+        }
+
         let whole_hash = self
             .host
             .get_whole_hash(&self.canonical)
@@ -281,12 +325,38 @@ impl VerterHost {
         mode: ResolverMode,
         whole_hash: Hash16,
     ) -> Option<ResolvedComponentMetaState> {
+        self.compute_component_meta_state_inner(canonical, mode, whole_hash, None)
+    }
+
+    fn compute_component_meta_state_from_captured(
+        &self,
+        canonical: &str,
+        mode: ResolverMode,
+        captured: &CapturedComponentMetaInputs,
+    ) -> Option<ResolvedComponentMetaState> {
+        self.compute_component_meta_state_inner(
+            canonical,
+            mode,
+            captured.whole_hash,
+            Some(captured),
+        )
+    }
+
+    fn compute_component_meta_state_inner(
+        &self,
+        canonical: &str,
+        mode: ResolverMode,
+        whole_hash: Hash16,
+        captured: Option<&CapturedComponentMetaInputs>,
+    ) -> Option<ResolvedComponentMetaState> {
         self.provenance
             .component_meta_resolved_state_recomputes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Step 1: Get the raw analysis snapshot (without enrichment).
-        let snapshot = self.get_raw_analysis_snapshot(canonical)?;
+        let snapshot = captured
+            .map(|captured| captured.snapshot.clone())
+            .or_else(|| self.get_raw_analysis_snapshot(canonical))?;
 
         let mut resolved_macros = Vec::new();
         let mut resolved_type_registry = Vec::new();
@@ -308,9 +378,16 @@ impl VerterHost {
                     snapshot.macro_type_deps.len(),
                 ));
             }
-            let dep_resolutions = self.dependency_resolutions_for_eval(canonical);
-            let imported_inputs =
-                Arc::new(self.imported_eval_inputs(canonical, &snapshot, &dep_resolutions));
+            let dep_resolutions = captured
+                .map(|captured| captured.dep_resolutions.clone())
+                .unwrap_or_else(|| self.dependency_resolutions_for_eval(canonical));
+            let imported_inputs = Arc::new(self.imported_eval_inputs_with_owner_context(
+                canonical,
+                &snapshot,
+                &dep_resolutions,
+                captured.and_then(|captured| captured.owner_eval_source.as_deref()),
+                captured.and_then(|captured| captured.owner_env.as_ref()),
+            ));
             if component_meta_debug_enabled() {
                 component_meta_debug(format!(
                     "resolve_component_meta owner={} mode={:?} step=evaluated_types:imported_inputs_done sources={} type_aliases={} tracked_deps={}",
@@ -330,7 +407,13 @@ impl VerterHost {
             let computed_eval_types = if imported_inputs.overflow.is_some() {
                 None
             } else {
-                self.compute_evaluated_types_with_tracking(canonical, &snapshot, &imported_inputs)
+                self.compute_evaluated_types_with_tracking_from_owner_context(
+                    canonical,
+                    &snapshot,
+                    &imported_inputs,
+                    captured.and_then(|captured| captured.owner_eval_source.as_deref()),
+                    captured.and_then(|captured| captured.owner_env.clone()),
+                )
             };
             if let Some(computed) = computed_eval_types.as_ref() {
                 tracked_deps.extend(computed.discovered_dependencies.iter().cloned());

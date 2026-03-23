@@ -3,6 +3,7 @@ use crate::meta::MetaProject;
 use crate::types::{HostConfig, ResolverMode};
 use crate::VerterHost;
 use std::sync::Arc;
+use verter_resolver::StableRequestExecutor;
 
 // ===========================================================================
 // Test helpers
@@ -48,6 +49,54 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
         .flat_map(|m| m.slots.iter())
         .map(|s| s.name.clone())
         .collect()
+}
+
+#[test]
+fn component_meta_request_executor_uses_captured_owner_inputs_after_owner_changes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ foo: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let original_props = vec!["foo".to_string()];
+    let mut executor = ComponentMetaRequestExecutor::new(
+        project.host(),
+        "/src/App.vue".to_string(),
+        ResolverMode::Expanded,
+    );
+    let view = executor.snapshot_view();
+
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ bar: number }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = executor
+        .compute(&view)
+        .expect("component-meta compute should be infallible")
+        .expect("component-meta should still resolve against captured owner inputs");
+
+    let snapshot_props: Vec<String> = state
+        .snapshot
+        .macros
+        .iter()
+        .filter(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .flat_map(|m| m.prop_fields.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert_eq!(snapshot_props, original_props);
 }
 
 #[test]
