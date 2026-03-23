@@ -775,13 +775,15 @@ pub fn expand_macro_types(
 ) -> crate::type_expand::ExpandedComponentTypes {
     use crate::type_expand::{
         expand_normalized_expr, expand_object_shape, ExpandedComponentTypes, ExpandedField,
-        ExpandedMacroProps,
+        ExpandedMacroObjectShape, ExpandedMacroProps,
     };
     use crate::type_expr_lower::parse_type_annotation;
 
     let mut result = ExpandedComponentTypes::default();
-    let define_props_type_params = source.map(collect_define_props_type_params);
+    let macro_type_params = source.map(collect_define_macro_type_params);
     let mut define_props_index = 0usize;
+    let mut define_emits_index = 0usize;
+    let mut define_slots_index = 0usize;
     let started = Instant::now();
     let start_steps = env.steps();
 
@@ -815,7 +817,10 @@ pub fn expand_macro_types(
 
         // Expand defineProps<T>() type parameter into object shape
         if m.kind == crate::types::AnalyzedMacroKind::DefineProps && m.is_type_based {
-            if let Some(type_params) = define_props_type_params.as_ref() {
+            if let Some(type_params) = macro_type_params
+                .as_ref()
+                .map(|params| &params.define_props)
+            {
                 if let Some(lowered) = type_params.get(define_props_index) {
                     let shape_result = expand_object_shape(lowered, env, budget);
                     if !shape_result.value.properties.is_empty()
@@ -829,6 +834,24 @@ pub fn expand_macro_types(
                 }
             }
             define_props_index += 1;
+        }
+
+        if m.kind == crate::types::AnalyzedMacroKind::DefineEmits && m.is_type_based {
+            if let Some(type_params) = macro_type_params
+                .as_ref()
+                .map(|params| &params.define_emits)
+            {
+                if let Some(lowered) = type_params.get(define_emits_index) {
+                    let shape_result = expand_object_shape(lowered, env, budget);
+                    if has_named_shape_surface(&shape_result.value) {
+                        result.define_emits.push(ExpandedMacroObjectShape {
+                            macro_index,
+                            result: shape_result,
+                        });
+                    }
+                }
+            }
+            define_emits_index += 1;
         }
 
         // Expand emit payload types
@@ -846,6 +869,24 @@ pub fn expand_macro_types(
                     });
                 }
             }
+        }
+
+        if m.kind == crate::types::AnalyzedMacroKind::DefineSlots && m.is_type_based {
+            if let Some(type_params) = macro_type_params
+                .as_ref()
+                .map(|params| &params.define_slots)
+            {
+                if let Some(lowered) = type_params.get(define_slots_index) {
+                    let shape_result = expand_object_shape(lowered, env, budget);
+                    if !shape_result.value.properties.is_empty() {
+                        result.define_slots.push(ExpandedMacroObjectShape {
+                            macro_index,
+                            result: shape_result,
+                        });
+                    }
+                }
+            }
+            define_slots_index += 1;
         }
 
         // Expand slot binding types (no skip heuristic — expander handles complexity)
@@ -896,10 +937,12 @@ pub fn expand_macro_types(
 
     type_expand_debug(|| {
         format!(
-            "expand_macro_types:end props={} define_props={} emits={} slot_bindings={} bindings={} steps_delta={} budget_exhausted={} took {:?}",
+            "expand_macro_types:end props={} define_props={} define_emits={} emits={} define_slots={} slot_bindings={} bindings={} steps_delta={} budget_exhausted={} took {:?}",
             result.props.len(),
             result.define_props.len(),
+            result.define_emits.len(),
             result.emits.len(),
+            result.define_slots.len(),
             result.slot_bindings.len(),
             result.bindings.len(),
             env.steps().saturating_sub(start_steps),
@@ -911,25 +954,49 @@ pub fn expand_macro_types(
     result
 }
 
-pub fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
+fn has_named_shape_surface(shape: &crate::type_expand::ExpandedObjectShape) -> bool {
+    !shape.properties.is_empty() || !shape.call_signatures.is_empty()
+}
+
+#[derive(Default)]
+pub struct CollectedMacroTypeParams {
+    pub define_props: Vec<TypeExpr>,
+    pub define_emits: Vec<TypeExpr>,
+    pub define_slots: Vec<TypeExpr>,
+}
+
+pub fn collect_define_macro_type_params(source: &str) -> CollectedMacroTypeParams {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
-    fn is_define_props_call(call: &CallExpression<'_>) -> bool {
-        matches!(&call.callee, Expression::Identifier(id) if id.name == "defineProps")
+    fn collect_call_type_param(
+        call: &CallExpression<'_>,
+        source: &str,
+        result: &mut CollectedMacroTypeParams,
+    ) {
+        let Expression::Identifier(id) = &call.callee else {
+            return;
+        };
+        let Some(type_args) = &call.type_arguments else {
+            return;
+        };
+        let Some(first) = type_args.params.first() else {
+            return;
+        };
+
+        match id.name.as_str() {
+            "defineProps" => result.define_props.push(lower_ts_type(first, source)),
+            "defineEmits" => result.define_emits.push(lower_ts_type(first, source)),
+            "defineSlots" => result.define_slots.push(lower_ts_type(first, source)),
+            _ => {}
+        }
     }
 
-    fn walk_expr(expr: &Expression<'_>, source: &str, result: &mut Vec<TypeExpr>) {
+    fn walk_expr(expr: &Expression<'_>, source: &str, result: &mut CollectedMacroTypeParams) {
         match expr {
             Expression::CallExpression(call) => {
-                if is_define_props_call(call) {
-                    if let Some(type_args) = &call.type_arguments {
-                        if let Some(first) = type_args.params.first() {
-                            result.push(lower_ts_type(first, source));
-                        }
-                    }
-                }
+                collect_call_type_param(call, source, result);
                 walk_expr(&call.callee, source, result);
                 for arg in &call.arguments {
                     if let Argument::SpreadElement(spread) = arg {
@@ -956,7 +1023,7 @@ pub fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
         }
     }
 
-    fn walk_stmt(stmt: &Statement<'_>, source: &str, result: &mut Vec<TypeExpr>) {
+    fn walk_stmt(stmt: &Statement<'_>, source: &str, result: &mut CollectedMacroTypeParams) {
         match stmt {
             Statement::ExpressionStatement(expr_stmt) => {
                 walk_expr(&expr_stmt.expression, source, result)
@@ -975,11 +1042,15 @@ pub fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
     let ret = Parser::new(&allocator, source, source_type).parse();
-    let mut result = Vec::new();
+    let mut result = CollectedMacroTypeParams::default();
     for stmt in &ret.program.body {
         walk_stmt(stmt, source, &mut result);
     }
     result
+}
+
+pub fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
+    collect_define_macro_type_params(source).define_props
 }
 
 // ---------------------------------------------------------------------------

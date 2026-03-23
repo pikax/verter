@@ -1036,11 +1036,11 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             }
             AnalyzedMacroKind::DefineEmits => {
                 let emit_fields = merged_emit_fields(mac, resolved_macro.as_ref());
-                extract_events_from_macro(&emit_fields, evaluated_types, &mut events);
+                extract_events_from_macro(macro_index, &emit_fields, evaluated_types, &mut events);
             }
             AnalyzedMacroKind::DefineSlots => {
                 let slot_fields = merged_slot_fields(mac, resolved_macro.as_ref());
-                extract_slots_from_macro(&slot_fields, evaluated_types, &mut slots);
+                extract_slots_from_macro(macro_index, &slot_fields, evaluated_types, &mut slots);
             }
             AnalyzedMacroKind::DefineModel => {
                 let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
@@ -1265,6 +1265,47 @@ fn define_props_property_expansion_metadata(
     })
 }
 
+fn expanded_define_emits_shape(
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
+    macro_index: usize,
+) -> Option<&crate::type_expand::ExpandedMacroObjectShape> {
+    evaluated?
+        .define_emits
+        .iter()
+        .find(|entry| entry.macro_index == macro_index)
+}
+
+fn expanded_define_slots_shape(
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
+    macro_index: usize,
+) -> Option<&crate::type_expand::ExpandedMacroObjectShape> {
+    evaluated?
+        .define_slots
+        .iter()
+        .find(|entry| entry.macro_index == macro_index)
+}
+
+fn macro_object_property_expansion_metadata(
+    entry: &crate::type_expand::ExpandedMacroObjectShape,
+    property_name: &str,
+) -> crate::type_expand::ExpansionMetadata {
+    let diagnostics = entry
+        .result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.property_name.is_none()
+                || diagnostic.property_name.as_deref() == Some(property_name)
+        })
+        .cloned()
+        .collect();
+
+    crate::type_expand::ExpansionMetadata {
+        completeness: entry.result.completeness,
+        diagnostics,
+    }
+}
+
 /// Resolve prop type via priority chain:
 /// 1. Evaluated TypeExpr (preferred)
 /// 2. Raw annotation text → TypeExpr::Unknown
@@ -1326,10 +1367,62 @@ fn resolve_prop_type(
 // ── Events ─────────────────────────────────────────────────────────────────
 
 fn extract_events_from_macro(
+    macro_index: usize,
     emit_fields: &[crate::types::AnalyzedEmitField],
     evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<EventAnalysis>,
 ) {
+    let expanded_events = expanded_define_emit_events(evaluated, macro_index);
+    if !expanded_events.is_empty() {
+        let expanded_by_name: rustc_hash::FxHashMap<_, _> = expanded_events
+            .iter()
+            .cloned()
+            .map(|event| (event.name.clone(), event))
+            .collect();
+
+        if emit_fields.is_empty() {
+            for event in expanded_events {
+                out.push(EventAnalysis {
+                    name: event.name,
+                    payload: event.payload,
+                    payload_expansion: event.payload_expansion,
+                    raw_signature: None,
+                    description: None,
+                    tags: Vec::new(),
+                });
+            }
+            return;
+        }
+
+        for field in emit_fields {
+            let (payload, payload_expansion) = expanded_by_name
+                .get(&field.name)
+                .map(|event| (event.payload.clone(), event.payload_expansion.clone()))
+                .or_else(|| {
+                    evaluated.and_then(|eval| {
+                        eval.emits
+                            .iter()
+                            .find(|f| f.name == field.name)
+                            .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
+                    })
+                })
+                .unwrap_or_else(|| match &field.payload_type {
+                    Some(raw) => (parse_annotation_or_unknown(raw), None),
+                    None => (unknown_type("unknown".to_string()), None),
+                });
+
+            out.push(EventAnalysis {
+                name: field.name.clone(),
+                payload,
+                payload_expansion,
+                raw_signature: field.payload_type.clone(),
+                description: field.description.clone(),
+                tags: field.tags.clone(),
+            });
+        }
+        return;
+    }
+
     for field in emit_fields {
         let (payload, payload_expansion) = if let Some(eval) = evaluated {
             eval.emits
@@ -1361,10 +1454,29 @@ fn extract_events_from_macro(
 // ── Slots ──────────────────────────────────────────────────────────────────
 
 fn extract_slots_from_macro(
+    macro_index: usize,
     slot_fields: &[crate::types::AnalyzedSlotField],
     evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<SlotAnalysis>,
 ) {
+    let expanded_slots = expanded_define_slot_entries(evaluated, macro_index);
+    if !expanded_slots.is_empty() {
+        for slot in expanded_slots {
+            let source_field = slot_fields.iter().find(|field| field.name == slot.name);
+            out.push(SlotAnalysis {
+                name: slot.name,
+                is_scoped: !slot.bindings.is_empty(),
+                bindings: slot.bindings,
+                is_required: slot.is_required,
+                description: source_field.and_then(|field| field.description.clone()),
+                tags: source_field
+                    .map(|field| field.tags.clone())
+                    .unwrap_or_default(),
+            });
+        }
+        return;
+    }
+
     for field in slot_fields {
         let bindings: Vec<SlotBindingAnalysis> = field
             .bindings
@@ -1404,6 +1516,216 @@ fn extract_slots_from_macro(
             description: field.description.clone(),
             tags: field.tags.clone(),
         });
+    }
+}
+
+#[derive(Clone)]
+struct ExpandedEventEntry {
+    name: String,
+    payload: TypeExpr,
+    payload_expansion: Option<crate::type_expand::ExpansionMetadata>,
+}
+
+#[derive(Clone)]
+struct ExpandedSlotEntry {
+    name: String,
+    bindings: Vec<SlotBindingAnalysis>,
+    is_required: bool,
+}
+
+fn expanded_define_emit_events(
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
+    macro_index: usize,
+) -> Vec<ExpandedEventEntry> {
+    use crate::type_expr::{LiteralValue, TupleElement, TypeExpr};
+
+    let Some(entry) = expanded_define_emits_shape(evaluated, macro_index) else {
+        return Vec::new();
+    };
+
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut events = Vec::new();
+
+    for prop in &entry.result.value.properties {
+        if !seen.insert(prop.name.clone()) {
+            continue;
+        }
+        events.push(ExpandedEventEntry {
+            name: prop.name.clone(),
+            payload: prop.ty.clone(),
+            payload_expansion: Some(macro_object_property_expansion_metadata(entry, &prop.name)),
+        });
+    }
+
+    for sig in &entry.result.value.call_signatures {
+        let Some(first) = sig.parameters.first() else {
+            continue;
+        };
+        let payload = TypeExpr::Tuple {
+            elements: sig
+                .parameters
+                .iter()
+                .skip(1)
+                .map(|param| TupleElement {
+                    label: (!param.name.is_empty()).then(|| param.name.clone()),
+                    ty: param.ty.clone(),
+                    optional: param.optional,
+                    rest: param.rest,
+                })
+                .collect(),
+            readonly: false,
+        };
+        let payload_expansion = Some(crate::type_expand::ExpansionMetadata {
+            completeness: entry.result.completeness,
+            diagnostics: entry.result.diagnostics.clone(),
+        });
+
+        match &first.ty {
+            TypeExpr::Literal(LiteralValue::String(name)) => {
+                if seen.insert(name.clone()) {
+                    events.push(ExpandedEventEntry {
+                        name: name.clone(),
+                        payload: payload.clone(),
+                        payload_expansion: payload_expansion.clone(),
+                    });
+                }
+            }
+            TypeExpr::Union(types) => {
+                for ty in types {
+                    let TypeExpr::Literal(LiteralValue::String(name)) = ty else {
+                        continue;
+                    };
+                    if seen.insert(name.clone()) {
+                        events.push(ExpandedEventEntry {
+                            name: name.clone(),
+                            payload: payload.clone(),
+                            payload_expansion: payload_expansion.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    events
+}
+
+fn expanded_define_slot_entries(
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
+    macro_index: usize,
+) -> Vec<ExpandedSlotEntry> {
+    let Some(entry) = expanded_define_slots_shape(evaluated, macro_index) else {
+        return Vec::new();
+    };
+
+    entry
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|prop| ExpandedSlotEntry {
+            name: prop.name.clone(),
+            bindings: expanded_slot_bindings(
+                evaluated,
+                &prop.name,
+                &prop.ty,
+                Some(macro_object_property_expansion_metadata(entry, &prop.name)),
+            ),
+            is_required: !prop.optional,
+        })
+        .collect()
+}
+
+fn expanded_slot_bindings(
+    evaluated: Option<&crate::type_expand::ExpandedComponentTypes>,
+    slot_name: &str,
+    ty: &TypeExpr,
+    type_expansion: Option<crate::type_expand::ExpansionMetadata>,
+) -> Vec<SlotBindingAnalysis> {
+    let direct_bindings = slot_bindings_from_type_expr(ty, type_expansion.clone());
+    if !direct_bindings.is_empty() {
+        return direct_bindings;
+    }
+
+    let Some(evaluated) = evaluated else {
+        return Vec::new();
+    };
+
+    let bindings: Vec<SlotBindingAnalysis> = evaluated
+        .slot_bindings
+        .iter()
+        .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
+        .map(|field| SlotBindingAnalysis {
+            name: field
+                .name
+                .split_once('.')
+                .map(|(_, binding)| binding.to_string())
+                .unwrap_or_else(|| field.name.clone()),
+            type_expr: field.r#type.clone(),
+            type_expansion: Some(field_expansion_metadata(field)),
+            raw_type: None,
+        })
+        .collect();
+    if !bindings.is_empty() {
+        return bindings;
+    }
+
+    Vec::new()
+}
+
+fn slot_bindings_from_type_expr(
+    ty: &TypeExpr,
+    type_expansion: Option<crate::type_expand::ExpansionMetadata>,
+) -> Vec<SlotBindingAnalysis> {
+    let bindings_ty = match ty {
+        TypeExpr::Function(func) => func.parameters.first().map(|param| &param.ty),
+        _ => None,
+    };
+    let Some(bindings_ty) = bindings_ty else {
+        return Vec::new();
+    };
+
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut bindings = Vec::new();
+    collect_slot_bindings_from_object_type(bindings_ty, &type_expansion, &mut seen, &mut bindings);
+    bindings
+}
+
+fn collect_slot_bindings_from_object_type(
+    ty: &TypeExpr,
+    type_expansion: &Option<crate::type_expand::ExpansionMetadata>,
+    seen: &mut rustc_hash::FxHashSet<String>,
+    out: &mut Vec<SlotBindingAnalysis>,
+) {
+    use crate::type_expr::{ObjectMember, TypeExpr};
+
+    match ty {
+        TypeExpr::Parenthesized(inner) => {
+            collect_slot_bindings_from_object_type(inner, type_expansion, seen, out);
+        }
+        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+            for inner in types {
+                collect_slot_bindings_from_object_type(inner, type_expansion, seen, out);
+            }
+        }
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                let ObjectMember::Property(prop) = member else {
+                    continue;
+                };
+                if !seen.insert(prop.name.clone()) {
+                    continue;
+                }
+                out.push(SlotBindingAnalysis {
+                    name: prop.name.clone(),
+                    type_expr: prop.ty.clone(),
+                    type_expansion: type_expansion.clone(),
+                    raw_type: None,
+                });
+            }
+        }
+        _ => {}
     }
 }
 

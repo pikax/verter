@@ -222,9 +222,15 @@ pub struct ExpandedComponentTypes {
     /// Expanded full defineProps object shapes keyed by macro index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub define_props: Vec<ExpandedMacroProps>,
+    /// Expanded full defineEmits object shapes keyed by macro index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub define_emits: Vec<ExpandedMacroObjectShape>,
     /// Expanded emit payload types, keyed by event name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emits: Vec<ExpandedField>,
+    /// Expanded full defineSlots object shapes keyed by macro index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub define_slots: Vec<ExpandedMacroObjectShape>,
     /// Expanded slot binding types, keyed by "slotName.bindingName".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slot_bindings: Vec<ExpandedField>,
@@ -260,11 +266,22 @@ pub struct ExpandedMacroProps {
     pub result: ExpansionResult<ExpandedObjectShape>,
 }
 
+/// Expanded full object shape for a specific type-based macro.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandedMacroObjectShape {
+    pub macro_index: usize,
+    /// The expanded object shape with completeness information.
+    pub result: ExpansionResult<ExpandedObjectShape>,
+}
+
 impl ExpandedComponentTypes {
     pub fn is_empty(&self) -> bool {
         self.props.is_empty()
             && self.define_props.is_empty()
+            && self.define_emits.is_empty()
             && self.emits.is_empty()
+            && self.define_slots.is_empty()
             && self.slot_bindings.is_empty()
             && self.bindings.is_empty()
     }

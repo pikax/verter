@@ -467,6 +467,21 @@ export class ComponentMetaChecker {
           if (loaded !== undefined) {
             this.baseFiles.add(absPath);
             this.trackedFiles.set(absPath, loaded);
+            return;
+          }
+        }
+
+        if (this.workspace) {
+          const content = await readFileSafe(absPath, this.workspace);
+          this.ensureActive();
+          if (content !== null) {
+            // Native pooled projects can occasionally decline ensureLoaded() for a
+            // workspace-backed file that is otherwise readable. Fall back to a
+            // session-local overlay so the checker still returns metadata instead
+            // of silently degrading to an empty surface.
+            this.overlayFiles.add(absPath);
+            this.trackedFiles.set(absPath, content);
+            this._session.upsert(absPath, content);
           }
         }
       }

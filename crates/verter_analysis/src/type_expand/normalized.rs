@@ -1,7 +1,10 @@
 //! NormalizedExpr expansion: resolves references and utility types while
 //! preserving complex forms symbolically when exact resolution is not possible.
 
-use crate::type_eval::{evaluate, is_assignable_to, is_definitely_not_assignable, EvalEnv};
+use crate::type_eval::{
+    evaluate, is_assignable_to, is_definitely_not_assignable, try_evaluate_conditional_with_infer,
+    EvalEnv,
+};
 use crate::type_expr::{ObjectMember, TypeExpr};
 
 use super::request::{
@@ -68,6 +71,10 @@ pub(crate) fn normalize_expr_with_diagnostics(
             if is_assignable_to(&check_eval, &extends_eval) {
                 // Resolved — evaluate only the true branch
                 normalize_expr_with_diagnostics(true_type, env, diagnostics)
+            } else if let Some(result) =
+                try_evaluate_conditional_with_infer(&check_eval, &extends_eval, true_type, env)
+            {
+                result
             } else if is_definitely_not_assignable(&check_eval, &extends_eval) {
                 // Resolved — evaluate only the false branch
                 normalize_expr_with_diagnostics(false_type, env, diagnostics)

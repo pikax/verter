@@ -1302,6 +1302,24 @@ fn extract_bindings_follows_default_import_then_export_local() {
 }
 
 #[test]
+fn extract_bindings_keeps_namespace_type_imports() {
+    let allocator = Allocator::new();
+    let source = "import type * as Types from './types';";
+    let result = extract_imported_type_bindings(source, &allocator);
+
+    assert!(
+        result
+            .bindings
+            .iter()
+            .any(|binding| binding.local_name == "Types"
+                && binding.source == "./types"
+                && binding.is_namespace),
+        "namespace type import should be preserved for lazy raw-source resolution: {:?}",
+        result.bindings
+    );
+}
+
+#[test]
 fn collect_required_import_names_for_external_type_is_targeted() {
     let allocator = Allocator::new();
     let source = r#"
@@ -1368,6 +1386,30 @@ export function setup() {
     );
     assert!(required.contains("Base"));
     assert!(!required.contains("computed"));
+}
+
+#[test]
+fn collect_required_import_names_for_external_type_ignores_slot_return_only_imports() {
+    let allocator = Allocator::new();
+    let source = r#"
+import type { VNode } from 'vue'
+import type { SlotBindings } from './slot-bindings'
+
+export interface Slots {
+  default?(props: SlotBindings): VNode[]
+  title?(props?: {}): VNode[]
+}
+"#;
+
+    let required = collect_required_import_names_for_external_type("Slots", source, &allocator);
+
+    assert_eq!(
+        required.len(),
+        1,
+        "slot return types should not drag framework-only imports into the required set"
+    );
+    assert!(required.contains("SlotBindings"));
+    assert!(!required.contains("VNode"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -108,7 +108,9 @@ fn props_use_evaluated_type_when_available() {
             diagnostics: Vec::new(),
         }],
         define_props: Vec::new(),
+        define_emits: Vec::new(),
         emits: Vec::new(),
+        define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
     };
@@ -153,7 +155,9 @@ fn props_preserve_expansion_metadata_when_available() {
             }],
         }],
         define_props: Vec::new(),
+        define_emits: Vec::new(),
         emits: Vec::new(),
+        define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
     };
@@ -194,7 +198,9 @@ fn evaluated_types_are_used_when_supplied() {
             diagnostics: Vec::new(),
         }],
         define_props: Vec::new(),
+        define_emits: Vec::new(),
         emits: Vec::new(),
+        define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
     };
@@ -258,7 +264,9 @@ fn define_props_eval_supplements_missing_prop_fields() {
                 },
             ),
         }],
+        define_emits: Vec::new(),
         emits: Vec::new(),
+        define_slots: Vec::new(),
         slot_bindings: Vec::new(),
         bindings: Vec::new(),
     };
@@ -413,6 +421,238 @@ fn extracts_events_from_define_emits() {
 
     // Negative: no props from defineEmits
     assert!(result.props.is_empty(), "no props from defineEmits");
+}
+
+#[test]
+fn define_emits_eval_supplements_local_tuple_property_events() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineEmits,
+        emit_fields: vec![crate::types::AnalyzedEmitField {
+            name: "update:searchTerm".to_string(),
+            span: verter_span::Span::default(),
+            payload_type: Some("[value: string]".to_string()),
+            description: Some("Local update event".to_string()),
+            tags: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let resolved_macros = vec![crate::component_meta::ResolvedMacroInput {
+        macro_index: 0,
+        props: Vec::new(),
+        emits: vec![
+            crate::types::AnalyzedEmitField {
+                name: "escapeKeyDown".to_string(),
+                span: verter_span::Span::default(),
+                payload_type: Some("[event: KeyboardEvent]".to_string()),
+                description: None,
+                tags: Vec::new(),
+            },
+            crate::types::AnalyzedEmitField {
+                name: "closeAutoFocus".to_string(),
+                span: verter_span::Span::default(),
+                payload_type: Some("[event: Event]".to_string()),
+                description: None,
+                tags: Vec::new(),
+            },
+        ],
+        slots: Vec::new(),
+    }];
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: vec![crate::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::type_expand::ExpansionResult::exact(
+                crate::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        crate::type_expand::ExpandedProperty {
+                            name: "escapeKeyDown".to_string(),
+                            ty: TypeExpr::Tuple {
+                                elements: vec![crate::type_expr::TupleElement {
+                                    label: Some("event".to_string()),
+                                    ty: TypeExpr::named("KeyboardEvent"),
+                                    optional: false,
+                                    rest: false,
+                                }],
+                                readonly: false,
+                            },
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::type_expand::ExpandedProperty {
+                            name: "closeAutoFocus".to_string(),
+                            ty: TypeExpr::Tuple {
+                                elements: vec![crate::type_expr::TupleElement {
+                                    label: Some("event".to_string()),
+                                    ty: TypeExpr::named("Event"),
+                                    optional: false,
+                                    rest: false,
+                                }],
+                                readonly: false,
+                            },
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::type_expand::ExpandedProperty {
+                            name: "update:searchTerm".to_string(),
+                            ty: TypeExpr::Tuple {
+                                elements: vec![crate::type_expr::TupleElement {
+                                    label: Some("value".to_string()),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: false,
+                                    rest: false,
+                                }],
+                                readonly: false,
+                            },
+                            optional: false,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let event_names: Vec<&str> = result
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+
+    assert!(
+        event_names.contains(&"escapeKeyDown")
+            && event_names.contains(&"closeAutoFocus")
+            && event_names.contains(&"update:searchTerm"),
+        "resolved inherited emits plus a local tuple-property event should survive analysis extraction: {:?}",
+        event_names
+    );
+    let local = result
+        .events
+        .iter()
+        .find(|event| event.name == "update:searchTerm")
+        .expect("local tuple-property event should be present");
+    assert_eq!(
+        local.raw_signature.as_deref(),
+        Some("[value: string]"),
+        "local tuple-property events should preserve raw signature metadata"
+    );
+}
+
+#[test]
+fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineEmits,
+        ..make_define_props(vec![])
+    }];
+    let resolved_macros = vec![crate::component_meta::ResolvedMacroInput {
+        macro_index: 0,
+        props: Vec::new(),
+        emits: vec![
+            crate::types::AnalyzedEmitField {
+                name: "escapeKeyDown".to_string(),
+                span: verter_span::Span::default(),
+                payload_type: Some("[event: KeyboardEvent]".to_string()),
+                description: None,
+                tags: Vec::new(),
+            },
+            crate::types::AnalyzedEmitField {
+                name: "closeAutoFocus".to_string(),
+                span: verter_span::Span::default(),
+                payload_type: Some("[]".to_string()),
+                description: None,
+                tags: Vec::new(),
+            },
+        ],
+        slots: Vec::new(),
+    }];
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: vec![crate::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::type_expand::ExpansionResult::exact(
+                crate::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        crate::type_expand::ExpandedProperty {
+                            name: "escapeKeyDown".to_string(),
+                            ty: TypeExpr::Tuple {
+                                elements: vec![crate::type_expr::TupleElement {
+                                    label: Some("event".to_string()),
+                                    ty: TypeExpr::named("KeyboardEvent"),
+                                    optional: false,
+                                    rest: false,
+                                }],
+                                readonly: false,
+                            },
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::type_expand::ExpandedProperty {
+                            name: "closeAutoFocus".to_string(),
+                            ty: TypeExpr::Tuple {
+                                elements: Vec::new(),
+                                readonly: false,
+                            },
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::type_expand::ExpandedProperty {
+                            name: "openAutoFocus".to_string(),
+                            ty: TypeExpr::Tuple {
+                                elements: Vec::new(),
+                                readonly: false,
+                            },
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::type_expand::ExpandedProperty {
+                            name: "entryFocus".to_string(),
+                            ty: TypeExpr::Tuple {
+                                elements: Vec::new(),
+                                readonly: false,
+                            },
+                            optional: false,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let event_names: Vec<&str> = result
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+
+    assert_eq!(
+        event_names,
+        vec!["escapeKeyDown", "closeAutoFocus"],
+        "resolved emit membership should remain authoritative when evaluated defineEmits contains omitted imported events"
+    );
 }
 
 // ---------------------------------------------------------------------------

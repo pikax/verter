@@ -483,38 +483,47 @@ impl VerterHost {
         }
 
         let mut companion_types = rustc_hash::FxHashMap::default();
-        for binding in extracted
-            .bindings
-            .iter()
-            .filter(|binding| required_import_names.contains(&binding.local_name))
-        {
-            if debug_enabled {
-                external_type_debug(format!(
-                    "resolve_external_type companion-binding dep={} type={} binding={} -> {}:{}",
-                    dep_canonical,
-                    type_name,
-                    binding.local_name,
-                    binding.source,
-                    binding.imported_name,
-                ));
-            }
-            if let Some(resolved) = self.resolve_external_type_from_loaded_files(
-                &dep_canonical,
-                &binding.source,
-                &binding.imported_name,
-                tracked_deps,
-                resolution_deps,
-                cache,
-                visiting,
-                false,
-                kind,
-                use_host_cache,
-                profile_hash,
-                depth + 1,
-            )? {
-                companion_types
-                    .entry(binding.local_name.clone())
-                    .or_insert(resolved);
+        for binding in &extracted.bindings {
+            let required_aliases =
+                verter_core::utils::oxc::vue::resolve_type::required_import_alias_names_for_binding(
+                    binding,
+                    &required_import_names,
+                );
+            for required_alias in required_aliases {
+                let Some(imported_name) =
+                    verter_core::utils::oxc::vue::resolve_type::imported_member_name_for_required_alias(
+                        binding,
+                        &required_alias,
+                    )
+                else {
+                    continue;
+                };
+                if debug_enabled {
+                    external_type_debug(format!(
+                        "resolve_external_type companion-binding dep={} type={} binding={} -> {}:{}",
+                        dep_canonical,
+                        type_name,
+                        required_alias,
+                        binding.source,
+                        imported_name,
+                    ));
+                }
+                if let Some(resolved) = self.resolve_external_type_from_loaded_files(
+                    &dep_canonical,
+                    &binding.source,
+                    &imported_name,
+                    tracked_deps,
+                    resolution_deps,
+                    cache,
+                    visiting,
+                    false,
+                    kind,
+                    use_host_cache,
+                    profile_hash,
+                    depth + 1,
+                )? {
+                    companion_types.entry(required_alias).or_insert(resolved);
+                }
             }
         }
 

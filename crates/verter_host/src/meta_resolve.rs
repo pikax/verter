@@ -24,6 +24,7 @@ use crate::host_manage::{
 };
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -251,12 +252,13 @@ impl VerterHost {
             snapshot.macro_type_deps.iter().cloned().collect();
         for dep in &macro_type_deps {
             let macro_index = dep.macro_index;
+            let dep_exported_name = macro_dep_exported_type_name(&snapshot, dep);
             // Resolve the canonical path of the dependency file.
             let dep_canonical = self
                 .resolve_type_dependency_canonical(&canonical, &dep.import_source)
                 .unwrap_or_default();
             let declaration =
-                resolve_type_declaration(self, &dep_canonical, dep.type_name.as_str());
+                resolve_type_declaration(self, &dep_canonical, dep_exported_name.as_ref());
             let jsdoc = resolve_jsdoc_block(
                 self,
                 declaration.canonical_source.as_str(),
@@ -319,7 +321,7 @@ impl VerterHost {
                     let resolved = self.resolve_external_type_from_loaded_files(
                         &canonical,
                         &dep.import_source,
-                        &dep.type_name,
+                        dep_exported_name.as_ref(),
                         &mut tracked_deps,
                         &mut resolution_deps,
                         &mut cache,
@@ -703,6 +705,40 @@ fn should_ignore_external_macro_type(dep: &verter_analysis::MacroTypeDep) -> boo
     dep.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots
         && dep.import_source == "vue"
         && dep.type_name == "Slot"
+}
+
+fn macro_dep_exported_type_name<'a>(
+    snapshot: &'a FileAnalysisSnapshot,
+    dep: &'a verter_analysis::MacroTypeDep,
+) -> Cow<'a, str> {
+    for import in snapshot
+        .imports
+        .iter()
+        .filter(|import| import.source == dep.import_source)
+    {
+        for binding in &import.bindings {
+            if dep.type_name == binding.name {
+                return Cow::Owned(
+                    binding
+                        .imported_name
+                        .clone()
+                        .unwrap_or_else(|| binding.name.clone()),
+                );
+            }
+
+            if matches!(
+                binding.kind,
+                verter_analysis::types::ImportBindingKind::Namespace
+            ) {
+                let prefix = format!("{}.", binding.name);
+                if let Some(member_name) = dep.type_name.strip_prefix(&prefix) {
+                    return Cow::Owned(member_name.to_string());
+                }
+            }
+        }
+    }
+
+    Cow::Borrowed(dep.type_name.as_str())
 }
 
 fn member_jsdoc(
@@ -1203,29 +1239,38 @@ fn resolve_jsdoc_tag_type(
         );
 
     let mut companion_types = rustc_hash::FxHashMap::default();
-    for binding in extracted
-        .bindings
-        .iter()
-        .filter(|binding| required_import_names.contains(&binding.local_name))
-    {
-        let mut resolution_deps = std::collections::BTreeSet::new();
-        if let Ok(Some(resolved)) = host.resolve_external_type_from_loaded_files(
-            canonical_source,
-            &binding.source,
-            &binding.imported_name,
-            tracked_deps,
-            &mut resolution_deps,
-            cache,
-            visiting,
-            false,
-            kind,
-            true,
-            None,
-            0,
-        ) {
-            companion_types
-                .entry(binding.local_name.clone())
-                .or_insert(resolved);
+    for binding in &extracted.bindings {
+        let required_aliases =
+            verter_core::utils::oxc::vue::resolve_type::required_import_alias_names_for_binding(
+                binding,
+                &required_import_names,
+            );
+        for required_alias in required_aliases {
+            let Some(imported_name) =
+                verter_core::utils::oxc::vue::resolve_type::imported_member_name_for_required_alias(
+                    binding,
+                    &required_alias,
+                )
+            else {
+                continue;
+            };
+            let mut resolution_deps = std::collections::BTreeSet::new();
+            if let Ok(Some(resolved)) = host.resolve_external_type_from_loaded_files(
+                canonical_source,
+                &binding.source,
+                &imported_name,
+                tracked_deps,
+                &mut resolution_deps,
+                cache,
+                visiting,
+                false,
+                kind,
+                true,
+                None,
+                0,
+            ) {
+                companion_types.entry(required_alias).or_insert(resolved);
+            }
         }
     }
 

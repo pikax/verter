@@ -455,17 +455,19 @@ impl VerterHost {
         );
 
         for import in &snapshot.imports {
-            for binding in import.bindings.iter().filter(|binding| {
-                required_import_names.contains(&binding.name)
-                    && !matches!(
+            for binding in &import.bindings {
+                let required_alias_names = required_type_alias_names_for_import_binding(
+                    binding.name.as_str(),
+                    matches!(
                         binding.kind,
                         verter_analysis::types::ImportBindingKind::Namespace
-                    )
-            }) {
-                let imported_name = binding
-                    .imported_name
-                    .as_deref()
-                    .unwrap_or(binding.name.as_str());
+                    ),
+                    &required_import_names,
+                );
+                if required_alias_names.is_empty() {
+                    continue;
+                }
+
                 let Some(dep_canonical) = self
                     .resolve_type_dependency_canonical(owner_canonical_id, &import.source)
                     .or_else(|| import.resolved_canonical_id.clone())
@@ -484,48 +486,62 @@ impl VerterHost {
                 };
 
                 canonical_dependencies.insert(dep_canonical.clone());
-                let declaration = crate::meta_resolve::resolve_type_declaration(
-                    self,
-                    &dep_canonical,
-                    imported_name,
-                );
-                let source_canonical_id = if declaration.canonical_source.is_empty() {
-                    dep_canonical.clone()
-                } else {
-                    declaration.canonical_source.clone()
-                };
-                let exported_name = if declaration.resolved_name.is_empty() {
-                    imported_name.to_string()
-                } else {
-                    declaration.resolved_name.clone()
-                };
+                for required_alias_name in required_alias_names {
+                    let Some(imported_name) = imported_member_name_for_type_alias(
+                        binding.name.as_str(),
+                        binding.imported_name.as_deref(),
+                        matches!(
+                            binding.kind,
+                            verter_analysis::types::ImportBindingKind::Namespace
+                        ),
+                        &required_alias_name,
+                    ) else {
+                        continue;
+                    };
 
-                if alias_names.insert(binding.name.clone()) {
-                    if let Some(alias) = self.prepare_imported_type_alias(
-                        ImportedTypeAliasRequest {
-                            owner_canonical_id,
-                            import_source: &import.source,
-                            local_name: &binding.name,
-                            imported_name,
-                            source_canonical_id: &source_canonical_id,
-                            exported_name: &exported_name,
-                        },
-                        &mut canonical_dependencies,
-                        alias_env_stack,
-                    ) {
-                        if alias.requires_source_merge {
-                            self.record_relevant_type_eval_inputs_recursive(
-                                &source_canonical_id,
-                                &exported_name,
-                                &mut seen,
-                                &mut inputs,
-                                &mut canonical_dependencies,
-                                &mut visited_type_roots,
-                                &mut snapshot_cache,
-                                &mut eval_source_cache,
-                            );
+                    let declaration = crate::meta_resolve::resolve_type_declaration(
+                        self,
+                        &dep_canonical,
+                        &imported_name,
+                    );
+                    let source_canonical_id = if declaration.canonical_source.is_empty() {
+                        dep_canonical.clone()
+                    } else {
+                        declaration.canonical_source.clone()
+                    };
+                    let exported_name = if declaration.resolved_name.is_empty() {
+                        imported_name.clone()
+                    } else {
+                        declaration.resolved_name.clone()
+                    };
+
+                    if alias_names.insert(required_alias_name.clone()) {
+                        if let Some(alias) = self.prepare_imported_type_alias(
+                            ImportedTypeAliasRequest {
+                                owner_canonical_id,
+                                import_source: &import.source,
+                                local_name: &required_alias_name,
+                                imported_name: &imported_name,
+                                source_canonical_id: &source_canonical_id,
+                                exported_name: &exported_name,
+                            },
+                            &mut canonical_dependencies,
+                            alias_env_stack,
+                        ) {
+                            if alias.requires_source_merge {
+                                self.record_relevant_type_eval_inputs_recursive(
+                                    &source_canonical_id,
+                                    &exported_name,
+                                    &mut seen,
+                                    &mut inputs,
+                                    &mut canonical_dependencies,
+                                    &mut visited_type_roots,
+                                    &mut snapshot_cache,
+                                    &mut eval_source_cache,
+                                );
+                            }
+                            type_aliases.push(alias);
                         }
-                        type_aliases.push(alias);
                     }
                 }
             }
@@ -636,6 +652,7 @@ impl VerterHost {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_relevant_type_eval_inputs_recursive(
         &self,
         canonical_id: &str,
@@ -678,48 +695,119 @@ impl VerterHost {
             return;
         }
 
+        // Try the analysis snapshot first for import declarations.
+        // If no snapshot exists (dep loaded as raw source, not through normal pipeline),
+        // fall back to lightweight OXC extraction from the eval source.
         let snapshot = snapshot_cache
             .entry(canonical_id.to_string())
             .or_insert_with(|| self.get_analysis_snapshot_internal(canonical_id, None))
             .clone();
-        let Some(snapshot) = snapshot else {
-            return;
-        };
 
-        for import in &snapshot.imports {
-            for binding in import.bindings.iter().filter(|binding| {
-                required_import_names.contains(&binding.name)
-                    && !matches!(
-                        binding.kind,
-                        verter_analysis::types::ImportBindingKind::Namespace
-                    )
-            }) {
-                let imported_name = binding
-                    .imported_name
-                    .as_deref()
-                    .unwrap_or(binding.name.as_str());
-                let Some(dep_canonical) = import.resolved_canonical_id.clone().or_else(|| {
+        struct LightweightImportBinding {
+            name: String,
+            imported_name: Option<String>,
+            source: String,
+            resolved_canonical_id: Option<String>,
+            is_namespace: bool,
+        }
+
+        let lightweight_bindings: Vec<LightweightImportBinding>;
+        let bindings_ref: &[LightweightImportBinding];
+
+        if let Some(ref snapshot) = snapshot {
+            lightweight_bindings = snapshot
+                .imports
+                .iter()
+                .flat_map(|import| {
                     import
+                        .bindings
+                        .iter()
+                        .map(move |binding| LightweightImportBinding {
+                            name: binding.name.clone(),
+                            imported_name: binding.imported_name.clone(),
+                            source: import.source.clone(),
+                            resolved_canonical_id: import.resolved_canonical_id.clone(),
+                            is_namespace: matches!(
+                                binding.kind,
+                                verter_analysis::types::ImportBindingKind::Namespace
+                            ),
+                        })
+                })
+                .collect();
+            bindings_ref = &lightweight_bindings;
+        } else {
+            // No analysis snapshot — extract imports from the eval source directly.
+            let extracted =
+                verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
+                    eval_source.as_str(),
+                    &alloc,
+                );
+            lightweight_bindings = extracted
+                .bindings
+                .into_iter()
+                .map(|b| LightweightImportBinding {
+                    name: b.local_name.clone(),
+                    imported_name: if b.is_namespace {
+                        None
+                    } else if b.imported_name != b.local_name {
+                        Some(b.imported_name)
+                    } else {
+                        None
+                    },
+                    source: b.source,
+                    resolved_canonical_id: None,
+                    is_namespace: b.is_namespace,
+                })
+                .collect();
+            bindings_ref = &lightweight_bindings;
+        }
+
+        for binding in bindings_ref.iter() {
+            let required_alias_names = required_type_alias_names_for_import_binding(
+                binding.name.as_str(),
+                binding.is_namespace,
+                &required_import_names,
+            );
+            if required_alias_names.is_empty() {
+                continue;
+            }
+            let Some(dep_canonical) = binding
+                .resolved_canonical_id
+                .clone()
+                .or_else(|| self.resolve_type_dependency_canonical(canonical_id, &binding.source))
+                .or_else(|| {
+                    binding
                         .source
                         .starts_with('.')
-                        .then(|| crate::id::resolve_external(canonical_id, &import.source))
-                }) else {
+                        .then(|| crate::id::resolve_external(canonical_id, &binding.source))
+                })
+            else {
+                continue;
+            };
+
+            canonical_dependencies.insert(dep_canonical.clone());
+            for required_alias_name in required_alias_names {
+                let Some(imported_name) = imported_member_name_for_type_alias(
+                    binding.name.as_str(),
+                    binding.imported_name.as_deref(),
+                    binding.is_namespace,
+                    &required_alias_name,
+                ) else {
                     continue;
                 };
 
-                canonical_dependencies.insert(dep_canonical.clone());
                 let declaration = crate::meta_resolve::resolve_type_declaration(
                     self,
                     &dep_canonical,
-                    imported_name,
+                    &imported_name,
                 );
                 let next_canonical = if declaration.canonical_source.is_empty() {
-                    dep_canonical
+                    dep_canonical.clone()
                 } else {
                     declaration.canonical_source
                 };
                 let next_exported_name = if declaration.resolved_name.is_empty() {
-                    imported_name.to_string()
+                    imported_name
                 } else {
                     declaration.resolved_name
                 };
@@ -788,8 +876,36 @@ impl VerterHost {
         canonical_dependencies.extend(resolution_deps);
         canonical_dependencies.insert(resolved_source_canonical_id.clone());
 
-        let requires_source_merge = resolved_decl_body.is_none() && resolved_body.is_none();
-        if let Some(body) = choose_preferred_imported_type_body(resolved_body, resolved_decl_body) {
+        // When the original body is an Intersection with Ref nodes (i.e., interface extends
+        // imported types), the flattened resolved_body from the OXC resolver may be incomplete —
+        // it might only contain directly declared members, missing inherited ones.
+        // In this case, keep the structural Intersection body and force source merge so the
+        // EvalEnv can properly resolve the extends chain with loaded dependency sources.
+        let body_has_structural_extends = body_has_structural_intersection_refs(&decl.body);
+        let preferred_body =
+            choose_preferred_imported_type_body(resolved_body.clone(), resolved_decl_body.clone());
+        let selected_body =
+            choose_preferred_imported_type_body(Some(decl.body.clone()), preferred_body.clone())
+                .or(preferred_body.clone());
+        let requires_source_merge = if body_has_structural_extends {
+            resolved_decl_body.is_none()
+                && match selected_body.as_ref() {
+                    Some(body) => {
+                        is_empty_object_surface(body) || has_non_object_top_level_surface(body)
+                    }
+                    None => true,
+                }
+        } else {
+            selected_body.is_none()
+        };
+
+        if body_has_structural_extends && requires_source_merge {
+            // Keep the raw Intersection body WITHOUT evaluating it against the dep env.
+            // The dep env only has local types — imported Refs (e.g., LinkProps in
+            // ButtonProps extends chain) would be lost if evaluated now. The final
+            // EvalEnv (built in build_owner_eval_env_with_inputs) will have all
+            // 262+ symbols from dep source merge and can resolve everything.
+        } else if let Some(body) = selected_body {
             let mut normalized_env = dep_env.clone();
             for param in &decl.type_parameters {
                 normalized_env.type_bindings.insert(
@@ -4120,6 +4236,21 @@ impl VerterHost {
     }
 }
 
+/// Check whether a type body has a top-level Intersection containing Ref nodes,
+/// indicating `interface Foo extends ImportedType, Omit<Bar, ...> { ... }`.
+/// When true, the flattened OXC resolved body may be incomplete (missing inherited
+/// members), so the EvalEnv should load full dependency sources instead.
+fn body_has_structural_intersection_refs(body: &verter_analysis::type_expr::TypeExpr) -> bool {
+    use verter_analysis::type_expr::TypeExpr;
+
+    match body {
+        TypeExpr::Intersection(parts) => parts
+            .iter()
+            .any(|part| matches!(part, TypeExpr::Ref { .. })),
+        _ => false,
+    }
+}
+
 fn choose_preferred_imported_type_body(
     resolved_body: Option<verter_analysis::type_expr::TypeExpr>,
     resolved_decl_body: Option<verter_analysis::type_expr::TypeExpr>,
@@ -4326,9 +4457,7 @@ fn extracted_surface_property_count(expr: &verter_analysis::type_expr::TypeExpr)
             let mut total = 0usize;
             let mut saw_surface = false;
             for ty in types {
-                let Some(count) = extracted_surface_property_count(ty) else {
-                    return None;
-                };
+                let count = extracted_surface_property_count(ty)?;
                 total += count;
                 saw_surface = true;
             }
@@ -4530,6 +4659,11 @@ fn collect_required_owner_import_names(
     }
     let type_bindings = rustc_hash::FxHashMap::default();
     let mut active_locals = rustc_hash::FxHashSet::default();
+    let macro_type_params =
+        verter_analysis::type_eval_build::collect_define_macro_type_params(owner_eval_source);
+    let mut define_props_index = 0usize;
+    let mut define_emits_index = 0usize;
+    let mut define_slots_index = 0usize;
     let imported_binding_names: rustc_hash::FxHashSet<&str> = snapshot
         .imports
         .iter()
@@ -4552,6 +4686,35 @@ fn collect_required_owner_import_names(
         // behind the macro root. Only fall back to shared macro deps when the
         // local macro analyzer captured no root type references.
         if mac.is_type_based {
+            let macro_type_expr = match mac.kind {
+                verter_analysis::AnalyzedMacroKind::DefineProps => {
+                    let expr = macro_type_params.define_props.get(define_props_index);
+                    define_props_index += 1;
+                    expr
+                }
+                verter_analysis::AnalyzedMacroKind::DefineEmits => {
+                    let expr = macro_type_params.define_emits.get(define_emits_index);
+                    define_emits_index += 1;
+                    expr
+                }
+                verter_analysis::AnalyzedMacroKind::DefineSlots => {
+                    let expr = macro_type_params.define_slots.get(define_slots_index);
+                    define_slots_index += 1;
+                    expr
+                }
+                _ => None,
+            };
+            if let Some(expr) = macro_type_expr {
+                if !expr.is_unknown() {
+                    collect_surface_eval_import_names_from_expr(
+                        expr,
+                        owner_env,
+                        &type_bindings,
+                        &mut active_locals,
+                        &mut required,
+                    );
+                }
+            }
             for type_reference in &mac.type_references {
                 collect_required_import_names_for_symbol(
                     type_reference,
@@ -4581,7 +4744,7 @@ fn collect_required_owner_import_names(
                 if !expr.is_unknown() {
                     collect_surface_eval_import_names_from_expr(
                         &expr,
-                        &owner_env,
+                        owner_env,
                         &type_bindings,
                         &mut active_locals,
                         &mut required,
@@ -4596,7 +4759,7 @@ fn collect_required_owner_import_names(
                 if !expr.is_unknown() {
                     collect_surface_eval_import_names_from_expr(
                         &expr,
-                        &owner_env,
+                        owner_env,
                         &type_bindings,
                         &mut active_locals,
                         &mut required,
@@ -4612,7 +4775,7 @@ fn collect_required_owner_import_names(
                     if !expr.is_unknown() {
                         collect_surface_eval_import_names_from_expr(
                             &expr,
-                            &owner_env,
+                            owner_env,
                             &type_bindings,
                             &mut active_locals,
                             &mut required,
@@ -4632,7 +4795,7 @@ fn collect_required_owner_import_names(
             }
             collect_surface_eval_import_names_from_expr(
                 &expr,
-                &owner_env,
+                owner_env,
                 &type_bindings,
                 &mut active_locals,
                 &mut required,
@@ -4713,6 +4876,13 @@ fn collect_required_import_names_for_symbol(
         return;
     }
 
+    if let Some((root, _)) = symbol.split_once('.') {
+        if imported_binding_names.contains(root) {
+            required.insert(symbol.to_string());
+            return;
+        }
+    }
+
     if imported_binding_names.contains(symbol) {
         required.insert(symbol.to_string());
     }
@@ -4726,6 +4896,43 @@ fn collect_requested_binding_names(
         .iter()
         .flat_map(|mac| mac.expose_fields.iter().map(|field| field.name.clone()))
         .collect()
+}
+
+fn required_type_alias_names_for_import_binding(
+    local_binding_name: &str,
+    is_namespace: bool,
+    required_import_names: &rustc_hash::FxHashSet<String>,
+) -> Vec<String> {
+    if is_namespace {
+        let prefix = format!("{local_binding_name}.");
+        return required_import_names
+            .iter()
+            .filter(|name| name.starts_with(&prefix))
+            .cloned()
+            .collect();
+    }
+
+    required_import_names
+        .contains(local_binding_name)
+        .then(|| vec![local_binding_name.to_string()])
+        .unwrap_or_default()
+}
+
+fn imported_member_name_for_type_alias(
+    local_binding_name: &str,
+    imported_name: Option<&str>,
+    is_namespace: bool,
+    required_alias_name: &str,
+) -> Option<String> {
+    if is_namespace {
+        let prefix = format!("{local_binding_name}.");
+        return required_alias_name
+            .strip_prefix(&prefix)
+            .map(str::to_string)
+            .filter(|name| !name.is_empty());
+    }
+
+    Some(imported_name.unwrap_or(local_binding_name).to_string())
 }
 
 fn collect_surface_eval_import_names_from_expr(
@@ -5214,35 +5421,6 @@ fn collect_surface_eval_import_names_from_function(
             active_locals,
             required,
         );
-    }
-    if let Some(return_type) = func.return_type.as_deref() {
-        collect_surface_eval_import_names_from_expr(
-            return_type,
-            owner_env,
-            type_bindings,
-            active_locals,
-            required,
-        );
-    }
-    for type_param in &func.type_parameters {
-        if let Some(constraint) = type_param.constraint.as_deref() {
-            collect_surface_eval_import_names_from_expr(
-                constraint,
-                owner_env,
-                type_bindings,
-                active_locals,
-                required,
-            );
-        }
-        if let Some(default) = type_param.default.as_deref() {
-            collect_surface_eval_import_names_from_expr(
-                default,
-                owner_env,
-                type_bindings,
-                active_locals,
-                required,
-            );
-        }
     }
 }
 

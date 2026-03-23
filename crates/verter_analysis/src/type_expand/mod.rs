@@ -18,9 +18,9 @@ pub use normalized::expand_normalized_expr;
 pub use object_shape::expand_object_shape;
 pub use request::{
     ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature,
-    ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape, ExpandedParameter,
-    ExpandedProperty, ExpansionBudget, ExpansionCompleteness, ExpansionDiagnostic,
-    ExpansionMetadata, ExpansionResult, ExpansionStopReason,
+    ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape,
+    ExpandedParameter, ExpandedProperty, ExpansionBudget, ExpansionCompleteness,
+    ExpansionDiagnostic, ExpansionMetadata, ExpansionResult, ExpansionStopReason,
 };
 
 #[cfg(test)]

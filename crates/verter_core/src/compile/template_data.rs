@@ -1084,6 +1084,7 @@ fn extract_slot_def(
 ) {
     // Find the "name" attribute on the <slot> element
     let mut name = "default".to_string();
+    let mut has_dynamic_name = false;
     let mut has_bindings = false;
     let mut binding_names = Vec::new();
     let mut binding_expressions = Vec::new();
@@ -1099,6 +1100,10 @@ fn extract_slot_def(
                     .zip(prop.arg_end)
                     .map(|(s, e)| &source[s as usize..e as usize]);
                 if let Some(arg_name) = arg {
+                    if arg_name == "name" {
+                        has_dynamic_name = true;
+                        continue;
+                    }
                     has_bindings = true;
                     binding_names.push(arg_name.to_string());
                     // Capture expression text and span
@@ -1121,6 +1126,10 @@ fn extract_slot_def(
                 }
             }
         }
+    }
+
+    if has_dynamic_name {
+        return;
     }
 
     let has_fallback_content = el

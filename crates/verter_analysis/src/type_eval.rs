@@ -348,6 +348,10 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
             let extends_eval = evaluate(extends, env);
             if is_assignable_to(&check_eval, &extends_eval) {
                 evaluate(true_type, env)
+            } else if let Some(result) =
+                try_evaluate_conditional_with_infer(&check_eval, &extends_eval, true_type, env)
+            {
+                result
             } else if is_definitely_not_assignable(&check_eval, &extends_eval) {
                 evaluate(false_type, env)
             } else {
@@ -626,6 +630,105 @@ pub(crate) fn restore_type_parameters(saved: Vec<(String, Option<TypeExpr>)>, en
         } else {
             env.type_bindings.remove(&name);
         }
+    }
+}
+
+pub(crate) fn try_evaluate_conditional_with_infer(
+    check: &TypeExpr,
+    extends: &TypeExpr,
+    true_type: &TypeExpr,
+    env: &mut EvalEnv,
+) -> Option<TypeExpr> {
+    let mut inferred = FxHashMap::default();
+    if !collect_infer_bindings(check, extends, &mut inferred) || inferred.is_empty() {
+        return None;
+    }
+
+    let mut saved = Vec::with_capacity(inferred.len());
+    for (name, ty) in inferred {
+        saved.push((name.clone(), env.type_bindings.insert(name, ty)));
+    }
+    let result = evaluate(true_type, env);
+    restore_type_parameters(saved, env);
+    Some(result)
+}
+
+fn collect_infer_bindings(
+    actual: &TypeExpr,
+    pattern: &TypeExpr,
+    inferred: &mut FxHashMap<String, TypeExpr>,
+) -> bool {
+    match pattern {
+        TypeExpr::Infer { name } => {
+            if let Some(existing) = inferred.get(name) {
+                existing == actual
+            } else {
+                inferred.insert(name.clone(), actual.clone());
+                true
+            }
+        }
+        TypeExpr::Function(pattern_fn) => {
+            let TypeExpr::Function(actual_fn) = actual else {
+                return false;
+            };
+            if actual_fn.parameters.len() != pattern_fn.parameters.len() {
+                return false;
+            }
+            for (actual_param, pattern_param) in
+                actual_fn.parameters.iter().zip(&pattern_fn.parameters)
+            {
+                if !collect_infer_bindings(&actual_param.ty, &pattern_param.ty, inferred) {
+                    return false;
+                }
+            }
+            match (&actual_fn.return_type, &pattern_fn.return_type) {
+                (_, None) => true,
+                (Some(actual_ret), Some(pattern_ret)) => {
+                    collect_infer_bindings(actual_ret, pattern_ret, inferred)
+                }
+                (None, Some(pattern_ret)) => matches!(
+                    pattern_ret.as_ref(),
+                    TypeExpr::Primitive(PrimitiveName::Void | PrimitiveName::Any)
+                ),
+            }
+        }
+        TypeExpr::Array {
+            element: pattern_element,
+            ..
+        } => {
+            let TypeExpr::Array {
+                element: actual_element,
+                ..
+            } = actual
+            else {
+                return false;
+            };
+            collect_infer_bindings(actual_element, pattern_element, inferred)
+        }
+        TypeExpr::Tuple {
+            elements: pattern_elements,
+            ..
+        } => {
+            let TypeExpr::Tuple {
+                elements: actual_elements,
+                ..
+            } = actual
+            else {
+                return false;
+            };
+            if actual_elements.len() != pattern_elements.len() {
+                return false;
+            }
+            actual_elements
+                .iter()
+                .zip(pattern_elements)
+                .all(|(actual_element, pattern_element)| {
+                    collect_infer_bindings(&actual_element.ty, &pattern_element.ty, inferred)
+                })
+        }
+        TypeExpr::Parenthesized(inner) => collect_infer_bindings(actual, inner, inferred),
+        TypeExpr::Primitive(PrimitiveName::Any | PrimitiveName::Unknown) => true,
+        _ => actual == pattern,
     }
 }
 

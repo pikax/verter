@@ -1614,6 +1614,10 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             result.dedup_props();
         }
 
+        TSType::TSMappedType(mapped) => {
+            resolve_mapped_type_with_ctx(mapped, base_offset, result, &*ctx);
+        }
+
         // Type reference: SomeType or SomeType<T>
         TSType::TSTypeReference(type_ref) => {
             // Get the type name for lookup
@@ -1833,6 +1837,10 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             result.dedup_props();
         }
 
+        TSType::TSMappedType(mapped) => {
+            resolve_mapped_type_with_ctx(mapped, base_offset, result, ctx);
+        }
+
         // Type reference: SomeType or SomeType<T>
         TSType::TSTypeReference(type_ref) => {
             // Get the type name for lookup
@@ -2024,6 +2032,147 @@ fn resolve_type_literal_members(
             }
             _ => {}
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedMappedKey {
+    name: String,
+    key: Span,
+    optional: bool,
+}
+
+fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
+    mapped: &'ctx TSMappedType<'a>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) {
+    // Renamed mapped keys (`as ...`) need a dedicated key-evaluation path.
+    // Until that exists, only materialize direct finite key sets.
+    if mapped.name_type.is_some() {
+        return;
+    }
+
+    let keys = resolve_mapped_type_keys_with_ctx(&mapped.constraint, ctx);
+    if keys.is_empty() {
+        return;
+    }
+
+    let span = Span {
+        start: mapped.span.start + base_offset,
+        end: mapped.span.end + base_offset,
+    };
+    let type_span = mapped.type_annotation.as_ref().map(|ann| Span {
+        start: ann.span().start + base_offset,
+        end: ann.span().end + base_offset,
+    });
+    let type_text = mapped
+        .type_annotation
+        .as_ref()
+        .and_then(|ann| span_text(ctx.source, ann.span().into()));
+    let types = mapped
+        .type_annotation
+        .as_ref()
+        .map(|ann| infer_runtime_type(ann))
+        .unwrap_or_else(|| vec![RuntimeType::Unknown]);
+    let optional_override = mapped_optional_override(mapped.optional);
+
+    for key in keys {
+        result.props.push(ResolvedProp {
+            span,
+            key: Span {
+                start: key.key.start + base_offset,
+                end: key.key.end + base_offset,
+            },
+            key_name: Some(key.name),
+            optional: optional_override.unwrap_or(key.optional),
+            types: types.clone(),
+            visibility: ResolvedMemberVisibility::Public,
+            type_span,
+            type_text: type_text.clone(),
+            map_local: true,
+            span_is_absolute: base_offset != 0,
+        });
+    }
+
+    result.dedup_props();
+}
+
+fn mapped_optional_override(modifier: Option<TSMappedTypeModifierOperator>) -> Option<bool> {
+    match modifier {
+        Some(TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus) => Some(true),
+        Some(TSMappedTypeModifierOperator::Minus) => Some(false),
+        None => None,
+    }
+}
+
+fn resolve_mapped_type_keys_with_ctx<'ctx, 'a: 'ctx>(
+    constraint: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Vec<ResolvedMappedKey> {
+    match constraint {
+        TSType::TSTypeOperatorType(op) if matches!(op.operator, TSTypeOperatorOperator::Keyof) => {
+            let resolved = resolve_type_elements_with_ctx_ref(&op.type_annotation, 0, ctx);
+            resolved
+                .props
+                .into_iter()
+                .filter_map(|prop| {
+                    let name = prop
+                        .key_name
+                        .clone()
+                        .or_else(|| span_text(ctx.source, prop.key))?;
+                    Some(ResolvedMappedKey {
+                        name,
+                        key: prop.key,
+                        optional: prop.optional,
+                    })
+                })
+                .collect()
+        }
+        TSType::TSLiteralType(literal) => resolve_mapped_string_literal_key(literal),
+        TSType::TSUnionType(union) => union
+            .types
+            .iter()
+            .flat_map(|ty| resolve_mapped_type_keys_with_ctx(ty, ctx))
+            .collect(),
+        TSType::TSParenthesizedType(paren) => {
+            resolve_mapped_type_keys_with_ctx(&paren.type_annotation, ctx)
+        }
+        TSType::TSTypeReference(type_ref) => {
+            let name = get_type_reference_name(&type_ref.type_name);
+            if let Some((aliased_type, _)) = ctx.find_type_alias(name.as_bytes()) {
+                resolve_mapped_type_keys_with_ctx(aliased_type, ctx)
+            } else {
+                extract_string_literal_keys_with_ctx(constraint, Some(ctx))
+                    .into_iter()
+                    .map(|name| ResolvedMappedKey {
+                        name,
+                        key: Span::new(0, 0),
+                        optional: false,
+                    })
+                    .collect()
+            }
+        }
+        _ => extract_string_literal_keys_with_ctx(constraint, Some(ctx))
+            .into_iter()
+            .map(|name| ResolvedMappedKey {
+                name,
+                key: Span::new(0, 0),
+                optional: false,
+            })
+            .collect(),
+    }
+}
+
+fn resolve_mapped_string_literal_key(literal: &TSLiteralType<'_>) -> Vec<ResolvedMappedKey> {
+    match &literal.literal {
+        TSLiteral::StringLiteral(value) => vec![ResolvedMappedKey {
+            name: value.value.to_string(),
+            key: Span::from(value.span),
+            optional: false,
+        }],
+        _ => Vec::new(),
     }
 }
 
@@ -2711,6 +2860,7 @@ pub struct ImportedTypeBinding {
     pub local_name: String,
     pub imported_name: String,
     pub source: String,
+    pub is_namespace: bool,
 }
 
 /// Result of extracting type bindings from a dependency file.
@@ -2748,6 +2898,7 @@ pub fn extract_imported_type_bindings(
                                 local_name: import_spec.local.name.to_string(),
                                 imported_name: import_spec.imported.name().to_string(),
                                 source: import_decl.source.value.to_string(),
+                                is_namespace: false,
                             });
                         }
                         ImportDeclarationSpecifier::ImportDefaultSpecifier(import_spec) => {
@@ -2755,9 +2906,17 @@ pub fn extract_imported_type_bindings(
                                 local_name: import_spec.local.name.to_string(),
                                 imported_name: "default".to_string(),
                                 source: import_decl.source.value.to_string(),
+                                is_namespace: false,
                             });
                         }
-                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(import_spec) => {
+                            result.bindings.push(ImportedTypeBinding {
+                                local_name: import_spec.local.name.to_string(),
+                                imported_name: "*".to_string(),
+                                source: import_decl.source.value.to_string(),
+                                is_namespace: true,
+                            });
+                        }
                     }
                 }
             }
@@ -2771,6 +2930,7 @@ pub fn extract_imported_type_bindings(
                             local_name,
                             imported_name,
                             source: source.value.to_string(),
+                            is_namespace: false,
                         };
                         result.bindings.push(binding.clone());
                         result.reexport_bindings.push(binding);
@@ -2793,6 +2953,7 @@ pub fn extract_imported_type_bindings(
                         local_name: specifier.exported.name().to_string(),
                         imported_name: imported.imported_name.clone(),
                         source: imported.source.clone(),
+                        is_namespace: imported.is_namespace,
                     });
                 }
             }
@@ -2807,6 +2968,40 @@ pub fn extract_imported_type_bindings(
     }
 
     result
+}
+
+pub fn required_import_alias_names_for_binding(
+    binding: &ImportedTypeBinding,
+    required_import_names: &FxHashSet<String>,
+) -> Vec<String> {
+    if binding.is_namespace {
+        let prefix = format!("{}.", binding.local_name);
+        return required_import_names
+            .iter()
+            .filter(|name| name.starts_with(&prefix))
+            .cloned()
+            .collect();
+    }
+
+    required_import_names
+        .contains(&binding.local_name)
+        .then(|| vec![binding.local_name.clone()])
+        .unwrap_or_default()
+}
+
+pub fn imported_member_name_for_required_alias(
+    binding: &ImportedTypeBinding,
+    required_alias_name: &str,
+) -> Option<String> {
+    if binding.is_namespace {
+        let prefix = format!("{}.", binding.local_name);
+        return required_alias_name
+            .strip_prefix(&prefix)
+            .map(str::to_string)
+            .filter(|name| !name.is_empty());
+    }
+
+    Some(binding.imported_name.clone())
 }
 
 /// Lightweight export surface of a file: names that are publicly exported
@@ -3063,24 +3258,10 @@ fn collect_interface_reference_names(
                 }
             }
             TSSignature::TSMethodSignature(method) => {
-                if let Some(return_type) = &method.return_type {
-                    collect_type_reference_names(&return_type.type_annotation, refs);
-                }
-                for param in &method.params.items {
-                    if let Some(type_annotation) = &param.type_annotation {
-                        collect_type_reference_names(&type_annotation.type_annotation, refs);
-                    }
-                }
+                collect_formal_parameter_reference_names(&method.params, refs);
             }
             TSSignature::TSCallSignatureDeclaration(call) => {
-                if let Some(return_type) = &call.return_type {
-                    collect_type_reference_names(&return_type.type_annotation, refs);
-                }
-                for param in &call.params.items {
-                    if let Some(type_annotation) = &param.type_annotation {
-                        collect_type_reference_names(&type_annotation.type_annotation, refs);
-                    }
-                }
+                collect_formal_parameter_reference_names(&call.params, refs);
             }
             TSSignature::TSIndexSignature(index) => {
                 collect_type_reference_names(&index.type_annotation.type_annotation, refs);
@@ -3119,14 +3300,7 @@ fn collect_class_reference_names(class: &Class<'_>, refs: &mut FxHashSet<String>
                 }
             }
             ClassElement::MethodDefinition(method) => {
-                if let Some(return_type) = &method.value.return_type {
-                    collect_type_reference_names(&return_type.type_annotation, refs);
-                }
-                for param in &method.value.params.items {
-                    if let Some(type_annotation) = &param.type_annotation {
-                        collect_type_reference_names(&type_annotation.type_annotation, refs);
-                    }
-                }
+                collect_formal_parameter_reference_names(&method.value.params, refs);
             }
             ClassElement::AccessorProperty(prop) => {
                 if let Some(type_annotation) = &prop.type_annotation {
@@ -3217,15 +3391,10 @@ fn collect_type_reference_names(ts_type: &TSType<'_>, refs: &mut FxHashSet<Strin
             }
         }
         TSType::TSFunctionType(function) => {
-            collect_type_reference_names(&function.return_type.type_annotation, refs);
-            for param in &function.params.items {
-                if let Some(type_annotation) = &param.type_annotation {
-                    collect_type_reference_names(&type_annotation.type_annotation, refs);
-                }
-            }
+            collect_formal_parameter_reference_names(&function.params, refs);
         }
         TSType::TSConstructorType(constructor) => {
-            collect_type_reference_names(&constructor.return_type.type_annotation, refs);
+            collect_formal_parameter_reference_names(&constructor.params, refs);
         }
         TSType::TSTypeQuery(query) => {
             if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
@@ -3233,6 +3402,20 @@ fn collect_type_reference_names(ts_type: &TSType<'_>, refs: &mut FxHashSet<Strin
             }
         }
         _ => {}
+    }
+}
+
+fn collect_formal_parameter_reference_names(
+    params: &FormalParameters<'_>,
+    refs: &mut FxHashSet<String>,
+) {
+    // Component-meta only needs callable parameter surfaces for props/emits/slots.
+    // Skipping return-type-only imports avoids pulling large framework graphs
+    // like `VNode` into companion/source-merge work.
+    for param in &params.items {
+        if let Some(type_annotation) = &param.type_annotation {
+            collect_type_reference_names(&type_annotation.type_annotation, refs);
+        }
     }
 }
 

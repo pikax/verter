@@ -934,6 +934,502 @@ defineProps<{
     expect(userProp!.schema.schema).not.toHaveProperty("password");
   });
 
+  it("preserves inherited imported props through Omit chains and keeps explicit class", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-imported-inherited-props-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "types.ts",
+      `export interface LinkProps {
+  as?: string
+  class?: any
+  href?: string
+  target?: string
+  active?: boolean
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'active'
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  label?: string
+  color?: string
+  variant?: string
+  ui?: object
+}`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface Props extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: 'primary'
+  variant?: 'solid'
+  side?: 'left' | 'right'
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const propNames = meta.props.map((prop) => prop.name);
+
+    expect(propNames).toEqual(
+      expect.arrayContaining(["as", "class", "label", "ui", "color", "variant", "side"]),
+    );
+    expect(propNames).not.toEqual(expect.arrayContaining(["href", "target", "active"]));
+
+    checker.close();
+  });
+
+  it("preserves inherited imported emits through Omit chains", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-imported-inherited-emits-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "events.ts",
+      `export interface MenuContentImplEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'pointerDownOutside', event: PointerEvent): void
+  (e: 'focusOutside', event: FocusEvent): void
+  (e: 'interactOutside', event: Event): void
+  (e: 'openAutoFocus'): void
+  (e: 'closeAutoFocus'): void
+  (e: 'entryFocus'): void
+}
+
+export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+
+export interface ContextMenuContentEmits extends MenuContentEmits {}`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type { ContextMenuContentEmits } from './events'
+
+defineEmits<ContextMenuContentEmits>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const events = Object.fromEntries(meta.events.map((event) => [event.name, event.type]));
+
+    expect(Object.keys(events)).toEqual(
+      expect.arrayContaining([
+        "escapeKeyDown",
+        "pointerDownOutside",
+        "focusOutside",
+        "interactOutside",
+        "closeAutoFocus",
+      ]),
+    );
+    expect(Object.keys(events)).not.toEqual(
+      expect.arrayContaining(["openAutoFocus", "entryFocus"]),
+    );
+    expect(events.escapeKeyDown).toContain("event: Event");
+
+    checker.close();
+  });
+
+  it("preserves mixed inherited and local emits", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-mixed-inherited-emits-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "events.ts",
+      `export interface MenuContentEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'focusOutside', event: FocusEvent): void
+}`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type { MenuContentEmits } from './events'
+
+interface Emits extends MenuContentEmits {
+  (e: 'closeAutoFocus'): void
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const eventNames = meta.events.map((event) => event.name);
+
+    expect(eventNames).toEqual(
+      expect.arrayContaining(["escapeKeyDown", "focusOutside", "closeAutoFocus"]),
+    );
+
+    checker.close();
+  });
+
+  it("preserves inherited emits when a local interface adds tuple-property events", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-mixed-inherited-tuple-emits-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "events.ts",
+      `export interface MenuContentEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'focusOutside', event: FocusEvent): void
+}`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type { MenuContentEmits } from './events'
+
+interface Emits extends MenuContentEmits {
+  'update:searchTerm': [value: string]
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const events = Object.fromEntries(meta.events.map((event) => [event.name, event.type]));
+
+    expect(Object.keys(events)).toEqual(
+      expect.arrayContaining(["escapeKeyDown", "focusOutside", "update:searchTerm"]),
+    );
+    expect(events["update:searchTerm"]).toContain("value: string");
+
+    checker.close();
+  });
+
+  it("preserves inherited alias-chain emits when a local interface adds tuple-property events", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-mixed-inherited-alias-tuple-emits-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "events.ts",
+      `export interface MenuContentImplEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'pointerDownOutside', event: PointerEvent): void
+  (e: 'focusOutside', event: FocusEvent): void
+  (e: 'interactOutside', event: Event): void
+  (e: 'openAutoFocus'): void
+  (e: 'closeAutoFocus'): void
+  (e: 'entryFocus'): void
+}
+
+export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type { MenuContentEmits } from './events'
+
+interface Emits extends MenuContentEmits {
+  'update:searchTerm': [value: string]
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const eventNames = meta.events.map((event) => event.name);
+
+    expect(eventNames).toEqual(
+      expect.arrayContaining([
+        "escapeKeyDown",
+        "pointerDownOutside",
+        "focusOutside",
+        "interactOutside",
+        "closeAutoFocus",
+        "update:searchTerm",
+      ]),
+    );
+    expect(eventNames).not.toEqual(expect.arrayContaining(["openAutoFocus", "entryFocus"]));
+
+    checker.close();
+  });
+
+  it("preserves inherited alias-chain emits through local import aliases", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-aliased-inherited-alias-tuple-emits-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "events.ts",
+      `export interface MenuContentImplEmits {
+  escapeKeyDown: [event: KeyboardEvent]
+  pointerDownOutside: [event: PointerEvent]
+  focusOutside: [event: FocusEvent]
+  interactOutside: [event: Event]
+  openAutoFocus: [event: Event]
+  closeAutoFocus: [event: Event]
+  entryFocus: [event: Event]
+}
+
+export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type { MenuContentEmits as LocalMenuContentEmits } from './events'
+
+interface Emits extends LocalMenuContentEmits {
+  'update:searchTerm': [value: string]
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const eventNames = meta.events.map((event) => event.name);
+
+    expect(eventNames).toEqual(
+      expect.arrayContaining([
+        "escapeKeyDown",
+        "pointerDownOutside",
+        "focusOutside",
+        "interactOutside",
+        "closeAutoFocus",
+        "update:searchTerm",
+      ]),
+    );
+    expect(eventNames).not.toEqual(expect.arrayContaining(["openAutoFocus", "entryFocus"]));
+
+    checker.close();
+  });
+
+  it("materializes imported mapped slots and does not synthesize default from dynamic branches", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-imported-mapped-slots-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "slots.ts",
+      `export interface PricingPlan {
+  id: string
+}
+
+export interface PricingPlanSlots {
+  badge(props: { planId: string }): any
+  title(props: { planId: string }): any
+}
+
+export type ExtendSlotWithPlan<TPlan, TKey extends keyof PricingPlanSlots> =
+  PricingPlanSlots[TKey] extends (props: infer P) => any
+    ? (props: P & { plan: TPlan }) => any
+    : PricingPlanSlots[TKey]
+
+export type PricingPlansSlots<TPlan extends PricingPlan = PricingPlan> = {
+  [K in keyof PricingPlanSlots]?: ExtendSlotWithPlan<TPlan, K>
+} & {
+  default?(props?: {}): any
+}
+
+export type TableSlots = {
+  expanded?(props: { row: string }): any
+  empty?(props?: {}): any
+} & Record<string, (props: any) => any>`,
+    );
+
+    checker.updateFile(
+      "PricingPlans.vue",
+      `<script setup lang="ts">
+import type { PricingPlansSlots } from './slots'
+
+defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
+</script>
+<template><div /></template>`,
+    );
+
+    checker.updateFile(
+      "Table.vue",
+      `<script setup lang="ts">
+import type { TableSlots } from './slots'
+
+defineSlots<TableSlots>()
+</script>
+<template><div /></template>`,
+    );
+
+    const pricingPlans = await checker.getComponentMeta("PricingPlans.vue");
+    expect(pricingPlans.slots.map((slot) => slot.name)).toEqual(
+      expect.arrayContaining(["badge", "title", "default"]),
+    );
+    const badgeType = pricingPlans.slots.find((slot) => slot.name === "badge")?.type;
+    expect(badgeType).toContain("plan");
+    expect(badgeType).toContain("planId");
+    expect(badgeType).not.toBe("{}");
+
+    const table = await checker.getComponentMeta("Table.vue");
+    expect(table.slots.map((slot) => slot.name)).toEqual(
+      expect.arrayContaining(["expanded", "empty"]),
+    );
+    expect(table.slots.map((slot) => slot.name)).not.toContain("default");
+
+    checker.close();
+  });
+
+  it("does not synthesize default from dynamic template slot names", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-dynamic-template-slot-names-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+const sectionSlot = 'section-title'
+</script>
+<template>
+  <div>
+    <slot :name="sectionSlot" />
+    <slot name="caption" />
+  </div>
+</template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const slotNames = meta.slots.map((slot) => slot.name);
+
+    expect(slotNames).toContain("caption");
+    expect(slotNames).not.toContain("default");
+
+    checker.close();
+  });
+
+  it("resolves namespace-qualified imported props", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-namespace-props-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "types.ts",
+      `export interface BaseProps {
+  a?: string
+  b?: number
+}
+
+export interface Props extends BaseProps {
+  c?: boolean
+}`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type * as Types from './types'
+
+defineProps<Types.Props>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const propNames = meta.props.map((prop) => prop.name);
+
+    expect(propNames).toEqual(expect.arrayContaining(["a", "b", "c"]));
+    expect(propNames).not.toContain("default");
+
+    checker.close();
+  });
+
+  it("materializes mapped tuple emits from type-based defineEmits", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-mapped-emits-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+type Emits = {
+  [K in 'open' | 'close']?: []
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const eventNames = meta.events.map((event) => event.name);
+
+    expect(eventNames).toEqual(expect.arrayContaining(["open", "close"]));
+    expect(eventNames).not.toContain("default");
+
+    checker.close();
+  });
+
+  it("materializes imported mapped tuple emits from type-based defineEmits", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-imported-mapped-emits-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "events.ts",
+      `export type Emits = {
+  [K in 'open' | 'close']?: []
+}`,
+    );
+
+    checker.updateFile(
+      "App.vue",
+      `<script setup lang="ts">
+import type { Emits } from './events'
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("App.vue");
+    const eventNames = meta.events.map((event) => event.name);
+
+    expect(eventNames).toEqual(expect.arrayContaining(["open", "close"]));
+    expect(eventNames).not.toContain("default");
+
+    checker.close();
+  });
+
   it("preserves index signature text inside intersection schemas", async () => {
     const checker = await createRuntimeChecker("checker-index-signature");
 

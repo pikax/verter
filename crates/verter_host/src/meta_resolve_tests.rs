@@ -50,6 +50,196 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn package_declaration_entrypoints_materialize_alias_chain_emits_with_local_tuple_property() {
+    let ws = verter_vfs::MemoryWorkspace::new(verter_vfs::MemoryOptions::default());
+    ws.inject_file(
+        "/project/node_modules/my-lib/package.json".to_string(),
+        Arc::from(
+            r#"{"name": "my-lib", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js" } }}"#,
+        ),
+    );
+    ws.inject_file(
+        "/project/node_modules/my-lib/dist/index.d.ts".to_string(),
+        Arc::from(r#"import { MenuContentEmits as ImportedMenuContentEmits } from "./inner.js"; export type { ImportedMenuContentEmits as MenuContentEmits };"#),
+    );
+    ws.inject_file(
+        "/project/node_modules/my-lib/dist/inner.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface MenuContentImplEmits {
+  escapeKeyDown: [event: KeyboardEvent]
+  pointerDownOutside: [event: PointerEvent]
+  focusOutside: [event: FocusEvent]
+  interactOutside: [event: Event]
+  openAutoFocus: [event: Event]
+  closeAutoFocus: [event: Event]
+  entryFocus: [event: Event]
+}
+
+export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/project/node_modules/my-lib/dist/inner.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        Arc::new(ws),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/project".to_string(),
+            "/project".to_string(),
+            Some("/project/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
+
+    project
+        .upsert_base(
+            "/project/App.vue",
+            r#"<script setup lang="ts">
+import type { MenuContentEmits } from 'my-lib'
+
+interface Emits extends MenuContentEmits {
+  'update:searchTerm': [value: string]
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/project/App.vue")
+        .expect("package declaration alias-chain emits should resolve");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"escapeKeyDown")
+            && event_names.contains(&"pointerDownOutside")
+            && event_names.contains(&"focusOutside")
+            && event_names.contains(&"interactOutside")
+            && event_names.contains(&"closeAutoFocus")
+            && event_names.contains(&"update:searchTerm"),
+        "package declaration alias-chain emits should preserve inherited imported events alongside local tuple-property events: {:?}",
+        event_names
+    );
+    assert!(
+        !event_names.contains(&"openAutoFocus") && !event_names.contains(&"entryFocus"),
+        "package declaration alias-chain emits must still respect omitted imported events: {:?}",
+        event_names
+    );
+}
+
+#[test]
+fn package_declaration_entrypoints_materialize_aliased_emits_with_local_tuple_property() {
+    let ws = verter_vfs::MemoryWorkspace::new(verter_vfs::MemoryOptions::default());
+    ws.inject_file(
+        "/project/node_modules/my-lib/package.json".to_string(),
+        Arc::from(
+            r#"{"name": "my-lib", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js" } }}"#,
+        ),
+    );
+    ws.inject_file(
+        "/project/node_modules/my-lib/dist/index.d.ts".to_string(),
+        Arc::from(r#"import { MenuContentEmits as ImportedMenuContentEmits } from "./inner.js"; export type { ImportedMenuContentEmits as MenuContentEmits };"#),
+    );
+    ws.inject_file(
+        "/project/node_modules/my-lib/dist/inner.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface MenuContentImplEmits {
+  escapeKeyDown: [event: KeyboardEvent]
+  pointerDownOutside: [event: PointerEvent]
+  focusOutside: [event: FocusEvent]
+  interactOutside: [event: Event]
+  openAutoFocus: [event: Event]
+  closeAutoFocus: [event: Event]
+  entryFocus: [event: Event]
+}
+
+export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/project/node_modules/my-lib/dist/inner.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        Arc::new(ws),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/project".to_string(),
+            "/project".to_string(),
+            Some("/project/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
+
+    project
+        .upsert_base(
+            "/project/App.vue",
+            r#"<script setup lang="ts">
+import type { MenuContentEmits as LocalMenuContentEmits } from 'my-lib'
+
+interface Emits extends LocalMenuContentEmits {
+  'update:searchTerm': [value: string]
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/project/App.vue")
+        .expect("aliased package declaration emits should resolve");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"escapeKeyDown")
+            && event_names.contains(&"pointerDownOutside")
+            && event_names.contains(&"focusOutside")
+            && event_names.contains(&"interactOutside")
+            && event_names.contains(&"closeAutoFocus")
+            && event_names.contains(&"update:searchTerm"),
+        "aliased package declaration emits should preserve inherited imported events alongside local tuple-property events: {:?}",
+        event_names
+    );
+    assert!(
+        !event_names.contains(&"openAutoFocus") && !event_names.contains(&"entryFocus"),
+        "aliased package declaration emits must still respect omitted imported events: {:?}",
+        event_names
+    );
+}
+
 // ===========================================================================
 // Phase 1: Architecture — Resolver mode behavior
 // ===========================================================================
@@ -1449,6 +1639,1219 @@ defineSlots<Slots>()
         slot_names.contains(&"default"),
         "resolvable local slot branches should survive final meta extraction even when dynamic utility branches cannot be expanded: {:?}",
         slot_names
+    );
+}
+
+#[test]
+fn imported_inherited_props_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export interface LinkProps {
+  as?: string
+  class?: any
+  href?: string
+  target?: string
+  active?: boolean
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'active'
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  label?: string
+  color?: string
+  variant?: string
+  ui?: object
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface Props extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: 'primary'
+  variant?: 'solid'
+  side?: 'left' | 'right'
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"as"),
+        "inherited props should survive imported Omit chains: {:?}",
+        prop_names
+    );
+    assert!(
+        prop_names.contains(&"class"),
+        "explicit inherited class prop should survive imported Omit chains: {:?}",
+        prop_names
+    );
+    assert!(
+        prop_names.contains(&"label"),
+        "local Button props should survive imported Omit chains: {:?}",
+        prop_names
+    );
+    assert!(
+        prop_names.contains(&"ui"),
+        "non-omitted inherited props should survive imported Omit chains: {:?}",
+        prop_names
+    );
+    assert!(
+        prop_names.contains(&"color")
+            && prop_names.contains(&"variant")
+            && prop_names.contains(&"side"),
+        "local redeclarations should win and remain visible: {:?}",
+        prop_names
+    );
+    assert!(
+        !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"active"),
+        "omitted imported keys must not leak into final props: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn barrel_reexported_vue_props_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/components/Link.vue",
+            r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  target?: string
+  active?: boolean
+  class?: any
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'active'
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/use-icons.ts",
+            r#"
+export interface UseComponentIconsProps {
+  icon?: string
+  leading?: boolean
+  trailing?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './Link.vue'
+import type { UseComponentIconsProps } from './use-icons'
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'href'> {
+  label?: string
+  color?: string
+  variant?: string
+  size?: string
+  square?: boolean
+  block?: boolean
+  class?: any
+  ui?: object
+}
+</script>
+<template><button /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/index.ts",
+            "export * from './components/Link.vue'\nexport * from './components/Button.vue'",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './index'
+
+interface Props extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: 'primary'
+  variant?: 'solid'
+  side?: 'left' | 'right'
+  ui?: { base?: any }
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let alias_debug = resolved
+        .cached_eval_inputs
+        .as_ref()
+        .map(|imported_inputs| {
+            imported_inputs
+                .type_aliases
+                .iter()
+                .map(|alias| {
+                    format!(
+                        "{}<-{}#{} merge={}",
+                        alias.local_name,
+                        alias.source_canonical_id,
+                        alias.exported_name,
+                        alias.requires_source_merge
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"label")
+            && prop_names.contains(&"size")
+            && prop_names.contains(&"square")
+            && prop_names.contains(&"block")
+            && prop_names.contains(&"icon")
+            && prop_names.contains(&"leading")
+            && prop_names.contains(&"trailing")
+            && prop_names.contains(&"class")
+            && prop_names.contains(&"ui")
+            && prop_names.contains(&"side")
+            && prop_names.contains(&"color")
+            && prop_names.contains(&"variant"),
+        "barrel re-exported Vue props should preserve inherited imported members: props={:?} aliases={:?}",
+        prop_names,
+        alias_debug
+    );
+    assert!(
+        !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"active"),
+        "barrel re-exported Vue props must still respect Omit keys: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn imported_inherited_emits_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            r#"
+export interface MenuContentImplEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'pointerDownOutside', event: PointerEvent): void
+  (e: 'focusOutside', event: FocusEvent): void
+  (e: 'interactOutside', event: Event): void
+  (e: 'openAutoFocus'): void
+  (e: 'closeAutoFocus'): void
+  (e: 'entryFocus'): void
+}
+
+export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+
+export interface ContextMenuContentEmits extends MenuContentEmits {}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ContextMenuContentEmits } from './events'
+
+defineEmits<ContextMenuContentEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"escapeKeyDown")
+            && event_names.contains(&"pointerDownOutside")
+            && event_names.contains(&"focusOutside")
+            && event_names.contains(&"interactOutside")
+            && event_names.contains(&"closeAutoFocus"),
+        "inherited emits should survive imported Omit chains: {:?}",
+        event_names
+    );
+    assert!(
+        !event_names.contains(&"openAutoFocus") && !event_names.contains(&"entryFocus"),
+        "omitted imported emits must not leak into final events: {:?}",
+        event_names
+    );
+}
+
+#[test]
+fn imported_inherited_and_local_emits_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            r#"
+export interface MenuContentEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'focusOutside', event: FocusEvent): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { MenuContentEmits } from './events'
+
+interface Emits extends MenuContentEmits {
+  (e: 'closeAutoFocus'): void
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"escapeKeyDown")
+            && event_names.contains(&"focusOutside")
+            && event_names.contains(&"closeAutoFocus"),
+        "mixed local and inherited emits should survive final meta extraction: {:?}",
+        event_names
+    );
+}
+
+#[test]
+fn imported_mapped_tuple_emits_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            r#"export type Emits = {
+  [K in 'open' | 'close']?: []
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Emits } from './events'
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"open") && event_names.contains(&"close"),
+        "imported mapped tuple emits should materialize concrete event names: {:?}",
+        event_names
+    );
+    assert!(
+        !event_names.contains(&"default"),
+        "imported mapped tuple emits must not invent unrelated events: {:?}",
+        event_names
+    );
+}
+
+#[test]
+fn imported_inherited_and_tuple_property_local_emits_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            r#"
+export interface MenuContentEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'focusOutside', event: FocusEvent): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { MenuContentEmits } from './events'
+
+interface Emits extends MenuContentEmits {
+  'update:searchTerm': [value: string]
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"escapeKeyDown")
+            && event_names.contains(&"focusOutside")
+            && event_names.contains(&"update:searchTerm"),
+        "tuple-property local emits must not discard inherited imported emits: {:?}",
+        event_names
+    );
+}
+
+#[test]
+fn imported_alias_chain_and_tuple_property_local_emits_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            r#"
+export interface MenuContentImplEmits {
+  (e: 'escapeKeyDown', event: Event): void
+  (e: 'pointerDownOutside', event: PointerEvent): void
+  (e: 'focusOutside', event: FocusEvent): void
+  (e: 'interactOutside', event: Event): void
+  (e: 'openAutoFocus'): void
+  (e: 'closeAutoFocus'): void
+  (e: 'entryFocus'): void
+}
+
+export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { MenuContentEmits } from './events'
+
+interface Emits extends MenuContentEmits {
+  'update:searchTerm': [value: string]
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"escapeKeyDown")
+            && event_names.contains(&"pointerDownOutside")
+            && event_names.contains(&"focusOutside")
+            && event_names.contains(&"interactOutside")
+            && event_names.contains(&"closeAutoFocus")
+            && event_names.contains(&"update:searchTerm"),
+        "tuple-property local emits must preserve inherited imported alias-chain emits: {:?}",
+        event_names
+    );
+    assert!(
+        !event_names.contains(&"openAutoFocus") && !event_names.contains(&"entryFocus"),
+        "local alias-chain emits must still respect omitted imported events: {:?}",
+        event_names
+    );
+}
+
+#[test]
+fn cyclic_barrel_vue_props_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+}
+
+export interface AnchorHTMLAttributes {
+  href?: string
+  target?: string
+  rel?: string
+  download?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types/tv.ts",
+            r#"
+export type ComponentConfig<TTheme, TAppConfig, TName extends string> = {
+  variants: {
+    color: 'primary' | 'neutral'
+    variant: 'solid' | 'ghost'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    base?: string
+  }
+  ui: {
+    base: string
+  }
+  AppConfig: TAppConfig
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/composables/useComponentIcons.ts",
+            r#"
+import type { AvatarProps, IconProps } from '../types'
+
+export interface UseComponentIconsProps {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+  loading?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/Avatar.vue",
+            r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+  alt?: string
+  size?: 'sm' | 'md'
+}
+</script>
+<template><img /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/Icon.vue",
+            r#"<script lang="ts">
+export interface IconProps {
+  name?: string
+}
+</script>
+<template><i /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/Link.vue",
+            r#"<script lang="ts">
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from '../types/html'
+
+export interface LinkProps extends Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+  href?: string
+  target?: string
+  rel?: string
+  active?: boolean
+  activeClass?: string
+  inactiveClass?: string
+  raw?: boolean
+  custom?: boolean
+  class?: any
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'rel' | 'active' | 'activeClass' | 'inactiveClass' | 'download'
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/Button.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from './nuxt-schema'
+import theme from './button-theme'
+import type { UseComponentIconsProps } from '../composables/useComponentIcons'
+import type { LinkProps, AvatarProps } from '../types'
+import type { ComponentConfig } from '../types/tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: Button['variants']['color']
+  variant?: Button['variants']['variant']
+  size?: Button['variants']['size']
+  square?: boolean
+  block?: boolean
+  loadingAuto?: boolean
+  onClick?: ((event: MouseEvent) => void) | Array<((event: MouseEvent) => void)>
+  avatar?: AvatarProps
+  class?: any
+  ui?: Button['slots']
+}
+</script>
+<template><button /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/button-theme.ts",
+            "export default { variants: {} }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/components/nuxt-schema.ts",
+            "export interface AppConfig {}",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types/index.ts",
+            r#"
+export * from '../components/Avatar.vue'
+export * from '../components/Button.vue'
+export * from '../components/Icon.vue'
+export * from '../components/Link.vue'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from './components/nuxt-schema'
+import theme from './components/button-theme'
+import type { ButtonProps, LinkPropsKeys } from './types'
+import type { ComponentConfig } from './types/tv'
+
+type DashboardSidebarCollapse = ComponentConfig<typeof theme, AppConfig, 'dashboardSidebarCollapse'>
+
+export interface DashboardSidebarCollapseProps extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  side?: 'left' | 'right'
+  ui?: DashboardSidebarCollapse['slots']
+}
+</script>
+<script setup lang="ts">
+defineProps<DashboardSidebarCollapseProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let alias_debug = resolved
+        .cached_eval_inputs
+        .as_ref()
+        .map(|imported_inputs| {
+            imported_inputs
+                .type_aliases
+                .iter()
+                .map(|alias| {
+                    format!(
+                        "{}<-{}#{} merge={}",
+                        alias.local_name,
+                        alias.source_canonical_id,
+                        alias.exported_name,
+                        alias.requires_source_merge
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"label")
+            && prop_names.contains(&"size")
+            && prop_names.contains(&"square")
+            && prop_names.contains(&"block")
+            && prop_names.contains(&"icon")
+            && prop_names.contains(&"loading")
+            && prop_names.contains(&"avatar")
+            && prop_names.contains(&"as")
+            && prop_names.contains(&"class")
+            && prop_names.contains(&"type")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"side")
+            && prop_names.contains(&"color")
+            && prop_names.contains(&"variant"),
+        "cyclic barrel Vue props should preserve inherited imported members: props={:?} aliases={:?}",
+        prop_names,
+        alias_debug
+    );
+    assert!(
+        !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"rel")
+            && !prop_names.contains(&"active")
+            && !prop_names.contains(&"activeClass")
+            && !prop_names.contains(&"inactiveClass")
+            && !prop_names.contains(&"download"),
+        "cyclic barrel Omit should still exclude imported LinkPropsKeys members: props={:?} aliases={:?}",
+        prop_names,
+        alias_debug
+    );
+}
+
+#[test]
+fn lazy_workspace_cyclic_barrel_vue_props_reach_final_component_meta() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    for (path, source) in [
+        (
+            "/workspace/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+}
+
+export interface AnchorHTMLAttributes {
+  href?: string
+  target?: string
+  rel?: string
+  download?: boolean
+}
+"#,
+        ),
+        (
+            "/workspace/types/tv.ts",
+            r#"
+export type ComponentConfig<TTheme, TAppConfig, TName extends string> = {
+  variants: {
+    color: 'primary' | 'neutral'
+    variant: 'solid' | 'ghost'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    base?: string
+  }
+  ui: {
+    base: string
+  }
+  AppConfig: TAppConfig
+}
+"#,
+        ),
+        (
+            "/workspace/composables/useComponentIcons.ts",
+            r#"
+import type { AvatarProps, IconProps } from '../types'
+
+export interface UseComponentIconsProps {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+  loading?: boolean
+}
+"#,
+        ),
+        (
+            "/workspace/components/Avatar.vue",
+            r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+  alt?: string
+  size?: 'sm' | 'md'
+}
+</script>
+<template><img /></template>"#,
+        ),
+        (
+            "/workspace/components/Icon.vue",
+            r#"<script lang="ts">
+export interface IconProps {
+  name?: string
+}
+</script>
+<template><i /></template>"#,
+        ),
+        (
+            "/workspace/components/Link.vue",
+            r#"<script lang="ts">
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from '../types/html'
+
+export interface LinkProps extends Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+  href?: string
+  target?: string
+  rel?: string
+  active?: boolean
+  activeClass?: string
+  inactiveClass?: string
+  raw?: boolean
+  custom?: boolean
+  class?: any
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'rel' | 'active' | 'activeClass' | 'inactiveClass' | 'download'
+</script>
+<template><a /></template>"#,
+        ),
+        (
+            "/workspace/components/Button.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from './nuxt-schema'
+import theme from './button-theme'
+import type { UseComponentIconsProps } from '../composables/useComponentIcons'
+import type { LinkProps, AvatarProps } from '../types'
+import type { ComponentConfig } from '../types/tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: Button['variants']['color']
+  variant?: Button['variants']['variant']
+  size?: Button['variants']['size']
+  square?: boolean
+  block?: boolean
+  loadingAuto?: boolean
+  onClick?: ((event: MouseEvent) => void) | Array<((event: MouseEvent) => void)>
+  avatar?: AvatarProps
+  class?: any
+  ui?: Button['slots']
+}
+</script>
+<template><button /></template>"#,
+        ),
+        (
+            "/workspace/components/button-theme.ts",
+            "export default { variants: {} }",
+        ),
+        (
+            "/workspace/components/nuxt-schema.ts",
+            "export interface AppConfig {}",
+        ),
+        (
+            "/workspace/types/index.ts",
+            r#"
+export * from '../components/Avatar.vue'
+export * from '../components/Button.vue'
+export * from '../components/Icon.vue'
+export * from '../components/Link.vue'
+"#,
+        ),
+        (
+            "/workspace/App.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from './components/nuxt-schema'
+import theme from './components/button-theme'
+import type { ButtonProps, LinkPropsKeys } from './types'
+import type { ComponentConfig } from './types/tv'
+
+type DashboardSidebarCollapse = ComponentConfig<typeof theme, AppConfig, 'dashboardSidebarCollapse'>
+
+export interface DashboardSidebarCollapseProps extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  side?: 'left' | 'right'
+  ui?: DashboardSidebarCollapse['slots']
+}
+</script>
+<script setup lang="ts">
+defineProps<DashboardSidebarCollapseProps>()
+</script>
+<template><div /></template>"#,
+        ),
+    ] {
+        ws.inject_file(path.to_string(), Arc::from(source));
+    }
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    let project = MetaProject::new(host);
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "entry file should load from workspace"
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/workspace/App.vue")
+        .expect("should return component meta");
+    let resolved = project
+        .host()
+        .resolve_component_meta("/workspace/App.vue", ResolverMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let alias_debug = resolved
+        .cached_eval_inputs
+        .as_ref()
+        .map(|imported_inputs| {
+            imported_inputs
+                .type_aliases
+                .iter()
+                .map(|alias| {
+                    format!(
+                        "{}<-{}#{} merge={} body={:?}",
+                        alias.local_name,
+                        alias.source_canonical_id,
+                        alias.exported_name,
+                        alias.requires_source_merge,
+                        alias.decl.body
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"label")
+            && prop_names.contains(&"size")
+            && prop_names.contains(&"square")
+            && prop_names.contains(&"block")
+            && prop_names.contains(&"icon")
+            && prop_names.contains(&"loading")
+            && prop_names.contains(&"avatar")
+            && prop_names.contains(&"as")
+            && prop_names.contains(&"class")
+            && prop_names.contains(&"type")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"side")
+            && prop_names.contains(&"color")
+            && prop_names.contains(&"variant"),
+        "lazy workspace cyclic barrel props should preserve inherited imported members: props={:?} aliases={:?}",
+        prop_names,
+        alias_debug
+    );
+    assert!(
+        !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"rel")
+            && !prop_names.contains(&"active")
+            && !prop_names.contains(&"activeClass")
+            && !prop_names.contains(&"inactiveClass")
+            && !prop_names.contains(&"download"),
+        "lazy workspace cyclic barrel Omit should exclude imported LinkPropsKeys members: props={:?} aliases={:?}",
+        prop_names,
+        alias_debug
+    );
+}
+
+#[test]
+fn imported_mapped_slots_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export interface PricingPlan {
+  id: string
+}
+
+export interface PricingPlanSlots {
+  badge(props: { planId: string }): any
+  title(props: { planId: string }): any
+}
+
+export type ExtendSlotWithPlan<TPlan, TKey extends keyof PricingPlanSlots> =
+  PricingPlanSlots[TKey] extends (props: infer P) => any
+    ? (props: P & { plan: TPlan }) => any
+    : PricingPlanSlots[TKey]
+
+export type PricingPlansSlots<TPlan extends PricingPlan = PricingPlan> = {
+  [K in keyof PricingPlanSlots]?: ExtendSlotWithPlan<TPlan, K>
+} & {
+  default?(props?: {}): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { PricingPlansSlots } from './slots'
+
+defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert!(
+        slot_names.contains(&"badge")
+            && slot_names.contains(&"title")
+            && slot_names.contains(&"default"),
+        "imported mapped slots should materialize concrete names in final meta: {:?}",
+        slot_names
+    );
+
+    let badge = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "badge")
+        .expect("badge slot should exist");
+    let badge_bindings: Vec<&str> = badge
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert!(
+        badge_bindings.contains(&"plan") && badge_bindings.contains(&"planId"),
+        "mapped slot bindings should preserve inferred and extended slot function parameters: {:?}",
+        badge_bindings
+    );
+}
+
+#[test]
+fn imported_dynamic_slot_branches_do_not_synthesize_default_in_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export type TableSlots = {
+  expanded?(props: { row: string }): any
+  empty?(props?: {}): any
+} & Record<string, (props: any) => any>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { TableSlots } from './slots'
+
+defineSlots<TableSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert!(
+        slot_names.contains(&"expanded") && slot_names.contains(&"empty"),
+        "named imported slots should survive dynamic branches: {:?}",
+        slot_names
+    );
+    assert!(
+        !slot_names.contains(&"default"),
+        "dynamic imported slot branches must not synthesize default: {:?}",
+        slot_names
+    );
+}
+
+#[test]
+fn template_dynamic_named_slot_outlets_do_not_synthesize_default_in_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const sectionSlot = 'section-title'
+</script>
+<template>
+  <div>
+    <slot :name="sectionSlot" />
+    <slot name="caption" />
+  </div>
+</template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert!(
+        slot_names.contains(&"caption"),
+        "static template slot outlets should still materialize: {:?}",
+        slot_names
+    );
+    assert!(
+        !slot_names.contains(&"default"),
+        "dynamic named template slot outlets must not synthesize default: {:?}",
+        slot_names
+    );
+}
+
+#[test]
+fn namespace_qualified_imported_props_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export interface BaseProps {
+  a?: string
+  b?: number
+}
+
+export interface Props extends BaseProps {
+  c?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type * as Types from './types'
+
+defineProps<Types.Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"a") && prop_names.contains(&"b") && prop_names.contains(&"c"),
+        "namespace-qualified imported props should resolve through the owner eval path: {:?}",
+        prop_names
+    );
+    assert!(
+        !prop_names.contains(&"default"),
+        "namespace-qualified imported props must not invent unrelated props: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn mapped_tuple_emits_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+type Emits = {
+  [K in 'open' | 'close']?: []
+}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let event_names: Vec<&str> = meta
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"open") && event_names.contains(&"close"),
+        "mapped tuple emits should materialize concrete event names: {:?}",
+        event_names
+    );
+    assert!(
+        !event_names.contains(&"default"),
+        "mapped tuple emits must not invent unrelated events: {:?}",
+        event_names
     );
 }
 

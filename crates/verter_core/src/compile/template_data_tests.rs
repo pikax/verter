@@ -158,6 +158,32 @@ fn slot_definition_named() {
 }
 
 #[test]
+fn slot_definition_dynamic_name_binding_is_not_materialized() {
+    let data = extract(r#"<template><slot :name="slotName" /></template>"#);
+    assert!(
+        data.slot_definitions.is_empty(),
+        "dynamic slot outlet names are not concrete slot definitions: {:?}",
+        data.slot_definitions
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn slot_definition_dynamic_name_v_bind_is_not_materialized() {
+    let data = extract(r#"<template><slot v-bind:name="slotName" /></template>"#);
+    assert!(
+        data.slot_definitions.is_empty(),
+        "v-bind:name slot outlets are not concrete slot definitions: {:?}",
+        data.slot_definitions
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn slot_definition_binding_expressions() {
     let data = extract(r#"<template><slot :item="row" :count="total" /></template>"#);
     assert_eq!(data.slot_definitions.len(), 1);
