@@ -2687,3 +2687,346 @@ export * from './tv'
         "pure barrel should have no direct exports"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 0.1: Inherited props/emits/slots through companion types
+// These tests verify that extends + Omit/Pick chains resolve correctly
+// when the base type comes from a companion (cross-file import).
+// ---------------------------------------------------------------------------
+
+/// Props extends Omit<CompanionType, keys> should preserve inherited members
+/// minus the omitted keys, plus local members.
+///
+/// Simulates: DashboardSidebarCollapse → Omit<ButtonProps, LinkPropsKeys | ...>
+#[test]
+fn companion_extends_omit_preserves_inherited_props() {
+    let alloc = Allocator::default();
+
+    // Simulate ButtonProps resolved from another file (companion)
+    let mut button_props = ResolvedElements::default();
+    for (name, optional) in [
+        ("icon", true),
+        ("avatar", true),
+        ("label", true),
+        ("color", true),
+        ("variant", true),
+        ("size", true),
+        ("onClick", true),
+        ("class", true),
+        ("as", true),
+        ("type", true),
+        ("disabled", true),
+        ("href", true),   // from LinkProps (should be omitted)
+        ("target", true), // from LinkProps (should be omitted)
+        ("active", true), // from LinkProps (should be omitted)
+    ] {
+        button_props.props.push(ResolvedProp {
+            span: Span::new(0, 0),
+            key: Span::new(0, 0),
+            key_name: Some(name.to_string()),
+            optional,
+            types: vec![RuntimeType::String],
+            visibility: ResolvedMemberVisibility::Public,
+            type_span: None,
+            type_text: None,
+            map_local: false,
+            span_is_absolute: false,
+        });
+    }
+
+    let mut companion_types = rustc_hash::FxHashMap::default();
+    companion_types.insert("ButtonProps".to_string(), button_props);
+
+    let dep = r#"
+import type { ButtonProps } from '../types'
+
+type LinkPropsKeys = 'href' | 'target' | 'active'
+
+export interface DashboardSidebarCollapseProps extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: string
+  variant?: string
+  side?: string
+  ui?: object
+}
+"#;
+
+    let resolved = resolve_external_type_with_companion(
+        "DashboardSidebarCollapseProps",
+        dep,
+        &companion_types,
+        &alloc,
+    )
+    .expect("should resolve DashboardSidebarCollapseProps");
+
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|p| p.key_name.as_deref())
+        .collect();
+
+    // Assert+: inherited props surviving Omit
+    assert!(
+        names.contains(&"icon"),
+        "inherited 'icon' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"avatar"),
+        "inherited 'avatar' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"label"),
+        "inherited 'label' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"size"),
+        "inherited 'size' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"onClick"),
+        "inherited 'onClick' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"class"),
+        "inherited 'class' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"as"),
+        "inherited 'as' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"type"),
+        "inherited 'type' should survive Omit, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"disabled"),
+        "inherited 'disabled' should survive Omit, got: {names:?}"
+    );
+
+    // Assert+: local re-declared props
+    assert!(
+        names.contains(&"color"),
+        "local 'color' should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"variant"),
+        "local 'variant' should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"side"),
+        "local 'side' should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"ui"),
+        "local 'ui' should be present, got: {names:?}"
+    );
+
+    // Assert-: omitted props must NOT be present
+    assert!(
+        !names.contains(&"href"),
+        "Omit'd 'href' should NOT be present, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"target"),
+        "Omit'd 'target' should NOT be present, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"active"),
+        "Omit'd 'active' should NOT be present, got: {names:?}"
+    );
+}
+
+/// Emits interface extending a companion emits type should preserve
+/// all inherited event names and payloads.
+///
+/// Simulates: ContextMenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+#[test]
+fn companion_extends_omit_preserves_inherited_emits() {
+    let alloc = Allocator::default();
+
+    // Simulate DismissableLayerEmits + closeAutoFocus resolved from another file
+    let mut base_emits = ResolvedElements::default();
+    for name in [
+        "escapeKeyDown",
+        "pointerDownOutside",
+        "focusOutside",
+        "interactOutside",
+        "openAutoFocus",
+        "closeAutoFocus",
+        "entryFocus",
+    ] {
+        base_emits.emits.push(ResolvedEmit {
+            span: Span::new(0, 0),
+            name: name.to_string(),
+            name_span: None,
+            signature: ResolvedEmitSignature::Call {
+                params_text: "event: Event".to_string(),
+            },
+            map_local: false,
+            span_is_absolute: false,
+        });
+    }
+
+    let mut companion_types = rustc_hash::FxHashMap::default();
+    companion_types.insert("MenuContentImplEmits".to_string(), base_emits);
+
+    let dep = r#"
+import type { MenuContentImplEmits } from './base'
+
+type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+
+export interface ContextMenuContentEmits extends MenuContentEmits {}
+"#;
+
+    let resolved = resolve_external_type_with_companion(
+        "ContextMenuContentEmits",
+        dep,
+        &companion_types,
+        &alloc,
+    )
+    .expect("should resolve ContextMenuContentEmits");
+
+    let emit_names: Vec<&str> = resolved.emits.iter().map(|e| e.name.as_str()).collect();
+
+    // Assert+: inherited events surviving Omit
+    assert!(
+        emit_names.contains(&"escapeKeyDown"),
+        "inherited 'escapeKeyDown' should survive Omit, got: {emit_names:?}"
+    );
+    assert!(
+        emit_names.contains(&"pointerDownOutside"),
+        "inherited 'pointerDownOutside' should survive, got: {emit_names:?}"
+    );
+    assert!(
+        emit_names.contains(&"focusOutside"),
+        "inherited 'focusOutside' should survive, got: {emit_names:?}"
+    );
+    assert!(
+        emit_names.contains(&"interactOutside"),
+        "inherited 'interactOutside' should survive, got: {emit_names:?}"
+    );
+    assert!(
+        emit_names.contains(&"closeAutoFocus"),
+        "inherited 'closeAutoFocus' should survive, got: {emit_names:?}"
+    );
+
+    // Assert-: omitted events must NOT be present
+    assert!(
+        !emit_names.contains(&"openAutoFocus"),
+        "Omit'd 'openAutoFocus' should NOT be present, got: {emit_names:?}"
+    );
+    assert!(
+        !emit_names.contains(&"entryFocus"),
+        "Omit'd 'entryFocus' should NOT be present, got: {emit_names:?}"
+    );
+
+    // Assert: exactly 5 events
+    assert_eq!(
+        resolved.emits.len(),
+        5,
+        "should have exactly 5 events after Omit, got: {emit_names:?}"
+    );
+}
+
+/// Mapped type slots over a companion type should expand to the companion's
+/// concrete keys. Dynamic/unbounded branches should NOT produce concrete slots.
+///
+/// Simulates: PricingPlansSlots = { [K in keyof PricingPlanSlots]?: ... } & { default: ... }
+#[test]
+fn companion_mapped_type_slots_expand_concrete_keys() {
+    let source = r#"
+interface PricingPlanSlots {
+  badge(props: {}): any
+  title(props: {}): any
+  description(props: {}): any
+  footer(props: {}): any
+}
+
+type PricingPlansSlots = {
+  [K in keyof PricingPlanSlots]?: (props: { plan: any }) => any
+} & {
+  default?(props?: {}): any
+}
+
+type Test = PricingPlansSlots
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    // Allow diagnostics (mapped types may produce some) but check output
+    let _ = diagnostics;
+
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|p| &source[p.key.start as usize..p.key.end as usize])
+        .collect();
+
+    // Assert+: all concrete slot names from the mapped type
+    assert!(
+        names.contains(&"badge"),
+        "mapped 'badge' slot should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"title"),
+        "mapped 'title' slot should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"description"),
+        "mapped 'description' slot should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"footer"),
+        "mapped 'footer' slot should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"default"),
+        "explicit 'default' slot should be present, got: {names:?}"
+    );
+
+    // Assert: should have 5 slots total
+    assert_eq!(
+        resolved.props.len(),
+        5,
+        "should have 5 slots (4 mapped + default), got: {names:?}"
+    );
+}
+
+/// Dynamic slot branches (Record<string, ...>) should NOT synthesize concrete slot names.
+/// Only explicitly named slots should appear.
+#[test]
+fn dynamic_slot_branches_do_not_synthesize_default() {
+    let source = r#"
+type TableSlots = {
+  expanded?(props: { row: any }): any
+  empty?(props?: {}): any
+  loading?(props?: {}): any
+} & Record<string, (props: any) => any>
+
+type Test = TableSlots
+"#;
+    let (resolved, _diagnostics) = resolve_with_ctx(source);
+
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .map(|p| &source[p.key.start as usize..p.key.end as usize])
+        .collect();
+
+    // Assert+: explicitly named slots are present
+    assert!(
+        names.contains(&"expanded"),
+        "named 'expanded' slot should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"empty"),
+        "named 'empty' slot should be present, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"loading"),
+        "named 'loading' slot should be present, got: {names:?}"
+    );
+
+    // Assert-: Record<string, ...> should NOT produce a 'default' slot
+    assert!(
+        !names.contains(&"default"),
+        "dynamic Record<string,...> should NOT synthesize 'default', got: {names:?}"
+    );
+}

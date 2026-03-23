@@ -1211,7 +1211,7 @@ fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
                 &mut inner,
                 ctx,
             );
-            let keys = extract_string_literal_keys(&type_args.params[1]);
+            let keys = extract_string_literal_keys_with_ctx(&type_args.params[1], Some(ctx));
             inner
                 .props
                 .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
@@ -1228,7 +1228,7 @@ fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
                 &mut inner,
                 ctx,
             );
-            let keys = extract_string_literal_keys(&type_args.params[1]);
+            let keys = extract_string_literal_keys_with_ctx(&type_args.params[1], Some(ctx));
             inner
                 .props
                 .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
@@ -1707,7 +1707,8 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                             &mut inner,
                             ctx,
                         );
-                        let keys = extract_string_literal_keys(&args.params[1]);
+                        let keys =
+                            extract_string_literal_keys_with_ctx(&args.params[1], Some(&*ctx));
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
@@ -1728,7 +1729,8 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                             &mut inner,
                             ctx,
                         );
-                        let keys = extract_string_literal_keys(&args.params[1]);
+                        let keys =
+                            extract_string_literal_keys_with_ctx(&args.params[1], Some(&*ctx));
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
@@ -1921,7 +1923,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                             &mut inner,
                             ctx,
                         );
-                        let keys = extract_string_literal_keys(&args.params[1]);
+                        let keys = extract_string_literal_keys_with_ctx(&args.params[1], Some(ctx));
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
@@ -1940,7 +1942,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                             &mut inner,
                             ctx,
                         );
-                        let keys = extract_string_literal_keys(&args.params[1]);
+                        let keys = extract_string_literal_keys_with_ctx(&args.params[1], Some(ctx));
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
@@ -2130,6 +2132,25 @@ fn get_property_key_name(key: &PropertyKey) -> Option<String> {
 /// Extract string literal keys from a type argument (supports single literal and unions).
 /// Used for `Omit<T, 'a' | 'b'>` and `Pick<T, 'a' | 'b'>`.
 fn extract_string_literal_keys(ty: &TSType) -> Vec<String> {
+    extract_string_literal_keys_with_ctx(ty, None)
+}
+
+/// Extract string literal keys from a type, optionally following type alias references
+/// when a context is available. This is critical for `Omit<T, KeysAlias | 'literal'>`
+/// where `KeysAlias` is a type alias expanding to a union of string literals.
+fn extract_string_literal_keys_with_ctx<'ctx, 'a: 'ctx>(
+    ty: &TSType<'a>,
+    ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
+) -> Vec<String> {
+    let mut visited = Vec::new();
+    extract_string_literal_keys_inner(ty, ctx, &mut visited)
+}
+
+fn extract_string_literal_keys_inner<'ctx, 'a: 'ctx>(
+    ty: &TSType<'a>,
+    ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
+    visited: &mut Vec<String>,
+) -> Vec<String> {
     match ty {
         TSType::TSLiteralType(lit) => {
             if let TSLiteral::StringLiteral(s) = &lit.literal {
@@ -2141,9 +2162,29 @@ fn extract_string_literal_keys(ty: &TSType) -> Vec<String> {
         TSType::TSUnionType(union) => union
             .types
             .iter()
-            .flat_map(|t| extract_string_literal_keys(t))
+            .flat_map(|t| extract_string_literal_keys_inner(t, ctx, visited))
             .collect(),
-        TSType::TSParenthesizedType(paren) => extract_string_literal_keys(&paren.type_annotation),
+        TSType::TSParenthesizedType(paren) => {
+            extract_string_literal_keys_inner(&paren.type_annotation, ctx, visited)
+        }
+        TSType::TSTypeReference(type_ref) if ctx.is_some() => {
+            let ctx = ctx.unwrap();
+            let name = type_ref.type_name.to_string();
+            // Recursion guard: prevent infinite loops on circular type aliases
+            if visited.contains(&name) {
+                return vec![];
+            }
+            visited.push(name.clone());
+            let name_bytes = name.as_bytes();
+            // Follow local type aliases to extract their string literal keys
+            let result = if let Some((aliased_type, _)) = ctx.find_type_alias(name_bytes) {
+                extract_string_literal_keys_inner(aliased_type, Some(ctx), visited)
+            } else {
+                vec![]
+            };
+            visited.pop();
+            result
+        }
         _ => vec![],
     }
 }
