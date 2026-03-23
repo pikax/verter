@@ -3624,9 +3624,12 @@ dependencies = [
 name = "verter_resolver"
 version = "0.0.1-beta.1"
 dependencies = [
+ "oxc_allocator",
  "parking_lot",
  "rustc-hash 2.1.1",
  "verter_analysis",
+ "verter_core",
+ "verter_span",
 ]
 
 [[package]]

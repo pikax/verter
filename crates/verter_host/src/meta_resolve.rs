@@ -19,9 +19,7 @@
 //!        host_resolve.rs  (declaration graph traversal, shared cache)
 //! ```
 
-use crate::host_manage::{
-    component_meta_debug, component_meta_debug_enabled, extract_slot_info_from_type_text,
-};
+use crate::host_manage::{component_meta_debug, component_meta_debug_enabled};
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
 use std::borrow::Cow;
@@ -109,32 +107,10 @@ impl<'a>
 }
 
 /// Native declaration kind for the resolved pre-expansion type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedDeclarationKind {
-    Interface,
-    TypeAlias,
-    Class,
-    Unknown,
-}
+pub type ResolvedDeclarationKind = verter_resolver::ResolvedDeclarationKind;
 
 /// Native pre-expansion declaration metadata retained by the shared resolver.
-#[derive(Debug, Clone)]
-pub struct ResolvedTypeDeclaration {
-    /// Name requested at the import site.
-    pub requested_name: String,
-    /// Stable declaration id assigned by the analysis-owned eval environment.
-    pub declaration_id: Option<verter_analysis::type_eval::DeclarationId>,
-    /// Final declaration name after alias/re-export traversal.
-    pub resolved_name: String,
-    /// Canonical path of the declaration owner.
-    pub canonical_source: String,
-    /// Span of the declaration in the source file.
-    pub span: verter_span::Span,
-    /// Declaration kind in the resolved source file.
-    pub kind: ResolvedDeclarationKind,
-    /// Best-effort declaration text prior to expansion.
-    pub text: Option<String>,
-}
+pub type ResolvedTypeDeclaration = verter_resolver::ResolvedTypeDeclaration;
 
 /// Host-owned sidecar result for component-meta / analysis enrichment.
 ///
@@ -200,14 +176,7 @@ pub struct ResolvedMacroMeta {
 }
 
 /// Native resolved prop metadata retained before compat/public projection.
-#[derive(Debug, Clone)]
-pub struct ResolvedNativeProp {
-    pub name: String,
-    pub is_optional: bool,
-    pub type_annotation: Option<String>,
-    pub visibility: verter_core::utils::oxc::vue::resolve_type::ResolvedMemberVisibility,
-    pub span: verter_span::Span,
-}
+pub type ResolvedNativeProp = verter_resolver::ResolvedNativeProp;
 
 /// Resolved JSDoc block with parsed tags.
 #[derive(Debug, Clone)]
@@ -463,11 +432,10 @@ impl VerterHost {
 
                     match resolved {
                         Ok(Some(elements)) => {
-                            let native_props = collect_native_props(&elements);
-                            let (props, emits, slots) = materialize_surfaces(
-                                self,
-                                declaration.canonical_source.as_str(),
-                                &dep.macro_kind,
+                            let projected = verter_resolver::project_macro_surfaces(
+                                read_full_source(self, declaration.canonical_source.as_str())
+                                    .as_deref(),
+                                dep.macro_kind,
                                 &elements,
                             );
                             if seen_registry_names.insert(dep.type_name.clone()) {
@@ -490,10 +458,10 @@ impl VerterHost {
                                 type_name: dep.type_name.clone(),
                                 import_source: dep.import_source.clone(),
                                 declaration: declaration.clone(),
-                                native_props,
-                                props,
-                                emits,
-                                slots,
+                                native_props: projected.native_props,
+                                props: projected.props,
+                                emits: projected.emits,
+                                slots: projected.slots,
                                 jsdoc: jsdoc.clone(),
                             });
                         }
@@ -857,118 +825,6 @@ fn resolved_meta_cache_key(
     }
 }
 
-/// Materialize props/emits/slots from resolved elements based on macro kind.
-fn collect_native_props(
-    elements: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
-) -> Vec<ResolvedNativeProp> {
-    elements
-        .props
-        .iter()
-        .map(|p| ResolvedNativeProp {
-            name: p.key_name.clone().unwrap_or_else(|| "unknown".to_string()),
-            is_optional: p.optional,
-            type_annotation: p.type_text.clone(),
-            visibility: p.visibility,
-            span: verter_span::Span::new(p.span.start, p.span.end),
-        })
-        .collect()
-}
-
-/// Materialize props/emits/slots from resolved elements based on macro kind.
-fn materialize_surfaces(
-    host: &VerterHost,
-    canonical_source: &str,
-    macro_kind: &verter_analysis::AnalyzedMacroKind,
-    elements: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
-) -> (
-    Vec<verter_analysis::AnalyzedPropField>,
-    Vec<verter_analysis::AnalyzedEmitField>,
-    Vec<verter_analysis::AnalyzedSlotField>,
-) {
-    let source = read_full_source(host, canonical_source);
-
-    match macro_kind {
-        verter_analysis::AnalyzedMacroKind::DefineProps
-        | verter_analysis::AnalyzedMacroKind::WithDefaults
-        | verter_analysis::AnalyzedMacroKind::DefineModel => {
-            let props = elements
-                .props
-                .iter()
-                .filter(|p| p.visibility.is_public())
-                .map(|p| {
-                    let (description, tags) = member_jsdoc(source.as_deref(), p.span);
-                    verter_analysis::AnalyzedPropField {
-                        name: p.key_name.clone().unwrap_or_else(|| "unknown".to_string()),
-                        is_optional: p.optional,
-                        span: verter_span::Span::default(),
-                        type_annotation: p.type_text.clone(),
-                        description,
-                        tags,
-                        resolution_source: verter_analysis::TypeResolutionSource::Rust,
-                        resolution_error: None,
-                    }
-                })
-                .collect();
-            (props, Vec::new(), Vec::new())
-        }
-        verter_analysis::AnalyzedMacroKind::DefineEmits => {
-            let emits = elements
-                .emits
-                .iter()
-                .map(|e| {
-                    let (description, tags) = member_jsdoc(source.as_deref(), e.span);
-                    let payload_type = match &e.signature {
-                        verter_core::utils::oxc::vue::resolve_type::ResolvedEmitSignature::Call {
-                            params_text,
-                        } => {
-                            if params_text.is_empty() {
-                                None
-                            } else {
-                                Some(format!("[{}]", params_text))
-                            }
-                        }
-                        verter_core::utils::oxc::vue::resolve_type::ResolvedEmitSignature::Tuple {
-                            tuple_text,
-                        } => Some(tuple_text.clone()),
-                    };
-                    verter_analysis::AnalyzedEmitField {
-                        name: e.name.clone(),
-                        span: verter_span::Span::default(),
-                        payload_type,
-                        description,
-                        tags,
-                    }
-                })
-                .collect();
-            (Vec::new(), emits, Vec::new())
-        }
-        verter_analysis::AnalyzedMacroKind::DefineSlots => {
-            let slots = elements
-                .props
-                .iter()
-                .filter(|p| p.visibility.is_public())
-                .map(|p| {
-                    let name = p.key_name.clone().unwrap_or_else(|| "unknown".to_string());
-                    let (description, tags) = member_jsdoc(source.as_deref(), p.span);
-                    let (bindings, return_type) =
-                        extract_slot_info_from_type_text(p.type_text.as_deref());
-                    verter_analysis::AnalyzedSlotField {
-                        name,
-                        is_required: !p.optional,
-                        span: verter_span::Span::default(),
-                        bindings,
-                        return_type,
-                        description,
-                        tags,
-                    }
-                })
-                .collect();
-            (Vec::new(), Vec::new(), slots)
-        }
-        _ => (Vec::new(), Vec::new(), Vec::new()),
-    }
-}
-
 fn should_ignore_external_macro_type(dep: &verter_analysis::MacroTypeDep) -> bool {
     dep.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots
         && dep.import_source == "vue"
@@ -1009,14 +865,58 @@ fn macro_dep_exported_type_name<'a>(
     Cow::Borrowed(dep.type_name.as_str())
 }
 
-fn member_jsdoc(
-    source: Option<&str>,
-    span: verter_span::Span,
-) -> (Option<String>, Vec<verter_analysis::types::JsdocTag>) {
-    let Some(source) = source else {
-        return (None, Vec::new());
-    };
-    verter_analysis::jsdoc::extract_jsdoc_near_offset(source, span.start)
+struct HostDeclarationMetadataResolver<'a> {
+    host: &'a VerterHost,
+}
+
+impl verter_resolver::DeclarationMetadataResolver for HostDeclarationMetadataResolver<'_> {
+    fn resolve_export_target(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<verter_resolver::ResolvedExportTarget> {
+        self.host
+            .resolve_exports(dep_canonical)
+            .into_iter()
+            .find(|export| export.name == requested_name)
+            .map(|export| verter_resolver::ResolvedExportTarget {
+                source_canonical_id: export.source_canonical_id,
+                source_name: export.source_name,
+            })
+    }
+
+    fn get_export_span_follow_reexports(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<verter_span::Span> {
+        self.host
+            .get_export_span_follow_reexports(dep_canonical, requested_name)
+            .map(|(_, start, end)| verter_span::Span::new(start, end))
+    }
+
+    fn read_source(&self, canonical_source: &str) -> Option<String> {
+        read_full_source(self.host, canonical_source)
+    }
+
+    fn type_declaration_id(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<verter_analysis::type_eval::DeclarationId> {
+        self.host
+            .base_eval_env(canonical_source)
+            .and_then(|env| env.type_declaration_id(resolved_name))
+    }
+
+    fn resolve_type_dependency_canonical(
+        &self,
+        from_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        self.host
+            .resolve_type_dependency_canonical(from_canonical, import_source)
+    }
 }
 
 pub(crate) fn resolve_type_declaration(
@@ -1024,118 +924,11 @@ pub(crate) fn resolve_type_declaration(
     dep_canonical: &str,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let resolved_export = host
-        .resolve_exports(dep_canonical)
-        .into_iter()
-        .find(|export| export.name == requested_name);
-
-    let (canonical_source, resolved_name) = if let Some(export) = resolved_export {
-        (
-            export
-                .source_canonical_id
-                .unwrap_or_else(|| dep_canonical.to_string()),
-            export.source_name,
-        )
-    } else {
-        follow_direct_type_reexport_chain(host, dep_canonical, requested_name)
-            .unwrap_or_else(|| (dep_canonical.to_string(), requested_name.to_string()))
-    };
-    let export_span = host
-        .get_export_span_follow_reexports(dep_canonical, requested_name)
-        .map(|(_, start, end)| verter_span::Span::new(start, end))
-        .unwrap_or_default();
-    let (kind, span, text) = read_full_source(host, canonical_source.as_str())
-        .map(|source| extract_declaration_details(&source, export_span, resolved_name.as_str()))
-        .unwrap_or((ResolvedDeclarationKind::Unknown, export_span, None));
-    let declaration_id = host
-        .base_eval_env(canonical_source.as_str())
-        .and_then(|env| env.type_declaration_id(resolved_name.as_str()));
-
-    // Some declaration entrypoints only re-export a type they imported from a
-    // sibling declaration file, e.g. `import { Foo } from "./inner.js"; export
-    // type { Foo };`. `resolve_exports()` sees the export surface, but not the
-    // imported declaration owner. When the selected source does not actually
-    // contain a declaration for `resolved_name`, follow the direct type reexport
-    // chain and retry against the concrete declaration owner.
-    if kind == ResolvedDeclarationKind::Unknown
-        && text.is_none()
-        && canonical_source == dep_canonical
-    {
-        if let Some((followed_canonical, followed_name)) =
-            follow_direct_type_reexport_chain(host, dep_canonical, requested_name)
-        {
-            if followed_canonical != canonical_source || followed_name != resolved_name {
-                if let Some(source) = read_full_source(host, followed_canonical.as_str()) {
-                    let followed_details =
-                        extract_declaration_details(&source, export_span, followed_name.as_str());
-                    if followed_details.0 != ResolvedDeclarationKind::Unknown
-                        || followed_details.2.is_some()
-                    {
-                        return ResolvedTypeDeclaration {
-                            requested_name: requested_name.to_string(),
-                            declaration_id: host
-                                .base_eval_env(followed_canonical.as_str())
-                                .and_then(|env| env.type_declaration_id(followed_name.as_str())),
-                            resolved_name: followed_name,
-                            canonical_source: followed_canonical,
-                            span: followed_details.1,
-                            kind: followed_details.0,
-                            text: followed_details.2,
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    ResolvedTypeDeclaration {
-        requested_name: requested_name.to_string(),
-        declaration_id,
-        resolved_name,
-        canonical_source,
-        span,
-        kind,
-        text,
-    }
-}
-
-fn follow_direct_type_reexport_chain(
-    host: &VerterHost,
-    dep_canonical: &str,
-    requested_name: &str,
-) -> Option<(String, String)> {
-    let mut current_canonical = dep_canonical.to_string();
-    let mut current_name = requested_name.to_string();
-    let mut visited = rustc_hash::FxHashSet::default();
-
-    loop {
-        if !visited.insert((current_canonical.clone(), current_name.clone())) {
-            return Some((current_canonical, current_name));
-        }
-
-        let source = read_full_source(host, current_canonical.as_str())?;
-        let alloc = oxc_allocator::Allocator::new();
-        let extracted = verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
-            &source, &alloc,
-        );
-
-        let Some(reexport) = extracted
-            .reexport_bindings
-            .iter()
-            .find(|binding| binding.local_name == current_name)
-        else {
-            return Some((current_canonical, current_name));
-        };
-
-        let Some(next_canonical) =
-            host.resolve_type_dependency_canonical(&current_canonical, &reexport.source)
-        else {
-            return Some((current_canonical, current_name));
-        };
-
-        current_canonical = next_canonical;
-        current_name = reexport.imported_name.clone();
-    }
+    verter_resolver::resolve_type_declaration(
+        &HostDeclarationMetadataResolver { host },
+        dep_canonical,
+        requested_name,
+    )
 }
 
 fn resolve_local_type_declaration(
@@ -1143,23 +936,12 @@ fn resolve_local_type_declaration(
     canonical_source: &str,
     resolved: &verter_analysis::ResolvedLocalType,
 ) -> ResolvedTypeDeclaration {
-    let span = resolved.span;
-    let (kind, resolved_span, text) = read_full_source(host, canonical_source)
-        .map(|source| extract_declaration_details(&source, span, resolved.name.as_str()))
-        .unwrap_or((ResolvedDeclarationKind::Unknown, span, None));
-    let declaration_id = host
-        .base_eval_env(canonical_source)
-        .and_then(|env| env.type_declaration_id(resolved.name.as_str()));
-
-    ResolvedTypeDeclaration {
-        requested_name: resolved.name.clone(),
-        declaration_id,
-        resolved_name: resolved.name.clone(),
-        canonical_source: canonical_source.to_string(),
-        span: resolved_span,
-        kind,
-        text,
-    }
+    verter_resolver::resolve_local_type_declaration(
+        &HostDeclarationMetadataResolver { host },
+        canonical_source,
+        resolved.name.as_str(),
+        resolved.span,
+    )
 }
 
 fn read_full_source(host: &VerterHost, canonical_source: &str) -> Option<String> {
@@ -1171,184 +953,6 @@ fn read_full_source(host: &VerterHost, canonical_source: &str) -> Option<String>
                 .read_file(canonical_source)
                 .map(|source| source.to_string())
         })
-}
-
-fn extract_declaration_details(
-    source: &str,
-    span: verter_span::Span,
-    resolved_name: &str,
-) -> (ResolvedDeclarationKind, verter_span::Span, Option<String>) {
-    if let Some((kind, start)) = find_named_declaration_start(source, span, resolved_name) {
-        if let Some((declaration_span, text)) = extract_named_declaration_text(source, start, kind)
-        {
-            return (kind, declaration_span, Some(text));
-        }
-    }
-
-    if span.end > span.start {
-        let start = span.start as usize;
-        let end = span.end as usize;
-        if start < source.len() && end <= source.len() {
-            return (
-                ResolvedDeclarationKind::Unknown,
-                span,
-                source.get(start..end).map(|text| text.trim().to_string()),
-            );
-        }
-    }
-
-    (ResolvedDeclarationKind::Unknown, span, None)
-}
-
-fn find_named_declaration_start(
-    source: &str,
-    span: verter_span::Span,
-    resolved_name: &str,
-) -> Option<(ResolvedDeclarationKind, usize)> {
-    let search_end = if span.start == 0 && span.end == 0 {
-        source.len()
-    } else {
-        (span.end as usize).min(source.len())
-    };
-    let haystack = source.get(..search_end).unwrap_or(source);
-    let patterns = [
-        (
-            ResolvedDeclarationKind::Interface,
-            format!("interface {resolved_name}"),
-        ),
-        (
-            ResolvedDeclarationKind::TypeAlias,
-            format!("type {resolved_name}"),
-        ),
-        (
-            ResolvedDeclarationKind::Class,
-            format!("class {resolved_name}"),
-        ),
-    ];
-
-    patterns
-        .into_iter()
-        .filter_map(|(kind, needle)| {
-            haystack.rfind(&needle).and_then(|start| {
-                // Verify word boundary: the character after the name must not be
-                // alphanumeric or underscore (prevents "interface Foo" matching
-                // "interface FooExtended").
-                let after = start + needle.len();
-                if after < haystack.len() {
-                    let next_ch = haystack.as_bytes()[after];
-                    if next_ch.is_ascii_alphanumeric() || next_ch == b'_' {
-                        return None;
-                    }
-                }
-                Some((kind, start))
-            })
-        })
-        .max_by_key(|(_, start)| *start)
-}
-
-fn extract_named_declaration_text(
-    source: &str,
-    keyword_start: usize,
-    kind: ResolvedDeclarationKind,
-) -> Option<(verter_span::Span, String)> {
-    let line_start = source[..keyword_start]
-        .rfind('\n')
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
-
-    let end = match kind {
-        ResolvedDeclarationKind::Interface | ResolvedDeclarationKind::Class => {
-            let brace_start = source.get(keyword_start..)?.find('{')? + keyword_start;
-            find_matching_brace(source, brace_start).map(|idx| idx + 1)
-        }
-        ResolvedDeclarationKind::TypeAlias => {
-            // Find the terminating semicolon at brace-depth 0, skipping
-            // semicolons inside object/mapped types like `{ [K in keyof T]: T[K]; }`.
-            find_top_level_semicolon(source, keyword_start)
-                .map(|idx| idx + 1)
-                .or_else(|| {
-                    source[keyword_start..]
-                        .find('\n')
-                        .map(|idx| keyword_start + idx)
-                })
-        }
-        ResolvedDeclarationKind::Unknown => None,
-    }?;
-
-    source.get(line_start..end).map(|text| {
-        (
-            verter_span::Span::new(line_start as u32, end as u32),
-            text.trim().to_string(),
-        )
-    })
-}
-
-/// Find the closing `}` that matches the opening `{` at `brace_start`.
-/// Skips braces inside string literals (single/double/backtick) and
-/// single-line comments (`//`). This is a best-effort text scanner, not
-/// a full parser — it does not handle multi-line comments or escaped quotes
-/// inside template literals.
-fn find_matching_brace(source: &str, brace_start: usize) -> Option<usize> {
-    let bytes = source.get(brace_start..)?.as_bytes();
-    let mut depth = 0u32;
-    let mut i = 0;
-    while i < bytes.len() {
-        let ch = bytes[i];
-        match ch {
-            // Skip string literals
-            b'\'' | b'"' | b'`' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != ch {
-                    if bytes[i] == b'\\' {
-                        i += 1; // skip escaped char
-                    }
-                    i += 1;
-                }
-                // skip closing quote
-            }
-            // Skip single-line comments
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            // Skip multi-line comments
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i += 1; // skip closing */
-            }
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(brace_start + i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Find the first `;` at brace-depth 0 starting from `start`.
-/// Skips semicolons inside `{ ... }` blocks (mapped types, object types).
-fn find_top_level_semicolon(source: &str, start: usize) -> Option<usize> {
-    let bytes = source.get(start..)?.as_bytes();
-    let mut depth = 0u32;
-    for (i, &ch) in bytes.iter().enumerate() {
-        match ch {
-            b'{' => depth += 1,
-            b'}' => depth = depth.saturating_sub(1),
-            b';' if depth == 0 => return Some(start + i),
-            _ => {}
-        }
-    }
-    None
 }
 
 #[allow(clippy::too_many_arguments)]

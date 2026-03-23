@@ -3,7 +3,22 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
+mod declaration_metadata;
+mod imported_eval_lookup;
+mod surface_projector;
+
 pub type ResolverHash16 = verter_analysis::Hash16;
+pub use declaration_metadata::{
+    resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
+    ResolvedDeclarationKind, ResolvedExportTarget, ResolvedTypeDeclaration,
+};
+pub use imported_eval_lookup::{
+    ImportedEvalLookup, ImportedEvalLookupResolver, ImportedTypeAliasResolveRequest,
+};
+pub use surface_projector::{
+    extract_slot_info_from_type_text, project_macro_surfaces, ProjectedMacroSurfaces,
+    ResolvedNativeProp,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StoreViewCompatToken(pub u64);
