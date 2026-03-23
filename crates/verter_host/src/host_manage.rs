@@ -1286,9 +1286,9 @@ impl VerterHost {
             None,
             0,
         ) {
-            Ok(resolved) => {
-                resolved.map(|resolved| resolved_elements_to_type_expr_via_type_text(&resolved))
-            }
+            Ok(resolved) => resolved.map(|resolved| {
+                verter_resolver::resolved_elements_to_type_expr_via_type_text(&resolved)
+            }),
             Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
                 limit,
                 type_name,
@@ -7616,39 +7616,6 @@ fn extract_component_meta_from_resolved(
         resolved.evaluated_types.as_ref(),
         include_fallthrough,
     )
-}
-
-/// Convert `ResolvedElements` props to a structured `TypeExpr::Object`
-/// using the pre-resolved `type_text` for each member.
-pub(crate) fn resolved_elements_to_type_expr_via_type_text(
-    resolved: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
-) -> verter_analysis::type_expr::TypeExpr {
-    use verter_analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
-
-    let properties = resolved
-        .props
-        .iter()
-        .map(|prop| {
-            let ty = prop
-                .type_text
-                .as_deref()
-                .map(verter_analysis::type_expr_lower::parse_type_annotation)
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: "unknown".to_string(),
-                });
-            ObjectMember::Property(ObjectProperty {
-                name: prop
-                    .key_name
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                ty,
-                optional: prop.optional,
-                readonly: false,
-            })
-        })
-        .collect();
-
-    TypeExpr::Object(ObjectExpr { properties })
 }
 
 #[cfg(test)]

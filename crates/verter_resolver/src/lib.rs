@@ -3,11 +3,17 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
+mod component_meta;
 mod declaration_metadata;
 mod imported_eval_lookup;
 mod surface_projector;
 
 pub type ResolverHash16 = verter_analysis::Hash16;
+pub use component_meta::{
+    resolve_component_meta_parts, resolved_elements_to_type_expr_via_type_text,
+    ComponentMetaEvalOutputs, ComponentMetaResolverHost, ResolvedComponentMetaParts,
+    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
+};
 pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedTypeDeclaration,
