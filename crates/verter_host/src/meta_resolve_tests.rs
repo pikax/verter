@@ -2817,6 +2817,95 @@ defineProps<Types.Props>()
 }
 
 #[test]
+fn imported_typeof_member_paths_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/theme.ts",
+            r#"
+export const theme = {
+  slots: {
+    root: '',
+    label: ''
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import * as ThemeNs from './theme'
+
+type Slots = typeof ThemeNs.theme.slots
+
+defineProps<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"root") && prop_names.contains(&"label"),
+        "imported typeof member paths should resolve through final component meta: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn reexported_imported_typeof_member_paths_reach_final_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/inner.ts",
+            r#"
+export const theme = {
+  slots: {
+    root: '',
+    label: ''
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/index.ts", r#"export { theme as sharedTheme } from './inner'"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import * as ThemeNs from './index'
+
+type Slots = typeof ThemeNs.sharedTheme.slots
+
+defineProps<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta");
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"root") && prop_names.contains(&"label"),
+        "re-exported imported typeof member paths should resolve through final component meta: {:?}",
+        prop_names
+    );
+}
+
+#[test]
 fn mapped_tuple_emits_reach_final_component_meta() {
     let project = make_project();
     project

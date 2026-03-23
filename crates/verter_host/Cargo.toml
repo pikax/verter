@@ -18,6 +18,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_core/hotpath", "verter_anal
 [dependencies]
 verter_core = { path = "../verter_core" }
 verter_analysis = { path = "../verter_analysis" }
+verter_resolver = { path = "../verter_resolver" }
 verter_span = { path = "../verter_span" }
 verter_vfs = { path = "../verter_vfs" }
 hotpath = { version = "0.13", optional = true }

@@ -1,0 +1,15 @@
+[package]
+name = "verter_resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Deterministic semantic resolution primitives for Verter"
+publish = false
+
+[dependencies]
+parking_lot = "0.12"
+rustc-hash = { workspace = true }
+verter_analysis = { path = "../verter_analysis" }

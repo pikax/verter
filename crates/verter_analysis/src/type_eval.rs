@@ -17,6 +17,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::type_expr::*;
 
+pub type DeclarationId = u64;
+
 // ---------------------------------------------------------------------------
 // Symbol table types
 // ---------------------------------------------------------------------------
@@ -83,10 +85,14 @@ pub struct EvalEnv {
     pub value_symbols: FxHashMap<String, ValueDeclInfo>,
     /// Memoized evaluations for non-generic type references.
     resolved_refs: FxHashMap<RefCacheKey, TypeExpr>,
+    /// Stable ids assigned to type declarations inserted into this environment.
+    type_decl_ids: FxHashMap<String, DeclarationId>,
+    /// Stable ids assigned to value declarations inserted into this environment.
+    value_decl_ids: FxHashMap<String, DeclarationId>,
     /// Generic type parameter bindings for the current instantiation.
     pub type_bindings: FxHashMap<String, TypeExpr>,
     /// Currently being evaluated (cycle detection).
-    active: FxHashSet<String>,
+    pub(crate) active: FxHashSet<String>,
     /// Evaluation limits.
     pub limits: EvalLimits,
     /// Current recursion depth.
@@ -95,6 +101,8 @@ pub struct EvalEnv {
     mapped_depth: usize,
     /// Total evaluation steps consumed (monotonically increasing).
     steps: usize,
+    /// Monotonic declaration ordinal used to assign stable ids.
+    next_declaration_id: DeclarationId,
 }
 
 /// Configurable limits for the evaluator.
@@ -128,12 +136,15 @@ impl EvalEnv {
             type_symbols: FxHashMap::default(),
             value_symbols: FxHashMap::default(),
             resolved_refs: FxHashMap::default(),
+            type_decl_ids: FxHashMap::default(),
+            value_decl_ids: FxHashMap::default(),
             type_bindings: FxHashMap::default(),
             active: FxHashSet::default(),
             limits: EvalLimits::default(),
             depth: 0,
             mapped_depth: 0,
             steps: 0,
+            next_declaration_id: 0,
         }
     }
 
@@ -147,12 +158,22 @@ impl EvalEnv {
 
     /// Register a type declaration.
     pub fn add_type(&mut self, decl: TypeDeclInfo) {
-        self.type_symbols.insert(decl.name.clone(), decl);
+        let name = decl.name.clone();
+        self.type_symbols.insert(name.clone(), decl);
+        if !self.type_decl_ids.contains_key(&name) {
+            let decl_id = self.allocate_declaration_id();
+            self.type_decl_ids.insert(name, decl_id);
+        }
     }
 
     /// Register a value declaration.
     pub fn add_value(&mut self, decl: ValueDeclInfo) {
-        self.value_symbols.insert(decl.name.clone(), decl);
+        let name = decl.name.clone();
+        self.value_symbols.insert(name.clone(), decl);
+        if !self.value_decl_ids.contains_key(&name) {
+            let decl_id = self.allocate_declaration_id();
+            self.value_decl_ids.insert(name, decl_id);
+        }
     }
 
     /// Returns the total number of evaluation steps consumed so far.
@@ -186,6 +207,26 @@ impl EvalEnv {
         for (name, decl) in other.value_symbols {
             self.value_symbols.entry(name).or_insert(decl);
         }
+        for (name, decl_id) in other.type_decl_ids {
+            self.type_decl_ids.entry(name).or_insert(decl_id);
+        }
+        for (name, decl_id) in other.value_decl_ids {
+            self.value_decl_ids.entry(name).or_insert(decl_id);
+        }
+        self.next_declaration_id = self.next_declaration_id.max(other.next_declaration_id);
+    }
+
+    pub fn type_declaration_id(&self, name: &str) -> Option<DeclarationId> {
+        self.type_decl_ids.get(name).copied()
+    }
+
+    pub fn value_declaration_id(&self, name: &str) -> Option<DeclarationId> {
+        self.value_decl_ids.get(name).copied()
+    }
+
+    fn allocate_declaration_id(&mut self) -> DeclarationId {
+        self.next_declaration_id += 1;
+        self.next_declaration_id
     }
 }
 
@@ -228,6 +269,40 @@ fn is_builtin_utility_name(name: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinUtilitySource {
+    Builtin,
+    Shadowed,
+    Unknown,
+}
+
+pub trait EvalLookup {
+    fn resolve_type_decl(&mut self, _name: &str) -> Option<TypeDeclInfo> {
+        None
+    }
+
+    fn resolve_value_decl(&mut self, _path: &[String]) -> Option<ValueDeclInfo> {
+        None
+    }
+
+    fn resolve_member_projection(&mut self, _object: &TypeExpr, _key: &str) -> Option<TypeExpr> {
+        None
+    }
+
+    fn utility_source(&mut self, name: &str) -> BuiltinUtilitySource {
+        if is_builtin_utility_name(name) {
+            BuiltinUtilitySource::Builtin
+        } else {
+            BuiltinUtilitySource::Unknown
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopEvalLookup;
+
+impl EvalLookup for NoopEvalLookup {}
+
 // ---------------------------------------------------------------------------
 // Evaluator
 // ---------------------------------------------------------------------------
@@ -237,39 +312,55 @@ fn is_builtin_utility_name(name: &str) -> bool {
 ///
 /// Returns a normalized `TypeExpr` with references resolved where possible.
 pub fn evaluate(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
+    let mut lookup = NoopEvalLookup;
+    evaluate_with_lookup(expr, env, &mut lookup)
+}
+
+/// Evaluate a `TypeExpr` with a synchronous external lookup adapter.
+pub fn evaluate_with_lookup(
+    expr: &TypeExpr,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> TypeExpr {
     if env.depth > env.limits.max_depth || env.steps >= env.limits.max_steps {
         return expr.clone();
     }
     env.depth += 1;
     env.steps += 1;
-    let result = evaluate_inner(expr, env);
+    let result = evaluate_inner(expr, env, lookup);
     env.depth -= 1;
     result
 }
 
-fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
+fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup) -> TypeExpr {
     match expr {
         // Terminals — pass through
         TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => expr.clone(),
 
         // Unwrap parenthesized
-        TypeExpr::Parenthesized(inner) => evaluate(inner, env),
+        TypeExpr::Parenthesized(inner) => evaluate_with_lookup(inner, env, lookup),
 
         // Union — evaluate each branch
         TypeExpr::Union(types) => {
-            let evaluated: Vec<TypeExpr> = types.iter().map(|t| evaluate(t, env)).collect();
+            let evaluated: Vec<TypeExpr> = types
+                .iter()
+                .map(|t| evaluate_with_lookup(t, env, lookup))
+                .collect();
             TypeExpr::union(evaluated)
         }
 
         // Intersection — evaluate each branch and merge objects
         TypeExpr::Intersection(types) => {
-            let evaluated: Vec<TypeExpr> = types.iter().map(|t| evaluate(t, env)).collect();
+            let evaluated: Vec<TypeExpr> = types
+                .iter()
+                .map(|t| evaluate_with_lookup(t, env, lookup))
+                .collect();
             merge_intersection(evaluated)
         }
 
         // Array — evaluate element
         TypeExpr::Array { element, readonly } => TypeExpr::Array {
-            element: Box::new(evaluate(element, env)),
+            element: Box::new(evaluate_with_lookup(element, env, lookup)),
             readonly: *readonly,
         },
 
@@ -279,7 +370,7 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
                 .iter()
                 .map(|e| TupleElement {
                     label: e.label.clone(),
-                    ty: evaluate(&e.ty, env),
+                    ty: evaluate_with_lookup(&e.ty, env, lookup),
                     optional: e.optional,
                     rest: e.rest,
                 })
@@ -295,45 +386,45 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
             let properties = obj
                 .properties
                 .iter()
-                .map(|m| evaluate_object_member(m, env))
+                .map(|m| evaluate_object_member(m, env, lookup))
                 .collect();
             TypeExpr::Object(ObjectExpr { properties })
         }
 
         // Function — evaluate param and return types
-        TypeExpr::Function(func) => TypeExpr::Function(evaluate_function(func, env)),
+        TypeExpr::Function(func) => TypeExpr::Function(evaluate_function(func, env, lookup)),
 
         // Type reference — resolve
         TypeExpr::Ref {
             name,
             type_arguments,
-        } => evaluate_ref(name, type_arguments, env),
+        } => evaluate_ref(name, type_arguments, env, lookup),
 
         // keyof T
         TypeExpr::KeyOf(operand) => {
-            let resolved = evaluate(operand, env);
+            let resolved = evaluate_with_lookup(operand, env, lookup);
             evaluate_keyof(&resolved)
         }
 
         // typeof x
-        TypeExpr::TypeOf(value_ref) => evaluate_typeof(value_ref, env),
+        TypeExpr::TypeOf(value_ref) => evaluate_typeof(value_ref, env, lookup),
 
         // T[K]
         TypeExpr::IndexedAccess { object, index } => {
-            let idx = evaluate(index, env);
+            let idx = evaluate_with_lookup(index, env, lookup);
 
             // Lazy path: if the index is a string literal, try to look up the
             // member directly without eagerly evaluating ALL members of the object.
             // This avoids evaluating expensive sibling members (e.g., ComponentConfig
             // has 4 members but we only need 'slots').
             if let TypeExpr::Literal(LiteralValue::String(key)) = &idx {
-                if let Some(result) = try_lazy_member_lookup(object, key, env) {
+                if let Some(result) = try_lazy_member_lookup(object, key, env, lookup) {
                     return result;
                 }
             }
 
             // Fallback: eager evaluation
-            let obj = evaluate(object, env);
+            let obj = evaluate_with_lookup(object, env, lookup);
             evaluate_indexed_access(&obj, &idx)
         }
 
@@ -344,16 +435,20 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
             true_type,
             false_type,
         } => {
-            let check_eval = evaluate(check, env);
-            let extends_eval = evaluate(extends, env);
+            let check_eval = evaluate_with_lookup(check, env, lookup);
+            let extends_eval = evaluate_with_lookup(extends, env, lookup);
             if is_assignable_to(&check_eval, &extends_eval) {
-                evaluate(true_type, env)
-            } else if let Some(result) =
-                try_evaluate_conditional_with_infer(&check_eval, &extends_eval, true_type, env)
-            {
+                evaluate_with_lookup(true_type, env, lookup)
+            } else if let Some(result) = try_evaluate_conditional_with_infer(
+                &check_eval,
+                &extends_eval,
+                true_type,
+                env,
+                lookup,
+            ) {
                 result
             } else if is_definitely_not_assignable(&check_eval, &extends_eval) {
-                evaluate(false_type, env)
+                evaluate_with_lookup(false_type, env, lookup)
             } else {
                 // Can't determine — return with UNEVALUATED branches.
                 // Do NOT evaluate both branches: that causes 2^N blowup on
@@ -378,20 +473,20 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
             readonly,
             name_type,
         } => evaluate_mapped(
-            parameter, source, value, *optional, *readonly, name_type, env,
+            parameter, source, value, *optional, *readonly, name_type, env, lookup,
         ),
 
         // Template literal
         TypeExpr::TemplateLiteral {
             quasis,
             expressions,
-        } => evaluate_template_literal(quasis, expressions, env),
+        } => evaluate_template_literal(quasis, expressions, env, lookup),
 
         // infer T — can't evaluate outside conditional context
         TypeExpr::Infer { .. } => expr.clone(),
 
         // Rest — evaluate inner
-        TypeExpr::Rest(inner) => TypeExpr::Rest(Box::new(evaluate(inner, env))),
+        TypeExpr::Rest(inner) => TypeExpr::Rest(Box::new(evaluate_with_lookup(inner, env, lookup))),
     }
 }
 
@@ -399,18 +494,37 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
 // Reference resolution
 // ---------------------------------------------------------------------------
 
-fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> TypeExpr {
+fn evaluate_ref(
+    name: &str,
+    type_arguments: &[TypeExpr],
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> TypeExpr {
     // Check type bindings first (generic parameters)
     if type_arguments.is_empty() {
         if let Some(bound) = env.type_bindings.get(name).cloned() {
-            return evaluate(&bound, env);
+            return evaluate_with_lookup(&bound, env, lookup);
         }
     }
 
+    let local_decl = env.type_symbols.get(name).cloned();
+    let external_decl = if local_decl.is_none() {
+        lookup.resolve_type_decl(name)
+    } else {
+        None
+    };
+    let utility_source = if local_decl.is_none() && external_decl.is_none() {
+        lookup.utility_source(name)
+    } else {
+        BuiltinUtilitySource::Shadowed
+    };
+
     // Built-in utilities may be able to operate on the raw argument surface
     // and avoid eagerly evaluating expensive siblings.
-    if let Some(result) = try_builtin_utility(name, type_arguments, env) {
-        return result;
+    if utility_source == BuiltinUtilitySource::Builtin {
+        if let Some(result) = try_builtin_utility(name, type_arguments, env, lookup) {
+            return result;
+        }
     }
 
     // Early opaque-arg bailout on the RAW arguments. This must happen before
@@ -420,7 +534,7 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
     if !type_arguments.is_empty()
         && type_arguments
             .iter()
-            .any(|arg| is_opaque_for_instantiation(arg, env))
+            .any(|arg| is_opaque_for_instantiation(arg, env, lookup))
     {
         return TypeExpr::named_with_args(name, type_arguments.to_vec());
     }
@@ -428,7 +542,10 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
     let evaluated_args = if type_arguments.is_empty() {
         Vec::new()
     } else {
-        type_arguments.iter().map(|a| evaluate(a, env)).collect()
+        type_arguments
+            .iter()
+            .map(|a| evaluate_with_lookup(a, env, lookup))
+            .collect()
     };
     let cache_key = ref_cache_key(name, &evaluated_args);
     if let Some(cached) = env.resolved_refs.get(&cache_key).cloned() {
@@ -436,7 +553,7 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
     }
 
     // Look up in type symbol table
-    if let Some(decl) = env.type_symbols.get(name).cloned() {
+    if let Some(decl) = local_decl.or(external_decl) {
         // Cycle detection
         if env.active.contains(name) {
             return TypeExpr::named(name);
@@ -444,9 +561,9 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
         env.active.insert(name.to_string());
 
         let result = if !decl.type_parameters.is_empty() {
-            instantiate_generic(&decl, &evaluated_args, env)
+            instantiate_generic(&decl, &evaluated_args, env, lookup)
         } else {
-            evaluate(&decl.body, env)
+            evaluate_with_lookup(&decl.body, env, lookup)
         };
 
         env.active.remove(name);
@@ -480,59 +597,73 @@ fn evaluate_ref(name: &str, type_arguments: &[TypeExpr], env: &mut EvalEnv) -> T
 ///
 /// Recurses into type arguments and structural positions to catch nested opaque
 /// inputs (e.g., `Pick<typeof theme, 'key'>` or `Foo<MissingType>`).
-fn is_opaque_for_instantiation(expr: &TypeExpr, env: &EvalEnv) -> bool {
+fn is_opaque_for_instantiation(
+    expr: &TypeExpr,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> bool {
     match expr {
         // typeof X where X is not in value_symbols
-        TypeExpr::TypeOf(vr) => vr.path.len() == 1 && !env.value_symbols.contains_key(&vr.path[0]),
+        TypeExpr::TypeOf(vr) => {
+            if vr.path.len() == 1 && env.value_symbols.contains_key(&vr.path[0]) {
+                return false;
+            }
+            lookup.resolve_value_decl(&vr.path).is_none()
+        }
         // Bail on unresolved references that are neither declared symbols nor
         // in-scope generic bindings. Utility wrappers recurse into their args.
         TypeExpr::Ref {
             name,
             type_arguments,
         } => {
-            if is_builtin_utility_name(name) {
+            if lookup.utility_source(name) == BuiltinUtilitySource::Builtin {
                 return type_arguments
                     .iter()
-                    .any(|a| is_opaque_for_instantiation(a, env));
+                    .any(|a| is_opaque_for_instantiation(a, env, lookup));
             }
-            if env.type_bindings.contains_key(name.as_str()) || env.type_symbols.contains_key(name)
+            if env.type_bindings.contains_key(name.as_str())
+                || env.type_symbols.contains_key(name)
+                || lookup.resolve_type_decl(name).is_some()
             {
                 return type_arguments
                     .iter()
-                    .any(|a| is_opaque_for_instantiation(a, env));
+                    .any(|a| is_opaque_for_instantiation(a, env, lookup));
             }
             true
         }
         // Indexed access on an opaque object
         TypeExpr::IndexedAccess { object, index } => {
-            is_opaque_for_instantiation(object, env) || is_opaque_for_instantiation(index, env)
+            is_opaque_for_instantiation(object, env, lookup)
+                || is_opaque_for_instantiation(index, env, lookup)
         }
         // KeyOf on an opaque type
-        TypeExpr::KeyOf(inner) => is_opaque_for_instantiation(inner, env),
+        TypeExpr::KeyOf(inner) => is_opaque_for_instantiation(inner, env, lookup),
         TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
-            is_opaque_for_instantiation(inner, env)
+            is_opaque_for_instantiation(inner, env, lookup)
         }
-        TypeExpr::Array { element, .. } => is_opaque_for_instantiation(element, env),
+        TypeExpr::Array { element, .. } => is_opaque_for_instantiation(element, env, lookup),
         TypeExpr::Tuple { elements, .. } => elements
             .iter()
-            .any(|element| is_opaque_for_instantiation(&element.ty, env)),
+            .any(|element| is_opaque_for_instantiation(&element.ty, env, lookup)),
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            types.iter().any(|ty| is_opaque_for_instantiation(ty, env))
+            types
+                .iter()
+                .any(|ty| is_opaque_for_instantiation(ty, env, lookup))
         }
         TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
-            ObjectMember::Property(prop) => is_opaque_for_instantiation(&prop.ty, env),
+            ObjectMember::Property(prop) => is_opaque_for_instantiation(&prop.ty, env, lookup),
             ObjectMember::IndexSignature(sig) => {
-                is_opaque_for_instantiation(&sig.key_type, env)
-                    || is_opaque_for_instantiation(&sig.value_type, env)
+                is_opaque_for_instantiation(&sig.key_type, env, lookup)
+                    || is_opaque_for_instantiation(&sig.value_type, env, lookup)
             }
             ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                is_function_opaque_for_instantiation(func, env)
+                is_function_opaque_for_instantiation(func, env, lookup)
             }
             ObjectMember::Method(method) => {
-                is_function_opaque_for_instantiation(&method.function, env)
+                is_function_opaque_for_instantiation(&method.function, env, lookup)
             }
         }),
-        TypeExpr::Function(func) => is_function_opaque_for_instantiation(func, env),
+        TypeExpr::Function(func) => is_function_opaque_for_instantiation(func, env, lookup),
         TypeExpr::Conditional {
             check,
             extends,
@@ -540,57 +671,66 @@ fn is_opaque_for_instantiation(expr: &TypeExpr, env: &EvalEnv) -> bool {
             false_type,
         } => [check, extends, true_type, false_type]
             .into_iter()
-            .any(|ty| is_opaque_for_instantiation(ty, env)),
+            .any(|ty| is_opaque_for_instantiation(ty, env, lookup)),
         TypeExpr::Mapped {
             source,
             value,
             name_type,
             ..
         } => {
-            is_opaque_for_instantiation(source, env)
-                || is_opaque_for_instantiation(value, env)
+            is_opaque_for_instantiation(source, env, lookup)
+                || is_opaque_for_instantiation(value, env, lookup)
                 || name_type
                     .as_deref()
-                    .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+                    .is_some_and(|ty| is_opaque_for_instantiation(ty, env, lookup))
         }
         TypeExpr::TemplateLiteral { expressions, .. } => expressions
             .iter()
-            .any(|expr| is_opaque_for_instantiation(expr, env)),
+            .any(|expr| is_opaque_for_instantiation(expr, env, lookup)),
         _ => false,
     }
 }
 
-fn is_function_opaque_for_instantiation(func: &FunctionExpr, env: &EvalEnv) -> bool {
+fn is_function_opaque_for_instantiation(
+    func: &FunctionExpr,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> bool {
     func.parameters
         .iter()
-        .any(|param| is_opaque_for_instantiation(&param.ty, env))
+        .any(|param| is_opaque_for_instantiation(&param.ty, env, lookup))
         || func
             .return_type
             .as_deref()
-            .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+            .is_some_and(|ty| is_opaque_for_instantiation(ty, env, lookup))
         || func.type_parameters.iter().any(|param| {
             param
                 .constraint
                 .as_deref()
-                .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+                .is_some_and(|ty| is_opaque_for_instantiation(ty, env, lookup))
                 || param
                     .default
                     .as_deref()
-                    .is_some_and(|ty| is_opaque_for_instantiation(ty, env))
+                    .is_some_and(|ty| is_opaque_for_instantiation(ty, env, lookup))
         })
 }
 
-fn instantiate_generic(decl: &TypeDeclInfo, args: &[TypeExpr], env: &mut EvalEnv) -> TypeExpr {
+fn instantiate_generic(
+    decl: &TypeDeclInfo,
+    args: &[TypeExpr],
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> TypeExpr {
     // Opaque-argument bailout: if any evaluated type argument is opaque
     // (e.g., unresolved `typeof theme`), skip body expansion and return
     // the symbolic reference with evaluated args. This prevents unbounded
     // expansion of complex generics when an argument can't be resolved.
-    if args.iter().any(|a| is_opaque_for_instantiation(a, env)) {
+    if args.iter().any(|a| is_opaque_for_instantiation(a, env, lookup)) {
         return TypeExpr::named_with_args(&decl.name, args.to_vec());
     }
 
     let saved = bind_type_parameters(decl, args, env);
-    let result = evaluate(&decl.body, env);
+    let result = evaluate_with_lookup(&decl.body, env, lookup);
     restore_type_parameters(saved, env);
 
     result
@@ -638,6 +778,7 @@ pub(crate) fn try_evaluate_conditional_with_infer(
     extends: &TypeExpr,
     true_type: &TypeExpr,
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> Option<TypeExpr> {
     let mut inferred = FxHashMap::default();
     if !collect_infer_bindings(check, extends, &mut inferred) || inferred.is_empty() {
@@ -648,7 +789,7 @@ pub(crate) fn try_evaluate_conditional_with_infer(
     for (name, ty) in inferred {
         saved.push((name.clone(), env.type_bindings.insert(name, ty)));
     }
-    let result = evaluate(true_type, env);
+    let result = evaluate_with_lookup(true_type, env, lookup);
     restore_type_parameters(saved, env);
     Some(result)
 }
@@ -732,16 +873,22 @@ fn collect_infer_bindings(
     }
 }
 
-pub(crate) fn with_bound_type_decl<R, F>(
+#[allow(dead_code)]
+pub(crate) fn with_bound_type_decl_with_lookup<R, F>(
     name: &str,
     type_arguments: &[TypeExpr],
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
     f: F,
 ) -> Option<R>
 where
     F: FnOnce(&TypeDeclInfo, &mut EvalEnv) -> R,
 {
-    let decl = env.type_symbols.get(name)?.clone();
+    let decl = env
+        .type_symbols
+        .get(name)
+        .cloned()
+        .or_else(|| lookup.resolve_type_decl(name))?;
     if env.active.contains(name) {
         return None;
     }
@@ -753,6 +900,20 @@ where
     Some(result)
 }
 
+#[allow(dead_code)]
+pub(crate) fn with_bound_type_decl<R, F>(
+    name: &str,
+    type_arguments: &[TypeExpr],
+    env: &mut EvalEnv,
+    f: F,
+) -> Option<R>
+where
+    F: FnOnce(&TypeDeclInfo, &mut EvalEnv) -> R,
+{
+    let mut lookup = NoopEvalLookup;
+    with_bound_type_decl_with_lookup(name, type_arguments, env, &mut lookup, f)
+}
+
 // ---------------------------------------------------------------------------
 // Built-in utility types
 // ---------------------------------------------------------------------------
@@ -761,85 +922,87 @@ fn try_builtin_utility(
     name: &str,
     type_arguments: &[TypeExpr],
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> Option<TypeExpr> {
     match name {
         "Partial" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             Some(apply_partial(&inner))
         }
         "Required" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             Some(apply_required(&inner))
         }
         "Readonly" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             Some(apply_readonly(&inner))
         }
         "Pick" if type_arguments.len() == 2 => {
-            let keys = evaluate(&type_arguments[1], env);
+            let keys = evaluate_with_lookup(&type_arguments[1], env, lookup);
             let key_set: rustc_hash::FxHashSet<String> =
                 extract_string_keys_recursive(&keys).into_iter().collect();
             if !key_set.is_empty() {
                 if let Some(obj) =
-                    try_project_object_shape(&type_arguments[0], &key_set, false, env)
+                    try_project_object_shape(&type_arguments[0], &key_set, false, env, lookup)
                 {
                     return Some(TypeExpr::Object(obj));
                 }
             }
-            let inner = evaluate(&type_arguments[0], env);
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             Some(apply_pick(&inner, &keys))
         }
         "Omit" if type_arguments.len() == 2 => {
-            let keys = evaluate(&type_arguments[1], env);
+            let keys = evaluate_with_lookup(&type_arguments[1], env, lookup);
             let key_set: rustc_hash::FxHashSet<String> =
                 extract_string_keys_recursive(&keys).into_iter().collect();
             if !key_set.is_empty() {
-                if let Some(obj) = try_project_object_shape(&type_arguments[0], &key_set, true, env)
+                if let Some(obj) =
+                    try_project_object_shape(&type_arguments[0], &key_set, true, env, lookup)
                 {
                     return Some(TypeExpr::Object(obj));
                 }
             }
-            let inner = evaluate(&type_arguments[0], env);
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             Some(apply_omit(&inner, &keys))
         }
         "Record" if type_arguments.len() == 2 => {
-            let keys = evaluate(&type_arguments[0], env);
-            let value = evaluate(&type_arguments[1], env);
+            let keys = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            let value = evaluate_with_lookup(&type_arguments[1], env, lookup);
             Some(apply_record(&keys, &value))
         }
         "Extract" if type_arguments.len() == 2 => {
-            let source = evaluate(&type_arguments[0], env);
-            let target = evaluate(&type_arguments[1], env);
+            let source = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            let target = evaluate_with_lookup(&type_arguments[1], env, lookup);
             Some(apply_extract(&source, &target))
         }
         "Exclude" if type_arguments.len() == 2 => {
-            let source = evaluate(&type_arguments[0], env);
-            let target = evaluate(&type_arguments[1], env);
+            let source = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            let target = evaluate_with_lookup(&type_arguments[1], env, lookup);
             Some(apply_exclude(&source, &target))
         }
         "NonNullable" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             Some(apply_non_nullable(&inner))
         }
         "ReturnType" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
-            Some(extract_return_type(&inner, env))
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            Some(extract_return_type(&inner, env, lookup))
         }
         "Parameters" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
-            Some(extract_parameters(&inner, env))
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            Some(extract_parameters(&inner, env, lookup))
         }
         "ConstructorParameters" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
-            Some(extract_constructor_parameters(&inner, env))
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            Some(extract_constructor_parameters(&inner, env, lookup))
         }
         "InstanceType" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
-            Some(extract_instance_type(&inner, env))
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            Some(extract_instance_type(&inner, env, lookup))
         }
         "Awaited" if type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
-            Some(unwrap_awaited(&inner, env))
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
+            Some(unwrap_awaited(&inner, env, lookup))
         }
         _ => None,
     }
@@ -1066,19 +1229,19 @@ fn apply_non_nullable(ty: &TypeExpr) -> TypeExpr {
 
 // -- ReturnType<T> --
 
-fn extract_return_type(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
+fn extract_return_type(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup) -> TypeExpr {
     match ty {
         TypeExpr::Function(func) => {
             if let Some(ref ret) = func.return_type {
-                evaluate(ret, env)
+                evaluate_with_lookup(ret, env, lookup)
             } else {
                 TypeExpr::Primitive(PrimitiveName::Void)
             }
         }
         // typeof fn → look up the function in value symbols
         TypeExpr::TypeOf(value_ref) => {
-            if let Some(resolved) = resolve_typeof(value_ref, env) {
-                extract_return_type(&resolved, env)
+            if let Some(resolved) = resolve_typeof(value_ref, env, lookup) {
+                extract_return_type(&resolved, env, lookup)
             } else {
                 TypeExpr::named_with_args("ReturnType", vec![ty.clone()])
             }
@@ -1089,7 +1252,7 @@ fn extract_return_type(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
 
 // -- Parameters<T> --
 
-fn extract_parameters(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
+fn extract_parameters(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup) -> TypeExpr {
     match ty {
         TypeExpr::Function(func) => {
             let elements = func
@@ -1097,7 +1260,7 @@ fn extract_parameters(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
                 .iter()
                 .map(|p| TupleElement {
                     label: p.name.clone(),
-                    ty: evaluate(&p.ty, env),
+                    ty: evaluate_with_lookup(&p.ty, env, lookup),
                     optional: p.optional,
                     rest: p.rest,
                 })
@@ -1108,8 +1271,8 @@ fn extract_parameters(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
             }
         }
         TypeExpr::TypeOf(value_ref) => {
-            if let Some(resolved) = resolve_typeof(value_ref, env) {
-                extract_parameters(&resolved, env)
+            if let Some(resolved) = resolve_typeof(value_ref, env, lookup) {
+                extract_parameters(&resolved, env, lookup)
             } else {
                 TypeExpr::named_with_args("Parameters", vec![ty.clone()])
             }
@@ -1120,7 +1283,11 @@ fn extract_parameters(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
 
 // -- ConstructorParameters<T> --
 
-fn extract_constructor_parameters(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
+fn extract_constructor_parameters(
+    ty: &TypeExpr,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> TypeExpr {
     match ty {
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
@@ -1130,7 +1297,7 @@ fn extract_constructor_parameters(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr 
                         .iter()
                         .map(|p| TupleElement {
                             label: p.name.clone(),
-                            ty: evaluate(&p.ty, env),
+                            ty: evaluate_with_lookup(&p.ty, env, lookup),
                             optional: p.optional,
                             rest: p.rest,
                         })
@@ -1149,13 +1316,17 @@ fn extract_constructor_parameters(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr 
 
 // -- InstanceType<T> --
 
-fn extract_instance_type(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
+fn extract_instance_type(
+    ty: &TypeExpr,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> TypeExpr {
     match ty {
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
                 if let ObjectMember::ConstructSignature(func) = member {
                     if let Some(ref ret) = func.return_type {
-                        return evaluate(ret, env);
+                        return evaluate_with_lookup(ret, env, lookup);
                     }
                 }
             }
@@ -1167,15 +1338,15 @@ fn extract_instance_type(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
 
 // -- Awaited<T> --
 
-fn unwrap_awaited(ty: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
+fn unwrap_awaited(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup) -> TypeExpr {
     match ty {
         TypeExpr::Ref {
             name,
             type_arguments,
         } if name == "Promise" && type_arguments.len() == 1 => {
-            let inner = evaluate(&type_arguments[0], env);
+            let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             // Recursively unwrap nested Promises
-            unwrap_awaited(&inner, env)
+            unwrap_awaited(&inner, env, lookup)
         }
         _ => ty.clone(),
     }
@@ -1212,24 +1383,36 @@ fn evaluate_keyof(ty: &TypeExpr) -> TypeExpr {
 // typeof
 // ---------------------------------------------------------------------------
 
-fn evaluate_typeof(value_ref: &ValueRef, env: &mut EvalEnv) -> TypeExpr {
-    if let Some(resolved) = resolve_typeof(value_ref, env) {
+fn evaluate_typeof(
+    value_ref: &ValueRef,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> TypeExpr {
+    if let Some(resolved) = resolve_typeof(value_ref, env, lookup) {
         resolved
     } else {
         TypeExpr::TypeOf(value_ref.clone())
     }
 }
 
-fn resolve_typeof(value_ref: &ValueRef, env: &mut EvalEnv) -> Option<TypeExpr> {
-    if value_ref.path.len() != 1 {
-        return None; // Qualified paths not yet supported
-    }
-    let name = &value_ref.path[0];
-    let decl = env.value_symbols.get(name)?.clone();
+fn resolve_typeof(
+    value_ref: &ValueRef,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> Option<TypeExpr> {
+    let decl = if value_ref.path.len() == 1 {
+        let name = &value_ref.path[0];
+        env.value_symbols
+            .get(name)
+            .cloned()
+            .or_else(|| lookup.resolve_value_decl(&value_ref.path))?
+    } else {
+        lookup.resolve_value_decl(&value_ref.path)?
+    };
 
     // If there's an explicit type annotation, use it
     if let Some(ref ty) = decl.type_annotation {
-        return Some(evaluate(ty, env));
+        return Some(evaluate_with_lookup(ty, env, lookup));
     }
 
     // Classes need their constructor shape preserved for utilities like
@@ -1278,14 +1461,19 @@ fn resolve_typeof(value_ref: &ValueRef, env: &mut EvalEnv) -> Option<TypeExpr> {
 /// Does NOT handle (falls back to eager):
 /// - Mapped types, conditionals, intersections, unions
 /// - Non-object bodies
-fn try_lazy_member_lookup(object: &TypeExpr, key: &str, env: &mut EvalEnv) -> Option<TypeExpr> {
+fn try_lazy_member_lookup(
+    object: &TypeExpr,
+    key: &str,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> Option<TypeExpr> {
     match object {
         TypeExpr::Object(obj) => {
             // Direct object literal — look up the member without evaluating siblings
             for member in &obj.properties {
                 if let ObjectMember::Property(p) = member {
                     if p.name == key {
-                        return Some(evaluate(&p.ty, env));
+                        return Some(evaluate_with_lookup(&p.ty, env, lookup));
                     }
                 }
                 if let ObjectMember::Method(m) = member {
@@ -1301,18 +1489,28 @@ fn try_lazy_member_lookup(object: &TypeExpr, key: &str, env: &mut EvalEnv) -> Op
             type_arguments,
         } => {
             if let Some(result) =
-                try_lazy_builtin_member_lookup(name.as_str(), type_arguments, key, env)
+                try_lazy_builtin_member_lookup(name.as_str(), type_arguments, key, env, lookup)
             {
                 return Some(result);
             }
 
-            with_bound_type_decl(name, type_arguments, env, |decl, env| {
-                try_lazy_member_lookup(&decl.body, key, env)
-            })
-            .flatten()
+            let decl = env
+                .type_symbols
+                .get(name)
+                .cloned()
+                .or_else(|| lookup.resolve_type_decl(name))?;
+            if env.active.contains(name) {
+                return None;
+            }
+            env.active.insert(name.to_string());
+            let saved = bind_type_parameters(&decl, type_arguments, env);
+            let result = try_lazy_member_lookup(&decl.body, key, env, lookup);
+            restore_type_parameters(saved, env);
+            env.active.remove(name);
+            result
         }
-        TypeExpr::Parenthesized(inner) => try_lazy_member_lookup(inner, key, env),
-        _ => None, // Can't short-circuit — fall back to eager evaluation
+        TypeExpr::Parenthesized(inner) => try_lazy_member_lookup(inner, key, env, lookup),
+        _ => lookup.resolve_member_projection(object, key),
     }
 }
 
@@ -1321,28 +1519,29 @@ fn try_lazy_builtin_member_lookup(
     type_arguments: &[TypeExpr],
     key: &str,
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> Option<TypeExpr> {
     match name {
         // These wrappers only change property modifiers, not the property type.
         "Partial" | "Required" | "Readonly" if type_arguments.len() == 1 => {
-            try_lazy_member_lookup(&type_arguments[0], key, env)
+            try_lazy_member_lookup(&type_arguments[0], key, env, lookup)
         }
         "Pick" if type_arguments.len() == 2 => {
-            let keys = evaluate(&type_arguments[1], env);
+            let keys = evaluate_with_lookup(&type_arguments[1], env, lookup);
             let key_set: rustc_hash::FxHashSet<String> =
                 extract_string_keys_recursive(&keys).into_iter().collect();
             if key_set.contains(key) {
-                try_lazy_member_lookup(&type_arguments[0], key, env)
+                try_lazy_member_lookup(&type_arguments[0], key, env, lookup)
             } else {
                 None
             }
         }
         "Omit" if type_arguments.len() == 2 => {
-            let keys = evaluate(&type_arguments[1], env);
+            let keys = evaluate_with_lookup(&type_arguments[1], env, lookup);
             let key_set: rustc_hash::FxHashSet<String> =
                 extract_string_keys_recursive(&keys).into_iter().collect();
             if !key_set.contains(key) {
-                try_lazy_member_lookup(&type_arguments[0], key, env)
+                try_lazy_member_lookup(&type_arguments[0], key, env, lookup)
             } else {
                 None
             }
@@ -1359,42 +1558,56 @@ fn try_project_object_shape(
     keys: &rustc_hash::FxHashSet<String>,
     omit_mode: bool,
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> Option<ObjectExpr> {
     match object {
-        TypeExpr::Object(obj) => Some(project_object_members(obj, keys, omit_mode, env)),
+        TypeExpr::Object(obj) => Some(project_object_members(obj, keys, omit_mode, env, lookup)),
         TypeExpr::Ref {
             name,
             type_arguments,
         } => {
-            if let Some(projected) = with_bound_type_decl(name, type_arguments, env, |decl, env| {
-                try_project_object_shape(&decl.body, keys, omit_mode, env)
-            })
-            .flatten()
-            {
-                return Some(projected);
+            let decl = env
+                .type_symbols
+                .get(name)
+                .cloned()
+                .or_else(|| lookup.resolve_type_decl(name));
+            if let Some(decl) = decl {
+                if env.active.contains(name) {
+                    return None;
+                }
+                env.active.insert(name.to_string());
+                let saved = bind_type_parameters(&decl, type_arguments, env);
+                let projected = try_project_object_shape(&decl.body, keys, omit_mode, env, lookup);
+                restore_type_parameters(saved, env);
+                env.active.remove(name);
+                if let Some(projected) = projected {
+                    return Some(projected);
+                }
             }
 
-            let evaluated = evaluate(object, env);
+            let evaluated = evaluate_with_lookup(object, env, lookup);
             if &evaluated == object {
                 None
             } else {
-                try_project_object_shape(&evaluated, keys, omit_mode, env)
+                try_project_object_shape(&evaluated, keys, omit_mode, env, lookup)
             }
         }
         TypeExpr::Intersection(types) => {
             let projected: Vec<ObjectExpr> = types
                 .iter()
-                .filter_map(|branch| try_project_object_shape(branch, keys, omit_mode, env))
+                .filter_map(|branch| try_project_object_shape(branch, keys, omit_mode, env, lookup))
                 .collect();
             merge_object_branches(projected)
         }
-        TypeExpr::Parenthesized(inner) => try_project_object_shape(inner, keys, omit_mode, env),
+        TypeExpr::Parenthesized(inner) => {
+            try_project_object_shape(inner, keys, omit_mode, env, lookup)
+        }
         TypeExpr::IndexedAccess { .. } | TypeExpr::TypeOf(_) => {
-            let evaluated = evaluate(object, env);
+            let evaluated = evaluate_with_lookup(object, env, lookup);
             if &evaluated == object {
                 None
             } else {
-                try_project_object_shape(&evaluated, keys, omit_mode, env)
+                try_project_object_shape(&evaluated, keys, omit_mode, env, lookup)
             }
         }
         _ => None,
@@ -1406,6 +1619,7 @@ fn project_object_members(
     keys: &rustc_hash::FxHashSet<String>,
     omit_mode: bool,
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> ObjectExpr {
     let properties = obj
         .properties
@@ -1419,7 +1633,7 @@ fn project_object_members(
                 };
                 keep.then(|| {
                     ObjectMember::Property(ObjectProperty {
-                        ty: evaluate(&prop.ty, env),
+                        ty: evaluate_with_lookup(&prop.ty, env, lookup),
                         ..prop.clone()
                     })
                 })
@@ -1441,14 +1655,14 @@ fn project_object_members(
                         .parameters
                         .iter()
                         .map(|param| FunctionParam {
-                            ty: evaluate(&param.ty, env),
+                            ty: evaluate_with_lookup(&param.ty, env, lookup),
                             ..param.clone()
                         })
                         .collect(),
                     return_type: sig
                         .return_type
                         .as_ref()
-                        .map(|ret| Box::new(evaluate(ret, env))),
+                        .map(|ret| Box::new(evaluate_with_lookup(ret, env, lookup))),
                     type_parameters: sig.type_parameters.clone(),
                 })
             }),
@@ -1458,14 +1672,14 @@ fn project_object_members(
                         .parameters
                         .iter()
                         .map(|param| FunctionParam {
-                            ty: evaluate(&param.ty, env),
+                            ty: evaluate_with_lookup(&param.ty, env, lookup),
                             ..param.clone()
                         })
                         .collect(),
                     return_type: sig
                         .return_type
                         .as_ref()
-                        .map(|ret| Box::new(evaluate(ret, env))),
+                        .map(|ret| Box::new(evaluate_with_lookup(ret, env, lookup))),
                     type_parameters: sig.type_parameters.clone(),
                 })
             }),
@@ -1561,12 +1775,13 @@ fn evaluate_mapped(
     readonly: MappedModifier,
     name_type: &Option<Box<TypeExpr>>,
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> TypeExpr {
     // Check mapped nesting depth limit
     if env.mapped_depth >= env.limits.max_mapped_depth {
         return TypeExpr::Mapped {
             parameter: parameter.to_string(),
-            source: Box::new(evaluate(source, env)),
+            source: Box::new(evaluate_with_lookup(source, env, lookup)),
             value: Box::new(value.clone()),
             optional,
             readonly,
@@ -1575,7 +1790,7 @@ fn evaluate_mapped(
     }
     env.mapped_depth += 1;
 
-    let resolved_source = evaluate(source, env);
+    let resolved_source = evaluate_with_lookup(source, env, lookup);
     let keys = extract_string_keys_recursive(&resolved_source);
 
     if keys.is_empty() || keys.len() > env.limits.max_mapped_keys {
@@ -1594,14 +1809,14 @@ fn evaluate_mapped(
     let saved = env.type_bindings.get(parameter).cloned();
 
     // Build lookup of source property modifiers for MappedModifier::None preservation
-    let source_props = extract_source_property_modifiers(&resolved_source, env);
+    let source_props = extract_source_property_modifiers(&resolved_source, env, lookup);
 
     let properties: Vec<ObjectMember> = keys
         .into_iter()
         .map(|key| {
             env.type_bindings
                 .insert(parameter.to_string(), TypeExpr::string_literal(&key));
-            let prop_type = evaluate(value, env);
+            let prop_type = evaluate_with_lookup(value, env, lookup);
             let src = source_props.get(key.as_str());
             let is_optional = match optional {
                 MappedModifier::Add => true,
@@ -1641,8 +1856,12 @@ fn evaluate_template_literal(
     quasis: &[String],
     expressions: &[TypeExpr],
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> TypeExpr {
-    let evaluated_exprs: Vec<TypeExpr> = expressions.iter().map(|e| evaluate(e, env)).collect();
+    let evaluated_exprs: Vec<TypeExpr> = expressions
+        .iter()
+        .map(|e| evaluate_with_lookup(e, env, lookup))
+        .collect();
 
     // Check if all expressions are literal or finite union of literals
     let all_finite = evaluated_exprs.iter().all(is_finite_string_set);
@@ -1680,29 +1899,33 @@ fn evaluate_template_literal(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn evaluate_object_member(member: &ObjectMember, env: &mut EvalEnv) -> ObjectMember {
+fn evaluate_object_member(
+    member: &ObjectMember,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> ObjectMember {
     match member {
         ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
             name: p.name.clone(),
-            ty: evaluate(&p.ty, env),
+            ty: evaluate_with_lookup(&p.ty, env, lookup),
             optional: p.optional,
             readonly: p.readonly,
         }),
         ObjectMember::IndexSignature(idx) => ObjectMember::IndexSignature(IndexSignature {
             key_name: idx.key_name.clone(),
-            key_type: evaluate(&idx.key_type, env),
-            value_type: evaluate(&idx.value_type, env),
+            key_type: evaluate_with_lookup(&idx.key_type, env, lookup),
+            value_type: evaluate_with_lookup(&idx.value_type, env, lookup),
             readonly: idx.readonly,
         }),
         ObjectMember::CallSignature(func) => {
-            ObjectMember::CallSignature(evaluate_function(func, env))
+            ObjectMember::CallSignature(evaluate_function(func, env, lookup))
         }
         ObjectMember::ConstructSignature(func) => {
-            ObjectMember::ConstructSignature(evaluate_function(func, env))
+            ObjectMember::ConstructSignature(evaluate_function(func, env, lookup))
         }
         ObjectMember::Method(m) => ObjectMember::Method(MethodSignature {
             name: m.name.clone(),
-            function: evaluate_function(&m.function, env),
+            function: evaluate_function(&m.function, env, lookup),
             optional: m.optional,
         }),
     }
@@ -1713,11 +1936,12 @@ fn evaluate_object_member(member: &ObjectMember, env: &mut EvalEnv) -> ObjectMem
 fn extract_source_property_modifiers(
     source: &TypeExpr,
     env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> rustc_hash::FxHashMap<String, (bool, bool)> {
     let mut result = rustc_hash::FxHashMap::default();
     // If the source is keyof T, resolve T to get its properties
     let obj = match source {
-        TypeExpr::KeyOf(inner) => evaluate(inner, env),
+        TypeExpr::KeyOf(inner) => evaluate_with_lookup(inner, env, lookup),
         _ => return result,
     };
     if let Some(obj_expr) = extract_object_shape(&obj) {
@@ -1798,14 +2022,18 @@ fn merge_intersection(types: Vec<TypeExpr>) -> TypeExpr {
     }
 }
 
-fn evaluate_function(func: &FunctionExpr, env: &mut EvalEnv) -> FunctionExpr {
+fn evaluate_function(
+    func: &FunctionExpr,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> FunctionExpr {
     FunctionExpr {
         parameters: func
             .parameters
             .iter()
             .map(|p| FunctionParam {
                 name: p.name.clone(),
-                ty: evaluate(&p.ty, env),
+                ty: evaluate_with_lookup(&p.ty, env, lookup),
                 optional: p.optional,
                 rest: p.rest,
             })
@@ -1813,7 +2041,7 @@ fn evaluate_function(func: &FunctionExpr, env: &mut EvalEnv) -> FunctionExpr {
         return_type: func
             .return_type
             .as_ref()
-            .map(|r| Box::new(evaluate(r, env))),
+            .map(|r| Box::new(evaluate_with_lookup(r, env, lookup))),
         type_parameters: func.type_parameters.clone(),
     }
 }

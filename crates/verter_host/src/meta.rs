@@ -600,7 +600,8 @@ impl MetaSession {
 
         match resolved {
             Some((analysis, resolved)) => {
-                if let Some(err) = component_meta_resolution_budget_error(canonical_or_alias, &resolved)
+                if let Some(err) =
+                    component_meta_resolution_budget_error(canonical_or_alias, &resolved)
                 {
                     Err(err)
                 } else {
@@ -632,7 +633,8 @@ impl MetaSession {
         })?;
         match resolved {
             Some((analysis, resolved)) => {
-                if let Some(err) = component_meta_resolution_budget_error(canonical_or_alias, &resolved)
+                if let Some(err) =
+                    component_meta_resolution_budget_error(canonical_or_alias, &resolved)
                 {
                     Err(err)
                 } else {

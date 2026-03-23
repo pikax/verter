@@ -1251,9 +1251,10 @@ pub(crate) struct CompileCacheEntry {
     pub(crate) aliases: std::collections::BTreeSet<String>,
     pub(crate) generation: u64,
 
-    /// Cached fallthrough resolution keyed by (whole_hash, generic_root_propagation).
+    /// Cached fallthrough resolution keyed by semantic fact versions and
+    /// generic-root-propagation behavior.
     /// Cleared everywhere `cached_resolved_meta` is cleared.
-    pub(crate) cached_fallthrough: Option<(Hash16, bool, Arc<FallthroughResolution>)>,
+    pub(crate) cached_fallthrough: Option<CachedFallthroughEntry>,
 
     /// Eviction flag — when true, the file is invisible to host accessors
     /// but deps/aliases are preserved for old-state diffing during reload.
@@ -1508,9 +1509,15 @@ pub(crate) struct ResolvedTypeCacheEntry {
 /// produced the cached state.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedComponentMetaCacheEntry {
-    pub owner_whole_hash: Hash16,
-    pub dependency_hashes: Vec<(String, Hash16)>,
+    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
     pub state: Arc<crate::meta_resolve::ResolvedComponentMetaState>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CachedFallthroughEntry {
+    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
+    pub generic_root_propagation: bool,
+    pub resolution: Arc<FallthroughResolution>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

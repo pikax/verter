@@ -1,10 +1,10 @@
 //! ObjectShape expansion: extracts a materialized object surface from a `TypeExpr`.
 
-use crate::type_eval::{evaluate, with_bound_type_decl, EvalEnv};
+use crate::type_eval::{evaluate_with_lookup, EvalEnv, EvalLookup, NoopEvalLookup};
 use crate::type_expr::{ObjectExpr, ObjectMember, TypeExpr};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::normalized::{normalize_expr_with_diagnostics, record_partial_markers};
+use super::normalized::record_partial_markers;
 use super::request::{
     ExpandedIndexSignature, ExpandedObjectResult, ExpandedObjectShape, ExpandedProperty,
     ExpansionBudget, ExpansionCompleteness, ExpansionDiagnostic, ExpansionResult,
@@ -24,10 +24,20 @@ pub fn expand_object_shape(
     env: &mut EvalEnv,
     budget: &ExpansionBudget,
 ) -> ExpandedObjectResult {
+    let mut lookup = NoopEvalLookup;
+    expand_object_shape_with_lookup(expr, env, budget, &mut lookup)
+}
+
+pub fn expand_object_shape_with_lookup(
+    expr: &TypeExpr,
+    env: &mut EvalEnv,
+    budget: &ExpansionBudget,
+    lookup: &mut dyn EvalLookup,
+) -> ExpandedObjectResult {
     env.apply_expansion_budget(budget);
 
     let mut diagnostics = Vec::new();
-    let shape = extract_shape(expr, env, &mut diagnostics);
+    let shape = extract_shape(expr, env, &mut diagnostics, lookup);
     if env.budget_exhausted() {
         diagnostics.push(ExpansionDiagnostic {
             reason: ExpansionStopReason::BudgetExceeded,
@@ -60,18 +70,19 @@ fn extract_shape(
     expr: &TypeExpr,
     env: &mut EvalEnv,
     diagnostics: &mut Vec<ExpansionDiagnostic>,
+    lookup: &mut dyn EvalLookup,
 ) -> ExpandedObjectShape {
     match expr {
         // Direct object — extract properties
-        TypeExpr::Object(obj) => object_expr_to_shape(obj, env, diagnostics, true),
+        TypeExpr::Object(obj) => object_expr_to_shape(obj, env, diagnostics, true, lookup),
 
-        TypeExpr::Parenthesized(inner) => extract_shape(inner, env, diagnostics),
+        TypeExpr::Parenthesized(inner) => extract_shape(inner, env, diagnostics, lookup),
 
         // Intersection — merge shapes from each branch with correct optionality
         TypeExpr::Intersection(types) => {
             let shapes: Vec<ExpandedObjectShape> = types
                 .iter()
-                .map(|t| extract_shape(t, env, diagnostics))
+                .map(|t| extract_shape(t, env, diagnostics, lookup))
                 .collect();
             merge_intersection_shapes(shapes)
         }
@@ -80,7 +91,7 @@ fn extract_shape(
         TypeExpr::Union(types) => {
             let shapes: Vec<ExpandedObjectShape> = types
                 .iter()
-                .map(|t| extract_shape(t, env, diagnostics))
+                .map(|t| extract_shape(t, env, diagnostics, lookup))
                 .collect();
             merge_union_shapes_vue(shapes)
         }
@@ -93,13 +104,24 @@ fn extract_shape(
             name,
             type_arguments,
         } => {
-            if let Some(shape) = with_bound_type_decl(name, type_arguments, env, |decl, env| {
-                extract_shape(&decl.body, env, diagnostics)
-            }) {
+            let decl = env
+                .type_symbols
+                .get(name)
+                .cloned()
+                .or_else(|| lookup.resolve_type_decl(name));
+            if let Some(decl) = decl {
+                if env.active.contains(name) {
+                    return ExpandedObjectShape::empty();
+                }
+                env.active.insert(name.to_string());
+                let saved = crate::type_eval::bind_type_parameters(&decl, type_arguments, env);
+                let shape = extract_shape(&decl.body, env, diagnostics, lookup);
+                crate::type_eval::restore_type_parameters(saved, env);
+                env.active.remove(name);
                 return shape;
             }
 
-            let evaluated = evaluate(expr, env);
+            let evaluated = evaluate_with_lookup(expr, env, lookup);
             if env.budget_exhausted() {
                 diagnostics.push(ExpansionDiagnostic {
                     reason: ExpansionStopReason::BudgetExceeded,
@@ -120,19 +142,19 @@ fn extract_shape(
                 return ExpandedObjectShape::empty();
             }
             if let TypeExpr::Object(obj) = &evaluated {
-                return object_expr_to_shape(obj, env, diagnostics, false);
+                return object_expr_to_shape(obj, env, diagnostics, false, lookup);
             }
             // Recurse on the evaluated result (may be Object, Intersection, etc.)
-            extract_shape(&evaluated, env, diagnostics)
+            extract_shape(&evaluated, env, diagnostics, lookup)
         }
 
         // Mapped type that wasn't expanded by evaluate (infinite key space or depth limit)
         TypeExpr::Mapped { source, value, .. } => {
             // First try evaluating the whole mapped type
-            let evaluated = evaluate(expr, env);
+            let evaluated = evaluate_with_lookup(expr, env, lookup);
             // If it resolved to an Object, extract that
             if let TypeExpr::Object(obj) = &evaluated {
-                return object_expr_to_shape(obj, env, diagnostics, false);
+                return object_expr_to_shape(obj, env, diagnostics, false, lookup);
             }
             // Still a Mapped — check why
             if is_infinite_source(source) {
@@ -167,20 +189,20 @@ fn extract_shape(
             true_type,
             false_type,
         } => {
-            let check_eval = evaluate(check, env);
-            let extends_eval = evaluate(extends, env);
+            let check_eval = evaluate_with_lookup(check, env, lookup);
+            let extends_eval = evaluate_with_lookup(extends, env, lookup);
             if crate::type_eval::is_assignable_to(&check_eval, &extends_eval) {
-                let evaluated_branch = evaluate(true_type, env);
+                let evaluated_branch = evaluate_with_lookup(true_type, env, lookup);
                 if let TypeExpr::Object(obj) = &evaluated_branch {
-                    return object_expr_to_shape(obj, env, diagnostics, false);
+                    return object_expr_to_shape(obj, env, diagnostics, false, lookup);
                 }
-                return extract_shape(&evaluated_branch, env, diagnostics);
+                return extract_shape(&evaluated_branch, env, diagnostics, lookup);
             } else if crate::type_eval::is_definitely_not_assignable(&check_eval, &extends_eval) {
-                let evaluated_branch = evaluate(false_type, env);
+                let evaluated_branch = evaluate_with_lookup(false_type, env, lookup);
                 if let TypeExpr::Object(obj) = &evaluated_branch {
-                    return object_expr_to_shape(obj, env, diagnostics, false);
+                    return object_expr_to_shape(obj, env, diagnostics, false, lookup);
                 }
-                return extract_shape(&evaluated_branch, env, diagnostics);
+                return extract_shape(&evaluated_branch, env, diagnostics, lookup);
             }
             // Indeterminate — skip, emit diagnostic
             diagnostics.push(ExpansionDiagnostic {
@@ -193,7 +215,7 @@ fn extract_shape(
 
         // KeyOf, IndexedAccess, TypeOf — try evaluating
         TypeExpr::KeyOf(_) | TypeExpr::IndexedAccess { .. } | TypeExpr::TypeOf(_) => {
-            let evaluated = evaluate(expr, env);
+            let evaluated = evaluate_with_lookup(expr, env, lookup);
             if matches!(
                 &evaluated,
                 TypeExpr::KeyOf(_) | TypeExpr::IndexedAccess { .. } | TypeExpr::TypeOf(_)
@@ -201,9 +223,9 @@ fn extract_shape(
                 // Still unresolved
                 ExpandedObjectShape::empty()
             } else if let TypeExpr::Object(obj) = &evaluated {
-                object_expr_to_shape(obj, env, diagnostics, false)
+                object_expr_to_shape(obj, env, diagnostics, false, lookup)
             } else {
-                extract_shape(&evaluated, env, diagnostics)
+                extract_shape(&evaluated, env, diagnostics, lookup)
             }
         }
 
@@ -218,6 +240,7 @@ fn object_expr_to_shape(
     env: &mut EvalEnv,
     diagnostics: &mut Vec<ExpansionDiagnostic>,
     normalize_members: bool,
+    lookup: &mut dyn EvalLookup,
 ) -> ExpandedObjectShape {
     let mut properties = Vec::new();
     let mut index_signatures = Vec::new();
@@ -228,7 +251,13 @@ fn object_expr_to_shape(
             ObjectMember::Property(prop) => {
                 properties.push(ExpandedProperty {
                     name: prop.name.clone(),
-                    ty: normalize_member_type(&prop.ty, env, diagnostics, normalize_members),
+                    ty: normalize_member_type(
+                        &prop.ty,
+                        env,
+                        diagnostics,
+                        normalize_members,
+                        lookup,
+                    ),
                     optional: prop.optional,
                     readonly: prop.readonly,
                 });
@@ -240,12 +269,14 @@ fn object_expr_to_shape(
                         env,
                         diagnostics,
                         normalize_members,
+                        lookup,
                     ),
                     value_type: normalize_member_type(
                         &sig.value_type,
                         env,
                         diagnostics,
                         normalize_members,
+                        lookup,
                     ),
                     readonly: sig.readonly,
                 });
@@ -256,6 +287,7 @@ fn object_expr_to_shape(
                     env,
                     diagnostics,
                     normalize_members,
+                    lookup,
                 ));
             }
             ObjectMember::Method(method) => {
@@ -266,6 +298,7 @@ fn object_expr_to_shape(
                         env,
                         diagnostics,
                         normalize_members,
+                        lookup,
                     )),
                     optional: method.optional,
                     readonly: false,
@@ -286,9 +319,15 @@ fn normalize_member_type(
     env: &mut EvalEnv,
     diagnostics: &mut Vec<ExpansionDiagnostic>,
     normalize_members: bool,
+    lookup: &mut dyn EvalLookup,
 ) -> TypeExpr {
     if normalize_members {
-        normalize_expr_with_diagnostics(expr, env, diagnostics)
+        super::normalized::normalize_expr_with_diagnostics_with_lookup(
+            expr,
+            env,
+            diagnostics,
+            lookup,
+        )
     } else {
         expr.clone()
     }
@@ -299,9 +338,10 @@ fn function_expr_to_type(
     env: &mut EvalEnv,
     diagnostics: &mut Vec<ExpansionDiagnostic>,
     normalize_members: bool,
+    lookup: &mut dyn EvalLookup,
 ) -> crate::type_expr::FunctionExpr {
     if normalize_members {
-        normalize_function_expr(func, env, diagnostics)
+        normalize_function_expr(func, env, diagnostics, lookup)
     } else {
         func.clone()
     }
@@ -428,9 +468,10 @@ fn function_expr_to_call_sig(
     env: &mut EvalEnv,
     diagnostics: &mut Vec<ExpansionDiagnostic>,
     normalize_members: bool,
+    lookup: &mut dyn EvalLookup,
 ) -> super::request::ExpandedCallSignature {
     use crate::type_expr::PrimitiveName;
-    let normalized = function_expr_to_type(sig, env, diagnostics, normalize_members);
+    let normalized = function_expr_to_type(sig, env, diagnostics, normalize_members, lookup);
     super::request::ExpandedCallSignature {
         parameters: normalized
             .parameters
@@ -455,6 +496,7 @@ fn normalize_function_expr(
     sig: &crate::type_expr::FunctionExpr,
     env: &mut EvalEnv,
     diagnostics: &mut Vec<ExpansionDiagnostic>,
+    lookup: &mut dyn EvalLookup,
 ) -> crate::type_expr::FunctionExpr {
     crate::type_expr::FunctionExpr {
         parameters: sig
@@ -462,15 +504,26 @@ fn normalize_function_expr(
             .iter()
             .map(|param| crate::type_expr::FunctionParam {
                 name: param.name.clone(),
-                ty: normalize_expr_with_diagnostics(&param.ty, env, diagnostics),
+                ty: super::normalized::normalize_expr_with_diagnostics_with_lookup(
+                    &param.ty,
+                    env,
+                    diagnostics,
+                    lookup,
+                ),
                 optional: param.optional,
                 rest: param.rest,
             })
             .collect(),
-        return_type: sig
-            .return_type
-            .as_ref()
-            .map(|ret| Box::new(normalize_expr_with_diagnostics(ret, env, diagnostics))),
+        return_type: sig.return_type.as_ref().map(|ret| {
+            Box::new(
+                super::normalized::normalize_expr_with_diagnostics_with_lookup(
+                    ret,
+                    env,
+                    diagnostics,
+                    lookup,
+                ),
+            )
+        }),
         type_parameters: sig.type_parameters.clone(),
     }
 }

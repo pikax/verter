@@ -2016,7 +2016,10 @@ defineProps<Props>()
         } => {
             assert_eq!(limit, crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS);
             assert_eq!(type_name, "Props");
-            assert!(!last_dep.is_empty(), "last dep should explain where the cap tripped");
+            assert!(
+                !last_dep.is_empty(),
+                "last dep should explain where the cap tripped"
+            );
         }
         other => panic!("expected step-limit error, got {other:?}"),
     }

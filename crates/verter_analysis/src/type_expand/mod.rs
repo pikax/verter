@@ -14,8 +14,8 @@ mod normalized;
 mod object_shape;
 mod request;
 
-pub use normalized::expand_normalized_expr;
-pub use object_shape::expand_object_shape;
+pub use normalized::{expand_normalized_expr, expand_normalized_expr_with_lookup};
+pub use object_shape::{expand_object_shape, expand_object_shape_with_lookup};
 pub use request::{
     ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature,
     ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape,

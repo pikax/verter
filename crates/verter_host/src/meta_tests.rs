@@ -114,8 +114,63 @@ fn cached_fallthrough_state(
             entry
                 .cached_fallthrough
                 .as_ref()
-                .map(|(_, _, cached)| Arc::clone(cached))
+                .map(|cached| Arc::clone(&cached.resolution))
         })
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
+    let project = make_project();
+    project
+        .upsert_base("/index.ts", "export * from './inner'")
+        .unwrap();
+
+    let mut entry = project
+        .host()
+        .compile_cache
+        .get_mut("/index.ts")
+        .expect("compile cache entry should exist");
+    entry.export_registry = Some(crate::types::FileExportRegistry {
+        source_hash: [1; 16],
+        named: rustc_hash::FxHashMap::default(),
+        wildcard_edges: Vec::new(),
+    });
+    entry.barrel_export_surface = Some(crate::types::BarrelResolutionState {
+        export_map: rustc_hash::FxHashMap::default(),
+        source_hash: [2; 16],
+        wildcard_sources: Vec::new(),
+        scanned_sources: rustc_hash::FxHashMap::default(),
+        tracked_deps: rustc_hash::FxHashSet::default(),
+        fully_resolved: true,
+        generation: 7,
+    });
+    drop(entry);
+
+    assert!(project.host().fact_versions_match(&[
+        verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            hash: [1; 16],
+        },
+        verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::BarrelSurface,
+            hash: [2; 16],
+        },
+        verter_resolver::FactVersionRef::BarrelGeneration {
+            canonical_id: "/index.ts".to_string(),
+            generation: 7,
+        },
+    ]));
+
+    assert!(!project.host().fact_versions_match(&[
+        verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            hash: [9; 16],
+        },
+    ]));
 }
 
 // ---------------------------------------------------------------------------

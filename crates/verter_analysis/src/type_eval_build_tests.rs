@@ -1,6 +1,20 @@
 use super::type_eval::*;
-use super::type_eval_build::{evaluate_macro_types, parse_and_build_env};
+use super::type_eval_build::{
+    evaluate_macro_types, expand_macro_types_with_lookup, parse_and_build_env,
+};
 use super::type_expr::*;
+use rustc_hash::FxHashMap;
+
+#[derive(Default)]
+struct BuildLookup {
+    type_decls: FxHashMap<String, TypeDeclInfo>,
+}
+
+impl EvalLookup for BuildLookup {
+    fn resolve_type_decl(&mut self, name: &str) -> Option<TypeDeclInfo> {
+        self.type_decls.get(name).cloned()
+    }
+}
 
 // =============================================================================
 // Type alias extraction
@@ -28,6 +42,21 @@ fn extracts_generic_type_alias() {
     let decl = &env.type_symbols["Box"];
     assert_eq!(decl.type_parameters.len(), 1);
     assert_eq!(decl.type_parameters[0].name, "T");
+}
+
+#[test]
+fn parse_and_build_env_assigns_stable_type_declaration_ids_for_unchanged_source() {
+    let env_a = parse_and_build_env("type Box<T> = { value: T }\ninterface User { id: number }");
+    let env_b = parse_and_build_env("type Box<T> = { value: T }\ninterface User { id: number }");
+
+    assert_eq!(
+        env_a.type_declaration_id("Box"),
+        env_b.type_declaration_id("Box")
+    );
+    assert_eq!(
+        env_a.type_declaration_id("User"),
+        env_b.type_declaration_id("User")
+    );
 }
 
 // =============================================================================
@@ -881,6 +910,53 @@ const localLabel: string = 'hello'
         !names.contains(&"importedLabel"),
         "should skip imported bindings, got: {names:?}"
     );
+}
+
+#[test]
+fn expand_macro_types_with_lookup_resolves_external_define_props() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+defineProps<RemoteProps>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let mut env = parse_and_build_env(source);
+    let mut lookup = BuildLookup::default();
+    lookup.type_decls.insert(
+        "RemoteProps".to_string(),
+        TypeDeclInfo {
+            name: "RemoteProps".to_string(),
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "title".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            }),
+        },
+    );
+
+    let budget = super::type_expand::ExpansionBudget::default();
+    let result = expand_macro_types_with_lookup(
+        &snapshot.macros,
+        Some(source),
+        &mut env,
+        None,
+        &budget,
+        &mut lookup,
+    );
+
+    assert_eq!(result.define_props.len(), 1);
+    let fields = &result.define_props[0].result.value.properties;
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].name, "title");
+    assert_eq!(fields[0].ty, TypeExpr::Primitive(PrimitiveName::String));
 }
 
 #[test]

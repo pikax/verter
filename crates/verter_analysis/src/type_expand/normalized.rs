@@ -2,8 +2,8 @@
 //! preserving complex forms symbolically when exact resolution is not possible.
 
 use crate::type_eval::{
-    evaluate, is_assignable_to, is_definitely_not_assignable, try_evaluate_conditional_with_infer,
-    EvalEnv,
+    evaluate_with_lookup, is_assignable_to, is_definitely_not_assignable,
+    try_evaluate_conditional_with_infer, EvalEnv, EvalLookup, NoopEvalLookup,
 };
 use crate::type_expr::{ObjectMember, TypeExpr};
 
@@ -23,10 +23,20 @@ pub fn expand_normalized_expr(
     env: &mut EvalEnv,
     budget: &ExpansionBudget,
 ) -> ExpandedExprResult {
+    let mut lookup = NoopEvalLookup;
+    expand_normalized_expr_with_lookup(expr, env, budget, &mut lookup)
+}
+
+pub fn expand_normalized_expr_with_lookup(
+    expr: &TypeExpr,
+    env: &mut EvalEnv,
+    budget: &ExpansionBudget,
+    lookup: &mut dyn EvalLookup,
+) -> ExpandedExprResult {
     env.apply_expansion_budget(budget);
 
     let mut diagnostics = Vec::new();
-    let result = normalize_expr_with_diagnostics(expr, env, &mut diagnostics);
+    let result = normalize_expr_with_diagnostics_with_lookup(expr, env, &mut diagnostics, lookup);
     if env.budget_exhausted() {
         push_diagnostic(
             &mut diagnostics,
@@ -52,10 +62,21 @@ pub fn expand_normalized_expr(
 
 /// Normalize a `TypeExpr`, handling conditionals specially to avoid
 /// evaluating branches of indeterminate conditionals.
+#[allow(dead_code)]
 pub(crate) fn normalize_expr_with_diagnostics(
     expr: &TypeExpr,
     env: &mut EvalEnv,
     diagnostics: &mut Vec<ExpansionDiagnostic>,
+) -> TypeExpr {
+    let mut lookup = NoopEvalLookup;
+    normalize_expr_with_diagnostics_with_lookup(expr, env, diagnostics, &mut lookup)
+}
+
+pub(crate) fn normalize_expr_with_diagnostics_with_lookup(
+    expr: &TypeExpr,
+    env: &mut EvalEnv,
+    diagnostics: &mut Vec<ExpansionDiagnostic>,
+    lookup: &mut dyn EvalLookup,
 ) -> TypeExpr {
     match expr {
         // Conditional — check assignability first, only evaluate the resolved branch
@@ -65,19 +86,23 @@ pub(crate) fn normalize_expr_with_diagnostics(
             true_type,
             false_type,
         } => {
-            let check_eval = evaluate(check, env);
-            let extends_eval = evaluate(extends, env);
+            let check_eval = evaluate_with_lookup(check, env, lookup);
+            let extends_eval = evaluate_with_lookup(extends, env, lookup);
 
             if is_assignable_to(&check_eval, &extends_eval) {
                 // Resolved — evaluate only the true branch
-                normalize_expr_with_diagnostics(true_type, env, diagnostics)
-            } else if let Some(result) =
-                try_evaluate_conditional_with_infer(&check_eval, &extends_eval, true_type, env)
-            {
+                normalize_expr_with_diagnostics_with_lookup(true_type, env, diagnostics, lookup)
+            } else if let Some(result) = try_evaluate_conditional_with_infer(
+                &check_eval,
+                &extends_eval,
+                true_type,
+                env,
+                lookup,
+            ) {
                 result
             } else if is_definitely_not_assignable(&check_eval, &extends_eval) {
                 // Resolved — evaluate only the false branch
-                normalize_expr_with_diagnostics(false_type, env, diagnostics)
+                normalize_expr_with_diagnostics_with_lookup(false_type, env, diagnostics, lookup)
             } else {
                 // Indeterminate — preserve with UNEVALUATED branches
                 push_diagnostic(
@@ -96,7 +121,7 @@ pub(crate) fn normalize_expr_with_diagnostics(
         }
 
         // All other expressions — delegate to evaluate()
-        _ => evaluate(expr, env),
+        _ => evaluate_with_lookup(expr, env, lookup),
     }
 }
 

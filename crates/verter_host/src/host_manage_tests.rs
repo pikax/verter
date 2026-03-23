@@ -1161,6 +1161,239 @@ defineProps<ChildProps>()
 }
 
 #[test]
+fn compute_evaluated_types_resolves_namespace_qualified_imported_props() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"export interface BaseProps {
+  a?: string
+  b?: number
+}
+
+export interface Props extends BaseProps {
+  c?: boolean
+}"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type * as Types from './types'
+
+defineProps<Types.Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("owner env builder should evaluate namespace-qualified imported props");
+    let names: Vec<String> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "a")
+            && names.iter().any(|name| name == "b")
+            && names.iter().any(|name| name == "c"),
+        "namespace-qualified imported props should resolve through evaluated types, got: {names:?}"
+    );
+}
+
+#[test]
+fn compute_evaluated_types_resolves_imported_typeof_member_paths() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/theme.ts",
+        r#"export const theme = {
+  slots: {
+    root: '',
+    label: ''
+  }
+}"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import * as ThemeNs from './theme'
+
+type Slots = typeof ThemeNs.theme.slots
+
+defineProps<Slots>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./theme".to_string(),
+            resolved_canonical_id: Some("/src/theme.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("owner env builder should evaluate imported typeof member paths");
+    let names: Vec<String> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "root") && names.iter().any(|name| name == "label"),
+        "imported typeof member paths should resolve through evaluated types, got: {names:?}"
+    );
+}
+
+#[test]
+fn compute_evaluated_types_resolves_imported_typeof_direct_namespace_value() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/theme.ts",
+        r#"export const theme = {
+  root: '',
+  label: ''
+}"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import * as ThemeNs from './theme'
+
+type Theme = typeof ThemeNs.theme
+
+defineProps<Theme>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./theme".to_string(),
+            resolved_canonical_id: Some("/src/theme.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("owner env builder should evaluate direct imported typeof paths");
+    let names: Vec<String> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "root") && names.iter().any(|name| name == "label"),
+        "direct imported typeof paths should resolve through evaluated types, got: {names:?}"
+    );
+}
+
+#[test]
+fn compute_evaluated_types_resolves_imported_typeof_through_value_reexports() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/inner.ts",
+        r#"export const theme = {
+  slots: {
+    root: '',
+    label: ''
+  }
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        r#"export { theme as sharedTheme } from './inner'"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import * as ThemeNs from './index'
+
+type Slots = typeof ThemeNs.sharedTheme.slots
+
+defineProps<Slots>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./index".to_string(),
+            resolved_canonical_id: Some("/src/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./inner".to_string(),
+            resolved_canonical_id: Some("/src/inner.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let evaluated = host
+        .compute_evaluated_types_with_inputs("/src/App.vue", &snapshot, &inputs)
+        .expect("owner env builder should evaluate re-exported imported typeof paths");
+    let names: Vec<String> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.clone())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name == "root") && names.iter().any(|name| name == "label"),
+        "re-exported imported typeof paths should resolve through evaluated types, got: {names:?}"
+    );
+}
+
+#[test]
 fn imported_eval_inputs_track_direct_runtime_deps_without_loading_value_graphs() {
     let host = make_host();
     upsert_vue(

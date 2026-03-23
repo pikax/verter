@@ -3534,6 +3534,7 @@ dependencies = [
  "thiserror 2.0.18",
  "verter_analysis",
  "verter_core",
+ "verter_resolver",
  "verter_scheduler",
  "verter_span",
  "verter_vfs",
@@ -3617,6 +3618,15 @@ dependencies = [
  "verter_scheduler",
  "verter_span",
  "verter_vfs",
+]
+
+[[package]]
+name = "verter_resolver"
+version = "0.0.1-beta.1"
+dependencies = [
+ "parking_lot",
+ "rustc-hash 2.1.1",
+ "verter_analysis",
 ]
 
 [[package]]

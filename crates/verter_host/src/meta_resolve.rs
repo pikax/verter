@@ -168,7 +168,7 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let whole_hash = self.get_whole_hash(&canonical).unwrap_or_default();
 
-        if let Some(cached) = self.try_get_cached_resolved_meta(&canonical, whole_hash, mode) {
+        if let Some(cached) = self.try_get_cached_resolved_meta(&canonical, mode) {
             if let Some(started) = started {
                 component_meta_debug(format!(
                     "resolve_component_meta owner={} mode={:?} cached took {:?}",
@@ -230,11 +230,15 @@ impl VerterHost {
                 &snapshot,
                 &dep_resolutions,
             ));
-            let eval_types = if imported_inputs.overflow.is_some() {
+            let computed_eval_types = if imported_inputs.overflow.is_some() {
                 None
             } else {
-                self.compute_evaluated_types_with_inputs(&canonical, &snapshot, &imported_inputs)
+                self.compute_evaluated_types_with_tracking(&canonical, &snapshot, &imported_inputs)
             };
+            if let Some(computed) = computed_eval_types.as_ref() {
+                tracked_deps.extend(computed.discovered_dependencies.iter().cloned());
+            }
+            let eval_types = computed_eval_types.and_then(|computed| computed.evaluated_types);
             if let Some(eval_started) = eval_started {
                 component_meta_debug(format!(
                     "resolve_component_meta owner={} mode={:?} evaluated_types took {:?} has_output={}",
@@ -432,7 +436,7 @@ impl VerterHost {
         // Sync transitive macro type dependencies for invalidation tracking.
         self.sync_transitive_macro_type_dependencies(&canonical, &tracked_deps);
 
-        let dependency_hashes = self.current_dependency_hashes(&tracked_deps);
+        let fact_versions = self.current_dependency_fact_versions(&canonical, &tracked_deps);
         let state = ResolvedComponentMetaState {
             snapshot,
             mode,
@@ -443,7 +447,7 @@ impl VerterHost {
             evaluated_types,
             cached_eval_inputs,
         };
-        self.store_cached_resolved_meta(&canonical, mode, &state, &dependency_hashes);
+        self.store_cached_resolved_meta(&canonical, mode, &state, &fact_versions);
         if let Some(started) = started {
             component_meta_debug(format!(
                 "resolve_component_meta owner={} mode={:?} total took {:?}",
@@ -506,17 +510,13 @@ impl VerterHost {
     fn try_get_cached_resolved_meta(
         &self,
         canonical: &str,
-        whole_hash: Hash16,
         mode: ResolverMode,
     ) -> Option<ResolvedComponentMetaState> {
         #[cfg(feature = "scheduler")]
         {
             let entry = self.compile_cache.get(canonical)?;
             let cached = entry.cached_resolved_meta.get(&mode)?;
-            if cached.owner_whole_hash != whole_hash {
-                return None;
-            }
-            if !self.dependency_hashes_match(&cached.dependency_hashes) {
+            if !self.fact_versions_match(&cached.fact_versions) {
                 return None;
             }
             Some(cached.state.as_ref().clone())
@@ -529,10 +529,7 @@ impl VerterHost {
             let files = read_lock(&self.files);
             let entry = files.get(canonical)?;
             let cached = entry.cached_resolved_meta.get(&mode)?;
-            if cached.owner_whole_hash != whole_hash {
-                return None;
-            }
-            if !self.dependency_hashes_match(&cached.dependency_hashes) {
+            if !self.fact_versions_match(&cached.fact_versions) {
                 return None;
             }
             Some(cached.state.as_ref().clone())
@@ -544,11 +541,10 @@ impl VerterHost {
         canonical: &str,
         mode: ResolverMode,
         state: &ResolvedComponentMetaState,
-        dependency_hashes: &[(String, Hash16)],
+        fact_versions: &[verter_resolver::FactVersionRef],
     ) {
         let cached = crate::types::ResolvedComponentMetaCacheEntry {
-            owner_whole_hash: state.whole_hash,
-            dependency_hashes: dependency_hashes.to_vec(),
+            fact_versions: fact_versions.to_vec(),
             state: Arc::new(state.clone()),
         };
 
@@ -570,25 +566,103 @@ impl VerterHost {
         }
     }
 
-    fn current_dependency_hashes(
+    pub(crate) fn current_dependency_fact_versions(
         &self,
+        canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
-    ) -> Vec<(String, Hash16)> {
-        tracked_deps
-            .iter()
-            .map(|dep| {
-                (
-                    dep.clone(),
-                    self.get_whole_hash(dep.as_str()).unwrap_or_default(),
-                )
-            })
-            .collect()
+    ) -> Vec<verter_resolver::FactVersionRef> {
+        let mut facts = Vec::with_capacity(tracked_deps.len() + 1);
+        facts.push(verter_resolver::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: self.get_whole_hash(canonical).unwrap_or_default(),
+        });
+        facts.extend(tracked_deps.iter().map(|dep| {
+            verter_resolver::FactVersionRef::FileWholeHash {
+                canonical_id: dep.clone(),
+                hash: self.get_whole_hash(dep.as_str()).unwrap_or_default(),
+            }
+        }));
+        facts
     }
 
-    fn dependency_hashes_match(&self, dependency_hashes: &[(String, Hash16)]) -> bool {
-        dependency_hashes.iter().all(|(canonical, expected_hash)| {
-            self.get_whole_hash(canonical.as_str()).unwrap_or_default() == *expected_hash
+    pub(crate) fn fact_versions_match(
+        &self,
+        fact_versions: &[verter_resolver::FactVersionRef],
+    ) -> bool {
+        fact_versions.iter().all(|fact| match fact {
+            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                self.get_whole_hash(canonical_id.as_str())
+                    .unwrap_or_default()
+                    == *hash
+            }
+            verter_resolver::FactVersionRef::BarrelGeneration {
+                canonical_id,
+                generation,
+            } => {
+                #[cfg(feature = "scheduler")]
+                {
+                    self.compile_cache
+                        .get(canonical_id)
+                        .and_then(|cc| {
+                            cc.barrel_export_surface
+                                .as_ref()
+                                .map(|surface| surface.generation == *generation)
+                        })
+                        .unwrap_or(false)
+                }
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    false
+                }
+            }
+            verter_resolver::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind,
+                hash,
+            } => self
+                .current_derived_fact_hash(canonical_id.as_str(), *kind)
+                .is_some_and(|current| current == *hash),
         })
+    }
+
+    fn current_derived_fact_hash(
+        &self,
+        canonical_id: &str,
+        kind: verter_resolver::DerivedFactKind,
+    ) -> Option<Hash16> {
+        match kind {
+            verter_resolver::DerivedFactKind::DirectSource => self.get_whole_hash(canonical_id),
+            verter_resolver::DerivedFactKind::ExportRegistry => {
+                #[cfg(feature = "scheduler")]
+                {
+                    self.compile_cache
+                        .get(canonical_id)
+                        .and_then(|cc| cc.export_registry.as_ref().map(|registry| registry.source_hash))
+                }
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    None
+                }
+            }
+            verter_resolver::DerivedFactKind::BarrelSurface => {
+                #[cfg(feature = "scheduler")]
+                {
+                    self.compile_cache
+                        .get(canonical_id)
+                        .and_then(|cc| {
+                            cc.barrel_export_surface
+                                .as_ref()
+                                .map(|surface| surface.source_hash)
+                        })
+                }
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    None
+                }
+            }
+            verter_resolver::DerivedFactKind::Route
+            | verter_resolver::DerivedFactKind::ExactResolution => None,
+        }
     }
 }
 

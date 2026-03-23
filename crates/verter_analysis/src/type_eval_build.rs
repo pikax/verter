@@ -773,9 +773,28 @@ pub fn expand_macro_types(
     local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
     budget: &crate::type_expand::ExpansionBudget,
 ) -> crate::type_expand::ExpandedComponentTypes {
+    let mut lookup = crate::type_eval::NoopEvalLookup;
+    expand_macro_types_with_lookup(
+        macros,
+        source,
+        env,
+        local_binding_names,
+        budget,
+        &mut lookup,
+    )
+}
+
+pub fn expand_macro_types_with_lookup(
+    macros: &[crate::types::AnalyzedMacro],
+    source: Option<&str>,
+    env: &mut EvalEnv,
+    local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
+    budget: &crate::type_expand::ExpansionBudget,
+    lookup: &mut dyn crate::type_eval::EvalLookup,
+) -> crate::type_expand::ExpandedComponentTypes {
     use crate::type_expand::{
-        expand_normalized_expr, expand_object_shape, ExpandedComponentTypes, ExpandedField,
-        ExpandedMacroObjectShape, ExpandedMacroProps,
+        expand_normalized_expr_with_lookup, expand_object_shape_with_lookup,
+        ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape, ExpandedMacroProps,
     };
     use crate::type_expr_lower::parse_type_annotation;
 
@@ -803,7 +822,7 @@ pub fn expand_macro_types(
             if let Some(ref type_ann) = field.type_annotation {
                 let parsed = parse_type_annotation(type_ann);
                 if !parsed.is_unknown() {
-                    let expanded = expand_normalized_expr(&parsed, env, budget);
+                    let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -822,7 +841,8 @@ pub fn expand_macro_types(
                 .map(|params| &params.define_props)
             {
                 if let Some(lowered) = type_params.get(define_props_index) {
-                    let shape_result = expand_object_shape(lowered, env, budget);
+                    let shape_result =
+                        expand_object_shape_with_lookup(lowered, env, budget, lookup);
                     if !shape_result.value.properties.is_empty()
                         || !shape_result.value.index_signatures.is_empty()
                     {
@@ -842,7 +862,8 @@ pub fn expand_macro_types(
                 .map(|params| &params.define_emits)
             {
                 if let Some(lowered) = type_params.get(define_emits_index) {
-                    let shape_result = expand_object_shape(lowered, env, budget);
+                    let shape_result =
+                        expand_object_shape_with_lookup(lowered, env, budget, lookup);
                     if has_named_shape_surface(&shape_result.value) {
                         result.define_emits.push(ExpandedMacroObjectShape {
                             macro_index,
@@ -859,7 +880,7 @@ pub fn expand_macro_types(
             if let Some(ref payload) = field.payload_type {
                 let parsed = parse_type_annotation(payload);
                 if !parsed.is_unknown() {
-                    let expanded = expand_normalized_expr(&parsed, env, budget);
+                    let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -877,7 +898,8 @@ pub fn expand_macro_types(
                 .map(|params| &params.define_slots)
             {
                 if let Some(lowered) = type_params.get(define_slots_index) {
-                    let shape_result = expand_object_shape(lowered, env, budget);
+                    let shape_result =
+                        expand_object_shape_with_lookup(lowered, env, budget, lookup);
                     if !shape_result.value.properties.is_empty() {
                         result.define_slots.push(ExpandedMacroObjectShape {
                             macro_index,
@@ -895,7 +917,8 @@ pub fn expand_macro_types(
                 if let Some(ref type_ann) = binding.type_annotation {
                     let parsed = parse_type_annotation(type_ann);
                     if !parsed.is_unknown() {
-                        let expanded = expand_normalized_expr(&parsed, env, budget);
+                        let expanded =
+                            expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
                         result.slot_bindings.push(ExpandedField {
                             name: format!("{}.{}", slot.name, binding.name),
                             r#type: expanded.value.expr,
@@ -925,7 +948,7 @@ pub fn expand_macro_types(
         })
         .collect();
     for (name, type_ann) in binding_entries {
-        let expanded = expand_normalized_expr(&type_ann, env, budget);
+        let expanded = expand_normalized_expr_with_lookup(&type_ann, env, budget, lookup);
         result.bindings.push(ExpandedField {
             name,
             r#type: expanded.value.expr,
@@ -1096,8 +1119,19 @@ pub fn parse_value_expression_type(expression: &str) -> Option<TypeExpr> {
 
 /// Parse and evaluate a value expression against an existing evaluation environment.
 pub fn evaluate_value_expression(expression: &str, env: &mut EvalEnv) -> Option<TypeExpr> {
+    let mut lookup = crate::type_eval::NoopEvalLookup;
+    evaluate_value_expression_with_lookup(expression, env, &mut lookup)
+}
+
+pub fn evaluate_value_expression_with_lookup(
+    expression: &str,
+    env: &mut EvalEnv,
+    lookup: &mut dyn crate::type_eval::EvalLookup,
+) -> Option<TypeExpr> {
     let lowered = parse_value_expression_type(expression)?;
-    Some(crate::type_eval::evaluate(&lowered, env))
+    Some(crate::type_eval::evaluate_with_lookup(
+        &lowered, env, lookup,
+    ))
 }
 
 fn lower_value_expression(expr: &Expression<'_>, source: &str) -> TypeExpr {

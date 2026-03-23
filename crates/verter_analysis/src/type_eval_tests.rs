@@ -1,6 +1,7 @@
 use super::type_eval::*;
 use super::type_expr::*;
 use super::type_expr_lower::parse_type_annotation;
+use rustc_hash::FxHashMap;
 
 fn env_with_user_type() -> EvalEnv {
     let mut env = EvalEnv::new();
@@ -39,6 +40,52 @@ fn env_with_user_type() -> EvalEnv {
         }),
     });
     env
+}
+
+#[derive(Default)]
+struct TestLookup {
+    type_decls: FxHashMap<String, TypeDeclInfo>,
+    value_decls: FxHashMap<String, ValueDeclInfo>,
+    utility_sources: FxHashMap<String, BuiltinUtilitySource>,
+}
+
+impl EvalLookup for TestLookup {
+    fn resolve_type_decl(&mut self, name: &str) -> Option<TypeDeclInfo> {
+        self.type_decls.get(name).cloned()
+    }
+
+    fn resolve_value_decl(&mut self, path: &[String]) -> Option<ValueDeclInfo> {
+        if path.len() != 1 {
+            return None;
+        }
+        self.value_decls.get(&path[0]).cloned()
+    }
+
+    fn utility_source(&mut self, name: &str) -> BuiltinUtilitySource {
+        self.utility_sources.get(name).copied().unwrap_or_else(|| {
+            if matches!(
+                name,
+                "Partial"
+                    | "Required"
+                    | "Readonly"
+                    | "Pick"
+                    | "Omit"
+                    | "Record"
+                    | "Extract"
+                    | "Exclude"
+                    | "NonNullable"
+                    | "ReturnType"
+                    | "Parameters"
+                    | "ConstructorParameters"
+                    | "InstanceType"
+                    | "Awaited"
+            ) {
+                BuiltinUtilitySource::Builtin
+            } else {
+                BuiltinUtilitySource::Unknown
+            }
+        })
+    }
 }
 
 // =============================================================================
@@ -100,6 +147,224 @@ fn eval_ref_cycle_detection() {
     let result = evaluate(&TypeExpr::named("A"), &mut env);
     // Should not stack overflow — cycle detection kicks in
     assert_eq!(result, TypeExpr::named("A"));
+}
+
+#[test]
+fn eval_with_lookup_resolves_external_type_reference() {
+    let mut env = EvalEnv::new();
+    let mut lookup = TestLookup::default();
+    lookup.type_decls.insert(
+        "RemoteProps".to_string(),
+        TypeDeclInfo {
+            name: "RemoteProps".to_string(),
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "title".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            }),
+        },
+    );
+
+    let result = evaluate_with_lookup(&TypeExpr::named("RemoteProps"), &mut env, &mut lookup);
+    let TypeExpr::Object(obj) = result else {
+        panic!("expected object from external lookup");
+    };
+    assert_eq!(obj.properties.len(), 1);
+    let ObjectMember::Property(prop) = &obj.properties[0] else {
+        panic!("expected property member");
+    };
+    assert_eq!(prop.name, "title");
+    assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::String));
+}
+
+#[test]
+fn eval_with_lookup_resolves_external_typeof() {
+    let mut env = EvalEnv::new();
+    let mut lookup = TestLookup::default();
+    lookup.value_decls.insert(
+        "remoteConfig".to_string(),
+        ValueDeclInfo {
+            name: "remoteConfig".to_string(),
+            kind: ValueDeclKind::Const,
+            type_annotation: Some(TypeExpr::Object(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "theme".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+            function_signature: None,
+            object_shape: None,
+        },
+    );
+
+    let result = evaluate_with_lookup(
+        &TypeExpr::TypeOf(ValueRef {
+            path: vec!["remoteConfig".to_string()],
+        }),
+        &mut env,
+        &mut lookup,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("expected object from external typeof lookup");
+    };
+    let ObjectMember::Property(prop) = &obj.properties[0] else {
+        panic!("expected property member");
+    };
+    assert_eq!(prop.name, "theme");
+}
+
+#[test]
+fn eval_with_lookup_resolves_lazy_member_projection_from_external_ref() {
+    let mut env = EvalEnv::new();
+    let mut lookup = TestLookup::default();
+    lookup.type_decls.insert(
+        "RemoteProps".to_string(),
+        TypeDeclInfo {
+            name: "RemoteProps".to_string(),
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(ObjectExpr {
+                properties: vec![
+                    ObjectMember::Property(ObjectProperty {
+                        name: "title".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    }),
+                    ObjectMember::Property(ObjectProperty {
+                        name: "count".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::Number),
+                        optional: false,
+                        readonly: false,
+                    }),
+                ],
+            }),
+        },
+    );
+
+    let result = evaluate_with_lookup(
+        &TypeExpr::IndexedAccess {
+            object: Box::new(TypeExpr::named("RemoteProps")),
+            index: Box::new(TypeExpr::string_literal("title")),
+        },
+        &mut env,
+        &mut lookup,
+    );
+
+    assert_eq!(result, TypeExpr::Primitive(PrimitiveName::String));
+}
+
+#[test]
+fn eval_with_lookup_allows_shadowing_builtin_pick() {
+    let mut env = EvalEnv::new();
+    let mut lookup = TestLookup::default();
+    lookup
+        .utility_sources
+        .insert("Pick".to_string(), BuiltinUtilitySource::Shadowed);
+    lookup.type_decls.insert(
+        "Pick".to_string(),
+        TypeDeclInfo {
+            name: "Pick".to_string(),
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            }],
+            body: TypeExpr::Object(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "picked".to_string(),
+                    ty: TypeExpr::named("T"),
+                    optional: false,
+                    readonly: false,
+                })],
+            }),
+        },
+    );
+
+    let result = evaluate_with_lookup(
+        &TypeExpr::named_with_args("Pick", vec![TypeExpr::Primitive(PrimitiveName::String)]),
+        &mut env,
+        &mut lookup,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("expected shadowed Pick alias to resolve as normal type");
+    };
+    let ObjectMember::Property(prop) = &obj.properties[0] else {
+        panic!("expected property member");
+    };
+    assert_eq!(prop.name, "picked");
+    assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::String));
+}
+
+#[test]
+fn eval_with_lookup_instantiates_generic_with_external_argument() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "Box".to_string(),
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+        }],
+        body: TypeExpr::Object(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "value".to_string(),
+                ty: TypeExpr::named("T"),
+                optional: false,
+                readonly: false,
+            })],
+        }),
+    });
+
+    let mut lookup = TestLookup::default();
+    lookup.type_decls.insert(
+        "RemoteProps".to_string(),
+        TypeDeclInfo {
+            name: "RemoteProps".to_string(),
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "title".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            }),
+        },
+    );
+
+    let result = evaluate_with_lookup(
+        &TypeExpr::named_with_args("Box", vec![TypeExpr::named("RemoteProps")]),
+        &mut env,
+        &mut lookup,
+    );
+
+    let TypeExpr::Object(obj) = result else {
+        panic!("expected generic alias to instantiate with external argument");
+    };
+    let ObjectMember::Property(prop) = &obj.properties[0] else {
+        panic!("expected property member");
+    };
+    assert_eq!(prop.name, "value");
+    let TypeExpr::Object(inner) = &prop.ty else {
+        panic!("expected external argument to resolve before instantiation");
+    };
+    let ObjectMember::Property(inner_prop) = &inner.properties[0] else {
+        panic!("expected nested property");
+    };
+    assert_eq!(inner_prop.name, "title");
 }
 
 // =============================================================================
