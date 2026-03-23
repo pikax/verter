@@ -645,11 +645,9 @@ fn is_opaque_for_instantiation(
         TypeExpr::Tuple { elements, .. } => elements
             .iter()
             .any(|element| is_opaque_for_instantiation(&element.ty, env, lookup)),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            types
-                .iter()
-                .any(|ty| is_opaque_for_instantiation(ty, env, lookup))
-        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .any(|ty| is_opaque_for_instantiation(ty, env, lookup)),
         TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
             ObjectMember::Property(prop) => is_opaque_for_instantiation(&prop.ty, env, lookup),
             ObjectMember::IndexSignature(sig) => {
@@ -725,7 +723,10 @@ fn instantiate_generic(
     // (e.g., unresolved `typeof theme`), skip body expansion and return
     // the symbolic reference with evaluated args. This prevents unbounded
     // expansion of complex generics when an argument can't be resolved.
-    if args.iter().any(|a| is_opaque_for_instantiation(a, env, lookup)) {
+    if args
+        .iter()
+        .any(|a| is_opaque_for_instantiation(a, env, lookup))
+    {
         return TypeExpr::named_with_args(&decl.name, args.to_vec());
     }
 

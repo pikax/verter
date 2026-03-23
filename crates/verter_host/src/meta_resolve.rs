@@ -27,6 +27,86 @@ use crate::VerterHost;
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Instant;
+use verter_resolver::{
+    run_stable_request, RequestSource, SingleflightRole, StableRequestExecutor, StoreView,
+};
+
+const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
+
+struct ComponentMetaRequestExecutor<'a> {
+    host: &'a VerterHost,
+    canonical: String,
+    mode: ResolverMode,
+    last_snapshot_epoch: Option<u64>,
+}
+
+impl<'a> ComponentMetaRequestExecutor<'a> {
+    fn new(host: &'a VerterHost, canonical: String, mode: ResolverMode) -> Self {
+        Self {
+            host,
+            canonical,
+            mode,
+            last_snapshot_epoch: None,
+        }
+    }
+}
+
+impl<'a>
+    StableRequestExecutor<verter_resolver::ResolutionNodeKey, Option<ResolvedComponentMetaState>>
+    for ComponentMetaRequestExecutor<'a>
+{
+    type View = crate::resolver_store::HostStoreView;
+    type Error = ();
+
+    fn cache_key(&self) -> verter_resolver::ResolutionNodeKey {
+        resolved_meta_cache_key(&self.canonical, self.mode)
+    }
+
+    fn snapshot_view(&mut self) -> Self::View {
+        let view = self.host.resolver_store_view();
+        self.last_snapshot_epoch = Some(view.mutation_epoch());
+        view
+    }
+
+    fn try_get_cached(&mut self, view: &Self::View) -> Option<Option<ResolvedComponentMetaState>> {
+        self.host
+            .try_get_cached_resolved_meta(&self.canonical, self.mode, view)
+            .map(Some)
+    }
+
+    fn compute(
+        &mut self,
+        _view: &Self::View,
+    ) -> Result<Option<ResolvedComponentMetaState>, Self::Error> {
+        let whole_hash = self
+            .host
+            .get_whole_hash(&self.canonical)
+            .unwrap_or_default();
+        Ok(self
+            .host
+            .compute_component_meta_state(&self.canonical, self.mode, whole_hash))
+    }
+
+    fn is_stable(&mut self, _view: &Self::View) -> bool {
+        self.last_snapshot_epoch
+            .is_some_and(|epoch| self.host.current_store_view_epoch() == epoch)
+    }
+
+    fn store_stable(&mut self, value: &Option<ResolvedComponentMetaState>) {
+        if let Some(state) = value.as_ref() {
+            self.host.store_cached_resolved_meta(
+                &self.canonical,
+                self.mode,
+                state,
+                &state.fact_versions,
+            );
+        }
+    }
+
+    fn max_attempts(&self) -> usize {
+        STORE_VIEW_STABILITY_MAX_ATTEMPTS
+    }
+}
 
 /// Native declaration kind for the resolved pre-expansion type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +159,8 @@ pub struct ResolvedComponentMetaState {
     /// Threaded through to `build_fallthrough_eval_env_with_inputs` to avoid
     /// a redundant second `imported_eval_inputs()` call in the fallthrough path.
     pub cached_eval_inputs: Option<Arc<crate::host_manage::ImportedEvalInputs>>,
+    /// Semantic fact versions consumed while producing this resolved state.
+    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
 }
 
 /// Native provenance retained for an expanded type-registry entry.
@@ -166,26 +248,74 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let whole_hash = self.get_whole_hash(&canonical).unwrap_or_default();
+        let mut executor = ComponentMetaRequestExecutor::new(self, canonical.clone(), mode);
+        let result = run_stable_request(&self.resolved_meta_singleflight, &mut executor)
+            .expect("resolved-meta request execution is infallible");
 
-        if let Some(cached) = self.try_get_cached_resolved_meta(&canonical, mode) {
-            if let Some(started) = started {
-                component_meta_debug(format!(
-                    "resolve_component_meta owner={} mode={:?} cached took {:?}",
+        if matches!(result.source, RequestSource::Cache) {
+            self.provenance
+                .resolver_node_cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !(matches!(result.source, RequestSource::Cache) && result.attempts == 1) {
+            self.provenance
+                .resolver_node_cache_misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let RequestSource::Flight { role, forked_lane } = result.source {
+            if role == SingleflightRole::Follower {
+                self.provenance
+                    .resolver_singleflight_coalesced
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if forked_lane {
+                self.provenance
+                    .resolver_cross_view_lane_forks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        if let Some(started) = started {
+            match result.source {
+                RequestSource::Cache => component_meta_debug(format!(
+                    "resolve_component_meta owner={} mode={:?} cached attempt={} took {:?}",
+                    canonical,
+                    mode,
+                    result.attempts.saturating_sub(1),
+                    started.elapsed(),
+                )),
+                RequestSource::Flight { role, .. } => component_meta_debug(format!(
+                    "resolve_component_meta owner={} mode={:?} role={:?} stable attempt={} total took {:?}",
+                    canonical,
+                    mode,
+                    role,
+                    result.attempts.saturating_sub(1),
+                    started.elapsed(),
+                )),
+                RequestSource::Fallback => component_meta_debug(format!(
+                    "resolve_component_meta owner={} mode={:?} retries_exhausted total took {:?}",
                     canonical,
                     mode,
                     started.elapsed(),
-                ));
+                )),
             }
-            return Some(cached);
         }
 
+        result.value
+    }
+
+    fn compute_component_meta_state(
+        &self,
+        canonical: &str,
+        mode: ResolverMode,
+        whole_hash: Hash16,
+    ) -> Option<ResolvedComponentMetaState> {
         self.provenance
             .component_meta_resolved_state_recomputes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Step 1: Get the raw analysis snapshot (without enrichment).
-        let snapshot = self.get_raw_analysis_snapshot(&canonical)?;
+        let snapshot = self.get_raw_analysis_snapshot(canonical)?;
 
         let mut resolved_macros = Vec::new();
         let mut resolved_type_registry = Vec::new();
@@ -196,10 +326,6 @@ impl VerterHost {
         let mut tracked_deps = std::collections::BTreeSet::new();
         let kind = verter_vfs::ResolveRequestKind::TypeImport;
 
-        // Step 2: Compute evaluated types first (Expanded mode only).
-        // This lets us skip redundant external macro resolution when the
-        // analysis-owned extractor can already produce authoritative output from
-        // evaluated fields and/or local macro surfaces.
         let (evaluated_types, cached_eval_inputs) = if mode == ResolverMode::Expanded {
             let eval_started = component_meta_debug_enabled().then(Instant::now);
             if component_meta_debug_enabled() {
@@ -211,9 +337,9 @@ impl VerterHost {
                     snapshot.macro_type_deps.len(),
                 ));
             }
-            let dep_resolutions = self.dependency_resolutions_for_eval(&canonical);
+            let dep_resolutions = self.dependency_resolutions_for_eval(canonical);
             let imported_inputs =
-                Arc::new(self.imported_eval_inputs(&canonical, &snapshot, &dep_resolutions));
+                Arc::new(self.imported_eval_inputs(canonical, &snapshot, &dep_resolutions));
             if component_meta_debug_enabled() {
                 component_meta_debug(format!(
                     "resolve_component_meta owner={} mode={:?} step=evaluated_types:imported_inputs_done sources={} type_aliases={} tracked_deps={}",
@@ -226,14 +352,14 @@ impl VerterHost {
             }
             tracked_deps.extend(imported_inputs.canonical_dependencies.iter().cloned());
             tracked_deps.extend(self.cache_dependency_candidates_from_snapshot(
-                &canonical,
+                canonical,
                 &snapshot,
                 &dep_resolutions,
             ));
             let computed_eval_types = if imported_inputs.overflow.is_some() {
                 None
             } else {
-                self.compute_evaluated_types_with_tracking(&canonical, &snapshot, &imported_inputs)
+                self.compute_evaluated_types_with_tracking(canonical, &snapshot, &imported_inputs)
             };
             if let Some(computed) = computed_eval_types.as_ref() {
                 tracked_deps.extend(computed.discovered_dependencies.iter().cloned());
@@ -253,16 +379,14 @@ impl VerterHost {
             (None, None)
         };
 
-        // Step 3: Resolve only the external macro surfaces that are still needed.
         let macro_resolution_started = component_meta_debug_enabled().then(Instant::now);
         let macro_type_deps: Vec<verter_analysis::MacroTypeDep> =
             snapshot.macro_type_deps.iter().cloned().collect();
         for dep in &macro_type_deps {
             let macro_index = dep.macro_index;
             let dep_exported_name = macro_dep_exported_type_name(&snapshot, dep);
-            // Resolve the canonical path of the dependency file.
             let dep_canonical = self
-                .resolve_type_dependency_canonical(&canonical, &dep.import_source)
+                .resolve_type_dependency_canonical(canonical, &dep.import_source)
                 .unwrap_or_default();
             let declaration =
                 resolve_type_declaration(self, &dep_canonical, dep_exported_name.as_ref());
@@ -277,8 +401,6 @@ impl VerterHost {
                 kind,
             );
 
-            // Always track the dependency canonical and declaration source
-            // so cache invalidation works for both modes.
             if !dep_canonical.is_empty() {
                 tracked_deps.insert(dep_canonical.clone());
             }
@@ -290,9 +412,6 @@ impl VerterHost {
 
             match mode {
                 ResolverMode::Type => {
-                    // Type mode: identity only — skip the expensive traversal.
-                    // The shared resolved_type_cache is warmed naturally when
-                    // Expanded mode is later called.
                     resolved_macros.push(ResolvedMacroMeta {
                         macro_index,
                         macro_kind: dep.macro_kind,
@@ -326,7 +445,7 @@ impl VerterHost {
 
                     let mut resolution_deps = std::collections::BTreeSet::new();
                     let resolved = self.resolve_external_type_from_loaded_files(
-                        &canonical,
+                        canonical,
                         &dep.import_source,
                         dep_exported_name.as_ref(),
                         &mut tracked_deps,
@@ -377,7 +496,6 @@ impl VerterHost {
                             });
                         }
                         Ok(None) | Err(_) => {
-                            // Best-effort: record identity even on resolution failure.
                             resolved_macros.push(ResolvedMacroMeta {
                                 macro_index,
                                 macro_kind: dep.macro_kind,
@@ -422,21 +540,16 @@ impl VerterHost {
                         );
                         resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
                             name: resolved.name.clone(),
-                            declaration: resolve_local_type_declaration(
-                                self,
-                                canonical.as_str(),
-                                resolved,
-                            ),
+                            declaration: resolve_local_type_declaration(self, canonical, resolved),
                         });
                     }
                 }
             }
         }
 
-        // Sync transitive macro type dependencies for invalidation tracking.
-        self.sync_transitive_macro_type_dependencies(&canonical, &tracked_deps);
+        self.sync_transitive_macro_type_dependencies(canonical, &tracked_deps);
 
-        let fact_versions = self.current_dependency_fact_versions(&canonical, &tracked_deps);
+        let fact_versions = self.current_dependency_fact_versions(canonical, &tracked_deps);
         let state = ResolvedComponentMetaState {
             snapshot,
             mode,
@@ -446,16 +559,8 @@ impl VerterHost {
             resolved_type_registry_meta,
             evaluated_types,
             cached_eval_inputs,
+            fact_versions: fact_versions.clone(),
         };
-        self.store_cached_resolved_meta(&canonical, mode, &state, &fact_versions);
-        if let Some(started) = started {
-            component_meta_debug(format!(
-                "resolve_component_meta owner={} mode={:?} total took {:?}",
-                canonical,
-                mode,
-                started.elapsed(),
-            ));
-        }
         Some(state)
     }
 
@@ -511,14 +616,33 @@ impl VerterHost {
         &self,
         canonical: &str,
         mode: ResolverMode,
+        store_view: &crate::resolver_store::HostStoreView,
     ) -> Option<ResolvedComponentMetaState> {
+        let cache_key = resolved_meta_cache_key(canonical, mode);
+        if let Some(cached) = self
+            .resolved_meta_cache
+            .get_if_valid(&cache_key, store_view)
+        {
+            self.mirror_cached_resolved_meta_arc(canonical, mode, cached.clone());
+            return Some(cached.as_ref().clone());
+        }
+
         #[cfg(feature = "scheduler")]
         {
             let entry = self.compile_cache.get(canonical)?;
             let cached = entry.cached_resolved_meta.get(&mode)?;
-            if !self.fact_versions_match(&cached.fact_versions) {
+            if !cached
+                .fact_versions
+                .iter()
+                .all(|fact| store_view.validates(fact))
+            {
                 return None;
             }
+            self.resolved_meta_cache.insert_arc(
+                cache_key,
+                cached.state.clone(),
+                cached.fact_versions.clone(),
+            );
             Some(cached.state.as_ref().clone())
         }
 
@@ -529,9 +653,18 @@ impl VerterHost {
             let files = read_lock(&self.files);
             let entry = files.get(canonical)?;
             let cached = entry.cached_resolved_meta.get(&mode)?;
-            if !self.fact_versions_match(&cached.fact_versions) {
+            if !cached
+                .fact_versions
+                .iter()
+                .all(|fact| store_view.validates(fact))
+            {
                 return None;
             }
+            self.resolved_meta_cache.insert_arc(
+                cache_key,
+                cached.state.clone(),
+                cached.fact_versions.clone(),
+            );
             Some(cached.state.as_ref().clone())
         }
     }
@@ -543,9 +676,24 @@ impl VerterHost {
         state: &ResolvedComponentMetaState,
         fact_versions: &[verter_resolver::FactVersionRef],
     ) {
+        let state = Arc::new(state.clone());
+        self.resolved_meta_cache.insert_arc(
+            resolved_meta_cache_key(canonical, mode),
+            state.clone(),
+            fact_versions.to_vec(),
+        );
+        self.mirror_cached_resolved_meta_arc(canonical, mode, state);
+    }
+
+    fn mirror_cached_resolved_meta_arc(
+        &self,
+        canonical: &str,
+        mode: ResolverMode,
+        state: Arc<ResolvedComponentMetaState>,
+    ) {
         let cached = crate::types::ResolvedComponentMetaCacheEntry {
-            fact_versions: fact_versions.to_vec(),
-            state: Arc::new(state.clone()),
+            fact_versions: state.fact_versions.clone(),
+            state,
         };
 
         #[cfg(feature = "scheduler")]
@@ -571,58 +719,65 @@ impl VerterHost {
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
     ) -> Vec<verter_resolver::FactVersionRef> {
-        let mut facts = Vec::with_capacity(tracked_deps.len() + 1);
-        facts.push(verter_resolver::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
-            hash: self.get_whole_hash(canonical).unwrap_or_default(),
-        });
-        facts.extend(tracked_deps.iter().map(|dep| {
-            verter_resolver::FactVersionRef::FileWholeHash {
-                canonical_id: dep.clone(),
-                hash: self.get_whole_hash(dep.as_str()).unwrap_or_default(),
-            }
-        }));
+        let mut facts = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+
+        self.append_dependency_fact_versions(canonical, &mut facts, &mut seen);
+        for dep in tracked_deps {
+            self.append_dependency_fact_versions(dep.as_str(), &mut facts, &mut seen);
+        }
+
         facts
     }
 
+    #[cfg(test)]
     pub(crate) fn fact_versions_match(
         &self,
         fact_versions: &[verter_resolver::FactVersionRef],
     ) -> bool {
-        fact_versions.iter().all(|fact| match fact {
-            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                self.get_whole_hash(canonical_id.as_str())
-                    .unwrap_or_default()
-                    == *hash
+        let view = self.resolver_store_view();
+        fact_versions.iter().all(|fact| view.validates(fact))
+    }
+
+    fn append_dependency_fact_versions(
+        &self,
+        canonical: &str,
+        facts: &mut Vec<verter_resolver::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<verter_resolver::FactVersionRef>,
+    ) {
+        let file_fact = verter_resolver::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: self.get_whole_hash(canonical).unwrap_or_default(),
+        };
+        if seen.insert(file_fact.clone()) {
+            facts.push(file_fact);
+        }
+
+        for kind in [
+            verter_resolver::DerivedFactKind::ExportRegistry,
+            verter_resolver::DerivedFactKind::BarrelSurface,
+        ] {
+            if let Some(hash) = self.current_derived_fact_hash(canonical, kind) {
+                let fact = verter_resolver::FactVersionRef::DerivedFactHash {
+                    canonical_id: canonical.to_string(),
+                    kind,
+                    hash,
+                };
+                if seen.insert(fact.clone()) {
+                    facts.push(fact);
+                }
             }
-            verter_resolver::FactVersionRef::BarrelGeneration {
-                canonical_id,
+        }
+
+        if let Some(generation) = self.current_barrel_generation(canonical) {
+            let fact = verter_resolver::FactVersionRef::BarrelGeneration {
+                canonical_id: canonical.to_string(),
                 generation,
-            } => {
-                #[cfg(feature = "scheduler")]
-                {
-                    self.compile_cache
-                        .get(canonical_id)
-                        .and_then(|cc| {
-                            cc.barrel_export_surface
-                                .as_ref()
-                                .map(|surface| surface.generation == *generation)
-                        })
-                        .unwrap_or(false)
-                }
-                #[cfg(not(feature = "scheduler"))]
-                {
-                    false
-                }
+            };
+            if seen.insert(fact.clone()) {
+                facts.push(fact);
             }
-            verter_resolver::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind,
-                hash,
-            } => self
-                .current_derived_fact_hash(canonical_id.as_str(), *kind)
-                .is_some_and(|current| current == *hash),
-        })
+        }
     }
 
     fn current_derived_fact_hash(
@@ -635,9 +790,11 @@ impl VerterHost {
             verter_resolver::DerivedFactKind::ExportRegistry => {
                 #[cfg(feature = "scheduler")]
                 {
-                    self.compile_cache
-                        .get(canonical_id)
-                        .and_then(|cc| cc.export_registry.as_ref().map(|registry| registry.source_hash))
+                    self.compile_cache.get(canonical_id).and_then(|cc| {
+                        cc.export_registry
+                            .as_ref()
+                            .map(|registry| registry.source_hash)
+                    })
                 }
                 #[cfg(not(feature = "scheduler"))]
                 {
@@ -647,13 +804,11 @@ impl VerterHost {
             verter_resolver::DerivedFactKind::BarrelSurface => {
                 #[cfg(feature = "scheduler")]
                 {
-                    self.compile_cache
-                        .get(canonical_id)
-                        .and_then(|cc| {
-                            cc.barrel_export_surface
-                                .as_ref()
-                                .map(|surface| surface.source_hash)
-                        })
+                    self.compile_cache.get(canonical_id).and_then(|cc| {
+                        cc.barrel_export_surface
+                            .as_ref()
+                            .map(|surface| surface.source_hash)
+                    })
                 }
                 #[cfg(not(feature = "scheduler"))]
                 {
@@ -663,6 +818,40 @@ impl VerterHost {
             verter_resolver::DerivedFactKind::Route
             | verter_resolver::DerivedFactKind::ExactResolution => None,
         }
+    }
+
+    fn current_barrel_generation(&self, canonical_id: &str) -> Option<u64> {
+        #[cfg(feature = "scheduler")]
+        {
+            self.compile_cache.get(canonical_id).and_then(|cc| {
+                cc.barrel_export_surface
+                    .as_ref()
+                    .map(|surface| surface.generation)
+            })
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let _ = canonical_id;
+            None
+        }
+    }
+}
+
+fn resolved_meta_cache_key(
+    canonical: &str,
+    mode: ResolverMode,
+) -> verter_resolver::ResolutionNodeKey {
+    verter_resolver::ResolutionNodeKey {
+        symbol_id: canonical.to_string(),
+        node_kind: verter_resolver::ResolutionNodeKind::Assemble,
+        traversal_lens: verter_resolver::TraversalLens::StructuralObject,
+        member_path_hash: 0,
+        type_args_hash: 0,
+        behavior_flags: match mode {
+            ResolverMode::Type => 1,
+            ResolverMode::Expanded => 2,
+        },
     }
 }
 

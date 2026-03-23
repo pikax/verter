@@ -11,6 +11,9 @@ use crate::id::canonicalize_id;
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
+use verter_resolver::{
+    run_stable_request, RequestSource, SingleflightRole, StableRequestExecutor, StoreView,
+};
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -32,6 +35,137 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 
 const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
 const COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS: usize = 2_000;
+const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
+
+struct FallthroughRequestExecutor<'a, 'b> {
+    host: &'a VerterHost,
+    canonical_id: String,
+    prop_type_overrides:
+        Option<&'a rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>>,
+    visiting: &'b mut rustc_hash::FxHashSet<String>,
+    last_snapshot_epoch: Option<u64>,
+}
+
+impl<'a, 'b> FallthroughRequestExecutor<'a, 'b> {
+    fn new(
+        host: &'a VerterHost,
+        canonical_id: String,
+        prop_type_overrides: Option<
+            &'a rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        visiting: &'b mut rustc_hash::FxHashSet<String>,
+    ) -> Self {
+        Self {
+            host,
+            canonical_id,
+            prop_type_overrides,
+            visiting,
+            last_snapshot_epoch: None,
+        }
+    }
+}
+
+impl<'a, 'b>
+    StableRequestExecutor<
+        verter_resolver::FallthroughNodeKey,
+        Option<crate::types::FallthroughResolution>,
+    > for FallthroughRequestExecutor<'a, 'b>
+{
+    type View = crate::resolver_store::HostStoreView;
+    type Error = ();
+
+    fn cache_key(&self) -> verter_resolver::FallthroughNodeKey {
+        fallthrough_cache_key(
+            &self.canonical_id,
+            self.host.config.generic_root_propagation,
+            self.prop_type_overrides,
+        )
+    }
+
+    fn snapshot_view(&mut self) -> Self::View {
+        let view = self.host.resolver_store_view();
+        self.last_snapshot_epoch = Some(view.mutation_epoch());
+        view
+    }
+
+    fn try_get_cached(
+        &mut self,
+        store_view: &Self::View,
+    ) -> Option<Option<crate::types::FallthroughResolution>> {
+        let cache_key = self.cache_key();
+        if let Some(cached) = self
+            .host
+            .fallthrough_cache
+            .get_if_valid(&cache_key, store_view)
+        {
+            if self.prop_type_overrides.is_none() {
+                self.host
+                    .mirror_cached_fallthrough_arc(&self.canonical_id, cached.clone());
+            }
+            return Some(Some(cached.as_ref().clone()));
+        }
+
+        if self.prop_type_overrides.is_none() {
+            #[cfg(feature = "scheduler")]
+            {
+                if let Some(cc) = self.host.compile_cache.get(&self.canonical_id) {
+                    if let Some(ref cached) = cc.cached_fallthrough {
+                        if cached.generic_root_propagation
+                            == self.host.config.generic_root_propagation
+                            && cached
+                                .fact_versions
+                                .iter()
+                                .all(|fact| store_view.validates(fact))
+                        {
+                            self.host.fallthrough_cache.insert_arc(
+                                cache_key,
+                                cached.resolution.clone(),
+                                cached.fact_versions.clone(),
+                            );
+                            self.host.mirror_cached_fallthrough_arc(
+                                &self.canonical_id,
+                                cached.resolution.clone(),
+                            );
+                            return Some(Some((*cached.resolution).clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn compute(
+        &mut self,
+        _view: &Self::View,
+    ) -> Result<Option<crate::types::FallthroughResolution>, Self::Error> {
+        Ok(self.host.compute_fallthrough_surface_uncached(
+            &self.canonical_id,
+            self.prop_type_overrides,
+            self.visiting,
+        ))
+    }
+
+    fn is_stable(&mut self, _view: &Self::View) -> bool {
+        self.last_snapshot_epoch
+            .is_some_and(|epoch| self.host.current_store_view_epoch() == epoch)
+    }
+
+    fn store_stable(&mut self, value: &Option<crate::types::FallthroughResolution>) {
+        if let Some(result) = value.as_ref() {
+            self.host.cache_fallthrough_result(
+                &self.canonical_id,
+                self.prop_type_overrides,
+                result,
+            );
+        }
+    }
+
+    fn max_attempts(&self) -> usize {
+        STORE_VIEW_STABILITY_MAX_ATTEMPTS
+    }
+}
 
 pub(crate) fn component_meta_symbolic_step_budget() -> usize {
     COMPONENT_META_MAX_SYMBOLIC_STEPS
@@ -258,7 +392,9 @@ impl<'a> ImportedEvalLookup<'a> {
                 .find(|export| !export.is_type && export.name == imported_name);
             let (source_canonical_id, source_name) = if let Some(export) = resolved_export {
                 (
-                    export.source_canonical_id.unwrap_or_else(|| dep_canonical_id.clone()),
+                    export
+                        .source_canonical_id
+                        .unwrap_or_else(|| dep_canonical_id.clone()),
                     export.source_name,
                 )
             } else {
@@ -1698,29 +1834,84 @@ impl VerterHost {
                         },
                     }],
                 },
+                fact_versions: self.current_dependency_fact_versions(
+                    canonical_id,
+                    &std::collections::BTreeSet::new(),
+                ),
             });
         }
 
-        // Check cache first
-        if prop_type_overrides.is_none() {
-            #[cfg(feature = "scheduler")]
-            {
-                if let Some(cc) = self.compile_cache.get(canonical_id) {
-                    if let Some(ref cached) = cc.cached_fallthrough {
-                        if cached.generic_root_propagation == self.config.generic_root_propagation
-                            && self.fact_versions_match(&cached.fact_versions)
-                        {
-                            visiting.remove(canonical_id);
-                            return Some((*cached.resolution).clone());
-                        }
-                    }
-                }
+        let mut executor = FallthroughRequestExecutor::new(
+            self,
+            canonical_id.to_string(),
+            prop_type_overrides,
+            visiting,
+        );
+        let result = run_stable_request(&self.fallthrough_singleflight, &mut executor)
+            .expect("fallthrough request execution is infallible");
+
+        if matches!(result.source, RequestSource::Cache) {
+            self.provenance
+                .resolver_node_cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !(matches!(result.source, RequestSource::Cache) && result.attempts == 1) {
+            self.provenance
+                .resolver_node_cache_misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let RequestSource::Flight { role, forked_lane } = result.source {
+            if role == SingleflightRole::Follower {
+                self.provenance
+                    .resolver_singleflight_coalesced
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if forked_lane {
+                self.provenance
+                    .resolver_cross_view_lane_forks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
-        // Get the analysis-only meta (without fallthrough populated)
+        visiting.remove(canonical_id);
+        if let Some(started) = started {
+            match result.source {
+                RequestSource::Cache => component_meta_debug(format!(
+                    "resolve_fallthrough owner={} cached attempt={} took {:?}",
+                    canonical_id,
+                    result.attempts.saturating_sub(1),
+                    started.elapsed(),
+                )),
+                RequestSource::Flight { role, .. } => component_meta_debug(format!(
+                    "resolve_fallthrough owner={} role={:?} stable attempt={} took {:?}",
+                    canonical_id,
+                    role,
+                    result.attempts.saturating_sub(1),
+                    started.elapsed(),
+                )),
+                RequestSource::Fallback => component_meta_debug(format!(
+                    "resolve_fallthrough owner={} retries_exhausted took {:?}",
+                    canonical_id,
+                    started.elapsed(),
+                )),
+            }
+        }
+        result.value
+    }
+
+    fn compute_fallthrough_surface_uncached(
+        &self,
+        canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+    ) -> Option<crate::types::FallthroughResolution> {
+        use verter_analysis::component_meta::*;
+
         let resolved =
             self.resolve_component_meta(canonical_id, crate::types::ResolverMode::Expanded)?;
+        let mut fallthrough_fact_versions = resolved.fact_versions.clone();
 
         let resolved_macros =
             component_meta_resolved_macros(&resolved.snapshot, &resolved.resolved_macros);
@@ -1744,7 +1935,6 @@ impl VerterHost {
         };
         let base_meta = extract_component_meta(input);
 
-        // Build declared prop/event name sets for subtraction
         let declared_prop_names: rustc_hash::FxHashSet<String> =
             base_meta.props.iter().map(|p| p.name.clone()).collect();
         let declared_event_names: rustc_hash::FxHashSet<String> =
@@ -1755,7 +1945,6 @@ impl VerterHost {
             .filter_map(|p| verter_analysis::html_intrinsics::on_prop_to_event_name(&p.name))
             .collect();
 
-        // Build the accepted props from declared members
         let mut accepted_props: Vec<AcceptedPropAnalysis> = base_meta
             .props
             .iter()
@@ -1783,30 +1972,17 @@ impl VerterHost {
             })
             .collect();
 
-        let root_reachability = &base_meta.root_reachability;
-
-        match root_reachability {
+        match &base_meta.root_reachability {
             RootReachability::NoFallthrough { reason } => {
-                let result = crate::types::FallthroughResolution {
+                Some(crate::types::FallthroughResolution {
                     accepted_props,
                     accepted_events,
                     accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
                     fallthrough_surface: FallthroughSurface::None {
                         reason: reason.clone(),
                     },
-                };
-                if prop_type_overrides.is_none() {
-                    self.cache_fallthrough_result(canonical_id, &result);
-                }
-                visiting.remove(canonical_id);
-                if let Some(started) = started {
-                    component_meta_debug(format!(
-                        "resolve_fallthrough owner={} reason=no_fallthrough took {:?}",
-                        canonical_id,
-                        started.elapsed(),
-                    ));
-                }
-                Some(result)
+                    fact_versions: fallthrough_fact_versions,
+                })
             }
             RootReachability::Branches { branches } => {
                 let mut fallthrough_branches = Vec::new();
@@ -1935,6 +2111,7 @@ impl VerterHost {
                                             &mut fallthrough_branches,
                                             &mut any_partial,
                                             &mut any_unresolved,
+                                            &mut fallthrough_fact_versions,
                                             visiting,
                                         );
                                     }
@@ -1972,6 +2149,7 @@ impl VerterHost {
                                         &mut fallthrough_branches,
                                         &mut any_partial,
                                         &mut any_unresolved,
+                                        &mut fallthrough_fact_versions,
                                         visiting,
                                     );
                                 }
@@ -2022,12 +2200,9 @@ impl VerterHost {
                 }
 
                 fallthrough_branches.sort_by(|a, b| a.branch_key.cmp(&b.branch_key));
-
-                // Build flat accepted projection from branches
                 let total_branches = fallthrough_branches.len();
                 let force_conditional = any_partial || any_unresolved;
 
-                // Collect inherited members from resolved + partial branches
                 let mut inherited_prop_map: rustc_hash::FxHashMap<
                     String,
                     (AcceptedPropAnalysis, Vec<String>),
@@ -2039,7 +2214,7 @@ impl VerterHost {
 
                 for fb in &fallthrough_branches {
                     if matches!(fb.status, BranchStatus::Unresolved { .. }) {
-                        continue; // Unresolved branches contribute no inherited members
+                        continue;
                     }
 
                     for fp in &fb.props {
@@ -2102,7 +2277,6 @@ impl VerterHost {
                     }
                 }
 
-                // Compute availability for inherited members
                 for (_, (prop, branch_keys)) in inherited_prop_map.iter_mut() {
                     branch_keys.sort();
                     branch_keys.dedup();
@@ -2122,7 +2296,6 @@ impl VerterHost {
                     }
                 }
 
-                // Sort inherited members and append after declared
                 let mut inherited_props: Vec<AcceptedPropAnalysis> =
                     inherited_prop_map.into_values().map(|(p, _)| p).collect();
                 inherited_props.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2139,27 +2312,15 @@ impl VerterHost {
                     AcceptedSurfaceCompleteness::Exact
                 };
 
-                let result = crate::types::FallthroughResolution {
+                Some(crate::types::FallthroughResolution {
                     accepted_props,
                     accepted_events,
                     accepted_surface_completeness: completeness,
                     fallthrough_surface: FallthroughSurface::Branches {
                         branches: fallthrough_branches,
                     },
-                };
-                if prop_type_overrides.is_none() {
-                    self.cache_fallthrough_result(canonical_id, &result);
-                }
-                visiting.remove(canonical_id);
-                if let Some(started) = started {
-                    component_meta_debug(format!(
-                        "resolve_fallthrough owner={} branches={} took {:?}",
-                        canonical_id,
-                        total_branches,
-                        started.elapsed(),
-                    ));
-                }
-                Some(result)
+                    fact_versions: fallthrough_fact_versions,
+                })
             }
         }
     }
@@ -2582,29 +2743,49 @@ impl VerterHost {
     fn cache_fallthrough_result(
         &self,
         canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
         result: &crate::types::FallthroughResolution,
+    ) {
+        let resolution = Arc::new(result.clone());
+        self.fallthrough_cache.insert_arc(
+            fallthrough_cache_key(
+                canonical_id,
+                self.config.generic_root_propagation,
+                prop_type_overrides,
+            ),
+            resolution.clone(),
+            result.fact_versions.clone(),
+        );
+        if prop_type_overrides.is_none() {
+            self.mirror_cached_fallthrough_arc(canonical_id, resolution);
+        }
+    }
+
+    fn mirror_cached_fallthrough_arc(
+        &self,
+        canonical_id: &str,
+        resolution: Arc<crate::types::FallthroughResolution>,
     ) {
         #[cfg(feature = "scheduler")]
         {
-            if let Some(state) = self.effective_file_state(canonical_id, None) {
+            if self.effective_file_state(canonical_id, None).is_some() {
                 let mut cc = self
                     .compile_cache
                     .entry(canonical_id.to_string())
                     .or_default();
                 cc.cached_fallthrough = Some(crate::types::CachedFallthroughEntry {
-                    fact_versions: vec![verter_resolver::FactVersionRef::FileWholeHash {
-                        canonical_id: canonical_id.to_string(),
-                        hash: state.whole_hash,
-                    }],
+                    fact_versions: resolution.fact_versions.clone(),
                     generic_root_propagation: self.config.generic_root_propagation,
-                    resolution: Arc::new(result.clone()),
+                    resolution,
                 });
             }
         }
 
         #[cfg(not(feature = "scheduler"))]
         {
-            let _ = (canonical_id, result);
+            let _ = (canonical_id, resolution);
         }
     }
 
@@ -3869,6 +4050,7 @@ impl VerterHost {
             self.compile_cache.remove(&canonical);
             self.scheduler.remove(&canonical);
 
+            self.bump_store_view_epoch();
             Some(HostRemoveResult {
                 canonical_id: canonical,
             })
@@ -3918,6 +4100,7 @@ impl VerterHost {
 
             self.ws().notify_delete(&canonical);
 
+            self.bump_store_view_epoch();
             Some(HostRemoveResult {
                 canonical_id: canonical,
             })
@@ -6815,6 +6998,7 @@ fn append_component_candidate_branches(
     fallthrough_branches: &mut Vec<verter_analysis::component_meta::FallthroughBranch>,
     any_partial: &mut bool,
     any_unresolved: &mut bool,
+    fact_versions: &mut Vec<verter_resolver::FactVersionRef>,
     visiting: &mut rustc_hash::FxHashSet<String>,
 ) {
     use verter_analysis::component_meta::*;
@@ -6846,6 +7030,11 @@ fn append_component_candidate_branches(
         });
         return;
     };
+
+    extend_unique_fact_versions(
+        fact_versions,
+        host.current_dependency_fact_versions(&child_id, &std::collections::BTreeSet::new()),
+    );
 
     // Fallthrough inheritance depends on Vue root reachability facts. When the
     // imported child resolves to a non-SFC entrypoint (package declarations,
@@ -6890,6 +7079,11 @@ fn append_component_candidate_branches(
         });
         return;
     };
+
+    extend_unique_fact_versions(
+        fact_versions,
+        child_resolution.fact_versions.iter().cloned(),
+    );
 
     match &child_resolution.fallthrough_surface {
         FallthroughSurface::None { .. } => {
@@ -7096,6 +7290,55 @@ fn append_component_candidate_branches(
             }
         }
     }
+}
+
+fn extend_unique_fact_versions<I>(
+    fact_versions: &mut Vec<verter_resolver::FactVersionRef>,
+    new_facts: I,
+) where
+    I: IntoIterator<Item = verter_resolver::FactVersionRef>,
+{
+    let mut seen: rustc_hash::FxHashSet<verter_resolver::FactVersionRef> =
+        fact_versions.iter().cloned().collect();
+    for fact in new_facts {
+        if seen.insert(fact.clone()) {
+            fact_versions.push(fact);
+        }
+    }
+}
+
+fn fallthrough_cache_key(
+    canonical_id: &str,
+    generic_root_propagation: bool,
+    prop_type_overrides: Option<
+        &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    >,
+) -> verter_resolver::FallthroughNodeKey {
+    verter_resolver::FallthroughNodeKey {
+        canonical_component_id: canonical_id.to_string(),
+        node_kind: verter_resolver::FallthroughNodeKind::BranchUnionMerge,
+        override_fingerprint: prop_type_overrides
+            .map(hash_prop_type_overrides)
+            .unwrap_or_default(),
+        behavior_flags: u32::from(generic_root_propagation),
+        branch_selector: None,
+    }
+}
+
+fn hash_prop_type_overrides(
+    overrides: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut pairs: Vec<_> = overrides.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut hasher = rustc_hash::FxHasher::default();
+    for (name, ty) in pairs {
+        name.hash(&mut hasher);
+        ty.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn inject_prop_type_overrides(

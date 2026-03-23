@@ -62,6 +62,7 @@ mod id;
 pub mod meta;
 pub mod meta_resolve;
 mod parse;
+mod resolver_store;
 #[cfg(feature = "scheduler")]
 pub mod scheduler_shim;
 mod shared;
@@ -110,6 +111,11 @@ pub struct VerterHost {
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,
+    /// Coarse semantic mutation epoch used for snapshot-coherent resolver views.
+    ///
+    /// Unlike `tick`, which tracks compile/access recency, this counter only
+    /// advances after host mutations that can change semantic resolution inputs.
+    pub(crate) store_view_epoch: std::sync::atomic::AtomicU64,
     /// Last computed cross-file prop constness overrides.
     /// Used to detect changes on re-computation (Phase 7 invalidation).
     pub(crate) last_const_prop_overrides:
@@ -135,6 +141,30 @@ pub struct VerterHost {
     /// Bounded to RESOLVED_TYPE_CACHE_CAP entries; cleared on close/clear_compile_cache.
     pub(crate) resolved_type_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
+    /// Resolver-owned validated cache for fully materialized component-meta states.
+    pub(crate) resolved_meta_cache: verter_resolver::ValidatedFactCache<
+        verter_resolver::ResolutionNodeKey,
+        crate::meta_resolve::ResolvedComponentMetaState,
+    >,
+    /// In-flight coalescing for fully materialized component-meta states.
+    pub(crate) resolved_meta_singleflight: verter_resolver::SingleflightGroup<
+        verter_resolver::ResolutionNodeKey,
+        verter_resolver::StableExecutionValue<
+            Option<crate::meta_resolve::ResolvedComponentMetaState>,
+        >,
+        (),
+    >,
+    /// Resolver-owned validated cache for fallthrough inheritance results.
+    pub(crate) fallthrough_cache: verter_resolver::ValidatedFactCache<
+        verter_resolver::FallthroughNodeKey,
+        crate::types::FallthroughResolution,
+    >,
+    /// In-flight coalescing for fallthrough inheritance resolution.
+    pub(crate) fallthrough_singleflight: verter_resolver::SingleflightGroup<
+        verter_resolver::FallthroughNodeKey,
+        verter_resolver::StableExecutionValue<Option<crate::types::FallthroughResolution>>,
+        (),
+    >,
     /// Cached pristine eval environments keyed by canonical id + whole_hash.
     /// Stored pre-evaluation and cloned per query to avoid reparsing the same
     /// script/declaration sources across component-meta requests.
@@ -185,6 +215,7 @@ impl VerterHost {
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
+            store_view_epoch: std::sync::atomic::AtomicU64::new(1),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
@@ -194,6 +225,10 @@ impl VerterHost {
             compile_cache: dashmap::DashMap::new(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            resolved_meta_cache: verter_resolver::ValidatedFactCache::default(),
+            resolved_meta_singleflight: verter_resolver::SingleflightGroup::default(),
+            fallthrough_cache: verter_resolver::ValidatedFactCache::default(),
+            fallthrough_singleflight: verter_resolver::SingleflightGroup::default(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
@@ -212,11 +247,16 @@ impl VerterHost {
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
+            store_view_epoch: std::sync::atomic::AtomicU64::new(1),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            resolved_meta_cache: verter_resolver::ValidatedFactCache::default(),
+            resolved_meta_singleflight: verter_resolver::SingleflightGroup::default(),
+            fallthrough_cache: verter_resolver::ValidatedFactCache::default(),
+            fallthrough_singleflight: verter_resolver::SingleflightGroup::default(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
@@ -252,6 +292,7 @@ impl VerterHost {
     /// automatically reads through the new workspace after this call.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_vfs::WorkspaceAccess>) {
         *self.workspace.write() = workspace;
+        self.bump_store_view_epoch();
     }
 
     /// Access provenance counters for component-meta observability.
@@ -262,6 +303,17 @@ impl VerterHost {
     /// Clone the workspace Arc for internal use.
     fn ws(&self) -> Arc<dyn verter_vfs::WorkspaceAccess> {
         self.workspace.read().clone()
+    }
+
+    pub(crate) fn current_store_view_epoch(&self) -> u64 {
+        self.store_view_epoch
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn bump_store_view_epoch(&self) -> u64 {
+        self.store_view_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     }
 
     /// Resolve an import through the workspace (VFS).
@@ -524,7 +576,12 @@ impl VerterHost {
             }
         }
         self.resolved_type_cache.lock().clear();
+        self.resolved_meta_cache.clear();
+        self.resolved_meta_singleflight.clear();
+        self.fallthrough_cache.clear();
+        self.fallthrough_singleflight.clear();
         self.eval_env_cache.lock().clear();
+        self.bump_store_view_epoch();
     }
 
     /// Clear only cached fallthrough surfaces.
@@ -535,6 +592,9 @@ impl VerterHost {
                 entry.cached_fallthrough = None;
             }
         }
+        self.fallthrough_cache.clear();
+        self.fallthrough_singleflight.clear();
+        self.bump_store_view_epoch();
     }
 
     /// Install a project-local HTML intrinsic catalog for this host.
@@ -609,8 +669,13 @@ impl VerterHost {
             self.scheduler.restart_driver();
         }
         self.resolved_type_cache.lock().clear();
+        self.resolved_meta_cache.clear();
+        self.resolved_meta_singleflight.clear();
+        self.fallthrough_cache.clear();
+        self.fallthrough_singleflight.clear();
         self.eval_env_cache.lock().clear();
         self.provenance.reset();
+        self.bump_store_view_epoch();
     }
 
     /// Configure project-scoped path alias resolution.
@@ -629,6 +694,7 @@ impl VerterHost {
         projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
+        self.bump_store_view_epoch();
     }
 
     #[cfg(feature = "host_metrics")]
@@ -810,6 +876,7 @@ impl VerterHost {
             cc.barrel_export_surface = None;
             cc.import_route_cache.clear();
         }
+        self.bump_store_view_epoch();
     }
 
     /// Ensure a file is loaded into the host.
@@ -870,7 +937,11 @@ impl VerterHost {
                 _ => return false,
             }
 
-            self.integrate_scheduler_snapshot(canonical_id)
+            let loaded = self.integrate_scheduler_snapshot(canonical_id);
+            if loaded {
+                self.bump_store_view_epoch();
+            }
+            loaded
         }
 
         #[cfg(not(feature = "scheduler"))]

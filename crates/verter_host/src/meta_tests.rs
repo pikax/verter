@@ -4,6 +4,7 @@ use crate::VerterHost;
 use std::sync::Arc;
 use verter_analysis::type_expand::ExpandedComponentTypes;
 use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+use verter_resolver::{ResolverStore, StoreView};
 
 fn make_project() -> Arc<MetaProject> {
     make_project_with_config(HostConfig {
@@ -101,6 +102,27 @@ fn cached_resolved_state(
     }
 }
 
+fn clear_legacy_cached_resolved_state(
+    project: &MetaProject,
+    canonical: &str,
+    mode: crate::types::ResolverMode,
+) {
+    #[cfg(feature = "scheduler")]
+    {
+        if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
+            entry.cached_resolved_meta.remove(&mode);
+        }
+    }
+
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let mut files = crate::shared::write_lock(&project.host().files);
+        if let Some(entry) = files.get_mut(canonical) {
+            entry.cached_resolved_meta.remove(&mode);
+        }
+    }
+}
+
 #[cfg(feature = "scheduler")]
 fn cached_fallthrough_state(
     project: &MetaProject,
@@ -116,6 +138,25 @@ fn cached_fallthrough_state(
                 .as_ref()
                 .map(|cached| Arc::clone(&cached.resolution))
         })
+}
+
+#[cfg(feature = "scheduler")]
+fn clear_legacy_cached_fallthrough_state(project: &MetaProject, canonical: &str) {
+    if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
+        entry.cached_fallthrough = None;
+    }
+}
+
+#[cfg(feature = "scheduler")]
+fn cached_fallthrough_entry(
+    project: &MetaProject,
+    canonical: &str,
+) -> Option<crate::types::CachedFallthroughEntry> {
+    project
+        .host()
+        .compile_cache
+        .get(canonical)
+        .and_then(|entry| entry.cached_fallthrough.clone())
 }
 
 #[cfg(feature = "scheduler")]
@@ -171,6 +212,136 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
             hash: [9; 16],
         },
     ]));
+}
+
+#[test]
+fn snapshot_view_is_stale_but_coherent_after_host_changes() {
+    let project = make_project();
+    project
+        .upsert_base("/types.ts", "export interface Props { label: string }")
+        .unwrap();
+
+    let before_hash = project
+        .host()
+        .get_whole_hash("/types.ts")
+        .expect("whole hash should exist before mutation");
+    let before_view = project.host().snapshot_view();
+    let before_epoch = before_view.mutation_epoch();
+    let fact = verter_resolver::FactVersionRef::FileWholeHash {
+        canonical_id: "/types.ts".to_string(),
+        hash: before_hash,
+    };
+
+    assert!(before_view.validates(&fact));
+
+    project
+        .upsert_base("/types.ts", "export interface Props { disabled: boolean }")
+        .unwrap();
+
+    let after_view = project.host().snapshot_view();
+    let after_epoch = after_view.mutation_epoch();
+
+    assert!(
+        before_view.validates(&fact),
+        "a captured store view should keep validating against the snapshot it was created from"
+    );
+    assert!(
+        !after_view.validates(&fact),
+        "a fresh store view should reject stale facts after the host changes"
+    );
+    assert_ne!(before_epoch, after_epoch);
+    assert_ne!(before_view.compat_token(), after_view.compat_token());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn ensure_loaded_advances_store_view_epoch() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(sfc("msg: string")),
+    );
+
+    let project = make_workspace_project(ws);
+    let before_view = project.host().snapshot_view();
+    let before_epoch = before_view.mutation_epoch();
+
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "ensure_loaded should load the workspace file into the host"
+    );
+
+    let after_view = project.host().snapshot_view();
+    assert_ne!(before_epoch, after_view.mutation_epoch());
+    assert_ne!(before_view.compat_token(), after_view.compat_token());
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn current_dependency_fact_versions_include_derived_resolver_facts() {
+    let project = make_project();
+    project
+        .upsert_base("/index.ts", "export * from './inner'")
+        .unwrap();
+
+    let whole_hash = project
+        .host()
+        .get_whole_hash("/index.ts")
+        .expect("whole hash should exist");
+
+    let mut entry = project
+        .host()
+        .compile_cache
+        .get_mut("/index.ts")
+        .expect("compile cache entry should exist");
+    entry.export_registry = Some(crate::types::FileExportRegistry {
+        source_hash: [3; 16],
+        named: rustc_hash::FxHashMap::default(),
+        wildcard_edges: Vec::new(),
+    });
+    entry.barrel_export_surface = Some(crate::types::BarrelResolutionState {
+        export_map: rustc_hash::FxHashMap::default(),
+        source_hash: [4; 16],
+        wildcard_sources: Vec::new(),
+        scanned_sources: rustc_hash::FxHashMap::default(),
+        tracked_deps: rustc_hash::FxHashSet::default(),
+        fully_resolved: true,
+        generation: 11,
+    });
+    drop(entry);
+
+    let facts = project
+        .host()
+        .current_dependency_fact_versions("/index.ts", &std::collections::BTreeSet::new());
+
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::FileWholeHash {
+            canonical_id: "/index.ts".to_string(),
+            hash: whole_hash,
+        })
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            hash: [3; 16],
+        })
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::BarrelSurface,
+            hash: [4; 16],
+        })
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::BarrelGeneration {
+            canonical_id: "/index.ts".to_string(),
+            generation: 11,
+        })
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -810,6 +981,108 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
 
     assert!(third.props.iter().any(|field| field.name == "label"));
     assert!(!Arc::ptr_eq(&second_cache, &third_cache));
+}
+
+#[test]
+fn resolved_meta_reuses_resolver_cache_after_legacy_slot_is_cleared() {
+    let project = make_project();
+    project
+        .upsert_base("Comp.vue", &sfc("count: number"))
+        .unwrap();
+
+    let _ = project
+        .host()
+        .resolve_component_meta("Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("initial resolve should succeed");
+    let first_cache =
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+            .expect("initial resolve should populate legacy cache mirror");
+
+    clear_legacy_cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded);
+    assert!(
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded).is_none(),
+        "legacy cache slot should be cleared before the second lookup"
+    );
+
+    project.host().provenance().reset();
+    let _ = project
+        .host()
+        .resolve_component_meta("Comp.vue", crate::types::ResolverMode::Expanded)
+        .expect("second resolve should succeed from resolver-owned cache");
+    let second_cache =
+        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+            .expect("resolver-owned cache hit should mirror back into the legacy slot");
+
+    assert!(Arc::ptr_eq(&first_cache, &second_cache));
+    assert_eq!(
+        provenance(&project).component_meta_resolved_state_recomputes,
+        0,
+        "resolver-owned cache hit should avoid a recompute after the legacy slot is cleared"
+    );
+    assert_eq!(
+        provenance(&project).resolver_node_cache_hits,
+        1,
+        "second lookup should be served from the resolver-owned cache"
+    );
+    assert_eq!(
+        provenance(&project).resolver_node_cache_misses,
+        0,
+        "second lookup should not miss the resolver-owned cache after the legacy slot is cleared"
+    );
+    assert_eq!(
+        provenance(&project).resolver_singleflight_coalesced,
+        0,
+        "single-threaded cache reuse should not require singleflight coalescing"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn fallthrough_reuses_resolver_cache_after_legacy_slot_is_cleared() {
+    let project = make_project();
+    project
+        .upsert_base("/Child.vue", r#"<template><div>child</div></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let _ = get_meta(&project, "/App.vue");
+    let first_cache = cached_fallthrough_state(&project, "/App.vue")
+        .expect("initial lookup should populate the legacy fallthrough mirror");
+
+    clear_legacy_cached_fallthrough_state(&project, "/App.vue");
+    assert!(
+        cached_fallthrough_state(&project, "/App.vue").is_none(),
+        "legacy fallthrough cache slot should be cleared before the second lookup"
+    );
+
+    project.host().provenance.reset();
+
+    let _ = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("second fallthrough resolve should succeed from resolver-owned cache");
+    let second_cache = cached_fallthrough_state(&project, "/App.vue")
+        .expect("resolver-owned fallthrough cache hit should mirror back into the legacy slot");
+
+    assert!(Arc::ptr_eq(&first_cache, &second_cache));
+    assert_eq!(
+        provenance(&project).resolver_node_cache_hits,
+        1,
+        "second fallthrough lookup should be served from the resolver-owned cache"
+    );
+    assert_eq!(
+        provenance(&project).resolver_node_cache_misses,
+        0,
+        "second fallthrough lookup should not miss the resolver-owned cache after the legacy slot is cleared"
+    );
 }
 
 #[test]
@@ -5111,6 +5384,58 @@ import Child from './Child.vue'
             "dependency change must invalidate the parent's cached fallthrough surface"
         );
     }
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn cached_fallthrough_fact_versions_include_transitive_child_component_meta_dependencies() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            "export interface ChildProps { msg?: string; count?: number }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Child.vue",
+            r#"<script setup lang="ts">
+import type { ChildProps } from './types'
+defineProps<ChildProps>()
+</script>
+<template><div>child</div></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let _ = get_meta(&project, "/App.vue");
+    let cached = cached_fallthrough_entry(&project, "/App.vue")
+        .expect("parent fallthrough should be cached after meta extraction");
+
+    assert!(
+        cached.fact_versions.iter().any(|fact| matches!(
+            fact,
+            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/Child.vue"
+        )),
+        "cached fallthrough facts should include the child component file"
+    );
+    assert!(
+        cached.fact_versions.iter().any(|fact| matches!(
+            fact,
+            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/types.ts"
+        )),
+        "cached fallthrough facts should include transitive child component-meta deps"
+    );
 }
 
 // ── Fix 2: eval-path host cache reuse within single resolve_component_meta ──

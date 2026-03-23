@@ -427,6 +427,14 @@ defineProps<Props>()
         p1.component_meta_resolved_state_recomputes, 1,
         "first query should compute resolved meta exactly once"
     );
+    assert_eq!(
+        p1.resolver_node_cache_misses, 1,
+        "first query should miss the resolver-owned cache once"
+    );
+    assert_eq!(
+        p1.resolver_node_cache_hits, 0,
+        "first query should not hit the resolver-owned cache"
+    );
 
     let _second = project
         .host()
@@ -436,6 +444,14 @@ defineProps<Props>()
     assert_eq!(
         p2.component_meta_resolved_state_recomputes, 1,
         "same-mode repeat should hit resolved-meta cache instead of recomputing"
+    );
+    assert_eq!(
+        p2.resolver_node_cache_misses, 1,
+        "repeat query should not introduce a second resolver-owned cache miss"
+    );
+    assert_eq!(
+        p2.resolver_node_cache_hits, 1,
+        "repeat query should hit the resolver-owned cache once"
     );
 }
 
@@ -2876,7 +2892,10 @@ export const theme = {
         )
         .unwrap();
     project
-        .upsert_base("/index.ts", r#"export { theme as sharedTheme } from './inner'"#)
+        .upsert_base(
+            "/index.ts",
+            r#"export { theme as sharedTheme } from './inner'"#,
+        )
         .unwrap();
     project
         .upsert_base(

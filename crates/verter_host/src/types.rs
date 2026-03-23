@@ -1536,6 +1536,10 @@ pub struct MetaProvenance {
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
     pub imported_eval_inputs_calls: std::sync::atomic::AtomicU64,
+    pub resolver_node_cache_hits: std::sync::atomic::AtomicU64,
+    pub resolver_node_cache_misses: std::sync::atomic::AtomicU64,
+    pub resolver_singleflight_coalesced: std::sync::atomic::AtomicU64,
+    pub resolver_cross_view_lane_forks: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1548,6 +1552,10 @@ impl Default for MetaProvenance {
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
             imported_eval_inputs_calls: std::sync::atomic::AtomicU64::new(0),
+            resolver_node_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            resolver_node_cache_misses: std::sync::atomic::AtomicU64::new(0),
+            resolver_singleflight_coalesced: std::sync::atomic::AtomicU64::new(0),
+            resolver_cross_view_lane_forks: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1581,6 +1589,22 @@ impl std::fmt::Debug for MetaProvenance {
                 "imported_eval_inputs_calls",
                 &self.imported_eval_inputs_calls.load(Relaxed),
             )
+            .field(
+                "resolver_node_cache_hits",
+                &self.resolver_node_cache_hits.load(Relaxed),
+            )
+            .field(
+                "resolver_node_cache_misses",
+                &self.resolver_node_cache_misses.load(Relaxed),
+            )
+            .field(
+                "resolver_singleflight_coalesced",
+                &self.resolver_singleflight_coalesced.load(Relaxed),
+            )
+            .field(
+                "resolver_cross_view_lane_forks",
+                &self.resolver_cross_view_lane_forks.load(Relaxed),
+            )
             .finish()
     }
 }
@@ -1601,6 +1625,10 @@ impl MetaProvenance {
                 .resolved_external_type_cache_misses
                 .load(Relaxed),
             imported_eval_inputs_calls: self.imported_eval_inputs_calls.load(Relaxed),
+            resolver_node_cache_hits: self.resolver_node_cache_hits.load(Relaxed),
+            resolver_node_cache_misses: self.resolver_node_cache_misses.load(Relaxed),
+            resolver_singleflight_coalesced: self.resolver_singleflight_coalesced.load(Relaxed),
+            resolver_cross_view_lane_forks: self.resolver_cross_view_lane_forks.load(Relaxed),
         }
     }
 
@@ -1615,6 +1643,10 @@ impl MetaProvenance {
         self.resolved_external_type_cache_hits.store(0, Relaxed);
         self.resolved_external_type_cache_misses.store(0, Relaxed);
         self.imported_eval_inputs_calls.store(0, Relaxed);
+        self.resolver_node_cache_hits.store(0, Relaxed);
+        self.resolver_node_cache_misses.store(0, Relaxed);
+        self.resolver_singleflight_coalesced.store(0, Relaxed);
+        self.resolver_cross_view_lane_forks.store(0, Relaxed);
     }
 }
 
@@ -1636,6 +1668,8 @@ pub struct FallthroughResolution {
     pub accepted_surface_completeness: verter_analysis::component_meta::AcceptedSurfaceCompleteness,
     /// Branch-structured inherited surface.
     pub fallthrough_surface: verter_analysis::component_meta::FallthroughSurface,
+    /// Semantic fact versions consumed while producing this resolution.
+    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
 }
 
 /// Serializable point-in-time snapshot of [`MetaProvenance`] counters.
@@ -1649,6 +1683,10 @@ pub struct MetaProvenanceSnapshot {
     pub resolved_external_type_cache_hits: u64,
     pub resolved_external_type_cache_misses: u64,
     pub imported_eval_inputs_calls: u64,
+    pub resolver_node_cache_hits: u64,
+    pub resolver_node_cache_misses: u64,
+    pub resolver_singleflight_coalesced: u64,
+    pub resolver_cross_view_lane_forks: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

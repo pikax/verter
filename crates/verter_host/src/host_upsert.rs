@@ -279,7 +279,7 @@ impl VerterHost {
         self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
         self.ws().notify_upsert(&canonical_id, req.source.clone());
 
-        build_upsert_result(
+        let result = build_upsert_result(
             canonical_id,
             result_data,
             &changes,
@@ -288,7 +288,9 @@ impl VerterHost {
                 .map(|h| h.parse.meta.clone())
                 .unwrap_or_default(),
             parse_duration_ms,
-        )
+        );
+        self.bump_store_view_epoch();
+        result
     }
 
     /// Sync parsed edges to VFS (extracted from upsert for reuse).
@@ -614,14 +616,16 @@ impl VerterHost {
             self.ws().notify_upsert(&canonical_id, req.source.clone());
         }
 
-        build_upsert_result(
+        let result = build_upsert_result(
             canonical_id,
             result_data,
             &changes,
             &prev_nodes,
             &old_meta,
             parse_duration_ms,
-        )
+        );
+        self.bump_store_view_epoch();
+        result
     }
 
     /// Apply preprocessor-compiled style overrides for a file+profile.
@@ -784,7 +788,7 @@ impl VerterHost {
                 changed_lsp_ids.push(l);
             }
 
-            Ok(HostUpdateResult {
+            let result = HostUpdateResult {
                 canonical_id: canonical,
                 changed: true,
                 slice_changes: SliceChanges::default(),
@@ -801,7 +805,9 @@ impl VerterHost {
                 preprocessor_requests: Vec::new(),
                 export_signatures: Vec::new(),
                 parse_duration_ms: 0.0,
-            })
+            };
+            self.bump_store_view_epoch();
+            Ok(result)
         }
 
         // Legacy path (WASM)
@@ -907,7 +913,7 @@ impl VerterHost {
                 changed_lsp_ids.push(l);
             }
 
-            Ok(HostUpdateResult {
+            let result = HostUpdateResult {
                 canonical_id: canonical,
                 changed: true,
                 slice_changes: SliceChanges::default(),
@@ -924,7 +930,9 @@ impl VerterHost {
                 preprocessor_requests: Vec::new(),
                 export_signatures: Vec::new(),
                 parse_duration_ms: 0.0,
-            })
+            };
+            self.bump_store_view_epoch();
+            Ok(result)
         }
     }
 
@@ -1115,7 +1123,7 @@ impl VerterHost {
                 changed_lsp_ids.push(l);
             }
 
-            Ok(HostUpdateResult {
+            let result = HostUpdateResult {
                 canonical_id: canonical,
                 changed: true,
                 slice_changes: SliceChanges::default(),
@@ -1132,7 +1140,9 @@ impl VerterHost {
                 preprocessor_requests: Vec::new(),
                 export_signatures: Vec::new(),
                 parse_duration_ms: 0.0,
-            })
+            };
+            self.bump_store_view_epoch();
+            Ok(result)
         }
 
         // Legacy path (WASM)
@@ -1200,7 +1210,7 @@ impl VerterHost {
                 changed_lsp_ids.push(l);
             }
 
-            Ok(HostUpdateResult {
+            let result = HostUpdateResult {
                 canonical_id: canonical,
                 changed: true,
                 slice_changes: SliceChanges::default(),
@@ -1217,7 +1227,9 @@ impl VerterHost {
                 preprocessor_requests: Vec::new(),
                 export_signatures: Vec::new(),
                 parse_duration_ms: 0.0,
-            })
+            };
+            self.bump_store_view_epoch();
+            Ok(result)
         }
     }
 }
