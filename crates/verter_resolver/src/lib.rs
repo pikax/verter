@@ -6,6 +6,8 @@ use std::sync::Arc;
 mod component_meta;
 mod declaration_metadata;
 mod eval_env_build;
+mod export_graph;
+mod export_registry_route;
 mod external_type_body;
 mod external_macro_types;
 mod external_type_graph;
@@ -29,6 +31,15 @@ pub use declaration_metadata::{
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedTypeDeclaration,
 };
 pub use eval_env_build::{collect_requested_binding_names, inject_imported_type_aliases};
+pub use export_graph::{
+    get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
+    resolve_exports_from_graph_best_effort, ExportGraphFileKind, ExportGraphResolver,
+    ExportSurface, ResolvedGraphExport,
+};
+pub use export_registry_route::{
+    resolve_type_via_registry, ExportRegistryView, RegistryExportEntry, RegistryResolvedTarget,
+    RegistryRoute, RegistryRouteResolver,
+};
 pub use external_type_body::{
     resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
 };

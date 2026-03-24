@@ -17,10 +17,15 @@ use verter_resolver::{
     collect_requested_binding_names,
     evaluate_imported_decl_with_owner_env as resolver_evaluate_imported_decl_with_owner_env,
     fallthrough_cache_key, inject_imported_type_aliases, known_spread_keys_from_type_expr,
+    get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
     inject_prop_type_overrides, materialize_imported_runtime_values_into_env,
-    push_partial_reason, resolve_usage_prop_type,
+    push_partial_reason,
+    resolve_exports_from_graph as resolver_resolve_exports_from_graph,
+    resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
+    resolve_usage_prop_type,
     resolve_fallthrough_surface as resolver_resolve_fallthrough_surface, run_stable_request,
-    DeclarationMetadataResolver, DynamicRootCandidate, FallthroughComputeHost,
+    DeclarationMetadataResolver, DynamicRootCandidate, ExportGraphFileKind,
+    ExportGraphResolver, ExportSurface, FallthroughComputeHost,
     FallthroughResolutionView, FallthroughResolverHost, ImportedDeclEvalResolver,
     ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalLookup,
     ImportedEvalLookupResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
@@ -387,6 +392,11 @@ struct HostRuntimeValueResolver<'a> {
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
+struct HostExportGraphResolver<'a> {
+    host: &'a VerterHost,
+    store_view: Option<&'a crate::resolver_store::HostStoreView>,
+}
+
 impl<'a> HostImportedEvalResolver<'a> {
     fn new(
         host: &'a VerterHost,
@@ -430,6 +440,97 @@ impl<'a> HostImportedEvalResolver<'a> {
             snapshot_cache: rustc_hash::FxHashMap::default(),
             eval_source_cache: rustc_hash::FxHashMap::default(),
             store_view,
+        }
+    }
+}
+
+impl HostExportGraphResolver<'_> {
+    fn file_kind_in_view(&self, canonical_id: &str) -> Option<ExportGraphFileKind> {
+        let (_, cached_parse, _) = self
+            .host
+            .current_eval_state_in_view(canonical_id, self.store_view)?;
+        Some(if cached_parse.is_some() {
+            ExportGraphFileKind::VueSfc
+        } else {
+            ExportGraphFileKind::NonSfc
+        })
+    }
+}
+
+impl ExportGraphResolver for HostExportGraphResolver<'_> {
+    fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
+        let snapshot = self
+            .host
+            .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)?;
+        Some(ExportSurface {
+            file_kind: self.file_kind_in_view(canonical_id)?,
+            export_signatures: snapshot.export_signatures.as_ref().clone(),
+        })
+    }
+
+    fn local_export_span(&self, canonical_id: &str, binding_name: &str) -> Option<verter_span::Span> {
+        let snapshot = self
+            .host
+            .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)?;
+        let file_kind = self.file_kind_in_view(canonical_id)?;
+
+        match file_kind {
+            ExportGraphFileKind::VueSfc => {
+                if let Some(binding) = snapshot.bindings.iter().find(|binding| binding.name == binding_name) {
+                    if binding.span.start > 0 || binding.span.end > 0 {
+                        return Some(binding.span);
+                    }
+                }
+
+                for mac in snapshot.macros.iter() {
+                    if mac.binding_name.as_deref() == Some(binding_name)
+                        && (mac.span.start > 0 || mac.span.end > 0)
+                    {
+                        return Some(mac.span);
+                    }
+                }
+
+                if binding_name == "default" {
+                    if let Some(first_binding) = snapshot.bindings.first() {
+                        if first_binding.span.start > 0 || first_binding.span.end > 0 {
+                            return Some(first_binding.span);
+                        }
+                    }
+                    if let Some(first_macro) = snapshot.macros.first() {
+                        if first_macro.span.start > 0 || first_macro.span.end > 0 {
+                            return Some(first_macro.span);
+                        }
+                    }
+                    return Some(verter_span::Span::default());
+                }
+
+                None
+            }
+            ExportGraphFileKind::NonSfc => snapshot
+                .export_signatures
+                .iter()
+                .find(|sig| sig.name == binding_name)
+                .map(|sig| sig.span)
+                .filter(|span| span.start > 0 || span.end > 0),
+        }
+    }
+
+    fn resolve_reexport_target(
+        &self,
+        canonical_id: &str,
+        source: &str,
+        sig: &verter_analysis::ExportSignature,
+    ) -> Option<String> {
+        if sig.is_type {
+            self.host
+                .resolve_type_dependency_canonical_in_view(canonical_id, source, self.store_view)
+        } else {
+            self.host.resolve_loaded_dependency_canonical_in_view(
+                canonical_id,
+                source,
+                verter_vfs::ResolveRequestKind::EsmImport,
+                self.store_view,
+            )
         }
     }
 }
@@ -4389,7 +4490,15 @@ impl VerterHost {
     ) -> Option<(String, u32, u32)> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         if let Some(view) = store_view {
-            self.current_eval_state_in_view(&canonical, Some(view))?;
+            let resolver = HostExportGraphResolver {
+                host: self,
+                store_view: Some(view),
+            };
+            return resolver_get_export_span_follow_reexports_from_graph(
+                &resolver,
+                &canonical,
+                binding_name,
+            );
         }
         #[cfg(feature = "scheduler")]
         if let Some(cc) = self.compile_cache.get(&canonical) {
@@ -4397,124 +4506,11 @@ impl VerterHost {
                 return None;
             }
         }
-        let mut visited = rustc_hash::FxHashSet::default();
-        self.follow_reexport_chain_in_view(&canonical, binding_name, &mut visited, store_view)
-    }
-
-    /// Internal recursive helper for following re-export chains.
-    /// Uses a visited set keyed on `(canonical_id, binding_name)` to detect cycles.
-    fn follow_reexport_chain(
-        &self,
-        canonical_id: &str,
-        binding_name: &str,
-        visited: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<(String, u32, u32)> {
-        self.follow_reexport_chain_in_view(canonical_id, binding_name, visited, None)
-    }
-
-    fn follow_reexport_chain_in_view(
-        &self,
-        canonical_id: &str,
-        binding_name: &str,
-        visited: &mut rustc_hash::FxHashSet<(String, String)>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<(String, u32, u32)> {
-        if !visited.insert((canonical_id.to_string(), binding_name.to_string())) {
-            return None;
-        }
-        if let Some(view) = store_view {
-            self.current_eval_state_in_view(canonical_id, Some(view))?;
-        }
-
-        #[cfg(feature = "scheduler")]
-        {
-            use crate::host_executor::{HostAnalysisData, HostSourceData};
-
-            let source_snap = self.scheduler.try_get_source(canonical_id)?;
-            let hd = source_snap.downcast_data::<HostSourceData>()?;
-            let file_kind = hd.file_kind;
-            drop(source_snap);
-
-            let analysis_snap = self.scheduler.try_get_analysis(canonical_id)?;
-            let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
-
-            if file_kind == crate::FileKind::VueSfc {
-                return Self::find_export_span(
-                    file_kind,
-                    &ad.script_analysis,
-                    &ad.export_signatures,
-                    binding_name,
-                )
-                .map(|(start, end)| (canonical_id.to_string(), start, end));
-            }
-
-            if let Some(sig) = ad.export_signatures.iter().find(|s| s.name == binding_name) {
-                if let (Some(ref source), Some(ref local_name)) =
-                    (&sig.reexport_source, &sig.reexport_local)
-                {
-                    let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
-                    if let Some(target_canonical) = resolved_target {
-                        return self.follow_reexport_chain_in_view(
-                            &target_canonical,
-                            local_name,
-                            visited,
-                            store_view,
-                        );
-                    }
-                    return None;
-                }
-
-                if sig.span.start > 0 || sig.span.end > 0 {
-                    return Some((canonical_id.to_string(), sig.span.start, sig.span.end));
-                }
-            }
-
-            None
-        }
-
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let (file_kind, export_signatures) = {
-                let files = read_lock(&self.files);
-                let entry = files.get(canonical_id)?;
-                (entry.file_kind, entry.export_signatures.clone())
-            };
-
-            if file_kind == crate::FileKind::VueSfc {
-                let files = read_lock(&self.files);
-                let entry = files.get(canonical_id)?;
-                return Self::find_export_span(
-                    entry.file_kind,
-                    &entry.script_analysis,
-                    &entry.export_signatures,
-                    binding_name,
-                )
-                .map(|(start, end)| (canonical_id.to_string(), start, end));
-            }
-
-            if let Some(sig) = export_signatures.iter().find(|s| s.name == binding_name) {
-                if let (Some(ref source), Some(ref local_name)) =
-                    (&sig.reexport_source, &sig.reexport_local)
-                {
-                    let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
-                    if let Some(target_canonical) = resolved_target {
-                        return self.follow_reexport_chain_in_view(
-                            &target_canonical,
-                            local_name,
-                            visited,
-                            store_view,
-                        );
-                    }
-                    return None;
-                }
-
-                if sig.span.start > 0 || sig.span.end > 0 {
-                    return Some((canonical_id.to_string(), sig.span.start, sig.span.end));
-                }
-            }
-
-            None
-        }
+        let resolver = HostExportGraphResolver {
+            host: self,
+            store_view: None,
+        };
+        resolver_get_export_span_follow_reexports_from_graph(&resolver, &canonical, binding_name)
     }
 
     /// Resolve an import specifier to its canonical ID using the host's file map,
@@ -4554,252 +4550,32 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Vec<ResolvedExport> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        if let Some(view) = store_view {
-            if self
-                .current_eval_state_in_view(&canonical, Some(view))
-                .is_none()
-            {
-                return Vec::new();
-            }
-        }
         #[cfg(feature = "scheduler")]
         if let Some(cc) = self.compile_cache.get(&canonical) {
             if cc.evicted {
                 return Vec::new();
             }
         }
-        let mut visiting = rustc_hash::FxHashSet::default();
-        self.collect_resolved_exports_in_view(&canonical, &mut visiting, store_view)
-    }
-
-    /// Recursively collect resolved exports from a file, following re-export chains.
-    fn collect_resolved_exports(
-        &self,
-        canonical_id: &str,
-        visiting: &mut rustc_hash::FxHashSet<String>,
-    ) -> Vec<ResolvedExport> {
-        self.collect_resolved_exports_in_view(canonical_id, visiting, None)
-    }
-
-    fn collect_resolved_exports_in_view(
-        &self,
-        canonical_id: &str,
-        visiting: &mut rustc_hash::FxHashSet<String>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Vec<ResolvedExport> {
-        if !visiting.insert(canonical_id.to_string()) {
-            return Vec::new();
-        }
-        if let Some(view) = store_view {
-            if self
-                .current_eval_state_in_view(canonical_id, Some(view))
-                .is_none()
-            {
-                visiting.remove(canonical_id);
-                return Vec::new();
-            }
-        }
-
-        let Some((file_kind, export_signatures)) =
-            self.export_surface_for_reexport_resolution(canonical_id)
-        else {
-            visiting.remove(canonical_id);
-            return Vec::new();
+        let resolver = HostExportGraphResolver {
+            host: self,
+            store_view,
         };
-
-        let mut results = Vec::new();
-
-        let has_default_signature = export_signatures.iter().any(|sig| sig.name == "default");
-        if file_kind == crate::FileKind::VueSfc && !has_default_signature {
-            results.push(ResolvedExport {
-                name: "default".to_string(),
-                is_type: false,
-                source_canonical_id: None,
-                source_name: "default".to_string(),
-            });
-        }
-
-        for sig in &export_signatures {
-            if sig.name == "*" {
-                if let Some(ref source) = sig.reexport_source {
-                    let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
-                    if let Some(target) = resolved_target {
-                        let nested =
-                            self.collect_resolved_exports_in_view(&target, visiting, store_view);
-                        for mut export in nested {
-                            if export.source_canonical_id.is_none() {
-                                export.source_canonical_id = Some(target.clone());
-                            }
-                            results.push(export);
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if let (Some(ref source), Some(ref local_name)) =
-                (&sig.reexport_source, &sig.reexport_local)
-            {
-                let resolved_target = resolve_reexport_target(self, canonical_id, source, sig);
-                if let Some(target) = resolved_target {
-                    let resolved = self
-                        .resolve_single_export_in_view(&target, local_name, visiting, store_view);
-                    let (src_id, src_name) = match resolved {
-                        Some((cid, n)) => (Some(cid), n),
-                        None if store_view.is_some() => {
-                            continue;
-                        }
-                        None => (Some(target.clone()), local_name.clone()),
-                    };
-                    results.push(ResolvedExport {
-                        name: sig.name.clone(),
-                        is_type: sig.is_type,
-                        source_canonical_id: src_id,
-                        source_name: src_name,
-                    });
-                } else if store_view.is_some() {
-                    continue;
-                } else {
-                    results.push(ResolvedExport {
-                        name: sig.name.clone(),
-                        is_type: sig.is_type,
-                        source_canonical_id: None,
-                        source_name: local_name.clone(),
-                    });
-                }
-            } else {
-                results.push(ResolvedExport {
-                    name: sig.name.clone(),
-                    is_type: sig.is_type,
-                    source_canonical_id: None,
-                    source_name: sig.name.clone(),
-                });
-            }
-        }
-
-        visiting.remove(canonical_id);
-        results
-    }
-
-    /// Follow a re-export chain for a single named export.
-    /// Returns (ultimate_canonical_id, ultimate_name) or None if unresolvable.
-    fn resolve_single_export(
-        &self,
-        canonical_id: &str,
-        name: &str,
-        visiting: &mut rustc_hash::FxHashSet<String>,
-    ) -> Option<(String, String)> {
-        self.resolve_single_export_in_view(canonical_id, name, visiting, None)
-    }
-
-    fn resolve_single_export_in_view(
-        &self,
-        canonical_id: &str,
-        name: &str,
-        visiting: &mut rustc_hash::FxHashSet<String>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<(String, String)> {
-        if let Some(view) = store_view {
-            self.current_eval_state_in_view(canonical_id, Some(view))?;
-        }
-        let (file_kind, export_signatures) =
-            self.export_surface_for_reexport_resolution(canonical_id)?;
-
-        if file_kind == crate::FileKind::VueSfc {
-            if name == "default" {
-                return Some((canonical_id.to_string(), name.to_string()));
-            }
-            if export_signatures.iter().any(|sig| sig.name == name) {
-                return Some((canonical_id.to_string(), name.to_string()));
-            }
-            return None;
-        }
-
-        let sig = export_signatures.iter().find(|s| s.name == name)?;
-
-        if let (Some(ref source), Some(ref local)) = (&sig.reexport_source, &sig.reexport_local) {
-            if visiting.contains(canonical_id) {
-                return Some((canonical_id.to_string(), name.to_string()));
-            }
-            visiting.insert(canonical_id.to_string());
-            let target = resolve_reexport_target(self, canonical_id, source, sig);
-            visiting.remove(canonical_id);
-
-            if let Some(target_id) = target {
-                let resolved =
-                    self.resolve_single_export_in_view(&target_id, local, visiting, store_view);
-                if store_view.is_some() {
-                    resolved
-                } else {
-                    resolved.or(Some((target_id, local.clone())))
-                }
-            } else {
-                if store_view.is_some() {
-                    None
-                } else {
-                    Some((canonical_id.to_string(), name.to_string()))
-                }
-            }
+        let resolved = if store_view.is_some() {
+            resolver_resolve_exports_from_graph(&resolver, &canonical)
         } else {
-            Some((canonical_id.to_string(), name.to_string()))
-        }
+            resolver_resolve_exports_from_graph_best_effort(&resolver, &canonical)
+        };
+        resolved
+            .into_iter()
+            .map(|export| ResolvedExport {
+                name: export.name,
+                is_type: export.is_type,
+                source_canonical_id: export.source_canonical_id,
+                source_name: export.source_name,
+            })
+            .collect()
     }
 
-    fn export_surface_for_reexport_resolution(
-        &self,
-        canonical_id: &str,
-    ) -> Option<(crate::FileKind, Vec<verter_analysis::ExportSignature>)> {
-        #[cfg(feature = "scheduler")]
-        {
-            use crate::host_executor::{HostAnalysisData, HostSourceData};
-
-            if let Some(source_snap) = self.scheduler.try_get_source(canonical_id) {
-                let hd = source_snap.downcast_data::<HostSourceData>()?;
-                let file_kind = hd.file_kind;
-                drop(source_snap);
-
-                if let Some(sigs) = self.scheduler.try_get_analysis(canonical_id).and_then(|a| {
-                    a.downcast_data::<HostAnalysisData>()
-                        .map(|ad| ad.export_signatures.clone())
-                }) {
-                    return Some((file_kind, sigs));
-                }
-            }
-        }
-
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let files = read_lock(&self.files);
-            if let Some(entry) = files.get(canonical_id) {
-                return Some((entry.file_kind, entry.export_signatures.clone()));
-            }
-        }
-
-        let source = self
-            .get_source(canonical_id)
-            .or_else(|| self.ws().read_file(canonical_id))?;
-        let file_kind = if canonical_id.ends_with(".vue") {
-            crate::FileKind::VueSfc
-        } else {
-            crate::FileKind::NonSfc
-        };
-        let export_signatures = match file_kind {
-            crate::FileKind::VueSfc => {
-                crate::parse::parse_vue_snapshot(
-                    canonical_id,
-                    &source,
-                    verter_analysis::AnalysisScope::NONE,
-                )
-                .0
-                .export_signatures
-            }
-            crate::FileKind::NonSfc => {
-                crate::parse::parse_non_sfc_snapshot(canonical_id, &source).export_signatures
-            }
-        };
-
-        Some((file_kind, export_signatures))
-    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -6294,23 +6070,6 @@ fn should_recurse_surface_type_arguments(name: &str) -> bool {
             | "InstanceType"
             | "Awaited"
     )
-}
-
-fn resolve_reexport_target(
-    host: &VerterHost,
-    canonical_id: &str,
-    source: &str,
-    sig: &verter_analysis::ExportSignature,
-) -> Option<String> {
-    if sig.is_type {
-        host.resolve_type_dependency_canonical(canonical_id, source)
-    } else {
-        let ctx = verter_vfs::ResolutionContext {
-            phase: verter_vfs::ResolvePhase::ProviderGraph,
-            kind: verter_vfs::ResolveRequestKind::EsmImport,
-        };
-        host.resolve_via_vfs(canonical_id, source, ctx)
-    }
 }
 
 /// Extract slot bindings from a type_text that encodes a slot's function signature.

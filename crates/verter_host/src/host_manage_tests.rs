@@ -517,6 +517,27 @@ defineProps<Props>()
 }
 
 #[test]
+fn stale_store_view_keeps_resolved_exports_on_captured_reexport_graph() {
+    let host = make_host();
+
+    upsert_non_sfc(&host, "/src/dep.ts", "export interface Props { msg: string }\n");
+    upsert_non_sfc(&host, "/src/index.ts", "export { Props } from './dep'\n");
+
+    let before_view = host.resolver_store_view();
+    let before_exports = host.resolve_exports_in_view("/src/index.ts", Some(&before_view));
+    assert_eq!(before_exports.len(), 1);
+    assert_eq!(before_exports[0].source_canonical_id.as_deref(), Some("/src/dep.ts"));
+
+    upsert_non_sfc(&host, "/src/dep.ts", "export interface Renamed { disabled: boolean }\n");
+
+    assert!(
+        host.resolve_exports_in_view("/src/index.ts", Some(&before_view))
+            .is_empty(),
+        "captured views must reject export graphs whose downstream re-export target changed",
+    );
+}
+
+#[test]
 fn owner_env_resolution_is_retained_for_nested_heritage_like_surfaces() {
     let decl = verter_analysis::type_eval::TypeDeclInfo {
         name: "EditorOptions".to_string(),

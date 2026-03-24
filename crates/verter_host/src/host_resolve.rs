@@ -30,7 +30,10 @@ use verter_core::compile::CodegenOptions;
 use verter_core::compile::{
     compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
-use verter_resolver::{resolve_external_type_from_source_body, ExternalTypeBodyResolver};
+use verter_resolver::{
+    resolve_external_type_from_source_body, ExternalTypeBodyResolver, ExportRegistryView,
+    RegistryExportEntry, RegistryRouteResolver,
+};
 
 #[cfg(not(feature = "scheduler"))]
 use crate::cache::enforce_profile_cap;
@@ -72,6 +75,11 @@ struct ViewExternalTypeGraphResolver<'a> {
 }
 
 struct HostExternalMacroTypeCollector<'a> {
+    host: &'a VerterHost,
+}
+
+#[cfg(feature = "scheduler")]
+struct HostRegistryRouteResolver<'a> {
     host: &'a VerterHost,
 }
 
@@ -218,6 +226,44 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
 
     fn debug_log(&self, message: String) {
         external_type_debug(message);
+    }
+}
+
+#[cfg(feature = "scheduler")]
+impl RegistryRouteResolver for HostRegistryRouteResolver<'_> {
+    fn ensure_export_registry(&self, canonical: &str) -> Option<ExportRegistryView> {
+        let registry = self.host.ensure_export_registry(canonical)?;
+        Some(ExportRegistryView {
+            source_hash: registry.source_hash,
+            named: registry
+                .named
+                .into_iter()
+                .map(|(name, entry)| {
+                    let entry = match entry {
+                        crate::types::ExportEntry::Defined => RegistryExportEntry::Defined,
+                        crate::types::ExportEntry::Alias {
+                            source_specifier,
+                            original_name,
+                        } => RegistryExportEntry::Alias {
+                            source_specifier,
+                            original_name,
+                        },
+                    };
+                    (name, entry)
+                })
+                .collect(),
+            wildcard_edges: registry.wildcard_edges,
+        })
+    }
+
+    fn resolve_loaded_dependency_canonical(
+        &self,
+        canonical: &str,
+        source_specifier: &str,
+        kind: verter_vfs::ResolveRequestKind,
+    ) -> Option<String> {
+        self.host
+            .resolve_loaded_dependency_canonical(canonical, source_specifier, kind)
     }
 }
 
@@ -1473,201 +1519,18 @@ impl VerterHost {
         kind: verter_vfs::ResolveRequestKind,
         visited: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> crate::types::RegistryRoute {
-        let mut tracked_deps = Vec::new();
-        let mut route_hashes = Vec::new();
-
-        let result = self.resolve_type_via_registry_inner(
-            canonical,
-            type_name,
-            kind,
-            visited,
-            &mut tracked_deps,
-            &mut route_hashes,
-        );
+        let resolver = HostRegistryRouteResolver { host: self };
+        let route =
+            verter_resolver::resolve_type_via_registry(&resolver, canonical, type_name, kind, visited);
 
         crate::types::RegistryRoute {
-            target: result,
-            tracked_deps,
-            route_hashes,
+            target: route.target.map(|target| crate::types::NormalizedTypeTarget {
+                final_canonical_id: target.final_canonical_id,
+                exported_name: target.exported_name,
+            }),
+            tracked_deps: route.tracked_deps,
+            route_hashes: route.route_hashes,
         }
-    }
-
-    #[cfg(feature = "scheduler")]
-    fn resolve_type_via_registry_inner(
-        &self,
-        canonical: &str,
-        type_name: &str,
-        kind: verter_vfs::ResolveRequestKind,
-        visited: &mut rustc_hash::FxHashSet<(String, String)>,
-        tracked_deps: &mut Vec<String>,
-        route_hashes: &mut Vec<(String, Hash16)>,
-    ) -> Option<crate::types::NormalizedTypeTarget> {
-        // Cycle detection
-        if !visited.insert((canonical.to_string(), type_name.to_string())) {
-            return None;
-        }
-
-        // Get or build registry for this file
-        let registry = self.ensure_export_registry(canonical)?;
-        tracked_deps.push(canonical.to_string());
-        route_hashes.push((canonical.to_string(), registry.source_hash));
-
-        // Step 1: Check named exports (authoritative, O(1))
-        if let Some(entry) = registry.named.get(type_name) {
-            match entry {
-                crate::types::ExportEntry::Defined => {
-                    return Some(crate::types::NormalizedTypeTarget {
-                        final_canonical_id: canonical.to_string(),
-                        exported_name: type_name.to_string(),
-                    });
-                }
-                crate::types::ExportEntry::Alias {
-                    source_specifier,
-                    original_name,
-                } => {
-                    // Follow this ONE import — resolve specifier to canonical
-                    if let Some(source_canonical) =
-                        self.resolve_loaded_dependency_canonical(canonical, source_specifier, kind)
-                    {
-                        return self.resolve_type_via_registry_inner(
-                            &source_canonical,
-                            original_name,
-                            kind,
-                            visited,
-                            tracked_deps,
-                            route_hashes,
-                        );
-                    }
-                    return None; // Can't resolve specifier
-                }
-            }
-        }
-
-        // Step 2: BFS through wildcard edges in source declaration order
-        // Level 1: check immediate children's named exports only
-        let mut bfs_queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-
-        for specifier in &registry.wildcard_edges {
-            if let Some(child_canonical) =
-                self.resolve_loaded_dependency_canonical(canonical, specifier, kind)
-            {
-                // Check child's named exports directly
-                if let Some(child_registry) = self.ensure_export_registry(&child_canonical) {
-                    tracked_deps.push(child_canonical.clone());
-                    route_hashes.push((child_canonical.clone(), child_registry.source_hash));
-
-                    if let Some(entry) = child_registry.named.get(type_name) {
-                        // Mark as visited for cycle safety
-                        visited.insert((child_canonical.clone(), type_name.to_string()));
-
-                        match entry {
-                            crate::types::ExportEntry::Defined => {
-                                return Some(crate::types::NormalizedTypeTarget {
-                                    final_canonical_id: child_canonical,
-                                    exported_name: type_name.to_string(),
-                                });
-                            }
-                            crate::types::ExportEntry::Alias {
-                                source_specifier,
-                                original_name,
-                            } => {
-                                if let Some(alias_canonical) = self
-                                    .resolve_loaded_dependency_canonical(
-                                        &child_canonical,
-                                        source_specifier,
-                                        kind,
-                                    )
-                                {
-                                    return self.resolve_type_via_registry_inner(
-                                        &alias_canonical,
-                                        original_name,
-                                        kind,
-                                        visited,
-                                        tracked_deps,
-                                        route_hashes,
-                                    );
-                                }
-                                return None;
-                            }
-                        }
-                    }
-
-                    // Not in named exports — enqueue child's wildcards for BFS level 2+
-                    for child_specifier in &child_registry.wildcard_edges {
-                        if let Some(grandchild_canonical) = self
-                            .resolve_loaded_dependency_canonical(
-                                &child_canonical,
-                                child_specifier,
-                                kind,
-                            )
-                        {
-                            if !visited
-                                .contains(&(grandchild_canonical.clone(), type_name.to_string()))
-                            {
-                                bfs_queue.push_back(grandchild_canonical);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // BFS level 2+: process queued wildcard children
-        while let Some(next_canonical) = bfs_queue.pop_front() {
-            if !visited.insert((next_canonical.clone(), type_name.to_string())) {
-                continue; // Already visited
-            }
-
-            if let Some(next_registry) = self.ensure_export_registry(&next_canonical) {
-                tracked_deps.push(next_canonical.clone());
-                route_hashes.push((next_canonical.clone(), next_registry.source_hash));
-
-                if let Some(entry) = next_registry.named.get(type_name) {
-                    match entry {
-                        crate::types::ExportEntry::Defined => {
-                            return Some(crate::types::NormalizedTypeTarget {
-                                final_canonical_id: next_canonical,
-                                exported_name: type_name.to_string(),
-                            });
-                        }
-                        crate::types::ExportEntry::Alias {
-                            source_specifier,
-                            original_name,
-                        } => {
-                            if let Some(alias_canonical) = self.resolve_loaded_dependency_canonical(
-                                &next_canonical,
-                                source_specifier,
-                                kind,
-                            ) {
-                                return self.resolve_type_via_registry_inner(
-                                    &alias_canonical,
-                                    original_name,
-                                    kind,
-                                    visited,
-                                    tracked_deps,
-                                    route_hashes,
-                                );
-                            }
-                            return None;
-                        }
-                    }
-                }
-
-                // Enqueue this node's wildcards for further BFS
-                for specifier in &next_registry.wildcard_edges {
-                    if let Some(grandchild_canonical) =
-                        self.resolve_loaded_dependency_canonical(&next_canonical, specifier, kind)
-                    {
-                        if !visited.contains(&(grandchild_canonical.clone(), type_name.to_string()))
-                        {
-                            bfs_queue.push_back(grandchild_canonical);
-                        }
-                    }
-                }
-            }
-        }
-
-        None // Type not found in export graph
     }
 
     /// Read the effective source for a dependency file for type resolution.
