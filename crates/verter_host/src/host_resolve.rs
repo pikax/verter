@@ -66,6 +66,11 @@ struct ViewExternalTypeResolver<'a> {
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
+struct ViewExternalTypeGraphResolver<'a> {
+    host: &'a VerterHost,
+    store_view: &'a crate::resolver_store::HostStoreView,
+}
+
 struct HostExternalMacroTypeCollector<'a> {
     host: &'a VerterHost,
 }
@@ -147,6 +152,72 @@ impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCo
             message,
             span: import_span,
         }
+    }
+}
+
+impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolver<'_> {
+    type Error = crate::types::ExternalTypeResolveError;
+
+    fn max_external_type_resolve_steps(&self) -> usize {
+        crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS
+    }
+
+    fn max_external_type_resolve_depth(&self) -> usize {
+        crate::types::MAX_RESOLVE_DEPTH
+    }
+
+    fn missing_root_dependency(&self) -> Self::Error {
+        crate::types::ExternalTypeResolveError::MissingRootDependency
+    }
+
+    fn depth_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
+        crate::types::ExternalTypeResolveError::DepthLimitExceeded {
+            limit: crate::types::MAX_RESOLVE_DEPTH,
+            type_name: type_name.to_string(),
+            last_dep: last_dep.to_string(),
+        }
+    }
+
+    fn step_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
+        crate::types::ExternalTypeResolveError::StepLimitExceeded {
+            limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
+            type_name: type_name.to_string(),
+            last_dep: last_dep.to_string(),
+        }
+    }
+
+    fn resolve_dependency_canonical(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        kind: verter_vfs::ResolveRequestKind,
+    ) -> Option<String> {
+        self.host.resolve_loaded_dependency_canonical_in_view(
+            owner_canonical,
+            import_source,
+            kind,
+            Some(self.store_view),
+        )
+    }
+
+    fn read_source_for_type_resolution(
+        &self,
+        dep_canonical: &str,
+        profile_hash: Option<u64>,
+    ) -> Option<String> {
+        self.host.read_dep_source_for_type_resolution_in_view(
+            dep_canonical,
+            profile_hash,
+            Some(self.store_view),
+        )
+    }
+
+    fn debug_enabled(&self) -> bool {
+        external_type_debug_enabled()
+    }
+
+    fn debug_log(&self, message: String) {
+        external_type_debug(message);
     }
 }
 
@@ -491,6 +562,28 @@ impl VerterHost {
         Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
+        if let Some(view) = store_view {
+            let resolver = ViewExternalTypeGraphResolver {
+                host: self,
+                store_view: view,
+            };
+            return verter_resolver::resolve_external_type_from_graph(
+                &resolver,
+                owner_canonical,
+                import_source,
+                type_name,
+                tracked_deps,
+                resolution_deps,
+                cache,
+                visiting,
+                required_root_dep,
+                kind,
+                use_host_cache,
+                profile_hash,
+                depth,
+            );
+        }
+
         // Safety net: prevent runaway recursion through deep barrel chains.
         if depth >= crate::types::MAX_RESOLVE_DEPTH {
             return Err(crate::types::ExternalTypeResolveError::DepthLimitExceeded {

@@ -8,6 +8,7 @@ mod declaration_metadata;
 mod eval_env_build;
 mod external_type_body;
 mod external_macro_types;
+mod external_type_graph;
 mod fallthrough;
 mod imported_decl_eval;
 mod imported_eval_collect;
@@ -35,6 +36,7 @@ pub use external_macro_types::{
     collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,
     ExternalMacroTypeDiagnostic,
 };
+pub use external_type_graph::{resolve_external_type_from_graph, ExternalTypeGraphResolver};
 pub use fallthrough::{
     append_component_candidate_branches, append_native_candidate_branch,
     collect_dynamic_root_candidates_from_type, extend_unique_fact_versions,
