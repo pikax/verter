@@ -13,10 +13,10 @@ use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
 use verter_resolver::{
-    build_imported_eval_inputs, collect_dynamic_root_candidates_from_type,
-    collect_requested_binding_names,
+    build_imported_eval_inputs, build_owner_eval_env_with_inputs,
+    collect_dynamic_root_candidates_from_type,
     evaluate_imported_decl_with_owner_env as resolver_evaluate_imported_decl_with_owner_env,
-    fallthrough_cache_key, inject_imported_type_aliases, known_spread_keys_from_type_expr,
+    fallthrough_cache_key, known_spread_keys_from_type_expr,
     get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
     inject_prop_type_overrides, materialize_imported_runtime_values_into_env,
     push_partial_reason,
@@ -31,8 +31,9 @@ use verter_resolver::{
     ImportedEvalLookupResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
     ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
     ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
-    PreparedImportedDeclContext, RequestSource, ResolvedConsumedBindings, ResolvedExportTarget,
-    SingleflightRole, StableRequestExecutor, StoreView,
+    OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource,
+    ResolvedConsumedBindings, ResolvedExportTarget, SingleflightRole,
+    StableRequestExecutor, StoreView,
 };
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -1130,9 +1131,33 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
     }
 }
 
-struct OwnerEvalEnvBuild {
-    env: verter_analysis::type_eval::EvalEnv,
-    requested_binding_names: rustc_hash::FxHashSet<String>,
+type OwnerEvalEnvBuild = verter_resolver::OwnerEvalEnvBuild;
+
+struct HostOwnerEvalEnvAssembler<'a> {
+    host: &'a VerterHost,
+    store_view: Option<&'a HostStoreView>,
+}
+
+impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
+    type Snapshot = FileAnalysisSnapshot;
+
+    fn base_eval_env(&self, canonical_id: &str) -> Option<verter_analysis::type_eval::EvalEnv> {
+        self.host.base_eval_env_in_view(canonical_id, self.store_view)
+    }
+
+    fn materialize_imported_runtime_values(
+        &self,
+        snapshot: &Self::Snapshot,
+        owner_local_value_names: &rustc_hash::FxHashSet<String>,
+        env: &mut verter_analysis::type_eval::EvalEnv,
+    ) {
+        self.host.materialize_imported_runtime_values_into_env_in_view(
+            snapshot,
+            owner_local_value_names,
+            env,
+            self.store_view,
+        );
+    }
 }
 
 impl VerterHost {
@@ -2290,64 +2315,30 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<OwnerEvalEnvBuild> {
         let started = component_meta_debug_enabled().then(Instant::now);
-        let mut env = owner_env.or_else(|| self.base_eval_env_in_view(canonical_id, store_view))?;
-        let local_type_names: rustc_hash::FxHashSet<String> =
-            env.type_symbols.keys().cloned().collect();
-        let local_value_names: rustc_hash::FxHashSet<String> =
-            env.value_symbols.keys().cloned().collect();
-        let requested_binding_names = collect_requested_binding_names(snapshot.macros.as_ref());
-        for dep_source in &imported_inputs.sources {
-            let dep_env = self
-                .base_eval_env_in_view(dep_source.canonical_id.as_str(), store_view)
-                .unwrap_or_else(|| {
-                    verter_analysis::type_eval_build::parse_and_build_env(
-                        dep_source.source.as_ref(),
-                    )
-                });
-            env.extend_missing(dep_env);
-        }
+        let assembler = HostOwnerEvalEnvAssembler {
+            host: self,
+            store_view,
+        };
+        let built = build_owner_eval_env_with_inputs(
+            &assembler,
+            canonical_id,
+            snapshot,
+            snapshot.macros.as_ref(),
+            imported_inputs,
+            prop_type_overrides,
+            owner_env,
+        )?;
         if component_meta_debug_enabled() {
             component_meta_debug(format!(
-                "build_owner_eval_env owner={} after_dep_merge dep_sources={} type_symbols={} value_symbols={} took {:?}",
+                "build_owner_eval_env owner={} dep_sources={} type_symbols={} value_symbols={} took {:?}",
                 canonical_id,
                 imported_inputs.sources.len(),
-                env.type_symbols.len(),
-                env.value_symbols.len(),
+                built.env.type_symbols.len(),
+                built.env.value_symbols.len(),
                 started.map(|start| start.elapsed()).unwrap_or_default(),
             ));
         }
-        inject_imported_type_aliases(&mut env, &local_type_names, imported_inputs);
-        if component_meta_debug_enabled() {
-            component_meta_debug(format!(
-                "build_owner_eval_env owner={} after_type_aliases type_symbols={} value_symbols={} took {:?}",
-                canonical_id,
-                env.type_symbols.len(),
-                env.value_symbols.len(),
-                started.map(|start| start.elapsed()).unwrap_or_default(),
-            ));
-        }
-        self.materialize_imported_runtime_values_into_env_in_view(
-            snapshot,
-            &local_value_names,
-            &mut env,
-            store_view,
-        );
-        if component_meta_debug_enabled() {
-            component_meta_debug(format!(
-                "build_owner_eval_env owner={} after_runtime_values type_symbols={} value_symbols={} took {:?}",
-                canonical_id,
-                env.type_symbols.len(),
-                env.value_symbols.len(),
-                started.map(|start| start.elapsed()).unwrap_or_default(),
-            ));
-        }
-        if let Some(overrides) = prop_type_overrides {
-            inject_prop_type_overrides(&mut env, overrides);
-        }
-        Some(OwnerEvalEnvBuild {
-            env,
-            requested_binding_names,
-        })
+        Some(built)
     }
 
     fn materialize_imported_runtime_values_into_env(

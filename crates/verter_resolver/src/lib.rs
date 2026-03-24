@@ -35,7 +35,10 @@ pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedTypeDeclaration,
 };
-pub use eval_env_build::{collect_requested_binding_names, inject_imported_type_aliases};
+pub use eval_env_build::{
+    build_owner_eval_env_with_inputs, collect_requested_binding_names,
+    inject_imported_type_aliases, OwnerEvalEnvAssembler, OwnerEvalEnvBuild,
+};
 pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
     resolve_exports_from_graph_best_effort, ExportGraphFileKind, ExportGraphResolver,

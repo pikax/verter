@@ -1,8 +1,28 @@
 use rustc_hash::FxHashSet;
 use verter_analysis::type_eval::EvalEnv;
+use verter_analysis::type_expr::TypeExpr;
 use verter_analysis::AnalyzedMacro;
 
+use crate::fallthrough::inject_prop_type_overrides;
 use crate::ImportedEvalInputs;
+
+pub struct OwnerEvalEnvBuild {
+    pub env: EvalEnv,
+    pub requested_binding_names: FxHashSet<String>,
+}
+
+pub trait OwnerEvalEnvAssembler {
+    type Snapshot;
+
+    fn base_eval_env(&self, canonical_id: &str) -> Option<EvalEnv>;
+
+    fn materialize_imported_runtime_values(
+        &self,
+        snapshot: &Self::Snapshot,
+        owner_local_value_names: &FxHashSet<String>,
+        env: &mut EvalEnv,
+    );
+}
 
 pub fn collect_requested_binding_names(macros: &[AnalyzedMacro]) -> FxHashSet<String> {
     macros
@@ -25,17 +45,86 @@ pub fn inject_imported_type_aliases(
     }
 }
 
+pub fn build_owner_eval_env_with_inputs<A: OwnerEvalEnvAssembler>(
+    assembler: &A,
+    canonical_id: &str,
+    snapshot: &A::Snapshot,
+    macros: &[AnalyzedMacro],
+    imported_inputs: &ImportedEvalInputs,
+    prop_type_overrides: Option<&rustc_hash::FxHashMap<String, TypeExpr>>,
+    owner_env: Option<EvalEnv>,
+) -> Option<OwnerEvalEnvBuild> {
+    let mut env = owner_env.or_else(|| assembler.base_eval_env(canonical_id))?;
+    let local_type_names: FxHashSet<String> = env.type_symbols.keys().cloned().collect();
+    let local_value_names: FxHashSet<String> = env.value_symbols.keys().cloned().collect();
+    let requested_binding_names = collect_requested_binding_names(macros);
+
+    for dep_source in &imported_inputs.sources {
+        let dep_env = assembler
+            .base_eval_env(dep_source.canonical_id.as_str())
+            .unwrap_or_else(|| {
+                verter_analysis::type_eval_build::parse_and_build_env(dep_source.source.as_ref())
+            });
+        env.extend_missing(dep_env);
+    }
+
+    inject_imported_type_aliases(&mut env, &local_type_names, imported_inputs);
+    assembler.materialize_imported_runtime_values(snapshot, &local_value_names, &mut env);
+
+    if let Some(overrides) = prop_type_overrides {
+        inject_prop_type_overrides(&mut env, overrides);
+    }
+
+    Some(OwnerEvalEnvBuild {
+        env,
+        requested_binding_names,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_requested_binding_names, inject_imported_type_aliases};
+    use super::{
+        build_owner_eval_env_with_inputs, collect_requested_binding_names,
+        inject_imported_type_aliases, OwnerEvalEnvAssembler,
+    };
     use crate::{ImportedEvalInputs, ImportedTypeAlias};
-    use rustc_hash::FxHashSet;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::BTreeSet;
-    use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+    use verter_analysis::type_eval::{
+        EvalEnv, TypeDeclInfo, TypeDeclKind, ValueDeclInfo, ValueDeclKind,
+    };
     use verter_analysis::type_expr::{PrimitiveName, TypeExpr};
     use verter_analysis::types::AnalyzedExposeField;
     use verter_analysis::{AnalyzedMacro, AnalyzedMacroKind};
     use verter_span::Span;
+
+    #[derive(Default)]
+    struct TestAssembler {
+        base_envs: FxHashMap<String, EvalEnv>,
+        runtime_values: FxHashMap<String, ValueDeclInfo>,
+    }
+
+    impl OwnerEvalEnvAssembler for TestAssembler {
+        type Snapshot = ();
+
+        fn base_eval_env(&self, canonical_id: &str) -> Option<EvalEnv> {
+            self.base_envs.get(canonical_id).cloned()
+        }
+
+        fn materialize_imported_runtime_values(
+            &self,
+            _snapshot: &Self::Snapshot,
+            owner_local_value_names: &FxHashSet<String>,
+            env: &mut EvalEnv,
+        ) {
+            for (name, value) in &self.runtime_values {
+                if owner_local_value_names.contains(name) {
+                    continue;
+                }
+                env.value_symbols.insert(name.clone(), value.clone());
+            }
+        }
+    }
 
     #[test]
     fn collect_requested_binding_names_only_tracks_exposed_fields() {
@@ -131,5 +220,132 @@ mod tests {
             env.type_symbols.get("Imported").map(|decl| &decl.body),
             Some(&TypeExpr::Primitive(PrimitiveName::Boolean))
         );
+    }
+
+    #[test]
+    fn build_owner_eval_env_with_inputs_merges_deps_aliases_runtime_values_and_overrides() {
+        let mut owner_env = EvalEnv::new();
+        owner_env.add_type(TypeDeclInfo {
+            name: "Local".to_string(),
+            declaration_id: 1,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: TypeExpr::Primitive(PrimitiveName::String),
+        });
+        owner_env.add_value(ValueDeclInfo {
+            name: "shadowed".to_string(),
+            declaration_id: 2,
+            kind: ValueDeclKind::Const,
+            type_annotation: Some(TypeExpr::Primitive(PrimitiveName::String)),
+            function_signature: None,
+            object_shape: None,
+        });
+
+        let mut dep_env = EvalEnv::new();
+        dep_env.add_type(TypeDeclInfo {
+            name: "DepOnly".to_string(),
+            declaration_id: 3,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: TypeExpr::Primitive(PrimitiveName::Boolean),
+        });
+
+        let mut assembler = TestAssembler::default();
+        assembler
+            .base_envs
+            .insert("/src/owner.ts".to_string(), owner_env.clone());
+        assembler
+            .base_envs
+            .insert("/src/dep.ts".to_string(), dep_env.clone());
+        assembler.runtime_values.insert(
+            "runtimeOnly".to_string(),
+            ValueDeclInfo {
+                name: "runtimeOnly".to_string(),
+                declaration_id: 4,
+                kind: ValueDeclKind::Const,
+                type_annotation: Some(TypeExpr::Primitive(PrimitiveName::Number)),
+                function_signature: None,
+                object_shape: None,
+            },
+        );
+        assembler.runtime_values.insert(
+            "shadowed".to_string(),
+            ValueDeclInfo {
+                name: "shadowed".to_string(),
+                declaration_id: 5,
+                kind: ValueDeclKind::Const,
+                type_annotation: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+                function_signature: None,
+                object_shape: None,
+            },
+        );
+
+        let imported_inputs = ImportedEvalInputs {
+            sources: vec![crate::ImportedEvalSource {
+                canonical_id: "/src/dep.ts".to_string(),
+                source: std::sync::Arc::<str>::from("export interface DepOnly {}"),
+            }],
+            type_aliases: vec![ImportedTypeAlias {
+                local_name: "Imported".to_string(),
+                source_canonical_id: "/src/dep.ts".to_string(),
+                exported_name: "Imported".to_string(),
+                decl: TypeDeclInfo {
+                    name: "Imported".to_string(),
+                    declaration_id: 6,
+                    kind: TypeDeclKind::Alias,
+                    type_parameters: Vec::new(),
+                    body: TypeExpr::Primitive(PrimitiveName::Boolean),
+                },
+                requires_source_merge: false,
+            }],
+            canonical_dependencies: BTreeSet::new(),
+            overflow: None,
+        };
+
+        let overrides = FxHashMap::from_iter([(
+            "Local".to_string(),
+            TypeExpr::Primitive(PrimitiveName::Number),
+        )]);
+
+        let actual = build_owner_eval_env_with_inputs(
+            &assembler,
+            "/src/owner.ts",
+            &(),
+            &[],
+            &imported_inputs,
+            Some(&overrides),
+            None,
+        )
+        .expect("owner env should build");
+
+        assert_eq!(
+            actual.env.type_symbols.get("DepOnly").map(|decl| &decl.body),
+            Some(&TypeExpr::Primitive(PrimitiveName::Boolean))
+        );
+        assert_eq!(
+            actual.env.type_symbols.get("Imported").map(|decl| &decl.body),
+            Some(&TypeExpr::Primitive(PrimitiveName::Boolean))
+        );
+        assert_eq!(
+            actual.env.type_symbols.get("Local").map(|decl| &decl.body),
+            Some(&TypeExpr::Primitive(PrimitiveName::Number))
+        );
+        assert_eq!(
+            actual
+                .env
+                .value_symbols
+                .get("runtimeOnly")
+                .and_then(|decl| decl.type_annotation.as_ref()),
+            Some(&TypeExpr::Primitive(PrimitiveName::Number))
+        );
+        assert_eq!(
+            actual
+                .env
+                .value_symbols
+                .get("shadowed")
+                .and_then(|decl| decl.type_annotation.as_ref()),
+            Some(&TypeExpr::Primitive(PrimitiveName::String))
+        );
+        assert!(actual.requested_binding_names.is_empty());
     }
 }
