@@ -28,18 +28,6 @@ export type ModelToModelInfo<T> = {
   [K in keyof T]: ExtractModelInfo<T[K], K & string>;
 };
 
-const foo = defineModel<string>("value");
-const bar = defineModel<string>("count", {
-  default: "hello",
-});
-const baz = defineModel<string>("count", {
-  required: true,
-});
-
-type FOO = ExtractModelInfo<typeof foo, "value">;
-type BAR = ExtractModelInfo<typeof bar, "count">;
-type BAZ = ExtractModelInfo<typeof baz, "count">;
-
 /**
  * Converts model definitions into emit function types.
  * For each model property, it creates an emit function for the update event.

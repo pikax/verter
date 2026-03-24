@@ -1,5 +1,6 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
+use verter_analysis::types::ImportBindingKind;
 use verter_analysis::*;
 
 fn make_analysis(
@@ -83,6 +84,8 @@ fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_falls_back_to
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: Some(VueApiClassification::Ref),
                 span: verter_span::Span::new(0, 0),
@@ -133,6 +136,8 @@ fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: Some(VueApiClassification::Ref),
                 span: verter_span::Span::new(0, 0),
@@ -201,6 +206,8 @@ fn test_go_to_import_falls_back_to_path_resolution_when_resolved_canonical_id_fa
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Overlay".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(24, 31),
@@ -270,6 +277,8 @@ fn test_go_to_import_without_resolution_falls_back_to_import_span() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "helper".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -417,6 +426,8 @@ fn test_no_definition_inside_html_comment() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "MyComponent".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -483,6 +494,8 @@ fn test_go_to_component_definition_from_template() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ChildComp".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -1078,6 +1091,8 @@ fn test_import_source_string_navigation() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Foo".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -1139,6 +1154,8 @@ fn test_path_alias_resolution_on_binding() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Foo".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -1261,6 +1278,8 @@ fn test_path_alias_resolution_on_import_string() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Foo".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -1620,6 +1639,8 @@ fn test_path_alias_resolution_on_component_tag() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "FooComp".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -2473,6 +2494,8 @@ fn test_vue_default_import_retries_with_default_binding() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "MyComp".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -2543,6 +2566,8 @@ fn test_named_import_non_vue_no_default_fallback() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "helper".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -2587,6 +2612,8 @@ fn test_component_tag_default_fallback() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "WrappedBtn".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -2677,6 +2704,8 @@ fn test_script_context_vue_import_default_fallback() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Comp".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),

@@ -2169,9 +2169,8 @@ fn declaration_entries_deterministic_for_same_source() {
 
 #[test]
 fn declaration_entries_preserve_interface_merges() {
-    let result = analyze(
-        "interface Foo { a: number }\ninterface Foo { b: string }\nexport const bar = 1;",
-    );
+    let result =
+        analyze("interface Foo { a: number }\ninterface Foo { b: string }\nexport const bar = 1;");
     let foo_entries: Vec<_> = result
         .declaration_entries
         .iter()
@@ -2183,8 +2182,7 @@ fn declaration_entries_preserve_interface_merges() {
         "merged interfaces should keep both declaration entries for stable IDs and change detection"
     );
     assert_ne!(
-        foo_entries[0].content_hash,
-        foo_entries[1].content_hash,
+        foo_entries[0].content_hash, foo_entries[1].content_hash,
         "distinct merged declarations should keep distinct content hashes"
     );
     assert!(

@@ -108,10 +108,7 @@ function createVirtualProgram(
   };
 
   host.fileExists = (fileName) => {
-    return (
-      fileName in allFiles ||
-      (fileName.includes("lib.") && fileName.endsWith(".d.ts"))
-    );
+    return fileName in allFiles || (fileName.includes("lib.") && fileName.endsWith(".d.ts"));
   };
 
   host.readFile = (fileName) => allFiles[fileName] ?? "";
@@ -132,8 +129,7 @@ function createVirtualProgram(
 
         // Simulate plugin: .vue → .vue.d.ts
         if (moduleName.endsWith(".vue")) {
-          const resolved =
-            resolveRelative(containingFile, moduleName) + ".d.ts";
+          const resolved = resolveRelative(containingFile, moduleName) + ".d.ts";
           if (resolved in allFiles) {
             return {
               resolvedModule: {
@@ -150,9 +146,7 @@ function createVirtualProgram(
         const candidates = [base + ".ts", base + "/index.ts", base];
         for (const candidate of candidates) {
           if (candidate in allFiles) {
-            const ext = candidate.endsWith(".d.ts")
-              ? ts.Extension.Dts
-              : ts.Extension.Ts;
+            const ext = candidate.endsWith(".d.ts") ? ts.Extension.Dts : ts.Extension.Ts;
             return {
               resolvedModule: {
                 resolvedFileName: candidate,
@@ -170,9 +164,7 @@ function createVirtualProgram(
     );
   };
 
-  const entries =
-    entryFiles ??
-    Object.keys(allFiles).filter((f) => !f.includes("node_modules"));
+  const entries = entryFiles ?? Object.keys(allFiles).filter((f) => !f.includes("node_modules"));
   const program = ts.createProgram(entries, options, host);
 
   return {
@@ -214,8 +206,7 @@ function getTypeAliasType(
       return checker.typeToString(
         type,
         undefined,
-        ts.TypeFormatFlags.NoTruncation |
-          ts.TypeFormatFlags.WriteArrayAsGenericType,
+        ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.WriteArrayAsGenericType,
       );
     }
   }
@@ -238,8 +229,7 @@ function getVariableType(
           return checker.typeToString(
             type,
             undefined,
-            ts.TypeFormatFlags.NoTruncation |
-              ts.TypeFormatFlags.WriteArrayAsGenericType,
+            ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.WriteArrayAsGenericType,
           );
         }
       }
@@ -251,14 +241,9 @@ function getVariableType(
 // ── Handcrafted declaration (no native binary needed) ───────────────────────
 // Mirrors the output shape of generate_code() from verter_core/src/tsc/script.rs
 
-function makeComponentDecl(
-  name: string,
-  propsFields: string,
-  emitOverloads?: string,
-): string {
+function makeComponentDecl(name: string, propsFields: string, emitOverloads?: string): string {
   const emit = emitOverloads ?? "(event: string, ...args: unknown[]) => void";
-  const omitKeys =
-    '"$props" | "$emit" | "$slots" | "$data" | "$attrs" | "$refs"';
+  const omitKeys = '"$props" | "$emit" | "$slots" | "$data" | "$attrs" | "$refs"';
   return `
 import { defineComponent } from "vue"
 type __OmitNew<T> = { [K in keyof T]: T[K] }
@@ -288,11 +273,7 @@ const mockLogger = { info: () => {}, msg: () => {} } as any;
 
 let hasNativeBinary = false;
 try {
-  const probe = parseFile(
-    "/probe.vue",
-    "<template><div /></template>",
-    mockLogger,
-  );
+  const probe = parseFile("/probe.vue", "<template><div /></template>", mockLogger, "/");
   hasNativeBinary = probe !== FALLBACK_STUB;
 } catch {
   hasNativeBinary = false;
@@ -399,10 +380,7 @@ describe("barrel export type preservation", () => {
 
   describe("multi-level barrel re-export", () => {
     it("preserves type through component/index.ts → components/index.ts chain", () => {
-      const decl = makeComponentDecl(
-        "Button",
-        "label: string; disabled?: boolean; size?: string",
-      );
+      const decl = makeComponentDecl("Button", "label: string; disabled?: boolean; size?: string");
 
       const { checker, getSourceFile } = createVirtualProgram({
         "/src/components/Button/Button.vue.d.ts": decl,
@@ -449,58 +427,52 @@ defineProps<{
 
     // Try to generate with native binary; skip if unavailable
     try {
-      generatedDecl = parseFile("/src/Overlay.vue", sfc, mockLogger);
+      generatedDecl = parseFile("/src/Overlay.vue", sfc, mockLogger, "/src");
     } catch {
       generatedDecl = FALLBACK_STUB;
     }
 
     const hasNative = generatedDecl !== FALLBACK_STUB;
 
-    it.skipIf(!hasNative)(
-      "parseFile() generates valid component declaration",
-      () => {
-        // Positive: output has expected markers
-        expect(generatedDecl).toContain("defineComponent");
-        expect(generatedDecl).toContain("__OmitNew");
-        expect(generatedDecl).toContain('import("vue").PublicProps');
-        expect(generatedDecl).toContain("export default");
-        expect(generatedDecl).toContain("$props");
-        expect(generatedDecl).toContain("zIndex");
-        expect(generatedDecl).toContain("lockScroll");
-        // Negative: not the fallback stub
-        expect(generatedDecl).not.toBe(FALLBACK_STUB);
-        expect(generatedDecl).not.toContain("as any");
-      },
-    );
+    it.skipIf(!hasNative)("parseFile() generates valid component declaration", () => {
+      // Positive: output has expected markers
+      expect(generatedDecl).toContain("defineComponent");
+      expect(generatedDecl).toContain("__OmitNew");
+      expect(generatedDecl).toContain('import("vue").PublicProps');
+      expect(generatedDecl).toContain("export default");
+      expect(generatedDecl).toContain("$props");
+      expect(generatedDecl).toContain("zIndex");
+      expect(generatedDecl).toContain("lockScroll");
+      // Negative: not the fallback stub
+      expect(generatedDecl).not.toBe(FALLBACK_STUB);
+      expect(generatedDecl).not.toContain("as any");
+    });
 
-    it.skipIf(!hasNative)(
-      "preserves $props through barrel with real parseFile() output",
-      () => {
-        const { checker, getSourceFile } = createVirtualProgram({
-          "/src/Overlay.vue.d.ts": generatedDecl,
-          "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
-          "/src/consumer.ts": `
+    it.skipIf(!hasNative)("preserves $props through barrel with real parseFile() output", () => {
+      const { checker, getSourceFile } = createVirtualProgram({
+        "/src/Overlay.vue.d.ts": generatedDecl,
+        "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
+        "/src/consumer.ts": `
           import { Overlay } from './index'
           const inst = new Overlay()
           const props = inst.$props
         `,
-        });
+      });
 
-        const sf = getSourceFile("/src/consumer.ts");
-        expect(sf).toBeDefined();
+      const sf = getSourceFile("/src/consumer.ts");
+      expect(sf).toBeDefined();
 
-        const propsType = getVariableType(checker, sf!, "props");
-        expect(propsType).toBeDefined();
-        // Positive: real props are preserved
-        expect(propsType).toContain("zIndex");
-        expect(propsType).toContain("duration");
-        expect(propsType).toContain("show");
-        expect(propsType).toContain("lockScroll");
-        // Negative: not degraded
-        expect(propsType).not.toBe("any");
-        expect(propsType).not.toBe("{}");
-      },
-    );
+      const propsType = getVariableType(checker, sf!, "props");
+      expect(propsType).toBeDefined();
+      // Positive: real props are preserved
+      expect(propsType).toContain("zIndex");
+      expect(propsType).toContain("duration");
+      expect(propsType).toContain("show");
+      expect(propsType).toContain("lockScroll");
+      // Negative: not degraded
+      expect(propsType).not.toBe("any");
+      expect(propsType).not.toBe("{}");
+    });
 
     it.skipIf(!hasNative)(
       "preserves $props through multi-level barrel with real parseFile() output",
@@ -651,7 +623,7 @@ defineProps<{
 </script>
 <template><div /></template>
 `;
-        const generated = parseFile("/src/Overlay.vue", sfc, mockLogger);
+        const generated = parseFile("/src/Overlay.vue", sfc, mockLogger, "/src");
         // The generated output should now use __OmitNew
         expect(generated).toContain("__OmitNew");
         expect(generated).not.toContain(": typeof __comp &");
@@ -727,10 +699,7 @@ defineProps<{
     });
 
     it("class and style survive barrel re-export", () => {
-      const decl = makeComponentDecl(
-        "Button",
-        "label: string; disabled?: boolean",
-      );
+      const decl = makeComponentDecl("Button", "label: string; disabled?: boolean");
 
       const { checker, program, getSourceFile } = createVirtualProgram({
         "/src/Button.vue.d.ts": decl,
@@ -761,59 +730,59 @@ defineProps<{
         const msg = ts.flattenDiagnosticMessageText(d.messageText, "\n");
         return msg.includes("class") || msg.includes("style");
       });
-      expect(propErrors, "accessing class/style through barrel should not produce type errors").toHaveLength(0);
+      expect(
+        propErrors,
+        "accessing class/style through barrel should not produce type errors",
+      ).toHaveLength(0);
 
       // Negative
       expect(propsType).not.toBe("any");
       expect(propsType).not.toBe("{}");
     });
 
-    it.skipIf(!hasNativeBinary)(
-      "class and style available with real parseFile() output",
-      () => {
-        const sfc = `
+    it.skipIf(!hasNativeBinary)("class and style available with real parseFile() output", () => {
+      const sfc = `
 <script setup lang="ts">
 defineProps<{ title: string; count?: number }>()
 </script>
 <template><div>{{ title }}</div></template>
 `;
-        const generated = parseFile("/src/MyComp.vue", sfc, mockLogger);
+      const generated = parseFile("/src/MyComp.vue", sfc, mockLogger, "/src");
 
-        const { checker, program, getSourceFile } = createVirtualProgram({
-          "/src/MyComp.vue.d.ts": generated,
-          "/src/consumer.ts": `
+      const { checker, program, getSourceFile } = createVirtualProgram({
+        "/src/MyComp.vue.d.ts": generated,
+        "/src/consumer.ts": `
             import MyComp from './MyComp.vue'
             const inst = new MyComp()
             const props = inst.$props
             const cls = props.class
             const sty = props.style
           `,
-        });
+      });
 
-        const sf = getSourceFile("/src/consumer.ts");
-        expect(sf).toBeDefined();
+      const sf = getSourceFile("/src/consumer.ts");
+      expect(sf).toBeDefined();
 
-        const propsType = getVariableType(checker, sf!, "props");
-        expect(propsType).toBeDefined();
-        // Positive: user props
-        expect(propsType).toContain("title");
-        expect(propsType).toContain("count");
-        // Positive: PublicProps (expanded) provides class/style/key
-        expect(propsType).toContain("AllowedComponentProps");
+      const propsType = getVariableType(checker, sf!, "props");
+      expect(propsType).toBeDefined();
+      // Positive: user props
+      expect(propsType).toContain("title");
+      expect(propsType).toContain("count");
+      // Positive: PublicProps (expanded) provides class/style/key
+      expect(propsType).toContain("AllowedComponentProps");
 
-        // Positive: accessing class/style compiles without error
-        const diagnostics = ts.getPreEmitDiagnostics(program, sf!);
-        const propErrors = diagnostics.filter((d) => {
-          const msg = ts.flattenDiagnosticMessageText(d.messageText, "\n");
-          return msg.includes("class") || msg.includes("style");
-        });
-        expect(propErrors, "accessing class/style should not produce type errors").toHaveLength(0);
+      // Positive: accessing class/style compiles without error
+      const diagnostics = ts.getPreEmitDiagnostics(program, sf!);
+      const propErrors = diagnostics.filter((d) => {
+        const msg = ts.flattenDiagnosticMessageText(d.messageText, "\n");
+        return msg.includes("class") || msg.includes("style");
+      });
+      expect(propErrors, "accessing class/style should not produce type errors").toHaveLength(0);
 
-        // Negative
-        expect(propsType).not.toBe("any");
-        expect(propsType).not.toBe("{}");
-      },
-    );
+      // Negative
+      expect(propsType).not.toBe("any");
+      expect(propsType).not.toBe("{}");
+    });
   });
 
   // ── Diagnostic check: no type errors in consumer ──────────────────────
@@ -835,9 +804,7 @@ defineProps<{ title: string; count?: number }>()
       expect(sf).toBeDefined();
 
       const diagnostics = ts.getPreEmitDiagnostics(program, sf!);
-      const errors = diagnostics.filter(
-        (d) => d.category === ts.DiagnosticCategory.Error,
-      );
+      const errors = diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error);
 
       // Filter out lib-related errors (our minimal environment doesn't have full lib.d.ts)
       const relevantErrors = errors.filter((d) => {

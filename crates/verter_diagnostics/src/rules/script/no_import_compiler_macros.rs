@@ -90,6 +90,8 @@ mod tests {
     fn make_binding(name: &str, api: Option<VueApiClassification>) -> AnalyzedImportBinding {
         AnalyzedImportBinding {
             name: name.to_string(),
+            kind: ImportBindingKind::Named,
+            imported_name: None,
             is_type_only: false,
             vue_api: api,
             span: Span::new(10, 30),

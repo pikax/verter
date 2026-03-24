@@ -6,6 +6,7 @@ use verter_analysis::template::{
     TemplateComponentVModel, TemplatePropUsage,
 };
 use verter_analysis::types::AnalyzedMacro;
+use verter_analysis::types::ImportBindingKind;
 use verter_host::FileAnalysisSnapshot;
 
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
@@ -666,6 +667,8 @@ fn suggest_matching_props_from_imports() {
             is_type_only: false,
             bindings: vec![verter_analysis::types::AnalyzedImportBinding {
                 name: "title".into(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -698,6 +701,8 @@ fn suggest_matching_props_type_only_import_excluded() {
             is_type_only: true,
             bindings: vec![verter_analysis::types::AnalyzedImportBinding {
                 name: "title".into(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: true,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),

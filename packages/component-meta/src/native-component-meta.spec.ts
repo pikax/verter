@@ -44,7 +44,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           source: "vue",
           isTypeOnly: false,
-          bindings: [{ name: "ref", isTypeOnly: false }],
+          bindings: [{ name: "ref", kind: "named", importedName: null, isTypeOnly: false }],
         },
       ],
       bindings: [
@@ -104,7 +104,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
       {
         source: "vue",
         isTypeOnly: false,
-        bindings: [{ name: "ref", isTypeOnly: false }],
+        bindings: [{ name: "ref", kind: "named", importedName: null, isTypeOnly: false }],
       },
     ]);
     expect(meta.bindings).toEqual([

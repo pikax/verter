@@ -402,6 +402,14 @@ export declare class VerterHost {
    * @param kind - "esm" (default), "type", "require", or "src"
    */
   resolveImport(importer: string, specifier: string, phase?: string, kind?: string): string | null;
+
+  /**
+   * Evaluate type annotations for a file's component metadata using the
+   * lightweight native evaluator.
+   *
+   * Returns JSON `{ props, emits, slotBindings, bindings }` or `null`.
+   */
+  evaluateTypes(canonicalOrAlias: string): string | null;
 }
 
 // =============================================================================

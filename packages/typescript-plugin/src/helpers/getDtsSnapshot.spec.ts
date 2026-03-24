@@ -21,15 +21,13 @@ beforeEach(() => {
 });
 
 const hasNativeBinary =
-  parseFile("/probe.vue", "<template><div /></template>", mockLogger) !== FALLBACK_STUB;
+  parseFile("/probe.vue", "<template><div /></template>", mockLogger, "/") !== FALLBACK_STUB;
 
 function normalizePath(fileName: string): string {
   return fileName.replace(/\\/g, "/");
 }
 
-function createInMemoryAccess(
-  files: Record<string, string>,
-): {
+function createInMemoryAccess(files: Record<string, string>): {
   resolveModule: (containingFile: string, specifier: string) => string | undefined;
   readSource: (fileName: string) => string | undefined;
 } {
@@ -81,14 +79,14 @@ const msg = "hello";
   <div>{{ msg }}</div>
 </template>
 `;
-    const result = parseFile("/test/Simple.vue", sfc, mockLogger);
+    const result = parseFile("/test/Simple.vue", sfc, mockLogger, "/test");
 
     // getPublicApi() generates a type declaration for the component's public API
     expect(result).not.toBe("export default {} as any");
     // Component name derived from filename
     expect(result).toContain("Simple");
     // Uses defineComponent from vue
-    expect(result).toContain('defineComponent');
+    expect(result).toContain("defineComponent");
     // Local bindings like `msg` are NOT included — only macros (defineProps, defineEmits, etc.)
     expect(result).not.toContain("msg");
   });
@@ -103,7 +101,7 @@ const props = defineProps<{ title: string; count?: number }>();
   <h1>{{ props.title }}</h1>
 </template>
 `;
-    const result = parseFile("/test/Props.vue", sfc, mockLogger);
+    const result = parseFile("/test/Props.vue", sfc, mockLogger, "/test");
 
     expect(result).not.toBe("export default {} as any");
     expect(result).toContain("title");
@@ -115,7 +113,7 @@ const props = defineProps<{ title: string; count?: number }>();
   <div>static content</div>
 </template>
 `;
-    const result = parseFile("/test/NoScript.vue", sfc, mockLogger);
+    const result = parseFile("/test/NoScript.vue", sfc, mockLogger, "/test");
 
     // Should still produce output (template-only component)
     expect(typeof result).toBe("string");
@@ -123,7 +121,7 @@ const props = defineProps<{ title: string; count?: number }>();
   });
 
   it("returns fallback stub for empty input", () => {
-    const result = parseFile("/test/Empty.vue", "", mockLogger);
+    const result = parseFile("/test/Empty.vue", "", mockLogger, "/test");
 
     expect(typeof result).toBe("string");
     expect(result.length).toBeGreaterThan(0);
@@ -139,8 +137,8 @@ const x = 1;
   <span>{{ x }}</span>
 </template>
 `;
-    const result1 = parseFile("/test/Cache.vue", sfc, mockLogger);
-    const result2 = parseFile("/test/Cache.vue", sfc, mockLogger);
+    const result1 = parseFile("/test/Cache.vue", sfc, mockLogger, "/test");
+    const result2 = parseFile("/test/Cache.vue", sfc, mockLogger, "/test");
 
     expect(result1).toBe(result2);
   });
@@ -155,7 +153,7 @@ const emit = defineEmits<{ change: [value: string] }>();
   <button @click="emit('change', 'hi')">Click</button>
 </template>
 `;
-    const result = parseFile("/test/Emits.vue", sfc, mockLogger);
+    const result = parseFile("/test/Emits.vue", sfc, mockLogger, "/test");
 
     expect(result).not.toBe("export default {} as any");
     expect(result).toContain("emit");
@@ -172,13 +170,13 @@ const props = defineProps<{ title: string }>();
   <h1>{{ props.title }}</h1>
 </template>
 `;
-    const result = parseFile("/test/VerterTypes.vue", sfc, mockLogger);
+    const result = parseFile("/test/VerterTypes.vue", sfc, mockLogger, "/test");
 
-    expect(result).toContain('__OmitNew');
+    expect(result).toContain("__OmitNew");
     expect(result).toContain('import("vue").PublicProps');
     expect(result).toContain('import("vue")');
     // Props should be present in the $props type
-    expect(result).toContain('title');
+    expect(result).toContain("title");
   });
 
   it.skipIf(!hasNativeBinary)("caches generated public API for both virtual file suffixes", () => {
@@ -188,7 +186,7 @@ defineProps<{ title: string }>()
 </script>
 <template><div>{{ title }}</div></template>
 `;
-    parseFile("/test/Cached.vue", sfc, mockLogger);
+    parseFile("/test/Cached.vue", sfc, mockLogger, "/test");
 
     const tsEntry = getCachedVirtualPublicApi("/test/Cached.vue.ts");
     const dtsEntry = getCachedVirtualPublicApi("/test/Cached.vue.d.ts");
@@ -202,25 +200,28 @@ defineProps<{ title: string }>()
   });
 
   // @ai-generated - Testing mode gets its own virtual cache key and exposes bindings.
-  it.skipIf(!hasNativeBinary)("caches testing-mode output under the dedicated virtual suffix", () => {
-    const sfc = `
+  it.skipIf(!hasNativeBinary)(
+    "caches testing-mode output under the dedicated virtual suffix",
+    () => {
+      const sfc = `
 <script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(1)
 </script>
 <template><div>{{ count }}</div></template>
 `;
-    parseFile("/test/Cached.vue", sfc, mockLogger);
-    const result = parseFile("/test/Cached.vue", sfc, mockLogger, undefined, "testing");
+      parseFile("/test/Cached.vue", sfc, mockLogger, "/test");
+      const result = parseFile("/test/Cached.vue", sfc, mockLogger, "/test", undefined, "testing");
 
-    const publicEntry = getCachedVirtualPublicApi("/test/Cached.vue.ts");
-    const testingEntry = getCachedVirtualPublicApi("/test/Cached.vue.__verter_test.ts");
+      const publicEntry = getCachedVirtualPublicApi("/test/Cached.vue.ts");
+      const testingEntry = getCachedVirtualPublicApi("/test/Cached.vue.__verter_test.ts");
 
-    expect(result).toContain("count: typeof count");
-    expect(testingEntry?.code).toContain("count: typeof count");
-    expect(testingEntry?.sourceMap).toBeTruthy();
-    expect(publicEntry?.code).not.toContain("count: typeof count");
-  });
+      expect(result).toContain("count: typeof count");
+      expect(testingEntry?.code).toContain("count: typeof count");
+      expect(testingEntry?.sourceMap).toBeTruthy();
+      expect(publicEntry?.code).not.toContain("count: typeof count");
+    },
+  );
 
   it.skipIf(!hasNativeBinary)("remaps virtual definition spans back to the local .vue file", () => {
     const sfc = `
@@ -229,7 +230,7 @@ defineProps<{ title: string }>()
 </script>
 <template><div>{{ title }}</div></template>
 `;
-    parseFile("/test/Remap.vue", sfc, mockLogger);
+    parseFile("/test/Remap.vue", sfc, mockLogger, "/test");
     const cached = getCachedVirtualPublicApi("/test/Remap.vue.ts");
 
     expect(cached).toBeDefined();
@@ -265,8 +266,8 @@ defineProps<{ label: string }>()
 <template><div>{{ label }}</div></template>
 `;
 
-    parseFile("/test/Refresh.vue", original, mockLogger);
-    parseFile("/test/Refresh.vue", updated, mockLogger);
+    parseFile("/test/Refresh.vue", original, mockLogger, "/test");
+    parseFile("/test/Refresh.vue", updated, mockLogger, "/test");
 
     const cached = getCachedVirtualPublicApi("/test/Refresh.vue.ts");
     expect(cached).toBeDefined();
@@ -292,34 +293,37 @@ defineProps<{ label: string }>()
   });
 
   // @ai-generated - Testing-mode sourcemaps should still remap wrapper.vm bindings to the SFC.
-  it.skipIf(!hasNativeBinary)("remaps testing-mode binding spans back to the local .vue file", () => {
-    const sfc = `
+  it.skipIf(!hasNativeBinary)(
+    "remaps testing-mode binding spans back to the local .vue file",
+    () => {
+      const sfc = `
 <script setup lang="ts">
 const count = 1
 </script>
 <template><div>{{ count }}</div></template>
 `;
-    parseFile("/test/Debug.vue", sfc, mockLogger, undefined, "testing");
-    const cached = getCachedVirtualPublicApi("/test/Debug.vue.__verter_test.ts");
+      parseFile("/test/Debug.vue", sfc, mockLogger, "/test", undefined, "testing");
+      const cached = getCachedVirtualPublicApi("/test/Debug.vue.__verter_test.ts");
 
-    expect(cached).toBeDefined();
-    const generatedStart = cached!.code.indexOf("count: typeof count");
-    expect(generatedStart).toBeGreaterThanOrEqual(0);
+      expect(cached).toBeDefined();
+      const generatedStart = cached!.code.indexOf("count: typeof count");
+      expect(generatedStart).toBeGreaterThanOrEqual(0);
 
-    const remapped = remapVirtualSpan(
-      "/test/Debug.vue.__verter_test.ts",
-      { start: generatedStart, length: "count".length },
-      (fileName) => (fileName === "/test/Debug.vue" ? sfc : undefined),
-    );
+      const remapped = remapVirtualSpan(
+        "/test/Debug.vue.__verter_test.ts",
+        { start: generatedStart, length: "count".length },
+        (fileName) => (fileName === "/test/Debug.vue" ? sfc : undefined),
+      );
 
-    expect(remapped).toEqual({
-      fileName: "/test/Debug.vue",
-      textSpan: {
-        start: sfc.indexOf("count = 1"),
-        length: 1,
-      },
-    });
-  });
+      expect(remapped).toEqual({
+        fileName: "/test/Debug.vue",
+        textSpan: {
+          start: sfc.indexOf("count = 1"),
+          length: 1,
+        },
+      });
+    },
+  );
 
   // @ai-generated - Resolves imported defineEmits types before getPublicApi.
   it.skipIf(!hasNativeBinary)("hydrates imported defineEmits types before getPublicApi", () => {
@@ -344,7 +348,7 @@ export interface EmitShape {
 `,
     });
 
-    const result = parseFile(entryFile, source, mockLogger, access);
+    const result = parseFile(entryFile, source, mockLogger, "/test", access);
 
     expect(result).not.toBe(FALLBACK_STUB);
     expect(result).toContain('"onSubmit"?: (payload: string) => void');
@@ -376,7 +380,7 @@ export interface Props {
 `,
     });
 
-    const result = parseFile(entryFile, source, mockLogger, access);
+    const result = parseFile(entryFile, source, mockLogger, "/test", access);
 
     expect(result).not.toBe(FALLBACK_STUB);
     expect(result).toContain("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>");
@@ -407,7 +411,7 @@ export interface Props {
 `,
     });
 
-    const result = parseFile(entryFile, source, mockLogger, access, "testing");
+    const result = parseFile(entryFile, source, mockLogger, "/test", access, "testing");
 
     expect(result).not.toBe(FALLBACK_STUB);
     expect(result).toContain("declare const title: Props['title']");
@@ -415,36 +419,39 @@ export interface Props {
   });
 
   // @ai-generated - Refreshes generated public API when an imported emits dependency changes.
-  it.skipIf(!hasNativeBinary)("refreshes imported macro types when the dependency source changes", () => {
-    const entryFile = "/test/src/components/RefreshDeps.vue";
-    const source = `
+  it.skipIf(!hasNativeBinary)(
+    "refreshes imported macro types when the dependency source changes",
+    () => {
+      const entryFile = "/test/src/components/RefreshDeps.vue";
+      const source = `
 <script setup lang="ts">
 import type { Emits } from './types'
 const emit = defineEmits<Emits>()
 </script>
 <template><button @click="emit('submit', 'ok')">Send</button></template>
 `;
-    const files = {
-      [entryFile]: source,
-      "/test/src/components/types.ts": `
+      const files = {
+        [entryFile]: source,
+        "/test/src/components/types.ts": `
 export interface Emits {
   (e: 'submit', payload: string): void
 }
 `,
-    };
+      };
 
-    const first = parseFile(entryFile, source, mockLogger, createInMemoryAccess(files));
-    expect(first).toContain('"onSubmit"?: (payload: string) => void');
-    expect(first).not.toContain('"onConfirm"?: (...args: [id: number]) => void');
+      const first = parseFile(entryFile, source, mockLogger, "/test", createInMemoryAccess(files));
+      expect(first).toContain('"onSubmit"?: (payload: string) => void');
+      expect(first).not.toContain('"onConfirm"?: (...args: [id: number]) => void');
 
-    files["/test/src/components/types.ts"] = `
+      files["/test/src/components/types.ts"] = `
 export interface Emits {
   confirm: [id: number]
 }
 `;
 
-    const second = parseFile(entryFile, source, mockLogger, createInMemoryAccess(files));
-    expect(second).toContain('"onConfirm"?: (...args: [id: number]) => void');
-    expect(second).not.toContain('"onSubmit"?: (payload: string) => void');
-  });
+      const second = parseFile(entryFile, source, mockLogger, "/test", createInMemoryAccess(files));
+      expect(second).toContain('"onConfirm"?: (...args: [id: number]) => void');
+      expect(second).not.toContain('"onSubmit"?: (payload: string) => void');
+    },
+  );
 });

@@ -243,6 +243,7 @@ pub fn organize_imports_actions(
 mod tests {
     use super::*;
     use crate::documents::line_index::LineIndex;
+    use verter_analysis::types::ImportBindingKind;
     use verter_analysis::types::VueApiCallSite;
     use verter_analysis::*;
 
@@ -278,6 +279,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "ref".into(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: Some(VueApiClassification::Ref),
                     span: verter_span::Span::new(25, 28),
@@ -320,12 +323,16 @@ mod tests {
                 bindings: vec![
                     AnalyzedImportBinding {
                         name: "ref".into(),
+                        kind: ImportBindingKind::Named,
+                        imported_name: None,
                         is_type_only: false,
                         vue_api: Some(VueApiClassification::Ref),
                         span: verter_span::Span::new(25, 28),
                     },
                     AnalyzedImportBinding {
                         name: "computed".into(),
+                        kind: ImportBindingKind::Named,
+                        imported_name: None,
                         is_type_only: false,
                         vue_api: Some(VueApiClassification::Computed),
                         span: verter_span::Span::new(30, 38),
@@ -368,6 +375,8 @@ mod tests {
                 is_type_only: true,
                 bindings: vec![AnalyzedImportBinding {
                     name: "Props".into(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: None,
                     span: verter_span::Span::new(29, 34),
@@ -421,12 +430,16 @@ mod tests {
                 bindings: vec![
                     AnalyzedImportBinding {
                         name: "ref".into(),
+                        kind: ImportBindingKind::Named,
+                        imported_name: None,
                         is_type_only: false,
                         vue_api: Some(VueApiClassification::Ref),
                         span: verter_span::Span::new(25, 28),
                     },
                     AnalyzedImportBinding {
                         name: "computed".into(),
+                        kind: ImportBindingKind::Named,
+                        imported_name: None,
                         is_type_only: false,
                         vue_api: Some(VueApiClassification::Computed),
                         span: verter_span::Span::new(30, 38),
@@ -503,6 +516,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "computed".into(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: Some(VueApiClassification::Computed),
                     span: verter_span::Span::new(25, 33),

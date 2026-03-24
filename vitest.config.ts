@@ -8,7 +8,11 @@ export default defineConfig({
       "**/dist/**",
       "**/e2e/**",
       "**/.claude/worktrees/**",
+      ".integration-tests/**",
       "packages/playground/**",
+      // packages/types has its own vitest.config.ts with typecheck: { only: true }
+      // — these are type-level tests that cannot run as runtime tests from the root config
+      "packages/types/**",
     ],
     coverage: {
       provider: "v8",

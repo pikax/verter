@@ -1,5 +1,6 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
+use verter_analysis::types::ImportBindingKind;
 use verter_analysis::types::VueApiCallSite;
 use verter_analysis::*;
 
@@ -86,6 +87,8 @@ fn test_hover_on_import() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: Some(VueApiClassification::Ref),
                 span: verter_span::Span::new(0, 0),
@@ -886,6 +889,8 @@ fn test_hover_on_ref_attr_does_not_show_import() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: Some(VueApiClassification::Ref),
                 span: verter_span::Span::new(0, 0),
@@ -971,6 +976,8 @@ fn test_hover_on_ref_in_interpolation_still_shows_import() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: Some(VueApiClassification::Ref),
                 span: verter_span::Span::new(0, 0),

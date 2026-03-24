@@ -97,7 +97,8 @@ fn is_store_source(source: &str) -> bool {
 mod tests {
     use super::*;
     use verter_analysis::types::{
-        AnalyzedImport, AnalyzedImportBinding, StoreApiClassification, StoreUsage,
+        AnalyzedImport, AnalyzedImportBinding, ImportBindingKind, StoreApiClassification,
+        StoreUsage,
     };
     use verter_span::Span;
 
@@ -119,6 +120,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "useUserStore".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: None,
                     span: Span::new(10, 30),
@@ -151,6 +154,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "useRouter".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: None,
                     span: Span::new(10, 30),

@@ -1748,6 +1748,7 @@ mod tests {
                 name: "Props".to_string(),
                 declaration: host::meta_resolve::ResolvedTypeDeclaration {
                     requested_name: "Props".to_string(),
+                    declaration_id: None,
                     resolved_name: "Props".to_string(),
                     canonical_source: "/src/types.ts".to_string(),
                     span: verter_span::Span::new(10, 48),
@@ -1757,6 +1758,7 @@ mod tests {
             }],
             evaluated_types: None,
             cached_eval_inputs: None,
+            fact_versions: Vec::new(),
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));

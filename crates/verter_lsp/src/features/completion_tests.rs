@@ -1,5 +1,6 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
+use verter_analysis::types::ImportBindingKind;
 use verter_analysis::*;
 
 fn make_analysis(
@@ -72,6 +73,8 @@ fn test_script_completions_include_imports() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: Some(VueApiClassification::Ref),
                 span: verter_span::Span::new(0, 0),
@@ -191,6 +194,8 @@ fn test_template_excludes_type_only_imports() {
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
                 name: "Props".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: true,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),
@@ -1835,6 +1840,8 @@ fn test_script_completions_have_sort_text() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: Some(VueApiClassification::Ref),
                 span: verter_span::Span::new(0, 0),

@@ -299,11 +299,15 @@ fn eval_intersection_child_override_wins() {
         "later child declarations should override the base property type"
     );
     assert!(
-        obj.properties.iter().any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "count")),
+        obj.properties
+            .iter()
+            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "count")),
         "merged intersection should retain child-only properties"
     );
     assert!(
-        !obj.properties.iter().any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "missing")),
+        !obj.properties
+            .iter()
+            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "missing")),
         "intersection merge must not fabricate unrelated properties"
     );
 }

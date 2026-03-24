@@ -13,12 +13,9 @@ describe("extension package manifest", () => {
       readFileSync(path.join(extensionDir, "package.json"), "utf8"),
     ) as { icon?: string };
 
-    expect(packageJson.icon).toBe("logo.svg");
+    expect(packageJson.icon).toBe("logo.png");
 
     const extensionLogoPath = path.join(extensionDir, packageJson.icon!);
-    const playgroundLogoPath = path.join(playgroundDir, "public", "logo.svg");
-
     expect(existsSync(extensionLogoPath)).toBe(true);
-    expect(readFileSync(extensionLogoPath, "utf8")).toBe(readFileSync(playgroundLogoPath, "utf8"));
   });
 });

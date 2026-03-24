@@ -105,6 +105,8 @@ fn simple_text_and_interpolation_extracts_to_computed() {
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
             name: "ref".to_string(),
+            kind: ImportBindingKind::Named,
+            imported_name: None,
             is_type_only: false,
             vue_api: None,
             span: Span::new(0, 0),
@@ -347,6 +349,8 @@ fn reactive_binding_no_dot_value() {
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
             name: "reactive".to_string(),
+            kind: ImportBindingKind::Named,
+            imported_name: None,
             is_type_only: false,
             vue_api: None,
             span: Span::new(0, 0),
@@ -433,6 +437,8 @@ fn maybe_ref_binding_uses_unref() {
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
             name: "ref".to_string(),
+            kind: ImportBindingKind::Named,
+            imported_name: None,
             is_type_only: false,
             vue_api: None,
             span: Span::new(0, 0),
@@ -689,12 +695,16 @@ fn no_duplicate_computed_import() {
         bindings: vec![
             AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: Span::new(0, 0),
             },
             AnalyzedImportBinding {
                 name: "computed".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: Span::new(0, 0),
@@ -775,6 +785,8 @@ fn complex_expression_preserved() {
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
             name: "ref".to_string(),
+            kind: ImportBindingKind::Named,
+            imported_name: None,
             is_type_only: false,
             vue_api: None,
             span: Span::new(0, 0),
@@ -1281,6 +1293,8 @@ fn bare_define_props_mixed_with_ref() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: Span::new(0, 0),
@@ -1613,6 +1627,8 @@ fn script_binding_shadows_prop() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: Span::new(0, 0),
@@ -1658,6 +1674,8 @@ fn computed_overrides_prop() {
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "computed".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: false,
                 vue_api: None,
                 span: Span::new(0, 0),

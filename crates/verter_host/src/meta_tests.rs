@@ -1813,7 +1813,7 @@ fn evaluate_types_resolves_imported_types_before_running_utilities() {
     let project = make_project();
     project
         .upsert_base(
-            "types.ts",
+            "/types.ts",
             r#"export interface ImportedUser {
   id: number
   name: string
@@ -1823,7 +1823,7 @@ fn evaluate_types_resolves_imported_types_before_running_utilities() {
         .unwrap();
     project
         .upsert_base(
-            "Comp.vue",
+            "/Comp.vue",
             r#"<script setup lang="ts">
 import type { ImportedUser } from './types'
 
@@ -1836,7 +1836,7 @@ defineProps<{
         .unwrap();
 
     let session = project.open_session().unwrap();
-    let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
     match evaluated_prop_type(&evaluated, "user") {
         TypeExpr::Object(obj) => {
@@ -2839,7 +2839,7 @@ fn evaluate_types_invalidates_cached_results_when_dependency_changes() {
     let project = make_project();
     project
         .upsert_base(
-            "types.ts",
+            "/types.ts",
             r#"export interface ImportedUser {
   id: number
 }"#,
@@ -2847,7 +2847,7 @@ fn evaluate_types_invalidates_cached_results_when_dependency_changes() {
         .unwrap();
     project
         .upsert_base(
-            "Comp.vue",
+            "/Comp.vue",
             r#"<script setup lang="ts">
 import type { ImportedUser } from './types'
 
@@ -2860,9 +2860,9 @@ defineProps<{
         .unwrap();
 
     let session = project.open_session().unwrap();
-    let first = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    let first = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     let first_cache =
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+        cached_resolved_state(&project, "/Comp.vue", crate::types::ResolverMode::Expanded)
             .expect("first evaluation should populate the cache");
 
     match evaluated_prop_type(&first, "user") {
@@ -2882,7 +2882,7 @@ defineProps<{
 
     session
         .upsert(
-            "types.ts",
+            "/types.ts",
             r#"export interface ImportedUser {
   id: number
   label: string
@@ -2891,9 +2891,9 @@ defineProps<{
         )
         .unwrap();
 
-    let second = session.evaluate_types("Comp.vue").unwrap().unwrap();
+    let second = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     let second_cache =
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+        cached_resolved_state(&project, "/Comp.vue", crate::types::ResolverMode::Expanded)
             .expect("dependency update should repopulate the cache");
 
     assert!(

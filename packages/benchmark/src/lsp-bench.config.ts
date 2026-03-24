@@ -109,16 +109,18 @@ export function resolveVerterBinary(options: ResolveVerterBinaryOptions): string
   const platform = options.platform ?? process.platform;
   const binaryName = platform === "win32" ? "verter-lsp.exe" : "verter-lsp";
 
-  const candidates = options.override
-    ? [resolveInputPath(options.override, cwd)]
-    : [
-        join(options.repoRoot, "target/release", binaryName),
-        join(options.repoRoot, "target/debug", binaryName),
-      ];
+  const candidates = (
+    options.override
+      ? [resolveInputPath(options.override, cwd)]
+      : [
+          join(options.repoRoot, "target/release", binaryName),
+          join(options.repoRoot, "target/debug", binaryName),
+        ]
+  ).map(normalizeSlashes);
 
   for (const candidate of candidates) {
     if (pathExists(candidate)) {
-      return normalizeSlashes(candidate);
+      return candidate;
     }
   }
 
@@ -141,14 +143,14 @@ export function resolveTypeScriptSdk(options: ResolveTypeScriptSdkOptions): stri
     return resolved;
   }
 
-  const workspaceSdk = join(options.workspaceRoot, "node_modules/typescript/lib");
+  const workspaceSdk = normalizeSlashes(join(options.workspaceRoot, "node_modules/typescript/lib"));
   if (pathExists(workspaceSdk)) {
-    return normalizeSlashes(workspaceSdk);
+    return workspaceSdk;
   }
 
-  const repoSdk = join(options.repoRoot, "node_modules/typescript/lib");
+  const repoSdk = normalizeSlashes(join(options.repoRoot, "node_modules/typescript/lib"));
   if (pathExists(repoSdk)) {
-    return normalizeSlashes(repoSdk);
+    return repoSdk;
   }
 
   const resolvePackage = options.resolvePackage ?? defaultPackageResolver();

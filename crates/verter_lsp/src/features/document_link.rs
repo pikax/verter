@@ -171,6 +171,7 @@ fn canonical_id_to_uri(canonical_id: &str) -> Uri {
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use verter_analysis::types::ImportBindingKind;
     use verter_analysis::*;
 
     #[test]
@@ -203,6 +204,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "Foo".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: None,
                     span: verter_span::Span::new(0, 0),

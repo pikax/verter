@@ -1,6 +1,7 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_analysis::template;
+use verter_analysis::types::ImportBindingKind;
 use verter_analysis::*;
 
 fn make_analysis(
@@ -378,6 +379,8 @@ fn test_cannot_rename_type_only_import() {
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
                 name: "Props".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
                 is_type_only: true,
                 vue_api: None,
                 span: verter_span::Span::new(0, 0),

@@ -70,6 +70,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "set".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: None,
                     span: Span::new(15, 18),
@@ -100,6 +102,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "delete".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: None,
                     span: Span::new(15, 21),
@@ -121,6 +125,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "ref".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: Some(VueApiClassification::Ref),
                     span: Span::new(15, 18),

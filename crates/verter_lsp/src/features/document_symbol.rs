@@ -449,6 +449,7 @@ mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
     use verter_analysis::style::{AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis};
+    use verter_analysis::types::ImportBindingKind;
     use verter_analysis::*;
 
     fn make_analysis(
@@ -505,6 +506,8 @@ mod tests {
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "ref".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
                     is_type_only: false,
                     vue_api: Some(VueApiClassification::Ref),
                     span: verter_span::Span::new(0, 0),

@@ -1814,6 +1814,7 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
         options_api: None,
         nested_macro_calls: Vec::new(),
         is_typescript: false,
+        declaration_entries: Vec::new(),
     };
 
     let ids = collect_imported_vue_priority_ids(&analysis);
