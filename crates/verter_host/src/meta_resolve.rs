@@ -25,14 +25,14 @@ use crate::VerterHost;
 use std::sync::Arc;
 use std::time::Instant;
 use verter_resolver::{
-    run_stable_request, ComponentMetaEvalOutputs, RequestSource, SingleflightRole,
-    StableRequestExecutor, StoreView,
+    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost,
+    RequestSource, SingleflightRole, StoreView,
 };
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone)]
-struct CapturedComponentMetaInputs {
+pub struct CapturedComponentMetaInputs {
     whole_hash: Hash16,
     snapshot: FileAnalysisSnapshot,
     owner_eval_source: Option<String>,
@@ -40,126 +40,81 @@ struct CapturedComponentMetaInputs {
     dep_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
 }
 
-struct ComponentMetaRequestExecutor<'a> {
-    host: &'a VerterHost,
-    canonical: String,
-    mode: ResolverMode,
-    last_snapshot_epoch: Option<u64>,
-    captured_inputs: Option<CapturedComponentMetaInputs>,
-}
+impl ComponentMetaRequestHost for VerterHost {
+    type View = crate::resolver_store::HostStoreView;
+    type Mode = ResolverMode;
+    type Resolution = ResolvedComponentMetaState;
+    type CapturedInputs = CapturedComponentMetaInputs;
 
-impl<'a> ComponentMetaRequestExecutor<'a> {
-    fn new(host: &'a VerterHost, canonical: String, mode: ResolverMode) -> Self {
-        Self {
-            host,
-            canonical,
-            mode,
-            last_snapshot_epoch: None,
-            captured_inputs: None,
-        }
+    fn cache_key(&self, canonical: &str, mode: Self::Mode) -> verter_resolver::ResolutionNodeKey {
+        resolved_meta_cache_key(canonical, mode)
     }
 
-    fn capture_owner_inputs(
+    fn snapshot_store_view(&self) -> Self::View {
+        self.resolver_store_view()
+    }
+
+    fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
+        store_view.mutation_epoch()
+    }
+
+    fn current_store_view_epoch(&self) -> u64 {
+        VerterHost::current_store_view_epoch(self)
+    }
+
+    fn capture_component_meta_inputs(
         &self,
-        view: &crate::resolver_store::HostStoreView,
-    ) -> Option<CapturedComponentMetaInputs> {
-        let snapshot = self
-            .host
-            .get_raw_analysis_snapshot_in_view(&self.canonical, Some(view))?;
-        let (source, cached_parse, whole_hash) = self
-            .host
-            .current_eval_state_in_view(&self.canonical, Some(view))?;
-        let owner_eval_source =
-            VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+        canonical: &str,
+        view: &Self::View,
+    ) -> Option<Self::CapturedInputs> {
+        let snapshot = self.get_raw_analysis_snapshot_in_view(canonical, Some(view))?;
+        let (source, cached_parse, whole_hash) = self.current_eval_state_in_view(canonical, Some(view))?;
+        let owner_eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
         Some(CapturedComponentMetaInputs {
             whole_hash,
             snapshot,
             owner_eval_source: Some(owner_eval_source),
-            owner_env: self.host.base_eval_env_in_view(&self.canonical, Some(view)),
-            dep_resolutions: self
-                .host
-                .dependency_resolutions_for_eval_in_view(&self.canonical, Some(view))?,
+            owner_env: self.base_eval_env_in_view(canonical, Some(view)),
+            dep_resolutions: self.dependency_resolutions_for_eval_in_view(canonical, Some(view))?,
         })
     }
-}
 
-impl<'a>
-    StableRequestExecutor<verter_resolver::ResolutionNodeKey, Option<ResolvedComponentMetaState>>
-    for ComponentMetaRequestExecutor<'a>
-{
-    type View = crate::resolver_store::HostStoreView;
-    type Error = ();
-
-    fn cache_key(&self) -> verter_resolver::ResolutionNodeKey {
-        resolved_meta_cache_key(&self.canonical, self.mode)
+    fn try_get_cached_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        store_view: &Self::View,
+    ) -> Option<Self::Resolution> {
+        self.try_get_cached_resolved_meta(canonical, mode, store_view)
     }
 
-    fn snapshot_view(&mut self) -> Self::View {
-        for _ in 0..STORE_VIEW_STABILITY_MAX_ATTEMPTS {
-            let view = self.host.resolver_store_view();
-            let captured_inputs = self.capture_owner_inputs(&view);
-            if self.host.current_store_view_epoch() == view.mutation_epoch() {
-                self.last_snapshot_epoch = Some(view.mutation_epoch());
-                self.captured_inputs = captured_inputs;
-                return view;
-            }
-        }
-
-        let view = self.host.resolver_store_view();
-        self.last_snapshot_epoch = Some(view.mutation_epoch());
-        self.captured_inputs = self.capture_owner_inputs(&view);
-        view
-    }
-
-    fn try_get_cached(&mut self, view: &Self::View) -> Option<Option<ResolvedComponentMetaState>> {
-        self.host
-            .try_get_cached_resolved_meta(&self.canonical, self.mode, view)
-            .map(Some)
-    }
-
-    fn compute(
-        &mut self,
-        view: &Self::View,
-    ) -> Result<Option<ResolvedComponentMetaState>, Self::Error> {
-        if let Some(captured) = self.captured_inputs.as_ref() {
-            return Ok(self.host.compute_component_meta_state_from_captured(
-                &self.canonical,
-                self.mode,
+    fn compute_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        captured: Option<&Self::CapturedInputs>,
+        store_view: Option<&Self::View>,
+    ) -> Option<Self::Resolution> {
+        if let Some(captured) = captured {
+            return self.compute_component_meta_state_from_captured(
+                canonical,
+                mode,
                 captured,
-                Some(view),
-            ));
-        }
-
-        let whole_hash = self
-            .host
-            .get_whole_hash(&self.canonical)
-            .unwrap_or_default();
-        Ok(self.host.compute_component_meta_state(
-            &self.canonical,
-            self.mode,
-            whole_hash,
-            Some(view),
-        ))
-    }
-
-    fn is_stable(&mut self, _view: &Self::View) -> bool {
-        self.last_snapshot_epoch
-            .is_some_and(|epoch| self.host.current_store_view_epoch() == epoch)
-    }
-
-    fn store_stable(&mut self, value: &Option<ResolvedComponentMetaState>) {
-        if let Some(state) = value.as_ref() {
-            self.host.store_cached_resolved_meta(
-                &self.canonical,
-                self.mode,
-                state,
-                &state.fact_versions,
+                store_view,
             );
         }
+
+        let whole_hash = self.get_whole_hash(canonical).unwrap_or_default();
+        self.compute_component_meta_state(canonical, mode, whole_hash, store_view)
     }
 
-    fn max_attempts(&self) -> usize {
-        STORE_VIEW_STABILITY_MAX_ATTEMPTS
+    fn store_component_meta_result(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        result: &Self::Resolution,
+    ) {
+        self.store_cached_resolved_meta(canonical, mode, result, &result.fact_versions);
     }
 }
 
@@ -220,9 +175,13 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let mut executor = ComponentMetaRequestExecutor::new(self, canonical.clone(), mode);
-        let result = run_stable_request(&self.resolved_meta_singleflight, &mut executor)
-            .expect("resolved-meta request execution is infallible");
+        let result = run_component_meta_request(
+            self,
+            &self.resolved_meta_singleflight,
+            &canonical,
+            mode,
+            STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+        );
 
         if matches!(result.source, RequestSource::Cache) {
             self.provenance

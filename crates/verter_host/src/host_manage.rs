@@ -24,19 +24,17 @@ use verter_resolver::{
     materialize_imported_runtime_values_into_env, push_partial_reason,
     resolve_exports_from_graph as resolver_resolve_exports_from_graph,
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
-    resolve_usage_prop_type,
-    resolve_fallthrough_surface as resolver_resolve_fallthrough_surface, run_stable_request,
+    resolve_usage_prop_type, resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
     DeclarationMetadataResolver, DynamicRootCandidate, ExportGraphFileKind,
     ExportGraphResolver, ExportSurface, FallthroughComputeHost,
-    FallthroughResolutionView, FallthroughResolverHost, ImportedDeclEvalResolver,
-    ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalLookup,
-    ImportedEvalLookupResolver, ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver,
-    ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
-    ImportedRuntimeValueResolver,
+    FallthroughRequestHost, FallthroughResolutionView, FallthroughResolverHost,
+    ImportedDeclEvalResolver, ImportedEvalBinding, ImportedEvalCollectorResolver,
+    ImportedEvalLookup, ImportedEvalLookupResolver, ImportedEvalOwnerContextResolver,
+    ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
+    ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
     ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
     OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource,
-    ResolvedConsumedBindings, ResolvedExportTarget, SingleflightRole,
-    StableRequestExecutor, StoreView,
+    ResolvedConsumedBindings, ResolvedExportTarget, SingleflightRole, StoreView,
 };
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -61,151 +59,6 @@ const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
 const COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS: usize = 2_000;
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
-struct FallthroughRequestExecutor<'a, 'b> {
-    host: &'a VerterHost,
-    canonical_id: String,
-    prop_type_overrides:
-        Option<&'a rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>>,
-    visiting: &'b mut rustc_hash::FxHashSet<String>,
-    fixed_store_view: Option<HostStoreView>,
-    last_snapshot_epoch: Option<u64>,
-}
-
-impl<'a, 'b> FallthroughRequestExecutor<'a, 'b> {
-    fn new(
-        host: &'a VerterHost,
-        canonical_id: String,
-        prop_type_overrides: Option<
-            &'a rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-        >,
-        visiting: &'b mut rustc_hash::FxHashSet<String>,
-    ) -> Self {
-        Self {
-            host,
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-            fixed_store_view: None,
-            last_snapshot_epoch: None,
-        }
-    }
-
-    fn with_fixed_view(mut self, store_view: Option<&HostStoreView>) -> Self {
-        self.fixed_store_view = store_view.cloned();
-        self
-    }
-}
-
-impl<'a, 'b>
-    StableRequestExecutor<
-        verter_resolver::FallthroughNodeKey,
-        Option<crate::types::FallthroughResolution>,
-    > for FallthroughRequestExecutor<'a, 'b>
-{
-    type View = crate::resolver_store::HostStoreView;
-    type Error = ();
-
-    fn cache_key(&self) -> verter_resolver::FallthroughNodeKey {
-        fallthrough_cache_key(
-            &self.canonical_id,
-            self.host.config.generic_root_propagation,
-            self.prop_type_overrides,
-        )
-    }
-
-    fn snapshot_view(&mut self) -> Self::View {
-        if let Some(view) = self.fixed_store_view.as_ref() {
-            self.last_snapshot_epoch = Some(view.mutation_epoch());
-            return view.clone();
-        }
-        let view = self.host.resolver_store_view();
-        self.last_snapshot_epoch = Some(view.mutation_epoch());
-        view
-    }
-
-    fn try_get_cached(
-        &mut self,
-        store_view: &Self::View,
-    ) -> Option<Option<crate::types::FallthroughResolution>> {
-        let cache_key = self.cache_key();
-        if let Some(cached) = self
-            .host
-            .fallthrough_cache
-            .get_if_valid(&cache_key, store_view)
-        {
-            if self.prop_type_overrides.is_none() {
-                self.host
-                    .mirror_cached_fallthrough_arc(&self.canonical_id, cached.clone());
-            }
-            return Some(Some(cached.as_ref().clone()));
-        }
-
-        if self.prop_type_overrides.is_none() {
-            #[cfg(feature = "scheduler")]
-            {
-                if let Some(cc) = self.host.compile_cache.get(&self.canonical_id) {
-                    if let Some(ref cached) = cc.cached_fallthrough {
-                        if cached.generic_root_propagation
-                            == self.host.config.generic_root_propagation
-                            && cached
-                                .fact_versions
-                                .iter()
-                                .all(|fact| store_view.validates(fact))
-                        {
-                            self.host.fallthrough_cache.insert_arc(
-                                cache_key,
-                                cached.resolution.clone(),
-                                cached.fact_versions.clone(),
-                            );
-                            self.host.mirror_cached_fallthrough_arc(
-                                &self.canonical_id,
-                                cached.resolution.clone(),
-                            );
-                            return Some(Some((*cached.resolution).clone()));
-                        }
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    fn compute(
-        &mut self,
-        view: &Self::View,
-    ) -> Result<Option<crate::types::FallthroughResolution>, Self::Error> {
-        Ok(self.host.compute_fallthrough_surface_uncached(
-            &self.canonical_id,
-            self.prop_type_overrides,
-            self.visiting,
-            Some(view),
-        ))
-    }
-
-    fn is_stable(&mut self, _view: &Self::View) -> bool {
-        if self.fixed_store_view.is_some() {
-            return true;
-        }
-        self.last_snapshot_epoch
-            .is_some_and(|epoch| self.host.current_store_view_epoch() == epoch)
-    }
-
-    fn store_stable(&mut self, value: &Option<crate::types::FallthroughResolution>) {
-        if let Some(result) = value.as_ref() {
-            self.host.cache_fallthrough_result(
-                &self.canonical_id,
-                self.prop_type_overrides,
-                result,
-            );
-        }
-    }
-
-    fn max_attempts(&self) -> usize {
-        STORE_VIEW_STABILITY_MAX_ATTEMPTS
-    }
-}
-
 impl FallthroughResolutionView for crate::types::FallthroughResolution {
     fn accepted_props(&self) -> &[verter_analysis::component_meta::AcceptedPropAnalysis] {
         &self.accepted_props
@@ -221,6 +74,106 @@ impl FallthroughResolutionView for crate::types::FallthroughResolution {
 
     fn fact_versions(&self) -> &[verter_resolver::FactVersionRef] {
         &self.fact_versions
+    }
+}
+
+impl FallthroughRequestHost for VerterHost {
+    type View = HostStoreView;
+    type Resolution = crate::types::FallthroughResolution;
+
+    fn generic_root_propagation(&self) -> bool {
+        self.config.generic_root_propagation
+    }
+
+    fn snapshot_store_view(&self) -> Self::View {
+        self.resolver_store_view()
+    }
+
+    fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
+        store_view.mutation_epoch()
+    }
+
+    fn current_store_view_epoch(&self) -> u64 {
+        VerterHost::current_store_view_epoch(self)
+    }
+
+    fn try_get_cached_fallthrough(
+        &self,
+        canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        store_view: &Self::View,
+    ) -> Option<Self::Resolution> {
+        let cache_key = fallthrough_cache_key(
+            canonical_id,
+            self.config.generic_root_propagation,
+            prop_type_overrides,
+        );
+        if let Some(cached) = self.fallthrough_cache.get_if_valid(&cache_key, store_view) {
+            if prop_type_overrides.is_none() {
+                self.mirror_cached_fallthrough_arc(canonical_id, cached.clone());
+            }
+            return Some(cached.as_ref().clone());
+        }
+
+        if prop_type_overrides.is_none() {
+            #[cfg(feature = "scheduler")]
+            {
+                if let Some(cc) = self.compile_cache.get(canonical_id) {
+                    if let Some(ref cached) = cc.cached_fallthrough {
+                        if cached.generic_root_propagation == self.config.generic_root_propagation
+                            && cached
+                                .fact_versions
+                                .iter()
+                                .all(|fact| store_view.validates(fact))
+                        {
+                            self.fallthrough_cache.insert_arc(
+                                cache_key,
+                                cached.resolution.clone(),
+                                cached.fact_versions.clone(),
+                            );
+                            self.mirror_cached_fallthrough_arc(
+                                canonical_id,
+                                cached.resolution.clone(),
+                            );
+                            return Some((*cached.resolution).clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn compute_fallthrough_surface_uncached(
+        &self,
+        canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+        store_view: Option<&Self::View>,
+    ) -> Option<Self::Resolution> {
+        VerterHost::compute_fallthrough_surface_uncached(
+            self,
+            canonical_id,
+            prop_type_overrides,
+            visiting,
+            store_view,
+        )
+    }
+
+    fn store_fallthrough_result(
+        &self,
+        canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        result: &Self::Resolution,
+    ) {
+        self.cache_fallthrough_result(canonical_id, prop_type_overrides, result);
     }
 }
 
@@ -1493,16 +1446,6 @@ impl VerterHost {
         }
     }
 
-    /// Load an evaluation dependency source, hydrating workspace-owned files into
-    /// host state when necessary before reading them.
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn load_eval_dependency_source_with_fallback(
-        &self,
-        dep_canonical: &str,
-    ) -> Option<(String, Arc<str>)> {
-        self.load_eval_dependency_source_with_fallback_in_view(dep_canonical, None)
-    }
-
     fn load_eval_dependency_source_with_fallback_in_view(
         &self,
         dep_canonical: &str,
@@ -1576,12 +1519,6 @@ impl VerterHost {
         None
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn load_eval_dependency_canonical_with_fallback(&self, dep_canonical: &str) -> Option<String> {
-        self.load_eval_dependency_source_with_fallback(dep_canonical)
-            .map(|(canonical, _)| canonical)
-    }
-
     fn load_eval_dependency_canonical_with_fallback_in_view(
         &self,
         dep_canonical: &str,
@@ -1589,15 +1526,6 @@ impl VerterHost {
     ) -> Option<String> {
         self.load_eval_dependency_source_with_fallback_in_view(dep_canonical, store_view)
             .map(|(canonical, _)| canonical)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn load_eval_dependency_source_text_with_fallback(
-        &self,
-        dep_canonical: &str,
-    ) -> Option<Arc<str>> {
-        self.load_eval_dependency_source_with_fallback(dep_canonical)
-            .map(|(_, source)| source)
     }
 
     fn load_eval_dependency_source_text_with_fallback_in_view(
@@ -2047,15 +1975,15 @@ impl VerterHost {
             });
         }
 
-        let mut executor = FallthroughRequestExecutor::new(
+        let result = verter_resolver::run_fallthrough_request(
             self,
-            canonical_id.to_string(),
+            &self.fallthrough_singleflight,
+            canonical_id,
             prop_type_overrides,
             visiting,
-        )
-        .with_fixed_view(store_view);
-        let result = run_stable_request(&self.fallthrough_singleflight, &mut executor)
-            .expect("fallthrough request execution is infallible");
+            store_view,
+            STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+        );
 
         if matches!(result.source, RequestSource::Cache) {
             self.provenance
@@ -2245,67 +2173,6 @@ impl VerterHost {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn build_owner_eval_env_with_inputs(
-        &self,
-        canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-        >,
-    ) -> Option<OwnerEvalEnvBuild> {
-        self.build_owner_eval_env_with_inputs_from_owner_env(
-            canonical_id,
-            snapshot,
-            imported_inputs,
-            prop_type_overrides,
-            None,
-        )
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn build_owner_eval_env_with_inputs_in_view(
-        &self,
-        canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-        >,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<OwnerEvalEnvBuild> {
-        self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
-            canonical_id,
-            snapshot,
-            imported_inputs,
-            prop_type_overrides,
-            None,
-            store_view,
-        )
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn build_owner_eval_env_with_inputs_from_owner_env(
-        &self,
-        canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-        >,
-        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
-    ) -> Option<OwnerEvalEnvBuild> {
-        self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
-            canonical_id,
-            snapshot,
-            imported_inputs,
-            prop_type_overrides,
-            owner_env,
-            None,
-        )
-    }
-
     fn build_owner_eval_env_with_inputs_from_owner_env_in_view(
         &self,
         canonical_id: &str,
@@ -2342,21 +2209,6 @@ impl VerterHost {
             ));
         }
         Some(built)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn materialize_imported_runtime_values_into_env(
-        &self,
-        snapshot: &FileAnalysisSnapshot,
-        owner_local_value_names: &rustc_hash::FxHashSet<String>,
-        env: &mut verter_analysis::type_eval::EvalEnv,
-    ) {
-        self.materialize_imported_runtime_values_into_env_in_view(
-            snapshot,
-            owner_local_value_names,
-            env,
-            None,
-        )
     }
 
     fn materialize_imported_runtime_values_into_env_in_view(

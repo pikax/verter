@@ -3,7 +3,7 @@ use crate::meta::MetaProject;
 use crate::types::{HostConfig, ResolverMode};
 use crate::VerterHost;
 use std::sync::Arc;
-use verter_resolver::StableRequestExecutor;
+use verter_resolver::ComponentMetaRequestHost;
 
 // ===========================================================================
 // Test helpers
@@ -65,12 +65,13 @@ defineProps<{ foo: string }>()
         .unwrap();
 
     let original_props = vec!["foo".to_string()];
-    let mut executor = ComponentMetaRequestExecutor::new(
+    let view = <VerterHost as ComponentMetaRequestHost>::snapshot_store_view(project.host());
+    let captured = <VerterHost as ComponentMetaRequestHost>::capture_component_meta_inputs(
         project.host(),
-        "/src/App.vue".to_string(),
-        ResolverMode::Expanded,
-    );
-    let view = executor.snapshot_view();
+        "/src/App.vue",
+        &view,
+    )
+    .expect("captured component-meta inputs should exist");
 
     project
         .upsert_base(
@@ -82,9 +83,13 @@ defineProps<{ bar: number }>()
         )
         .unwrap();
 
-    let state = executor
-        .compute(&view)
-        .expect("component-meta compute should be infallible")
+    let state = <VerterHost as ComponentMetaRequestHost>::compute_component_meta(
+        project.host(),
+        "/src/App.vue",
+        ResolverMode::Expanded,
+        Some(&captured),
+        Some(&view),
+    )
         .expect("component-meta should still resolve against captured owner inputs");
 
     let snapshot_props: Vec<String> = state

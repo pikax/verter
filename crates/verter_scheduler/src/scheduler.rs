@@ -54,6 +54,14 @@ fn num_cpus() -> usize {
         .unwrap_or(4)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn should_join_driver_thread(
+    handle_thread_id: std::thread::ThreadId,
+    current_thread_id: std::thread::ThreadId,
+) -> bool {
+    handle_thread_id != current_thread_id
+}
+
 /// A request to the scheduler.
 pub struct Request {
     pub file_id: String,
@@ -289,7 +297,9 @@ impl Scheduler {
         self.shutdown.store(true, Ordering::Release);
         let _ = self.inbox.sender.send(Submission::Wake);
         if let Some(handle) = self.driver_handle.lock().take() {
-            let _ = handle.join();
+            if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
+                let _ = handle.join();
+            }
         }
 
         // 2. Drain inbox — driver is stopped, so this is exclusive.
@@ -1412,7 +1422,9 @@ impl Drop for Scheduler {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if let Some(handle) = self.driver_handle.lock().take() {
-                let _ = handle.join();
+                if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
+                    let _ = handle.join();
+                }
             }
         }
 
@@ -2305,6 +2317,24 @@ mod tests {
         assert!(
             post_gen > pre_gen,
             "post-reset generation ({post_gen}) must be > pre-reset ({pre_gen})"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn driver_join_guard_skips_current_thread() {
+        let current = std::thread::current().id();
+        let other = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .expect("thread id probe should succeed");
+
+        assert!(
+            !should_join_driver_thread(current, current),
+            "driver join guard must skip self-join",
+        );
+        assert!(
+            should_join_driver_thread(other, current),
+            "driver join guard should still join distinct threads",
         );
     }
 

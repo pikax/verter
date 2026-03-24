@@ -4,6 +4,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 mod component_meta;
+mod component_meta_request;
 mod barrel_resolution;
 mod declaration_metadata;
 mod eval_env_build;
@@ -14,6 +15,7 @@ mod external_macro_types;
 mod external_type_graph;
 mod external_type_request;
 mod fallthrough;
+mod fallthrough_request;
 mod imported_decl_eval;
 mod imported_eval_collect;
 mod imported_eval_lookup;
@@ -32,6 +34,7 @@ pub use component_meta::{
     ComponentMetaResolverHost, ResolvedComponentMetaParts, ResolvedJsdocBlock,
     ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
+pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedTypeDeclaration,
@@ -70,6 +73,7 @@ pub use fallthrough::{
     FallthroughComputeHost, FallthroughResolutionView, FallthroughResolverHost,
     KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
+pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use imported_decl_eval::{
     evaluate_imported_decl_with_owner_env, ImportedDeclEvalResolver, PreparedImportedDeclContext,
 };
