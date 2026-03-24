@@ -264,7 +264,8 @@ fn scan_barrel_export_surface_recursive<R: BarrelResolutionResolver>(
     let current_hash = resolver.source_hash(current_canonical);
     state.tracked_deps.insert(current_canonical.to_string());
 
-    let Some(current_source) = resolver.read_source_for_type_resolution(current_canonical, profile_hash)
+    let Some(current_source) =
+        resolver.read_source_for_type_resolution(current_canonical, profile_hash)
     else {
         state
             .scanned_sources

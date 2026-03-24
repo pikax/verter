@@ -1976,3 +1976,231 @@ fn define_model_default_modelvalue() {
         model_macro.default_keys
     );
 }
+
+// ---------------------------------------------------------------------------
+// StableDeclarationId tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stable_declaration_id_new_and_accessors() {
+    let id = StableDeclarationId::new("/src/types.ts", "Props");
+    assert_eq!(id.canonical_id(), "/src/types.ts");
+    assert_eq!(id.name(), "Props");
+    assert!(!id.is_file_level());
+}
+
+#[test]
+fn stable_declaration_id_for_file() {
+    let id = StableDeclarationId::for_file("/src/App.vue");
+    assert_eq!(id.canonical_id(), "/src/App.vue");
+    assert_eq!(id.name(), "*");
+    assert!(id.is_file_level());
+}
+
+#[test]
+fn stable_declaration_id_to_symbol_id_roundtrip() {
+    let id = StableDeclarationId::new("/src/types.ts", "Props");
+    let symbol_id = id.to_symbol_id();
+    assert_eq!(symbol_id, "/src/types.ts#Props");
+
+    let parsed = StableDeclarationId::from_symbol_id(&symbol_id).unwrap();
+    assert_eq!(parsed, id);
+}
+
+#[test]
+fn stable_declaration_id_display() {
+    let id = StableDeclarationId::new("/src/types.ts", "Props");
+    assert_eq!(format!("{}", id), "/src/types.ts#Props");
+}
+
+#[test]
+fn stable_declaration_id_equality_same_file_same_name() {
+    let a = StableDeclarationId::new("/src/types.ts", "Props");
+    let b = StableDeclarationId::new("/src/types.ts", "Props");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn stable_declaration_id_inequality_different_name() {
+    let a = StableDeclarationId::new("/src/types.ts", "Props");
+    let b = StableDeclarationId::new("/src/types.ts", "Emits");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn stable_declaration_id_inequality_different_file() {
+    let a = StableDeclarationId::new("/src/types.ts", "Props");
+    let b = StableDeclarationId::new("/src/other.ts", "Props");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn stable_declaration_id_hashable() {
+    use std::collections::HashMap;
+    let mut map = HashMap::new();
+    let id = StableDeclarationId::new("/src/types.ts", "Props");
+    map.insert(id.clone(), 42);
+    assert_eq!(map.get(&id), Some(&42));
+}
+
+#[test]
+fn stable_declaration_id_from_symbol_id_without_hash_returns_none() {
+    assert!(StableDeclarationId::from_symbol_id("no-hash-here").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// LocalDeclarationEntry / declaration_entries population tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn declaration_entries_interface_is_type() {
+    let result = analyze("export interface Props { count: number }");
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "Props")
+        .expect("should have Props declaration entry");
+    assert_eq!(entry.kind, LocalDeclarationKind::Type);
+    assert_ne!(
+        entry.content_hash, [0u8; 16],
+        "content hash should be non-zero"
+    );
+}
+
+#[test]
+fn declaration_entries_type_alias_is_type() {
+    let result = analyze("export type Emits = { click: [] }");
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "Emits")
+        .expect("should have Emits declaration entry");
+    assert_eq!(entry.kind, LocalDeclarationKind::Type);
+}
+
+#[test]
+fn declaration_entries_const_is_value() {
+    let result = analyze("export const count = 42;");
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "count")
+        .expect("should have count declaration entry");
+    assert_eq!(entry.kind, LocalDeclarationKind::Value);
+}
+
+#[test]
+fn declaration_entries_function_is_value() {
+    let result = analyze("export function greet() { return 'hello'; }");
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "greet")
+        .expect("should have greet declaration entry");
+    assert_eq!(entry.kind, LocalDeclarationKind::Value);
+}
+
+#[test]
+fn declaration_entries_class_is_type_and_value() {
+    let result = analyze("export class MyComponent {}");
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "MyComponent")
+        .expect("should have MyComponent declaration entry");
+    assert_eq!(entry.kind, LocalDeclarationKind::TypeAndValue);
+}
+
+#[test]
+fn declaration_entries_enum_is_type_and_value() {
+    let result = analyze("export enum Direction { Up, Down }");
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "Direction")
+        .expect("should have Direction declaration entry");
+    assert_eq!(entry.kind, LocalDeclarationKind::TypeAndValue);
+}
+
+#[test]
+fn declaration_entries_includes_non_exported() {
+    let result = analyze("interface LocalProps { x: number }\nexport const used = 1;");
+    assert!(
+        result
+            .declaration_entries
+            .iter()
+            .any(|e| e.name == "LocalProps"),
+        "non-exported declarations should be included"
+    );
+}
+
+#[test]
+fn declaration_entries_hash_changes_when_body_changes() {
+    let result_a = analyze("export interface Props { count: number }");
+    let result_b = analyze("export interface Props { count: string }");
+    let hash_a = result_a
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "Props")
+        .unwrap()
+        .content_hash;
+    let hash_b = result_b
+        .declaration_entries
+        .iter()
+        .find(|e| e.name == "Props")
+        .unwrap()
+        .content_hash;
+    assert_ne!(
+        hash_a, hash_b,
+        "different body should produce different hash"
+    );
+}
+
+#[test]
+fn declaration_entries_deterministic_for_same_source() {
+    let code = "export interface Props { count: number }\nexport const x = 1;";
+    let result_a = analyze(code);
+    let result_b = analyze(code);
+    assert_eq!(
+        result_a.declaration_entries, result_b.declaration_entries,
+        "same source should produce identical declaration entries"
+    );
+}
+
+#[test]
+fn declaration_entries_preserve_interface_merges() {
+    let result = analyze(
+        "interface Foo { a: number }\ninterface Foo { b: string }\nexport const bar = 1;",
+    );
+    let foo_entries: Vec<_> = result
+        .declaration_entries
+        .iter()
+        .filter(|e| e.name == "Foo")
+        .collect();
+    assert_eq!(
+        foo_entries.len(),
+        2,
+        "merged interfaces should keep both declaration entries for stable IDs and change detection"
+    );
+    assert_ne!(
+        foo_entries[0].content_hash,
+        foo_entries[1].content_hash,
+        "distinct merged declarations should keep distinct content hashes"
+    );
+    assert!(
+        !result
+            .declaration_entries
+            .iter()
+            .any(|e| e.name == "Missing"),
+        "declaration entry collection must not fabricate unrelated names"
+    );
+}
+
+#[test]
+fn declaration_entries_empty_for_import_only_file() {
+    let result = analyze("import { ref } from 'vue';");
+    assert!(
+        result.declaration_entries.is_empty(),
+        "import-only file should have no declaration entries"
+    );
+}

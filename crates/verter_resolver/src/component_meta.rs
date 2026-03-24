@@ -117,6 +117,17 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     type EvalContext;
     type ImportedInputs;
 
+    fn resolve_type_declaration(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> ResolvedTypeDeclaration
+    where
+        Self: Sized,
+    {
+        resolve_type_declaration(self, dep_canonical, requested_name)
+    }
+
     fn snapshot_imports<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedImport];
     fn snapshot_macros<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedMacro];
     fn snapshot_macro_type_deps<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [MacroTypeDep];
@@ -128,6 +139,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         eval_context: Option<&Self::EvalContext>,
     ) -> ComponentMetaEvalOutputs<Self::ImportedInputs>;
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_macro_elements(
         &self,
         owner_canonical: &str,
@@ -207,8 +219,7 @@ where
         let dep_canonical = host
             .resolve_type_dependency_canonical(owner_canonical, &dep.import_source)
             .unwrap_or_default();
-        let declaration =
-            resolve_type_declaration(host, &dep_canonical, dep_exported_name.as_ref());
+        let declaration = host.resolve_type_declaration(&dep_canonical, dep_exported_name.as_ref());
         let jsdoc = host.resolve_jsdoc_block(
             declaration.canonical_source.as_str(),
             declaration.span,

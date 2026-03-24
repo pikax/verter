@@ -4,6 +4,114 @@ use verter_span::Span;
 /// Truncated SHA-256 hash (first 16 bytes). Used for content-based change detection.
 pub type Hash16 = [u8; 16];
 
+// ---------------------------------------------------------------------------
+// Stable declaration identifiers
+// ---------------------------------------------------------------------------
+
+/// A globally unique, deterministic identifier for a type or value declaration.
+///
+/// Composed of a canonical file ID and a declaration name, making it stable
+/// across re-analyses of the same source and unique across the workspace.
+///
+/// Used as `symbol_id` in `ResolutionNodeKey` for the resolver's node cache.
+///
+/// # Format
+///
+/// String representation: `{canonical_id}#{name}`
+///
+/// For file-level references (e.g., default export of a Vue SFC):
+/// `{canonical_id}#*`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StableDeclarationId {
+    canonical_id: String,
+    name: String,
+}
+
+impl StableDeclarationId {
+    /// Create a stable declaration ID for a named declaration in a file.
+    pub fn new(canonical_id: &str, name: &str) -> Self {
+        Self {
+            canonical_id: canonical_id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Create a stable declaration ID for a file-level reference (e.g., default export).
+    pub fn for_file(canonical_id: &str) -> Self {
+        Self {
+            canonical_id: canonical_id.to_string(),
+            name: "*".to_string(),
+        }
+    }
+
+    /// The canonical file path.
+    pub fn canonical_id(&self) -> &str {
+        &self.canonical_id
+    }
+
+    /// The declaration name within the file (`"*"` for file-level references).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether this is a file-level reference rather than a named declaration.
+    pub fn is_file_level(&self) -> bool {
+        self.name == "*"
+    }
+
+    /// Convert to the string representation used as `ResolutionNodeKey.symbol_id`.
+    pub fn to_symbol_id(&self) -> String {
+        format!("{}#{}", self.canonical_id, self.name)
+    }
+
+    /// Parse a `symbol_id` string back into a `StableDeclarationId`.
+    ///
+    /// Returns `None` if the string doesn't contain `#`.
+    pub fn from_symbol_id(symbol_id: &str) -> Option<Self> {
+        let (canonical_id, name) = symbol_id.rsplit_once('#')?;
+        Some(Self {
+            canonical_id: canonical_id.to_string(),
+            name: name.to_string(),
+        })
+    }
+}
+
+impl std::fmt::Display for StableDeclarationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.canonical_id, self.name)
+    }
+}
+
+/// Kind of declaration in the local namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalDeclarationKind {
+    /// Type-only: `interface Foo`, `type Foo = ...`
+    Type,
+    /// Value-only: `const foo`, `function foo()`, `let foo`
+    Value,
+    /// Both type and value: `class Foo {}`, `enum Foo {}`
+    TypeAndValue,
+}
+
+/// A local declaration entry in the analysis snapshot.
+///
+/// Represents a single type or value declaration in a file's top-level scope.
+/// Used by the resolver to construct stable cross-file declaration identifiers
+/// and to detect when a declaration's content has changed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalDeclarationEntry {
+    /// Declaration name.
+    pub name: String,
+    /// Whether this is a type, value, or both.
+    pub kind: LocalDeclarationKind,
+    /// Content hash of the declaration body. Changes when the declaration text changes.
+    pub content_hash: Hash16,
+    /// SFC-absolute span of the full declaration.
+    pub span: Span,
+}
+
 /// Compute a truncated SHA-256 hash (first 16 bytes).
 ///
 /// Used for export signature fingerprinting (cross-file change detection).
@@ -127,6 +235,14 @@ pub struct ScriptAnalysisSnapshot {
     /// `define-emits-declaration`, `define-model-type-required`, `require-typed-ref`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_typescript: bool,
+
+    /// Top-level declaration entries: types, values, and class/enum (both).
+    ///
+    /// Provides a unified view of all declarations in the file for the resolver.
+    /// Each entry has a content hash for change detection and a span for position.
+    /// Populated during `build_script_analysis`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declaration_entries: Vec<LocalDeclarationEntry>,
 }
 
 impl ScriptAnalysisSnapshot {

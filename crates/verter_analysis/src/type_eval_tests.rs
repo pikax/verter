@@ -243,6 +243,72 @@ fn eval_ref_cycle_detection() {
 }
 
 #[test]
+fn eval_intersection_child_override_wins() {
+    let mut env = EvalEnv::new();
+    let expr = TypeExpr::Intersection(vec![
+        TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "label".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "shared".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+        TypeExpr::Object(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "shared".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Number),
+                    optional: false,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "count".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                    optional: false,
+                    readonly: false,
+                }),
+            ],
+        }),
+    ]);
+
+    let result = evaluate(&expr, &mut env);
+    let TypeExpr::Object(obj) = result else {
+        panic!("expected merged object, got {result:?}");
+    };
+
+    let shared = obj
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "shared" => Some(prop),
+            _ => None,
+        })
+        .expect("intersection should keep shared property");
+    assert_eq!(
+        shared.ty,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "later child declarations should override the base property type"
+    );
+    assert!(
+        obj.properties.iter().any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "count")),
+        "merged intersection should retain child-only properties"
+    );
+    assert!(
+        !obj.properties.iter().any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "missing")),
+        "intersection merge must not fabricate unrelated properties"
+    );
+}
+
+#[test]
 fn eval_with_lookup_resolves_external_type_reference() {
     let mut env = EvalEnv::new();
     let mut lookup = TestLookup::default();

@@ -152,10 +152,7 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
                 if debug_enabled {
                     resolver.debug_log(format!(
                         "resolve_external_type route-cache-hit owner={} type={} -> {}#{}",
-                        owner_canonical,
-                        type_name,
-                        target.final_canonical_id,
-                        target.exported_name
+                        owner_canonical, type_name, target.final_canonical_id, target.exported_name
                     ));
                 }
 
@@ -218,9 +215,12 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
 
     if use_host_cache && profile_hash.is_none() {
         let mut registry_visited = FxHashSet::default();
-        if let Some(route) =
-            resolver.resolve_type_via_registry(&dep_canonical, type_name, kind, &mut registry_visited)
-        {
+        if let Some(route) = resolver.resolve_type_via_registry(
+            &dep_canonical,
+            type_name,
+            kind,
+            &mut registry_visited,
+        ) {
             if let Some(target) = &route.target {
                 let target_hash = resolver.whole_hash(&target.final_canonical_id);
                 if let Some(entry) = resolver.lookup_resolved_type_cache(
@@ -258,20 +258,21 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
         }
     }
 
-    let effective_source = match resolver.read_source_for_type_resolution(&dep_canonical, profile_hash) {
-        Some(source) => source,
-        None => {
-            if dep_canonical.ends_with(".vue") {
-                cache.insert(cache_key, None);
-                return Ok(None);
+    let effective_source =
+        match resolver.read_source_for_type_resolution(&dep_canonical, profile_hash) {
+            Some(source) => source,
+            None => {
+                if dep_canonical.ends_with(".vue") {
+                    cache.insert(cache_key, None);
+                    return Ok(None);
+                }
+                return if required_root_dep {
+                    Err(resolver.missing_root_dependency())
+                } else {
+                    Ok(None)
+                };
             }
-            return if required_root_dep {
-                Err(resolver.missing_root_dependency())
-            } else {
-                Ok(None)
-            };
-        }
-    };
+        };
 
     let dep_source_hash = if profile_hash.is_none() {
         Some(resolver.compute_source_hash(&effective_source))
@@ -368,14 +369,20 @@ mod tests {
     #[derive(Default)]
     struct TestResolver {
         dependency_routes: FxHashMap<(String, String, ResolveRequestKind), String>,
-        route_cache: FxHashMap<(String, String, String, ResolveRequestKind), ExternalTypeRouteEntry>,
-        resolved_cache:
-            RefCell<FxHashMap<(String, ResolverHash16, String, ResolveRequestKind), ExternalTypeResolvedCacheEntry>>,
+        route_cache:
+            FxHashMap<(String, String, String, ResolveRequestKind), ExternalTypeRouteEntry>,
+        resolved_cache: RefCell<
+            FxHashMap<
+                (String, ResolverHash16, String, ResolveRequestKind),
+                ExternalTypeResolvedCacheEntry,
+            >,
+        >,
         registry_routes: FxHashMap<(String, String, ResolveRequestKind), RegistryRoute>,
         sources: FxHashMap<String, String>,
         recursive_results: FxHashMap<(String, String, String), Option<ResolvedElements>>,
-        stored_routes:
-            RefCell<FxHashMap<(String, String, String, ResolveRequestKind), ExternalTypeRouteEntry>>,
+        stored_routes: RefCell<
+            FxHashMap<(String, String, String, ResolveRequestKind), ExternalTypeRouteEntry>,
+        >,
         cache_hits: RefCell<usize>,
         cache_misses: RefCell<usize>,
     }
@@ -456,11 +463,7 @@ mod tests {
             kind: ResolveRequestKind,
         ) -> Option<String> {
             self.dependency_routes
-                .get(&(
-                    owner_canonical.to_string(),
-                    import_source.to_string(),
-                    kind,
-                ))
+                .get(&(owner_canonical.to_string(), import_source.to_string(), kind))
                 .cloned()
         }
 

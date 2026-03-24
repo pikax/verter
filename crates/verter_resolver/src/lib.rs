@@ -3,26 +3,29 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
+mod barrel_resolution;
 mod component_meta;
 mod component_meta_request;
-mod barrel_resolution;
 mod declaration_metadata;
 mod eval_env_build;
 mod export_graph;
 mod export_registry_route;
-mod external_type_body;
 mod external_macro_types;
+mod external_type_body;
 mod external_type_graph;
 mod external_type_request;
 mod fallthrough;
 mod fallthrough_request;
+pub mod fallthrough_resolver;
 mod imported_decl_eval;
 mod imported_eval_collect;
 mod imported_eval_lookup;
 mod imported_eval_types;
 mod imported_type_alias;
+pub mod resolver_runtime;
 mod runtime_values;
 mod surface_projector;
+pub mod symbol_resolver;
 
 pub type ResolverHash16 = verter_analysis::Hash16;
 pub use barrel_resolution::{
@@ -31,8 +34,8 @@ pub use barrel_resolution::{
 pub use component_meta::{
     component_meta_resolved_macros, component_meta_type_registry, resolve_component_meta_parts,
     resolved_elements_to_type_expr_via_type_text, ComponentMetaEvalOutputs,
-    ComponentMetaResolverHost, ResolvedComponentMetaParts, ResolvedJsdocBlock,
-    ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
+    ComponentMetaResolverHost, ResolvedComponentMetaParts, ResolvedJsdocBlock, ResolvedJsdocTag,
+    ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{
@@ -52,26 +55,26 @@ pub use export_registry_route::{
     resolve_type_via_registry, ExportRegistryView, RegistryExportEntry, RegistryResolvedTarget,
     RegistryRoute, RegistryRouteResolver,
 };
-pub use external_type_body::{
-    resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
-};
-pub use external_type_request::{
-    resolve_external_type_request, ExternalTypeRequestResolver, ExternalTypeResolvedCacheEntry,
-    ExternalTypeRouteEntry,
-};
 pub use external_macro_types::{
     collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,
     ExternalMacroTypeDiagnostic,
 };
+pub use external_type_body::{
+    resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
+};
 pub use external_type_graph::{resolve_external_type_from_graph, ExternalTypeGraphResolver};
+pub use external_type_request::{
+    resolve_external_type_request, ExternalTypeRequestResolver, ExternalTypeResolvedCacheEntry,
+    ExternalTypeRouteEntry,
+};
 pub use fallthrough::{
     append_component_candidate_branches, append_native_candidate_branch,
-    collect_dynamic_root_candidates_from_type, extend_unique_fact_versions,
-    fallthrough_cache_key, hash_prop_type_overrides, known_spread_keys_from_type_expr,
-    inject_prop_type_overrides, merge_fallthrough_branches, push_partial_reason,
-    resolve_fallthrough_surface, resolve_usage_prop_type, DynamicRootCandidate,
-    FallthroughComputeHost, FallthroughResolutionView, FallthroughResolverHost,
-    KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
+    collect_dynamic_root_candidates_from_type, extend_unique_fact_versions, fallthrough_cache_key,
+    hash_prop_type_overrides, inject_prop_type_overrides, known_spread_keys_from_type_expr,
+    merge_fallthrough_branches, push_partial_reason, resolve_fallthrough_surface,
+    resolve_usage_prop_type, DynamicRootCandidate, FallthroughComputeHost,
+    FallthroughResolutionView, FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings,
+    ResolvedFallthroughSurface,
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use imported_decl_eval::{
@@ -178,6 +181,7 @@ pub enum TraversalLens {
 pub enum ResolutionNodeKind {
     Route,
     BarrelLookup,
+    DeclarationMetadata,
     SymbolExpand,
     MemberProjection,
     KeySpace,
@@ -379,6 +383,10 @@ where
     pub fn clear(&self) {
         self.entries.lock().clear();
     }
+
+    pub fn remove(&self, key: &K) {
+        self.entries.lock().remove(key);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +407,7 @@ pub struct SingleflightGroup<K, V, E>
 where
     K: Eq + Hash,
 {
+    #[allow(clippy::type_complexity)]
     flights: Mutex<FxHashMap<(K, StoreViewCompatToken), Arc<FlightState<V, E>>>>,
 }
 
@@ -501,6 +510,105 @@ where
 
     pub fn clear(&self) {
         self.flights.lock().clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Observability counters
+// ---------------------------------------------------------------------------
+
+/// Atomic counters for resolver observability.
+///
+/// Thread-safe via `AtomicU64`. The resolver increments these during resolution;
+/// consumers read snapshots via `snapshot()` for diagnostics, benchmarks, and tests.
+#[derive(Debug, Default)]
+pub struct ResolverCounters {
+    /// Number of times a cached node result was reused (fact-validated hit).
+    pub node_cache_hits: std::sync::atomic::AtomicU64,
+    /// Number of times a node had to be recomputed (cache miss or stale).
+    pub node_cache_misses: std::sync::atomic::AtomicU64,
+    /// Number of times singleflight coalesced a follower onto an in-flight leader.
+    pub singleflight_coalesces: std::sync::atomic::AtomicU64,
+    /// Number of cycle detections during resolution.
+    pub cycle_detections: std::sync::atomic::AtomicU64,
+    /// Number of times incompatible StoreViews forked separate singleflight lanes.
+    pub cross_view_lane_forks: std::sync::atomic::AtomicU64,
+    /// Number of route/barrel fact reuses (cached route entries validated and reused).
+    pub route_fact_reuses: std::sync::atomic::AtomicU64,
+}
+
+/// A non-atomic snapshot of `ResolverCounters` for reading/comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResolverCountersSnapshot {
+    pub node_cache_hits: u64,
+    pub node_cache_misses: u64,
+    pub singleflight_coalesces: u64,
+    pub cycle_detections: u64,
+    pub cross_view_lane_forks: u64,
+    pub route_fact_reuses: u64,
+}
+
+impl ResolverCounters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn snapshot(&self) -> ResolverCountersSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        ResolverCountersSnapshot {
+            node_cache_hits: self.node_cache_hits.load(Relaxed),
+            node_cache_misses: self.node_cache_misses.load(Relaxed),
+            singleflight_coalesces: self.singleflight_coalesces.load(Relaxed),
+            cycle_detections: self.cycle_detections.load(Relaxed),
+            cross_view_lane_forks: self.cross_view_lane_forks.load(Relaxed),
+            route_fact_reuses: self.route_fact_reuses.load(Relaxed),
+        }
+    }
+
+    pub fn reset(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.node_cache_hits.store(0, Relaxed);
+        self.node_cache_misses.store(0, Relaxed);
+        self.singleflight_coalesces.store(0, Relaxed);
+        self.cycle_detections.store(0, Relaxed);
+        self.cross_view_lane_forks.store(0, Relaxed);
+        self.route_fact_reuses.store(0, Relaxed);
+    }
+
+    #[inline]
+    pub fn record_cache_hit(&self) {
+        self.node_cache_hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_cache_miss(&self) {
+        self.node_cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_singleflight_coalesce(&self) {
+        self.singleflight_coalesces
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_cycle_detection(&self) {
+        self.cycle_detections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_cross_view_lane_fork(&self) {
+        self.cross_view_lane_forks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_route_fact_reuse(&self) {
+        self.route_fact_reuses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -801,5 +909,96 @@ mod tests {
         assert_eq!(second.role, SingleflightRole::Leader);
         assert!(first.forked_lane || second.forked_lane);
         assert!(!Arc::ptr_eq(&first.value, &second.value));
+    }
+
+    // -----------------------------------------------------------------------
+    // ResolverCounters tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolver_counters_default_is_zero() {
+        let counters = ResolverCounters::new();
+        let snap = counters.snapshot();
+        assert_eq!(snap.node_cache_hits, 0);
+        assert_eq!(snap.node_cache_misses, 0);
+        assert_eq!(snap.singleflight_coalesces, 0);
+        assert_eq!(snap.cycle_detections, 0);
+        assert_eq!(snap.cross_view_lane_forks, 0);
+        assert_eq!(snap.route_fact_reuses, 0);
+    }
+
+    #[test]
+    fn resolver_counters_increment_and_snapshot() {
+        let counters = ResolverCounters::new();
+        counters.record_cache_hit();
+        counters.record_cache_hit();
+        counters.record_cache_miss();
+        counters.record_singleflight_coalesce();
+        counters.record_cycle_detection();
+        counters.record_cross_view_lane_fork();
+        counters.record_route_fact_reuse();
+        counters.record_route_fact_reuse();
+        counters.record_route_fact_reuse();
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.node_cache_hits, 2);
+        assert_eq!(snap.node_cache_misses, 1);
+        assert_eq!(snap.singleflight_coalesces, 1);
+        assert_eq!(snap.cycle_detections, 1);
+        assert_eq!(snap.cross_view_lane_forks, 1);
+        assert_eq!(snap.route_fact_reuses, 3);
+    }
+
+    #[test]
+    fn resolver_counters_reset_clears_all() {
+        let counters = ResolverCounters::new();
+        counters.record_cache_hit();
+        counters.record_cache_miss();
+        counters.record_singleflight_coalesce();
+
+        counters.reset();
+        let snap = counters.snapshot();
+        assert_eq!(snap, ResolverCountersSnapshot::default());
+    }
+
+    #[test]
+    fn resolver_counters_thread_safe() {
+        let counters = Arc::new(ResolverCounters::new());
+        let barrier = Arc::new(Barrier::new(4));
+
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let counters = Arc::clone(&counters);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..100 {
+                        counters.record_cache_hit();
+                        counters.record_cache_miss();
+                    }
+                })
+            })
+            .collect();
+
+        barrier.wait();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.node_cache_hits, 300);
+        assert_eq!(snap.node_cache_misses, 300);
+    }
+
+    #[test]
+    fn resolver_counters_snapshot_is_not_default_after_recording() {
+        let counters = ResolverCounters::new();
+        counters.record_cache_hit();
+        let snap = counters.snapshot();
+        assert_ne!(
+            snap,
+            ResolverCountersSnapshot::default(),
+            "snapshot should differ from default after recording"
+        );
     }
 }

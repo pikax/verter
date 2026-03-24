@@ -76,7 +76,9 @@ where
     fn snapshot_view(&mut self) -> Self::View {
         for _ in 0..self.max_attempts {
             let view = self.host.snapshot_store_view();
-            let captured_inputs = self.host.capture_component_meta_inputs(&self.canonical, &view);
+            let captured_inputs = self
+                .host
+                .capture_component_meta_inputs(&self.canonical, &view);
             let view_epoch = self.host.view_mutation_epoch(&view);
             if self.host.current_store_view_epoch() == view_epoch {
                 self.last_snapshot_epoch = Some(view_epoch);
@@ -87,7 +89,9 @@ where
 
         let view = self.host.snapshot_store_view();
         self.last_snapshot_epoch = Some(self.host.view_mutation_epoch(&view));
-        self.captured_inputs = self.host.capture_component_meta_inputs(&self.canonical, &view);
+        self.captured_inputs = self
+            .host
+            .capture_component_meta_inputs(&self.canonical, &view);
         view
     }
 
@@ -125,7 +129,11 @@ where
 
 pub fn run_component_meta_request<H>(
     host: &H,
-    singleflight: &SingleflightGroup<ResolutionNodeKey, StableExecutionValue<Option<H::Resolution>>, ()>,
+    singleflight: &SingleflightGroup<
+        ResolutionNodeKey,
+        StableExecutionValue<Option<H::Resolution>>,
+        (),
+    >,
     canonical: &str,
     mode: H::Mode,
     max_attempts: usize,

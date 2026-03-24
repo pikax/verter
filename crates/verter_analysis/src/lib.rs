@@ -109,8 +109,9 @@ pub use types::{
     AnalyzedSlotFieldBinding, BindingInitializer, ComposableInfo, ComposableReturn,
     ComposableReturnField, CssVarManipulation, CssVarManipulationKind, DomQueryCallSite,
     DomQueryKind, ExportSignature, FunctionParam, Hash16, ImportSourceInfo, LiteralKind,
-    MacroTypeDep, ModuleReferenceAnalyzability, ModuleReferenceSemantics, ModuleReferenceSyntax,
-    NestedMacroCall, ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ReturnReactivity,
-    ScriptAnalysisSnapshot, ScriptTypeEnhancements, StoreApiClassification, StoreDefinition,
+    LocalDeclarationEntry, LocalDeclarationKind, MacroTypeDep, ModuleReferenceAnalyzability,
+    ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall, ReactivityKind,
+    ResolvedLocalType, ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot,
+    ScriptTypeEnhancements, StableDeclarationId, StoreApiClassification, StoreDefinition,
     StoreUsage, TypeResolutionSource, VueApiClassification,
 };

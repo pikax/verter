@@ -57,8 +57,11 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
     type Snapshot;
     type EvalEnv;
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_root_consumption(
         &self,
+        canonical_id: &str,
+        branch_key: &str,
         snapshot: &Self::Snapshot,
         element_index: u32,
         base: &ConsumedRootBindings,
@@ -83,8 +86,13 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DynamicRootCandidate {
-    NativeTag { tag: String },
-    ComponentImport { component_name: String, import_source: String },
+    NativeTag {
+        tag: String,
+    },
+    ComponentImport {
+        component_name: String,
+        import_source: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -241,8 +249,7 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
     fact_versions: &mut Vec<FactVersionRef>,
     visiting: &mut FxHashSet<String>,
 ) {
-    let Some(child_id) =
-        host.resolve_child_component_canonical(parent_canonical_id, import_source)
+    let Some(child_id) = host.resolve_child_component_canonical(parent_canonical_id, import_source)
     else {
         *any_unresolved = true;
         fallthrough_branches.push(unresolved_child_import_branch(
@@ -254,7 +261,10 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
         return;
     };
 
-    extend_unique_fact_versions(fact_versions, host.current_dependency_fact_versions(&child_id));
+    extend_unique_fact_versions(
+        fact_versions,
+        host.current_dependency_fact_versions(&child_id),
+    );
 
     if !child_id.ends_with(".vue") {
         *any_unresolved = true;
@@ -280,7 +290,10 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
         return;
     };
 
-    extend_unique_fact_versions(fact_versions, child_resolution.fact_versions().iter().cloned());
+    extend_unique_fact_versions(
+        fact_versions,
+        child_resolution.fact_versions().iter().cloned(),
+    );
 
     match child_resolution.fallthrough_surface() {
         FallthroughSurface::None { .. } => {
@@ -319,7 +332,9 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
                 status,
             });
         }
-        FallthroughSurface::Branches { branches: child_branches } => {
+        FallthroughSurface::Branches {
+            branches: child_branches,
+        } => {
             let child_declared_props: Vec<_> = child_resolution
                 .accepted_props()
                 .iter()
@@ -521,13 +536,17 @@ pub fn merge_fallthrough_branches(
         }
     }
 
-    let mut inherited_props: Vec<AcceptedPropAnalysis> =
-        inherited_prop_map.into_values().map(|(prop, _)| prop).collect();
+    let mut inherited_props: Vec<AcceptedPropAnalysis> = inherited_prop_map
+        .into_values()
+        .map(|(prop, _)| prop)
+        .collect();
     inherited_props.sort_by(|a, b| a.name.cmp(&b.name));
     accepted_props.extend(inherited_props);
 
-    let mut inherited_events: Vec<AcceptedEventAnalysis> =
-        inherited_event_map.into_values().map(|(event, _)| event).collect();
+    let mut inherited_events: Vec<AcceptedEventAnalysis> = inherited_event_map
+        .into_values()
+        .map(|(event, _)| event)
+        .collect();
     inherited_events.sort_by(|a, b| a.name.cmp(&b.name));
     accepted_events.extend(inherited_events);
 
@@ -538,6 +557,7 @@ pub fn merge_fallthrough_branches(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
     host: &H,
     canonical_id: &str,
@@ -548,10 +568,16 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
     mut fact_versions: Vec<FactVersionRef>,
     visiting: &mut FxHashSet<String>,
 ) -> ResolvedFallthroughSurface {
-    let declared_prop_names: FxHashSet<String> =
-        base_meta.props.iter().map(|prop| prop.name.clone()).collect();
-    let declared_event_names: FxHashSet<String> =
-        base_meta.events.iter().map(|event| event.name.clone()).collect();
+    let declared_prop_names: FxHashSet<String> = base_meta
+        .props
+        .iter()
+        .map(|prop| prop.name.clone())
+        .collect();
+    let declared_event_names: FxHashSet<String> = base_meta
+        .events
+        .iter()
+        .map(|event| event.name.clone())
+        .collect();
     let declared_listener_aliases: FxHashSet<String> = base_meta
         .props
         .iter()
@@ -609,6 +635,8 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                     | RootTargetRef::UnresolvedTarget { element_index, .. } => *element_index,
                 };
                 let resolved_consumed = host.resolve_root_consumption(
+                    canonical_id,
+                    &branch_key,
                     snapshot,
                     element_index,
                     &branch.consumed,
@@ -641,8 +669,11 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                             *usage_index,
                             &mut eval_env,
                         );
-                        let candidates =
-                            host.resolve_dynamic_root_candidates(snapshot, *usage_index, &mut eval_env);
+                        let candidates = host.resolve_dynamic_root_candidates(
+                            snapshot,
+                            *usage_index,
+                            &mut eval_env,
+                        );
 
                         if candidates.is_empty() {
                             any_unresolved = true;
@@ -1014,7 +1045,8 @@ fn inherited_component_props(
     consumed_attrs: &[String],
     child_id: &str,
 ) -> Vec<FallthroughPropEntry> {
-    props.iter()
+    props
+        .iter()
         .filter(|prop| !declared_prop_names.contains(&prop.name))
         .filter(|prop| !consumed_attrs.iter().any(|attr| attr == &prop.name))
         .map(|prop| FallthroughPropEntry {
@@ -1035,12 +1067,17 @@ fn inherited_component_events(
     consumed_listeners: &[String],
     child_id: &str,
 ) -> Vec<FallthroughEventEntry> {
-    events.iter()
+    events
+        .iter()
         .filter(|event| {
             !declared_event_names.contains(&event.name)
                 && !declared_listener_aliases.contains(&event.name)
         })
-        .filter(|event| !consumed_listeners.iter().any(|listener| listener == &event.name))
+        .filter(|event| {
+            !consumed_listeners
+                .iter()
+                .any(|listener| listener == &event.name)
+        })
         .map(|event| FallthroughEventEntry {
             name: event.name.clone(),
             payload: event.payload.clone(),
@@ -1058,7 +1095,8 @@ fn inherited_declared_component_props(
     consumed_attrs: &[String],
     child_id: &str,
 ) -> Vec<FallthroughPropEntry> {
-    props.iter()
+    props
+        .iter()
         .filter(|prop| !declared_prop_names.contains(&prop.name))
         .filter(|prop| !consumed_attrs.iter().any(|attr| attr == &prop.name))
         .map(|prop| FallthroughPropEntry {
@@ -1079,12 +1117,17 @@ fn inherited_declared_component_events(
     consumed_listeners: &[String],
     child_id: &str,
 ) -> Vec<FallthroughEventEntry> {
-    events.iter()
+    events
+        .iter()
         .filter(|event| {
             !declared_event_names.contains(&event.name)
                 && !declared_listener_aliases.contains(&event.name)
         })
-        .filter(|event| !consumed_listeners.iter().any(|listener| listener == &event.name))
+        .filter(|event| {
+            !consumed_listeners
+                .iter()
+                .any(|listener| listener == &event.name)
+        })
         .map(|event| FallthroughEventEntry {
             name: event.name.clone(),
             payload: event.payload.clone(),
@@ -1134,7 +1177,9 @@ fn normalize_public_spread_key(
     }
 }
 
-fn known_spread_keys_from_object(object: &verter_analysis::type_expr::ObjectExpr) -> KnownSpreadKeys {
+fn known_spread_keys_from_object(
+    object: &verter_analysis::type_expr::ObjectExpr,
+) -> KnownSpreadKeys {
     let mut result = KnownSpreadKeys {
         exact: true,
         ..KnownSpreadKeys::default()
@@ -1159,7 +1204,10 @@ fn known_spread_keys_from_object(object: &verter_analysis::type_expr::ObjectExpr
     result
 }
 
-fn intersect_known_spread_keys(mut left: KnownSpreadKeys, right: KnownSpreadKeys) -> KnownSpreadKeys {
+fn intersect_known_spread_keys(
+    mut left: KnownSpreadKeys,
+    right: KnownSpreadKeys,
+) -> KnownSpreadKeys {
     left.attrs = left.attrs.intersection(&right.attrs).cloned().collect();
     left.listeners = left
         .listeners
@@ -1174,11 +1222,11 @@ fn intersect_known_spread_keys(mut left: KnownSpreadKeys, right: KnownSpreadKeys
 mod tests {
     use super::{
         append_component_candidate_branches, append_native_candidate_branch,
-        collect_dynamic_root_candidates_from_type, fallthrough_cache_key,
-        hash_prop_type_overrides, inject_prop_type_overrides, known_spread_keys_from_type_expr,
-        merge_fallthrough_branches, resolve_fallthrough_surface, resolve_usage_prop_type,
-        DynamicRootCandidate, FallthroughComputeHost, FallthroughResolutionView,
-        FallthroughResolverHost, ResolvedConsumedBindings,
+        collect_dynamic_root_candidates_from_type, fallthrough_cache_key, hash_prop_type_overrides,
+        inject_prop_type_overrides, known_spread_keys_from_type_expr, merge_fallthrough_branches,
+        resolve_fallthrough_surface, resolve_usage_prop_type, DynamicRootCandidate,
+        FallthroughComputeHost, FallthroughResolutionView, FallthroughResolverHost,
+        ResolvedConsumedBindings,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use verter_analysis::component_meta::{
@@ -1189,7 +1237,9 @@ mod tests {
     };
     use verter_analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
     use verter_analysis::template::{PropValueConstness, TemplatePropUsage};
-    use verter_analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, ValueRef};
+    use verter_analysis::type_expr::{
+        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, ValueRef,
+    };
     use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
     use verter_span::Span;
 
@@ -1269,6 +1319,8 @@ mod tests {
 
         fn resolve_root_consumption(
             &self,
+            _canonical_id: &str,
+            _branch_key: &str,
             _snapshot: &Self::Snapshot,
             _element_index: u32,
             base: &ConsumedRootBindings,
@@ -1337,7 +1389,10 @@ mod tests {
         right.insert("a".to_string(), TypeExpr::primitive(PrimitiveName::Number));
         right.insert("b".to_string(), TypeExpr::primitive(PrimitiveName::String));
 
-        assert_eq!(hash_prop_type_overrides(&left), hash_prop_type_overrides(&right));
+        assert_eq!(
+            hash_prop_type_overrides(&left),
+            hash_prop_type_overrides(&right)
+        );
         assert_eq!(
             fallthrough_cache_key("/App.vue", true, Some(&left)),
             fallthrough_cache_key("/App.vue", true, Some(&right))
@@ -1483,7 +1538,8 @@ mod tests {
                 events: vec![],
                 root_chain: vec![],
                 status: BranchStatus::Unresolved {
-                    reason: verter_analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
+                    reason:
+                        verter_analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
                 },
             },
         ];
@@ -1507,32 +1563,30 @@ mod tests {
     #[test]
     fn known_spread_keys_from_type_expr_intersects_union_keys() {
         let summary = known_spread_keys_from_type_expr(&TypeExpr::union(vec![
-            TypeExpr::Object(ObjectExpr { properties: vec![ObjectMember::Property(
-                ObjectProperty {
+            TypeExpr::Object(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "id".to_string(),
                     optional: false,
                     readonly: false,
                     ty: TypeExpr::primitive(PrimitiveName::String),
-                },
-            )]}),
-            TypeExpr::Object(ObjectExpr { properties: vec![
-                ObjectMember::Property(
-                    ObjectProperty {
+                })],
+            }),
+            TypeExpr::Object(ObjectExpr {
+                properties: vec![
+                    ObjectMember::Property(ObjectProperty {
                         name: "id".to_string(),
                         optional: false,
                         readonly: false,
                         ty: TypeExpr::primitive(PrimitiveName::String),
-                    },
-                ),
-                ObjectMember::Property(
-                    ObjectProperty {
+                    }),
+                    ObjectMember::Property(ObjectProperty {
                         name: "title".to_string(),
                         optional: false,
                         readonly: false,
                         ty: TypeExpr::primitive(PrimitiveName::String),
-                    },
-                ),
-            ]}),
+                    }),
+                ],
+            }),
         ]))
         .expect("union object spread keys should resolve");
 
@@ -1577,7 +1631,10 @@ mod tests {
     fn inject_prop_type_overrides_adds_value_bindings() {
         let mut env = verter_analysis::type_eval::EvalEnv::new();
         let mut overrides = FxHashMap::default();
-        overrides.insert("size".to_string(), TypeExpr::primitive(PrimitiveName::Number));
+        overrides.insert(
+            "size".to_string(),
+            TypeExpr::primitive(PrimitiveName::Number),
+        );
 
         inject_prop_type_overrides(&mut env, &overrides);
 

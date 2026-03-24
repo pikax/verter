@@ -270,6 +270,10 @@ mod tests {
             cached_parse: None,
             cached_tsc_extract: None,
             cached_resolved_meta: FxHashMap::default(),
+            cached_fallthrough: None,
+            barrel_export_surface: None,
+            export_registry: None,
+            import_route_cache: FxHashMap::default(),
         };
         for i in 0..n_slots {
             entry.compile_slots.insert(

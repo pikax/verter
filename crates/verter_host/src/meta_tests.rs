@@ -148,6 +148,34 @@ fn clear_legacy_cached_fallthrough_state(project: &MetaProject, canonical: &str)
 }
 
 #[cfg(feature = "scheduler")]
+fn clear_runtime_top_level_fallthrough_node(project: &MetaProject, canonical: &str) {
+    let key = verter_resolver::fallthrough_cache_key(
+        canonical,
+        project.host().config.generic_root_propagation,
+        None,
+    );
+    project
+        .host()
+        .resolver_runtime()
+        .fallthrough
+        .remove_node_for_test(&key);
+}
+
+#[cfg(feature = "scheduler")]
+fn clear_runtime_root_follow_node(project: &MetaProject, canonical: &str) {
+    let key = verter_resolver::fallthrough_resolver::root_follow_key(
+        canonical,
+        0,
+        project.host().config.generic_root_propagation,
+    );
+    project
+        .host()
+        .resolver_runtime()
+        .fallthrough
+        .remove_node_for_test(&key);
+}
+
+#[cfg(feature = "scheduler")]
 fn cached_fallthrough_entry(
     project: &MetaProject,
     canonical: &str,
@@ -342,6 +370,75 @@ fn ensure_loaded_advances_store_view_epoch() {
     assert_ne!(before_view.compat_token(), after_view.compat_token());
 }
 
+#[test]
+fn store_view_compat_token_matches_snapshot_epoch() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .expect("upsert should succeed");
+
+    let view = project.host().snapshot_view();
+
+    assert_eq!(
+        view.compat_token(),
+        verter_resolver::StoreViewCompatToken(view.mutation_epoch()),
+        "v1 store-view compatibility must be exact snapshot epoch equality"
+    );
+}
+
+#[test]
+fn store_view_epoch_advances_on_upsert() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .expect("upsert should succeed");
+    let epoch_after_first = project.host().current_store_view_epoch();
+
+    project
+        .upsert_base("/App.vue", &sfc("msg: number"))
+        .expect("re-upsert should succeed");
+    let epoch_after_second = project.host().current_store_view_epoch();
+
+    assert_ne!(
+        epoch_after_first, epoch_after_second,
+        "mutation epoch must advance on re-upsert so compat tokens distinguish views"
+    );
+}
+
+#[test]
+fn store_view_epoch_advances_on_evict() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .expect("upsert should succeed");
+    let epoch_before = project.host().current_store_view_epoch();
+
+    project.host().evict("/App.vue");
+    let epoch_after = project.host().current_store_view_epoch();
+
+    assert_ne!(
+        epoch_before, epoch_after,
+        "mutation epoch must advance on evict so compat tokens distinguish views"
+    );
+}
+
+#[test]
+fn store_view_epoch_advances_on_clear_compile_cache() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", &sfc("msg: string"))
+        .expect("upsert should succeed");
+    let epoch_before = project.host().current_store_view_epoch();
+
+    project.host().clear_compile_cache();
+    let epoch_after = project.host().current_store_view_epoch();
+
+    assert_ne!(
+        epoch_before, epoch_after,
+        "mutation epoch must advance on clear_compile_cache so compat tokens distinguish views"
+    );
+}
+
 #[cfg(feature = "scheduler")]
 #[test]
 fn current_dependency_fact_versions_include_derived_resolver_facts() {
@@ -458,6 +555,110 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
             canonical_id: "/index.ts".to_string(),
             generation: 11,
         })
+    );
+}
+
+#[cfg(not(feature = "scheduler"))]
+#[test]
+fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler() {
+    let project = make_project();
+    project
+        .upsert_base("/index.ts", "export * from './inner'")
+        .unwrap();
+
+    let whole_hash = project
+        .host()
+        .get_whole_hash("/index.ts")
+        .expect("whole hash should exist");
+
+    {
+        let mut files = crate::shared::write_lock(&project.host().files);
+        let entry = files.get_mut("/index.ts").expect("file entry should exist");
+        entry.dependency_resolutions.insert(
+            "./inner".to_string(),
+            crate::types::DependencyResolution {
+                specifier: "./inner".to_string(),
+                resolved_canonical_id: Some("/inner.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        );
+        entry.export_registry = Some(crate::types::FileExportRegistry {
+            source_hash: [3; 16],
+            named: rustc_hash::FxHashMap::default(),
+            wildcard_edges: Vec::new(),
+        });
+        entry.barrel_export_surface = Some(crate::types::BarrelResolutionState {
+            export_map: rustc_hash::FxHashMap::default(),
+            source_hash: [4; 16],
+            wildcard_sources: Vec::new(),
+            scanned_sources: rustc_hash::FxHashMap::default(),
+            tracked_deps: rustc_hash::FxHashSet::default(),
+            fully_resolved: true,
+            generation: 11,
+        });
+        entry.import_route_cache.insert(
+            (
+                "./inner".to_string(),
+                "Inner".to_string(),
+                verter_vfs::ResolveRequestKind::TypeImport,
+            ),
+            crate::types::ImportTypeRouteEntry {
+                owner_hash: whole_hash,
+                target: Some(crate::types::NormalizedTypeTarget {
+                    final_canonical_id: "/inner.ts".to_string(),
+                    exported_name: "Inner".to_string(),
+                }),
+                tracked_deps: vec!["/inner.ts".to_string()],
+                route_hashes: vec![("/inner.ts".to_string(), [5; 16])],
+                negative_barrel_gen: None,
+            },
+        );
+    }
+
+    let facts = project
+        .host()
+        .current_dependency_fact_versions("/index.ts", &std::collections::BTreeSet::new());
+
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::FileWholeHash {
+            canonical_id: "/index.ts".to_string(),
+            hash: whole_hash,
+        })
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            hash: [3; 16],
+        }),
+        "non-scheduler store views must track export-registry facts"
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::Route,
+            hash: {
+                let files = crate::shared::read_lock(&project.host().files);
+                let entry = files.get("/index.ts").expect("file entry should exist");
+                crate::resolver_store::hash_import_route_cache(&entry.import_route_cache)
+            },
+        }),
+        "non-scheduler store views must track import-route facts"
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::BarrelSurface,
+            hash: [4; 16],
+        }),
+        "non-scheduler store views must track barrel-surface facts"
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::BarrelGeneration {
+            canonical_id: "/index.ts".to_string(),
+            generation: 11,
+        }),
+        "non-scheduler store views must track negative barrel invalidation generations"
     );
 }
 
@@ -1170,7 +1371,9 @@ import Child from './Child.vue'
         )
         .unwrap();
 
+    project.host().resolver_runtime().reset_counters();
     let _ = get_meta(&project, "/App.vue");
+    let after_first = project.host().resolver_runtime().counter_snapshot();
     let first_cache = cached_fallthrough_state(&project, "/App.vue")
         .expect("initial lookup should populate the legacy fallthrough mirror");
 
@@ -1186,19 +1389,265 @@ import Child from './Child.vue'
         .host()
         .resolve_fallthrough_surface("/App.vue")
         .expect("second fallthrough resolve should succeed from resolver-owned cache");
+    let after_second = project.host().resolver_runtime().counter_snapshot();
     let second_cache = cached_fallthrough_state(&project, "/App.vue")
         .expect("resolver-owned fallthrough cache hit should mirror back into the legacy slot");
 
-    assert!(Arc::ptr_eq(&first_cache, &second_cache));
+    let first_prop_names: Vec<_> = first_cache
+        .accepted_props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    let second_prop_names: Vec<_> = second_cache
+        .accepted_props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    assert_eq!(first_prop_names, second_prop_names);
+    assert_eq!(
+        first_cache.accepted_surface_completeness,
+        second_cache.accepted_surface_completeness
+    );
+    assert_eq!(
+        first_cache.fact_versions.len(),
+        second_cache.fact_versions.len(),
+        "legacy mirror repopulation should preserve dependency fact coverage"
+    );
+    assert!(
+        after_first.node_cache_misses > 0,
+        "first fallthrough resolve should populate runtime fallthrough nodes, got {:?}",
+        after_first
+    );
+    assert!(
+        after_second.node_cache_hits > after_first.node_cache_hits,
+        "clearing only the legacy mirror should now reuse the runtime top-level cache directly, before={:?} after={:?}",
+        after_first,
+        after_second
+    );
     assert_eq!(
         provenance(&project).resolver_node_cache_hits,
         1,
-        "second fallthrough lookup should be served from the resolver-owned cache"
+        "second fallthrough lookup should be served from the runtime cache and mirrored back into the legacy slot"
     );
     assert_eq!(
         provenance(&project).resolver_node_cache_misses,
         0,
-        "second fallthrough lookup should not miss the resolver-owned cache after the legacy slot is cleared"
+        "second fallthrough lookup should not miss once the runtime cache is consulted after the legacy slot is cleared"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn fallthrough_runtime_reuse_survives_host_cache_clear() {
+    let project = make_project();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let first = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("initial fallthrough resolve should succeed");
+    assert!(
+        first.accepted_props.iter().any(|prop| prop.name == "value"),
+        "initial fallthrough resolve should inherit input attrs from the child"
+    );
+
+    clear_legacy_cached_fallthrough_state(&project, "/App.vue");
+    project.host().provenance.reset();
+    project.host().resolver_runtime().reset_counters();
+
+    let second = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("second fallthrough resolve should succeed from runtime-owned cache");
+    let runtime = project.host().resolver_runtime().counter_snapshot();
+    let provenance = provenance(&project);
+
+    assert!(
+        second
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "value"),
+        "runtime-owned top-level fallthrough should preserve inherited input attrs"
+    );
+    assert!(
+        runtime.node_cache_hits > 0,
+        "runtime branch-union nodes should satisfy the top-level lookup after host cache clear, got {:?}",
+        runtime
+    );
+    assert_eq!(
+        provenance.resolver_node_cache_hits,
+        1,
+        "top-level fallthrough should be served from the runtime-owned cache once host caches are cleared"
+    );
+    assert_eq!(
+        provenance.resolver_node_cache_misses,
+        0,
+        "runtime-owned top-level fallthrough should avoid a host-side miss after host caches are cleared, got provenance={:?}",
+        provenance
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn top_level_fallthrough_lives_in_runtime_not_host_wrapper_cache() {
+    let project = make_project();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let result = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("fallthrough resolve should succeed");
+    let key = verter_resolver::fallthrough_cache_key(
+        "/App.vue",
+        project.host().config.generic_root_propagation,
+        None,
+    );
+    assert!(
+        result
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "value"),
+        "resolved fallthrough should inherit input attrs from the child"
+    );
+    assert!(
+        cached_fallthrough_state(&project, "/App.vue").is_some(),
+        "legacy compile-cache mirror should still be populated"
+    );
+    assert!(
+        project
+            .host()
+            .resolver_runtime()
+            .fallthrough
+            .get_cached_node(&key, &project.host().resolver_store_view())
+            .is_some(),
+        "top-level fallthrough should live only in runtime nodes once runtime owns top-level authority"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn fallthrough_recomputes_from_runtime_subnodes_after_top_level_node_clear() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const attrs = { id: 'hero', title: 'Hello' }
+</script>
+<template><div v-bind="attrs" /></template>"#,
+        )
+        .unwrap();
+
+    let first = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("initial fallthrough resolve should succeed");
+    assert!(
+        first
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "placeholder"),
+        "initial fallthrough resolve should include remaining div attrs"
+    );
+    assert!(
+        !first.accepted_props.iter().any(|prop| prop.name == "id"),
+        "consumed spread attrs must not leak into inherited attrs"
+    );
+
+    clear_legacy_cached_fallthrough_state(&project, "/App.vue");
+    clear_runtime_top_level_fallthrough_node(&project, "/App.vue");
+    clear_runtime_root_follow_node(&project, "/App.vue");
+    project.host().provenance.reset();
+    project.host().resolver_runtime().reset_counters();
+
+    let second = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("second fallthrough resolve should rebuild from runtime subnodes");
+    let runtime = project.host().resolver_runtime().counter_snapshot();
+
+    assert!(
+        second
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "placeholder"),
+        "recomputed fallthrough should preserve remaining div attrs"
+    );
+    assert!(
+        !second.accepted_props.iter().any(|prop| prop.name == "id"),
+        "recomputed fallthrough must still treat spread attrs as consumed"
+    );
+    assert!(
+        runtime.node_cache_hits >= 2,
+        "recomputing after evicting the top-level and root-follow nodes should reuse multiple deeper runtime subnodes, got {:?}",
+        runtime
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn fallthrough_reuses_root_follow_after_branch_union_node_clear() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", r#"<template><UnknownRoot /></template>"#)
+        .unwrap();
+
+    let first = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("initial fallthrough resolve should succeed");
+    assert!(
+        first.accepted_props.is_empty(),
+        "unresolved root should not fabricate inherited attrs"
+    );
+
+    clear_legacy_cached_fallthrough_state(&project, "/App.vue");
+    clear_runtime_top_level_fallthrough_node(&project, "/App.vue");
+    project.host().provenance.reset();
+    project.host().resolver_runtime().reset_counters();
+
+    let second = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("second fallthrough resolve should rebuild from root-follow and consumed-binding runtime nodes");
+    let runtime = project.host().resolver_runtime().counter_snapshot();
+
+    assert!(
+        second.accepted_props.is_empty(),
+        "recomputed unresolved root should not fabricate inherited attrs"
+    );
+    assert!(
+        runtime.node_cache_hits >= 1,
+        "evicting only the branch-union node should still reuse the cached root-follow node, got {:?}",
+        runtime
+    );
+    assert_eq!(
+        runtime.node_cache_misses,
+        1,
+        "only the missing branch-union node should miss once root-follow is runtime-owned, got {:?}",
+        runtime
     );
 }
 
@@ -5506,6 +5955,198 @@ import Child from './Child.vue'
             "dependency change must invalidate the parent's cached fallthrough surface"
         );
     }
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn shared_child_fallthrough_reuses_runtime_child_surface_nodes() {
+    let project = make_project();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/ParentA.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/ParentB.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    project.host().resolver_runtime().reset_counters();
+
+    let first = get_meta(&project, "/ParentA.vue");
+    let after_first = project.host().resolver_runtime().counter_snapshot();
+    let second = get_meta(&project, "/ParentB.vue");
+    let after_second = project.host().resolver_runtime().counter_snapshot();
+
+    assert!(
+        first.accepted_props.iter().any(|prop| prop.name == "value"),
+        "first parent should inherit input attrs from the shared child"
+    );
+    assert!(
+        second
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "value"),
+        "second parent should inherit input attrs from the shared child"
+    );
+    assert!(
+        !second
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "missing"),
+        "shared child reuse must not fabricate unrelated attrs"
+    );
+    assert!(
+        after_first.node_cache_misses > 0,
+        "first parent should populate runtime fallthrough child nodes, got {:?}",
+        after_first
+    );
+    assert!(
+        after_second.node_cache_hits > after_first.node_cache_hits,
+        "second parent should reuse runtime child-surface nodes for the shared child, before={:?} after={:?}",
+        after_first,
+        after_second
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn shared_child_runtime_reuse_survives_host_child_cache_clear() {
+    let project = make_project();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/ParentA.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/ParentB.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let first = get_meta(&project, "/ParentA.vue");
+    assert!(
+        first.accepted_props.iter().any(|prop| prop.name == "value"),
+        "first parent should inherit input attrs from the child"
+    );
+
+    clear_legacy_cached_fallthrough_state(&project, "/Child.vue");
+    project.host().provenance.reset();
+    project.host().resolver_runtime().reset_counters();
+
+    let second = get_meta(&project, "/ParentB.vue");
+    let runtime = project.host().resolver_runtime().counter_snapshot();
+    let provenance = provenance(&project);
+
+    assert!(
+        second
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "value"),
+        "second parent should still inherit input attrs after host child caches are cleared"
+    );
+    assert!(
+        runtime.node_cache_hits > 0,
+        "runtime child-surface nodes should satisfy the shared child lookup after host cache clear, got {:?}",
+        runtime
+    );
+    assert_eq!(
+        provenance.resolver_node_cache_misses,
+        2,
+        "only the new parent's component-meta and top-level fallthrough requests should miss once the child is runtime-owned, got provenance={:?}",
+        provenance
+    );
+    assert_eq!(
+        provenance.component_meta_resolved_state_recomputes,
+        1,
+        "the shared child should reuse runtime-owned fallthrough state instead of recomputing component meta, got provenance={:?}",
+        provenance
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn distinct_children_reuse_runtime_intrinsic_surface_nodes() {
+    let project = make_project();
+    project
+        .upsert_base("/ChildA.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base("/ChildB.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/ParentA.vue",
+            r#"<script setup lang="ts">
+import ChildA from './ChildA.vue'
+</script>
+<template><ChildA /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/ParentB.vue",
+            r#"<script setup lang="ts">
+import ChildB from './ChildB.vue'
+</script>
+<template><ChildB /></template>"#,
+        )
+        .unwrap();
+
+    let first = get_meta(&project, "/ParentA.vue");
+    assert!(
+        first.accepted_props.iter().any(|prop| prop.name == "value"),
+        "first parent should inherit input attrs from ChildA"
+    );
+
+    project.host().provenance.reset();
+    project.host().resolver_runtime().reset_counters();
+
+    let second = get_meta(&project, "/ParentB.vue");
+    let runtime = project.host().resolver_runtime().counter_snapshot();
+
+    assert!(
+        second
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "value"),
+        "second parent should inherit input attrs from ChildB"
+    );
+    assert!(
+        !second
+            .accepted_props
+            .iter()
+            .any(|prop| prop.name == "missing"),
+        "intrinsic reuse must not fabricate unrelated attrs"
+    );
+    assert!(
+        runtime.node_cache_hits > 0,
+        "the second parent should reuse runtime intrinsic-surface nodes for the shared <input> root, got {:?}",
+        runtime
+    );
 }
 
 #[cfg(feature = "scheduler")]

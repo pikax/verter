@@ -14,31 +14,30 @@ use crate::types::*;
 use crate::VerterHost;
 use verter_resolver::{
     build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
-    build_owner_eval_env_with_inputs,
+    build_owner_eval_env_with_inputs, collect_dynamic_root_candidates_from_type,
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry,
-    collect_dynamic_root_candidates_from_type,
     evaluate_imported_decl_with_owner_env as resolver_evaluate_imported_decl_with_owner_env,
-    fallthrough_cache_key, known_spread_keys_from_type_expr,
+    fallthrough_cache_key,
     get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
-    materialize_imported_runtime_values_into_env, push_partial_reason,
-    resolve_exports_from_graph as resolver_resolve_exports_from_graph,
+    known_spread_keys_from_type_expr, materialize_imported_runtime_values_into_env,
+    push_partial_reason, resolve_exports_from_graph as resolver_resolve_exports_from_graph,
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
-    resolve_usage_prop_type, resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
-    DeclarationMetadataResolver, DynamicRootCandidate, ExportGraphFileKind,
-    ExportGraphResolver, ExportSurface, FallthroughComputeHost,
-    FallthroughRequestHost, FallthroughResolutionView, FallthroughResolverHost,
-    ImportedDeclEvalResolver, ImportedEvalBinding, ImportedEvalCollectorResolver,
-    ImportedEvalLookup, ImportedEvalLookupResolver, ImportedEvalOwnerContextResolver,
-    ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
-    ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
+    resolve_fallthrough_surface as resolver_resolve_fallthrough_surface, resolve_usage_prop_type,
+    DeclarationMetadataResolver, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
+    ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
+    FallthroughResolverHost, ImportedDeclEvalResolver, ImportedEvalBinding,
+    ImportedEvalCollectorResolver, ImportedEvalLookup, ImportedEvalLookupResolver,
+    ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
+    ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
     ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
-    OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource,
-    ResolvedConsumedBindings, ResolvedExportTarget, SingleflightRole, StoreView,
+    OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource, ResolvedConsumedBindings,
+    ResolvedExportTarget, SingleflightRole, StoreView,
 };
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+
     *ENABLED.get_or_init(|| {
         std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
             || std::env::var_os("VERTER_META_DEBUG").is_some()
@@ -110,11 +109,44 @@ impl FallthroughRequestHost for VerterHost {
             self.config.generic_root_propagation,
             prop_type_overrides,
         );
-        if let Some(cached) = self.fallthrough_cache.get_if_valid(&cache_key, store_view) {
-            if prop_type_overrides.is_none() {
-                self.mirror_cached_fallthrough_arc(canonical_id, cached.clone());
+
+        if let Some(node) = self
+            .resolver_runtime()
+            .fallthrough
+            .get_cached_node(&cache_key, store_view)
+        {
+            if let Some(resolution) = self.runtime_branch_union_node_to_resolution(node) {
+                let resolution = Arc::new(resolution);
+                if prop_type_overrides.is_none() {
+                    self.mirror_cached_fallthrough_arc(canonical_id, resolution.clone());
+                }
+                return Some((*resolution).clone());
             }
-            return Some(cached.as_ref().clone());
+        }
+
+        let root_follow_key = verter_resolver::fallthrough_resolver::root_follow_key(
+            canonical_id,
+            prop_type_overrides
+                .map(verter_resolver::hash_prop_type_overrides)
+                .unwrap_or_default(),
+            self.config.generic_root_propagation,
+        );
+        if let Some(node) = self
+            .resolver_runtime()
+            .fallthrough
+            .get_cached_node(&root_follow_key, store_view)
+        {
+            if let Some(resolution) = self.runtime_root_follow_node_to_resolution(node) {
+                let resolution = Arc::new(resolution);
+                self.resolver_runtime().fallthrough.store_node(
+                    cache_key,
+                    self.build_runtime_fallthrough_node(resolution.as_ref()),
+                );
+                if prop_type_overrides.is_none() {
+                    self.mirror_cached_fallthrough_arc(canonical_id, resolution.clone());
+                }
+                return Some((*resolution).clone());
+            }
         }
 
         if prop_type_overrides.is_none() {
@@ -128,11 +160,6 @@ impl FallthroughRequestHost for VerterHost {
                                 .iter()
                                 .all(|fact| store_view.validates(fact))
                         {
-                            self.fallthrough_cache.insert_arc(
-                                cache_key,
-                                cached.resolution.clone(),
-                                cached.fact_versions.clone(),
-                            );
                             self.mirror_cached_fallthrough_arc(
                                 canonical_id,
                                 cached.resolution.clone(),
@@ -190,7 +217,27 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         &self,
         tag: &str,
     ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
-        self.host.intrinsic_members_for_tag(tag)
+        let cache_key = verter_resolver::fallthrough_resolver::intrinsic_surface_key(tag);
+
+        if let Some(view) = self.store_view {
+            if let Some(node) = self
+                .host
+                .resolver_runtime()
+                .fallthrough
+                .get_cached_node(&cache_key, view)
+            {
+                if let Some(members) = self.host.runtime_intrinsic_node_to_members(node) {
+                    return members;
+                }
+            }
+        }
+
+        let members = self.host.intrinsic_members_for_tag(tag);
+        self.host.resolver_runtime().fallthrough.store_node(
+            cache_key,
+            self.host.build_runtime_intrinsic_surface_node(&members),
+        );
+        members
     }
 
     fn resolve_child_component_canonical(
@@ -215,12 +262,11 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         &self,
         canonical_id: &str,
     ) -> Vec<verter_resolver::FactVersionRef> {
-        self.host
-            .current_dependency_fact_versions_in_view(
-                canonical_id,
-                &std::collections::BTreeSet::new(),
-                self.store_view,
-            )
+        self.host.current_dependency_fact_versions_in_view(
+            canonical_id,
+            &std::collections::BTreeSet::new(),
+            self.store_view,
+        )
     }
 
     fn resolve_child_fallthrough(
@@ -231,12 +277,43 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<Self::ChildResolution> {
-        self.host.resolve_fallthrough_surface_internal_with_overrides_in_view(
+        let cache_key = verter_resolver::fallthrough_resolver::child_surface_key(
             canonical_id,
-            prop_type_overrides,
-            visiting,
-            self.store_view,
-        )
+            prop_type_overrides
+                .map(verter_resolver::hash_prop_type_overrides)
+                .unwrap_or_default(),
+        );
+
+        if let Some(view) = self.store_view {
+            if let Some(node) = self
+                .host
+                .resolver_runtime()
+                .fallthrough
+                .get_cached_node(&cache_key, view)
+            {
+                if let Some(resolution) = self.host.runtime_child_node_to_resolution(node) {
+                    return Some(resolution);
+                }
+            }
+        }
+
+        let resolution = self
+            .host
+            .resolve_fallthrough_surface_internal_with_overrides_in_view(
+                canonical_id,
+                prop_type_overrides,
+                visiting,
+                self.store_view,
+            );
+
+        if let (Some(_view), Some(resolution)) = (self.store_view, resolution.as_ref()) {
+            self.host.resolver_runtime().fallthrough.store_node(
+                cache_key,
+                self.host.build_runtime_child_surface_node(resolution),
+            );
+        }
+
+        resolution
     }
 }
 
@@ -246,18 +323,40 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
 
     fn resolve_root_consumption(
         &self,
+        canonical_id: &str,
+        branch_key: &str,
         snapshot: &Self::Snapshot,
         element_index: u32,
         base: &verter_analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<Self::EvalEnv>,
     ) -> ResolvedConsumedBindings {
+        let cache_key =
+            verter_resolver::fallthrough_resolver::consumed_bindings_key(canonical_id, branch_key);
+
+        if let Some(view) = self.store_view {
+            if let Some(node) = self
+                .host
+                .resolver_runtime()
+                .fallthrough
+                .get_cached_node(&cache_key, view)
+            {
+                if let Some(resolved) = self.host.runtime_consumed_bindings_to_resolution(node) {
+                    return resolved;
+                }
+            }
+        }
+
         let resolved = self.host.resolve_root_consumption(
             snapshot,
             element_index,
             base,
             has_unknown_spread,
             eval_env,
+        );
+        self.host.resolver_runtime().fallthrough.store_node(
+            cache_key,
+            self.host.build_runtime_consumed_bindings_node(&resolved),
         );
         ResolvedConsumedBindings {
             bindings: resolved.bindings,
@@ -291,9 +390,10 @@ pub(crate) fn component_meta_symbolic_step_budget() -> usize {
 }
 
 fn component_meta_expansion_budget() -> verter_analysis::type_expand::ExpansionBudget {
-    let mut budget = verter_analysis::type_expand::ExpansionBudget::default();
-    budget.max_symbolic_work = COMPONENT_META_MAX_SYMBOLIC_STEPS;
-    budget
+    verter_analysis::type_expand::ExpansionBudget {
+        max_symbolic_work: COMPONENT_META_MAX_SYMBOLIC_STEPS,
+        ..Default::default()
+    }
 }
 
 fn macro_debug_summary(snapshot: &FileAnalysisSnapshot) -> String {
@@ -337,6 +437,7 @@ pub(crate) type ComputedEvaluatedTypes = verter_resolver::ComputedEvaluatedTypes
 struct HostImportedEvalResolver<'a> {
     host: &'a VerterHost,
     dep_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
+    allow_live_dependency_fallback: bool,
     alias_env_stack: rustc_hash::FxHashSet<String>,
     budget: ImportedEvalTraversalBudget,
     snapshot_cache: rustc_hash::FxHashMap<String, Option<FileAnalysisSnapshot>>,
@@ -360,6 +461,9 @@ impl<'a> HostImportedEvalResolver<'a> {
         owner_canonical_id: &'a str,
         store_view: Option<&'a crate::resolver_store::HostStoreView>,
     ) -> Self {
+        let allow_live_dependency_fallback = store_view
+            .map(|view| host.current_store_view_epoch() == view.mutation_epoch())
+            .unwrap_or(true);
         let mut alias_env_stack = rustc_hash::FxHashSet::default();
         alias_env_stack.insert(owner_canonical_id.to_string());
         Self {
@@ -367,6 +471,7 @@ impl<'a> HostImportedEvalResolver<'a> {
             dep_resolutions: host
                 .dependency_resolutions_for_eval_in_view(owner_canonical_id, store_view)
                 .unwrap_or_default(),
+            allow_live_dependency_fallback,
             alias_env_stack,
             budget: ImportedEvalTraversalBudget::new(
                 owner_canonical_id,
@@ -384,11 +489,15 @@ impl<'a> HostImportedEvalResolver<'a> {
         dep_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
         store_view: Option<&'a crate::resolver_store::HostStoreView>,
     ) -> Self {
+        let allow_live_dependency_fallback = store_view
+            .map(|view| host.current_store_view_epoch() == view.mutation_epoch())
+            .unwrap_or(true);
         let mut alias_env_stack = rustc_hash::FxHashSet::default();
         alias_env_stack.insert(owner_canonical_id.to_string());
         Self {
             host,
             dep_resolutions,
+            allow_live_dependency_fallback,
             alias_env_stack,
             budget: ImportedEvalTraversalBudget::new(
                 owner_canonical_id,
@@ -425,7 +534,11 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         })
     }
 
-    fn local_export_span(&self, canonical_id: &str, binding_name: &str) -> Option<verter_span::Span> {
+    fn local_export_span(
+        &self,
+        canonical_id: &str,
+        binding_name: &str,
+    ) -> Option<verter_span::Span> {
         let snapshot = self
             .host
             .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)?;
@@ -433,7 +546,11 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
 
         match file_kind {
             ExportGraphFileKind::VueSfc => {
-                if let Some(binding) = snapshot.bindings.iter().find(|binding| binding.name == binding_name) {
+                if let Some(binding) = snapshot
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.name == binding_name)
+                {
                     if binding.span.start > 0 || binding.span.end > 0 {
                         return Some(binding.span);
                     }
@@ -466,7 +583,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
             ExportGraphFileKind::NonSfc => snapshot
                 .export_signatures
                 .iter()
-                .find(|sig| sig.name == binding_name)
+                .find(|sig| sig.name == binding_name && sig.reexport_source.is_none())
                 .map(|sig| sig.span)
                 .filter(|span| span.start > 0 || span.end > 0),
         }
@@ -479,8 +596,11 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         sig: &verter_analysis::ExportSignature,
     ) -> Option<String> {
         if sig.is_type {
-            self.host
-                .resolve_type_dependency_canonical_in_view(canonical_id, source, self.store_view)
+            self.host.resolve_type_dependency_canonical_in_view(
+                canonical_id,
+                source,
+                self.store_view,
+            )
         } else {
             self.host.resolve_loaded_dependency_canonical_in_view(
                 canonical_id,
@@ -600,6 +720,11 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
                     .map(str::to_string)
             })
             .or_else(|| {
+                if !self.allow_live_dependency_fallback
+                    && self.dep_resolutions.contains_key(&import.source)
+                {
+                    return None;
+                }
                 self.host.resolve_type_dependency_canonical_in_view(
                     owner_canonical_id,
                     &import.source,
@@ -607,6 +732,9 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
                 )
             })
             .or_else(|| {
+                // Fallback: resolve relative imports via path manipulation when VFS
+                // resolution is unavailable (standalone/memory workspace without
+                // a published project graph).
                 (self.store_view.is_none() && import.source.starts_with('.'))
                     .then(|| crate::id::resolve_external(owner_canonical_id, &import.source))
             })
@@ -756,6 +884,11 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
                     .map(str::to_string)
             })
             .or_else(|| {
+                if !self.allow_live_dependency_fallback
+                    && self.dep_resolutions.contains_key(&import.source)
+                {
+                    return None;
+                }
                 self.host.resolve_type_dependency_canonical_in_view(
                     owner_canonical_id,
                     &import.source,
@@ -863,19 +996,40 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         source_canonical_id: &str,
         exported_name: &str,
     ) -> Option<PreparedImportedDeclContext> {
+        let resolved_export = self
+            .host
+            .resolve_exports_in_view(source_canonical_id, self.store_view)
+            .into_iter()
+            .find(|export| export.is_type && export.name == exported_name);
+        let resolved_source_canonical_id = resolved_export
+            .as_ref()
+            .and_then(|export| export.source_canonical_id.as_deref())
+            .and_then(|canonical| {
+                self.host
+                    .load_eval_dependency_canonical_with_fallback_in_view(
+                        canonical,
+                        self.store_view,
+                    )
+            })
+            .unwrap_or_else(|| source_canonical_id.to_string());
+        let resolved_exported_name = resolved_export
+            .as_ref()
+            .map(|export| export.source_name.as_str())
+            .unwrap_or(exported_name);
+
         let snapshot = self
             .host
-            .get_raw_analysis_snapshot_in_view(source_canonical_id, self.store_view)?;
+            .get_raw_analysis_snapshot_in_view(&resolved_source_canonical_id, self.store_view)?;
         let dep_eval_source = self
             .host
             .load_eval_dependency_source_text_with_fallback_in_view(
-                source_canonical_id,
+                &resolved_source_canonical_id,
                 self.store_view,
             )?;
         let dep_env = self
             .host
-            .base_eval_env_in_view(source_canonical_id, self.store_view)?;
-        let decl = dep_env.type_symbols.get(exported_name)?.clone();
+            .base_eval_env_in_view(&resolved_source_canonical_id, self.store_view)?;
+        let decl = dep_env.type_symbols.get(resolved_exported_name)?.clone();
 
         Some(PreparedImportedDeclContext {
             imports: snapshot.imports.to_vec(),
@@ -1008,7 +1162,10 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         let snapshot = self
             .snapshot_cache
             .entry(canonical_id.to_string())
-            .or_insert_with(|| self.host.get_raw_analysis_snapshot_in_view(canonical_id, self.store_view))
+            .or_insert_with(|| {
+                self.host
+                    .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)
+            })
             .clone();
 
         if let Some(snapshot) = snapshot {
@@ -1113,7 +1270,8 @@ impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
     type Snapshot = FileAnalysisSnapshot;
 
     fn base_eval_env(&self, canonical_id: &str) -> Option<verter_analysis::type_eval::EvalEnv> {
-        self.host.base_eval_env_in_view(canonical_id, self.store_view)
+        self.host
+            .base_eval_env_in_view(canonical_id, self.store_view)
     }
 
     fn materialize_imported_runtime_values(
@@ -1122,12 +1280,13 @@ impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
         owner_local_value_names: &rustc_hash::FxHashSet<String>,
         env: &mut verter_analysis::type_eval::EvalEnv,
     ) {
-        self.host.materialize_imported_runtime_values_into_env_in_view(
-            snapshot,
-            owner_local_value_names,
-            env,
-            self.store_view,
-        );
+        self.host
+            .materialize_imported_runtime_values_into_env_in_view(
+                snapshot,
+                owner_local_value_names,
+                env,
+                self.store_view,
+            );
     }
 }
 
@@ -1404,12 +1563,7 @@ impl VerterHost {
             );
         }
 
-        if self
-            .current_eval_state_in_view(canonical_id, store_view)
-            .is_none()
-        {
-            return None;
-        }
+        self.current_eval_state_in_view(canonical_id, store_view)?;
 
         #[cfg(feature = "scheduler")]
         {
@@ -1506,7 +1660,7 @@ impl VerterHost {
         None
     }
 
-    fn load_eval_dependency_canonical_with_fallback_in_view(
+    pub(crate) fn load_eval_dependency_canonical_with_fallback_in_view(
         &self,
         dep_canonical: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -1841,10 +1995,10 @@ impl VerterHost {
 
         let resolved =
             self.resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)?;
-        let include_fallthrough = !resolved
-            .cached_eval_inputs
-            .as_ref()
-            .is_some_and(|inputs| inputs.overflow.is_some());
+        let include_fallthrough = match resolved.cached_eval_inputs.as_ref() {
+            Some(inputs) => inputs.overflow.is_none(),
+            None => true,
+        };
         let meta = extract_component_meta_from_resolved(
             self,
             canonical_or_alias,
@@ -1878,10 +2032,10 @@ impl VerterHost {
 
         let resolved =
             self.resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)?;
-        let include_fallthrough = !resolved
-            .cached_eval_inputs
-            .as_ref()
-            .is_some_and(|inputs| inputs.overflow.is_some());
+        let include_fallthrough = match resolved.cached_eval_inputs.as_ref() {
+            Some(inputs) => inputs.overflow.is_none(),
+            None => true,
+        };
         let analysis = extract_component_meta_from_resolved(
             self,
             canonical_or_alias,
@@ -1967,7 +2121,7 @@ impl VerterHost {
 
         let result = verter_resolver::run_fallthrough_request(
             self,
-            &self.fallthrough_singleflight,
+            &self.resolver_runtime().top_level_fallthrough_singleflight,
             canonical_id,
             prop_type_overrides,
             visiting,
@@ -2033,16 +2187,32 @@ impl VerterHost {
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<crate::types::FallthroughResolution> {
-        let whole_hash = store_view
-            .and_then(|view| view.whole_hash(canonical_id))
-            .or_else(|| self.get_whole_hash(canonical_id))
-            .unwrap_or_default();
-        let resolved = self.compute_component_meta_state(
-            canonical_id,
-            crate::types::ResolverMode::Expanded,
-            whole_hash,
-            store_view,
-        )?;
+        // Try to reuse an already-cached Expanded resolved state before recomputing.
+        // get_component_meta() typically resolves Expanded just before calling fallthrough,
+        // so the cache should be warm.
+        let resolved = if let Some(view) = store_view {
+            self.try_get_cached_resolved_meta(
+                canonical_id,
+                crate::types::ResolverMode::Expanded,
+                view,
+            )
+        } else {
+            None
+        };
+        let resolved = if let Some(cached) = resolved {
+            cached
+        } else {
+            let whole_hash = store_view
+                .and_then(|view| view.whole_hash(canonical_id))
+                .or_else(|| self.get_whole_hash(canonical_id))
+                .unwrap_or_default();
+            self.compute_component_meta_state(
+                canonical_id,
+                crate::types::ResolverMode::Expanded,
+                whole_hash,
+                store_view,
+            )?
+        };
         let fallthrough_fact_versions = resolved.fact_versions.clone();
 
         let resolved_macros = resolver_component_meta_resolved_macros(
@@ -2466,18 +2636,278 @@ impl VerterHost {
         >,
         result: &crate::types::FallthroughResolution,
     ) {
-        let resolution = Arc::new(result.clone());
-        self.fallthrough_cache.insert_arc(
-            fallthrough_cache_key(
-                canonical_id,
-                self.config.generic_root_propagation,
-                prop_type_overrides,
-            ),
-            resolution.clone(),
-            result.fact_versions.clone(),
+        let cache_key = fallthrough_cache_key(
+            canonical_id,
+            self.config.generic_root_propagation,
+            prop_type_overrides,
         );
+        let resolution = Arc::new(result.clone());
+        self.resolver_runtime().fallthrough.store_node(
+            verter_resolver::fallthrough_resolver::root_follow_key(
+                canonical_id,
+                prop_type_overrides
+                    .map(verter_resolver::hash_prop_type_overrides)
+                    .unwrap_or_default(),
+                self.config.generic_root_propagation,
+            ),
+            self.build_runtime_root_follow_node(result),
+        );
+        self.resolver_runtime()
+            .fallthrough
+            .store_node(cache_key, self.build_runtime_fallthrough_node(result));
         if prop_type_overrides.is_none() {
             self.mirror_cached_fallthrough_arc(canonical_id, resolution);
+        }
+    }
+
+    fn extract_runtime_branch_results(
+        result: &crate::types::FallthroughResolution,
+    ) -> Vec<verter_resolver::fallthrough_resolver::FallthroughBranchResult> {
+        match &result.fallthrough_surface {
+            verter_analysis::component_meta::FallthroughSurface::Branches { branches } => branches
+                .iter()
+                .map(
+                    |branch| verter_resolver::fallthrough_resolver::FallthroughBranchResult {
+                        branch_key: branch.branch_key.clone(),
+                        inherited_prop_names: branch
+                            .props
+                            .iter()
+                            .map(|prop| prop.name.clone())
+                            .collect(),
+                        inherited_event_names: branch
+                            .events
+                            .iter()
+                            .map(|event| event.name.clone())
+                            .collect(),
+                        resolved: !matches!(
+                            branch.status,
+                            verter_analysis::component_meta::BranchStatus::Unresolved { .. }
+                        ),
+                    },
+                )
+                .collect(),
+            verter_analysis::component_meta::FallthroughSurface::None { .. } => Vec::new(),
+        }
+    }
+
+    fn build_runtime_fallthrough_node(
+        &self,
+        result: &crate::types::FallthroughResolution,
+    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+        let branches = Self::extract_runtime_branch_results(result);
+        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::BranchUnion(
+                verter_resolver::fallthrough_resolver::BranchUnionResult {
+                    accepted_props: result.accepted_props.clone(),
+                    accepted_events: result.accepted_events.clone(),
+                    accepted_surface_completeness: result.accepted_surface_completeness,
+                    fallthrough_surface: result.fallthrough_surface.clone(),
+                    all_resolved: matches!(
+                        result.accepted_surface_completeness,
+                        verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact
+                    ),
+                    branches,
+                },
+            ),
+            facts: result.fact_versions.clone(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn build_runtime_root_follow_node(
+        &self,
+        result: &crate::types::FallthroughResolution,
+    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+        let branches = Self::extract_runtime_branch_results(result);
+        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::RootFollow(
+                verter_resolver::fallthrough_resolver::RootFollowResult {
+                    accepted_props: result.accepted_props.clone(),
+                    accepted_events: result.accepted_events.clone(),
+                    accepted_surface_completeness: result.accepted_surface_completeness,
+                    fallthrough_surface: result.fallthrough_surface.clone(),
+                    has_single_root: matches!(
+                        result.fallthrough_surface,
+                        verter_analysis::component_meta::FallthroughSurface::Branches { ref branches } if branches.len() == 1
+                    ),
+                    branches,
+                },
+            ),
+            facts: result.fact_versions.clone(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn build_runtime_child_surface_node(
+        &self,
+        result: &crate::types::FallthroughResolution,
+    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::ChildSurfaceFollow(
+                verter_resolver::fallthrough_resolver::ChildSurfaceResult {
+                    accepted_props: result.accepted_props.clone(),
+                    accepted_events: result.accepted_events.clone(),
+                    accepted_surface_completeness: result.accepted_surface_completeness,
+                    fallthrough_surface: result.fallthrough_surface.clone(),
+                    inherited_prop_names: result
+                        .accepted_props
+                        .iter()
+                        .map(|prop| prop.name.clone())
+                        .collect(),
+                    inherited_event_names: result
+                        .accepted_events
+                        .iter()
+                        .map(|event| event.name.clone())
+                        .collect(),
+                    resolved: matches!(
+                        result.accepted_surface_completeness,
+                        verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact
+                    ),
+                },
+            ),
+            facts: result.fact_versions.clone(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn build_runtime_intrinsic_surface_node(
+        &self,
+        members: &[verter_analysis::html_intrinsics::OwnedIntrinsicMember],
+    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+        let mut attr_names = Vec::new();
+        let mut event_names = Vec::new();
+        for member in members {
+            match member.kind {
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => {
+                    attr_names.push(member.name.clone());
+                }
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
+                    event_names.push(member.name.clone());
+                }
+            }
+        }
+
+        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
+                verter_resolver::fallthrough_resolver::IntrinsicSurfaceResult {
+                    members: members.to_vec(),
+                    attr_names,
+                    event_names,
+                },
+            ),
+            facts: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn build_runtime_consumed_bindings_node(
+        &self,
+        resolved: &ResolvedConsumedBindings,
+    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+        let mut consumed_names = resolved.bindings.attrs.clone();
+        consumed_names.extend(resolved.bindings.listeners.iter().cloned());
+        consumed_names.sort();
+        consumed_names.dedup();
+
+        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
+                verter_resolver::fallthrough_resolver::ConsumedBindingsResult {
+                    attrs: resolved.bindings.attrs.clone(),
+                    listeners: resolved.bindings.listeners.clone(),
+                    has_dynamic_attr_name: resolved.bindings.has_dynamic_attr_name,
+                    has_dynamic_listener_name: resolved.bindings.has_dynamic_listener_name,
+                    partial_reasons: resolved.partial_reasons.clone(),
+                    consumed_names,
+                },
+            ),
+            facts: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn runtime_child_node_to_resolution(
+        &self,
+        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+    ) -> Option<crate::types::FallthroughResolution> {
+        match node.value {
+            verter_resolver::fallthrough_resolver::FallthroughNodeValue::ChildSurfaceFollow(
+                child,
+            ) => Some(crate::types::FallthroughResolution {
+                accepted_props: child.accepted_props,
+                accepted_events: child.accepted_events,
+                accepted_surface_completeness: child.accepted_surface_completeness,
+                fallthrough_surface: child.fallthrough_surface,
+                fact_versions: node.facts,
+            }),
+            _ => None,
+        }
+    }
+
+    fn runtime_branch_union_node_to_resolution(
+        &self,
+        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+    ) -> Option<crate::types::FallthroughResolution> {
+        match node.value {
+            verter_resolver::fallthrough_resolver::FallthroughNodeValue::BranchUnion(
+                branch_union,
+            ) => Some(crate::types::FallthroughResolution {
+                accepted_props: branch_union.accepted_props,
+                accepted_events: branch_union.accepted_events,
+                accepted_surface_completeness: branch_union.accepted_surface_completeness,
+                fallthrough_surface: branch_union.fallthrough_surface,
+                fact_versions: node.facts,
+            }),
+            _ => None,
+        }
+    }
+
+    fn runtime_root_follow_node_to_resolution(
+        &self,
+        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+    ) -> Option<crate::types::FallthroughResolution> {
+        match node.value {
+            verter_resolver::fallthrough_resolver::FallthroughNodeValue::RootFollow(
+                root_follow,
+            ) => Some(crate::types::FallthroughResolution {
+                accepted_props: root_follow.accepted_props,
+                accepted_events: root_follow.accepted_events,
+                accepted_surface_completeness: root_follow.accepted_surface_completeness,
+                fallthrough_surface: root_follow.fallthrough_surface,
+                fact_versions: node.facts,
+            }),
+            _ => None,
+        }
+    }
+
+    fn runtime_intrinsic_node_to_members(
+        &self,
+        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+        match node.value {
+            verter_resolver::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
+                intrinsic,
+            ) => Some(intrinsic.members),
+            _ => None,
+        }
+    }
+
+    fn runtime_consumed_bindings_to_resolution(
+        &self,
+        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+    ) -> Option<ResolvedConsumedBindings> {
+        match node.value {
+            verter_resolver::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
+                consumed,
+            ) => Some(ResolvedConsumedBindings {
+                bindings: verter_analysis::component_meta::ConsumedRootBindings {
+                    attrs: consumed.attrs,
+                    listeners: consumed.listeners,
+                    has_dynamic_attr_name: consumed.has_dynamic_attr_name,
+                    has_dynamic_listener_name: consumed.has_dynamic_listener_name,
+                },
+                partial_reasons: consumed.partial_reasons,
+            }),
+            _ => None,
         }
     }
 
@@ -4430,7 +4860,6 @@ impl VerterHost {
             })
             .collect()
     }
-
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5364,6 +5793,7 @@ fn collect_slot_eval_import_names_for_member(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_slot_eval_import_names_for_builtin_member(
     name: &str,
     type_arguments: &[verter_analysis::type_expr::TypeExpr],

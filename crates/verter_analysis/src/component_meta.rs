@@ -1461,7 +1461,24 @@ fn extract_slots_from_macro(
 ) {
     let expanded_slots = expanded_define_slot_entries(evaluated, macro_index);
     if !expanded_slots.is_empty() {
-        for slot in expanded_slots {
+        let mut remaining = expanded_slots;
+
+        for field in slot_fields {
+            let Some(slot_index) = remaining.iter().position(|slot| slot.name == field.name) else {
+                continue;
+            };
+            let slot = remaining.remove(slot_index);
+            out.push(SlotAnalysis {
+                name: slot.name,
+                is_scoped: !slot.bindings.is_empty(),
+                bindings: slot.bindings,
+                is_required: slot.is_required,
+                description: field.description.clone(),
+                tags: field.tags.clone(),
+            });
+        }
+
+        for slot in remaining {
             let source_field = slot_fields.iter().find(|field| field.name == slot.name);
             out.push(SlotAnalysis {
                 name: slot.name,

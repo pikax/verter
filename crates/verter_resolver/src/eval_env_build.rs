@@ -319,11 +319,19 @@ mod tests {
         .expect("owner env should build");
 
         assert_eq!(
-            actual.env.type_symbols.get("DepOnly").map(|decl| &decl.body),
+            actual
+                .env
+                .type_symbols
+                .get("DepOnly")
+                .map(|decl| &decl.body),
             Some(&TypeExpr::Primitive(PrimitiveName::Boolean))
         );
         assert_eq!(
-            actual.env.type_symbols.get("Imported").map(|decl| &decl.body),
+            actual
+                .env
+                .type_symbols
+                .get("Imported")
+                .map(|decl| &decl.body),
             Some(&TypeExpr::Primitive(PrimitiveName::Boolean))
         );
         assert_eq!(

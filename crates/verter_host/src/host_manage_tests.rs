@@ -476,6 +476,44 @@ defineProps<Props>();
 }
 
 #[test]
+fn stale_store_view_does_not_fallback_to_live_dependency_resolution_when_route_was_missing() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from "./types";
+defineProps<Props>();
+</script>"#,
+    );
+
+    let before_view = host.resolver_store_view();
+    let before_snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&before_view))
+        .expect("captured analysis snapshot should exist");
+    let before_import = before_snapshot
+        .imports
+        .iter()
+        .find(|import| import.source == "./types")
+        .expect("App.vue should keep the original import in the captured snapshot")
+        .clone();
+
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string }",
+    );
+
+    let resolver = HostImportedEvalResolver::new(&host, "/src/App.vue", Some(&before_view));
+    assert!(
+        resolver
+            .resolve_import_canonical_id("/src/App.vue", &before_import)
+            .is_none(),
+        "captured imported-eval lookups must not recover missing routes from the live workspace"
+    );
+}
+
+#[test]
 fn imported_eval_merge_keeps_captured_dependency_import_routes_when_candidates_change() {
     let host = make_host();
     upsert_non_sfc(
@@ -487,11 +525,9 @@ fn imported_eval_merge_keeps_captured_dependency_import_routes_when_candidates_c
 
     let before_view = host.resolver_store_view();
     let mut resolver = HostImportedEvalResolver::new(&host, "/src/index.ts", Some(&before_view));
-    let eval_source = ImportedEvalSourceMergeResolver::load_eval_source_for_merge(
-        &mut resolver,
-        "/src/index.ts",
-    )
-    .expect("captured view should load merge source");
+    let eval_source =
+        ImportedEvalSourceMergeResolver::load_eval_source_for_merge(&mut resolver, "/src/index.ts")
+            .expect("captured view should load merge source");
 
     upsert_non_sfc(
         &host,
@@ -530,7 +566,11 @@ defineProps<Props>()
 <template><div /></template>"#,
     );
     upsert_non_sfc(&host, "/src/types.ts", "export { Props } from './dep'\n");
-    upsert_non_sfc(&host, "/src/dep.ts", "export interface Props { msg: string }\n");
+    upsert_non_sfc(
+        &host,
+        "/src/dep.ts",
+        "export interface Props { msg: string }\n",
+    );
 
     host.set_import_dependencies(
         "/src/Consumer.vue",
@@ -560,7 +600,8 @@ defineProps<Props>()
         "captured store view should include transitive dependency whole hashes"
     );
     assert!(
-        view.dependency_resolution("/src/types.ts", "./dep").is_some(),
+        view.dependency_resolution("/src/types.ts", "./dep")
+            .is_some(),
         "captured store view should snapshot transitive dependency routes"
     );
 }
@@ -569,7 +610,11 @@ defineProps<Props>()
 fn resolver_store_view_tracks_reexport_dependency_routes() {
     let host = strict_host();
 
-    upsert_non_sfc(&host, "/src/dep.ts", "export interface Props { msg: string }\n");
+    upsert_non_sfc(
+        &host,
+        "/src/dep.ts",
+        "export interface Props { msg: string }\n",
+    );
     upsert_non_sfc(&host, "/src/index.ts", "export { Props } from './dep'\n");
 
     let view = host.resolver_store_view();
@@ -591,7 +636,11 @@ fn resolver_store_view_prefers_declaration_companion_routes_for_dts_imports() {
         "/src/index.d.ts",
         "import { Props } from './inner.js'\nexport type { Props }\n",
     );
-    upsert_non_sfc(&host, "/src/inner.d.ts", "export interface Props { msg: string }\n");
+    upsert_non_sfc(
+        &host,
+        "/src/inner.d.ts",
+        "export interface Props { msg: string }\n",
+    );
     upsert_non_sfc(&host, "/src/inner.js", "export const runtimeOnly = true\n");
 
     let view = host.resolver_store_view();
@@ -664,15 +713,26 @@ defineProps<ButtonProps>()
 fn stale_store_view_keeps_resolved_exports_on_captured_reexport_graph() {
     let host = make_host();
 
-    upsert_non_sfc(&host, "/src/dep.ts", "export interface Props { msg: string }\n");
+    upsert_non_sfc(
+        &host,
+        "/src/dep.ts",
+        "export interface Props { msg: string }\n",
+    );
     upsert_non_sfc(&host, "/src/index.ts", "export { Props } from './dep'\n");
 
     let before_view = host.resolver_store_view();
     let before_exports = host.resolve_exports_in_view("/src/index.ts", Some(&before_view));
     assert_eq!(before_exports.len(), 1);
-    assert_eq!(before_exports[0].source_canonical_id.as_deref(), Some("/src/dep.ts"));
+    assert_eq!(
+        before_exports[0].source_canonical_id.as_deref(),
+        Some("/src/dep.ts")
+    );
 
-    upsert_non_sfc(&host, "/src/dep.ts", "export interface Renamed { disabled: boolean }\n");
+    upsert_non_sfc(
+        &host,
+        "/src/dep.ts",
+        "export interface Renamed { disabled: boolean }\n",
+    );
 
     assert!(
         host.resolve_exports_in_view("/src/index.ts", Some(&before_view))

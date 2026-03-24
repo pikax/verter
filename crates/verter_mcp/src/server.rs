@@ -227,6 +227,7 @@ fn build_script_snapshot(
         options_api: analysis.options_api.clone(),
         nested_macro_calls: Vec::new(),
         is_typescript: analysis.is_typescript,
+        declaration_entries: Vec::new(),
     }
 }
 
@@ -3606,6 +3607,7 @@ const count = ref(0)
             options_api: None,
             nested_macro_calls: Vec::new(),
             is_typescript: false,
+            declaration_entries: Vec::new(),
         };
 
         let quality = scoring::compute_quality_score(Some(&script), None, &[], None);

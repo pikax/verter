@@ -148,13 +148,12 @@ fn collect_resolved_exports_from_graph<R: ExportGraphResolver>(
         if sig.name == "*" {
             if let Some(source) = &sig.reexport_source {
                 if let Some(target) = resolver.resolve_reexport_target(canonical_id, source, sig) {
-                    let nested =
-                        collect_resolved_exports_from_graph(
-                            resolver,
-                            &target,
-                            visiting,
-                            strict_missing_reexports,
-                        );
+                    let nested = collect_resolved_exports_from_graph(
+                        resolver,
+                        &target,
+                        visiting,
+                        strict_missing_reexports,
+                    );
                     for mut export in nested {
                         if export.source_canonical_id.is_none() {
                             export.source_canonical_id = Some(target.clone());
@@ -179,15 +178,13 @@ fn collect_resolved_exports_from_graph<R: ExportGraphResolver>(
                 });
                 continue;
             };
-            let Some((source_canonical_id, source_name)) =
-                resolve_single_export_from_graph(
-                    resolver,
-                    &target,
-                    local_name,
-                    visiting,
-                    strict_missing_reexports,
-                )
-            else {
+            let Some((source_canonical_id, source_name)) = resolve_single_export_from_graph(
+                resolver,
+                &target,
+                local_name,
+                visiting,
+                strict_missing_reexports,
+            ) else {
                 if strict_missing_reexports {
                     continue;
                 }
@@ -236,7 +233,10 @@ fn resolve_single_export_from_graph<R: ExportGraphResolver>(
         return None;
     }
 
-    let sig = surface.export_signatures.iter().find(|sig| sig.name == name)?;
+    let sig = surface
+        .export_signatures
+        .iter()
+        .find(|sig| sig.name == name)?;
     if let (Some(source), Some(local_name)) = (&sig.reexport_source, &sig.reexport_local) {
         if visiting.contains(canonical_id) {
             return Some((canonical_id.to_string(), name.to_string()));
@@ -345,13 +345,7 @@ mod tests {
             "/src/types.ts".to_string(),
             ExportSurface {
                 file_kind: ExportGraphFileKind::NonSfc,
-                export_signatures: vec![export_sig(
-                    "Props",
-                    true,
-                    Span::new(10, 20),
-                    None,
-                    None,
-                )],
+                export_signatures: vec![export_sig("Props", true, Span::new(10, 20), None, None)],
             },
         );
         resolver.routes.insert(

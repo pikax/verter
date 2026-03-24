@@ -22,6 +22,7 @@ pub struct ExternalMacroTypeCollection {
 pub trait ExternalMacroTypeCollectorHost {
     type Error;
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_external_macro_type(
         &self,
         owner_canonical: &str,

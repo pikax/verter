@@ -2983,10 +2983,11 @@ pub fn required_import_alias_names_for_binding(
             .collect();
     }
 
-    required_import_names
-        .contains(&binding.local_name)
-        .then(|| vec![binding.local_name.clone()])
-        .unwrap_or_default()
+    if required_import_names.contains(&binding.local_name) {
+        vec![binding.local_name.clone()]
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn imported_member_name_for_required_alias(

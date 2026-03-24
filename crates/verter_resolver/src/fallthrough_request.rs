@@ -70,8 +70,7 @@ impl<'a, 'b, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, H> {
     }
 }
 
-impl<'a, 'b, H>
-    StableRequestExecutor<FallthroughNodeKey, Option<H::Resolution>>
+impl<'a, 'b, H> StableRequestExecutor<FallthroughNodeKey, Option<H::Resolution>>
     for FallthroughRequestExecutor<'a, 'b, H>
 where
     H: FallthroughRequestHost,
@@ -122,8 +121,11 @@ where
 
     fn store_stable(&mut self, value: &Option<H::Resolution>) {
         if let Some(result) = value.as_ref() {
-            self.host
-                .store_fallthrough_result(&self.canonical_id, self.prop_type_overrides, result);
+            self.host.store_fallthrough_result(
+                &self.canonical_id,
+                self.prop_type_overrides,
+                result,
+            );
         }
     }
 
@@ -134,7 +136,11 @@ where
 
 pub fn run_fallthrough_request<H>(
     host: &H,
-    singleflight: &SingleflightGroup<FallthroughNodeKey, StableExecutionValue<Option<H::Resolution>>, ()>,
+    singleflight: &SingleflightGroup<
+        FallthroughNodeKey,
+        StableExecutionValue<Option<H::Resolution>>,
+        (),
+    >,
     canonical_id: &str,
     prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
     visiting: &mut FxHashSet<String>,

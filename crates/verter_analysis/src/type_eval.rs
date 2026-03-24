@@ -1828,6 +1828,7 @@ fn evaluate_indexed_access(object: &TypeExpr, index: &TypeExpr) -> TypeExpr {
 // Mapped types
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_mapped(
     parameter: &str,
     source: &TypeExpr,
@@ -2060,17 +2061,21 @@ fn merge_intersection(types: Vec<TypeExpr>) -> TypeExpr {
     // Check if all branches are objects — if so, merge
     let all_objects = types.iter().all(|t| matches!(t, TypeExpr::Object(_)));
     if all_objects {
+        // Last definition wins: for `Base & Child` (from interface extends),
+        // the child's own declaration takes precedence over the base's.
+        // This preserves own-declaration order when both base and child
+        // declare the same property name.
         let mut merged = Vec::new();
-        let mut seen = std::collections::HashSet::new();
         for t in types {
             if let TypeExpr::Object(obj) = t {
                 for member in obj.properties {
                     if let ObjectMember::Property(ref p) = member {
-                        // First definition wins — later duplicates are skipped.
-                        // For `Base & Child`, Base properties take precedence.
-                        if seen.insert(p.name.clone()) {
-                            merged.push(member);
+                        if let Some(existing_index) = merged.iter().position(|existing| {
+                            matches!(existing, ObjectMember::Property(existing_prop) if existing_prop.name == p.name)
+                        }) {
+                            merged.remove(existing_index);
                         }
+                        merged.push(member);
                     } else {
                         merged.push(member);
                     }

@@ -1894,7 +1894,10 @@ defineProps<Props>()
             0,
         )
         .expect("second resolution should complete");
-    assert!(second.is_some(), "Props should resolve on the second request");
+    assert!(
+        second.is_some(),
+        "Props should resolve on the second request"
+    );
 
     let p = host.provenance().snapshot();
     assert!(
@@ -1919,7 +1922,11 @@ defineProps<Props>()
 <template><div>consumer</div></template>"#,
     );
     upsert_non_sfc(&host, "/src/barrel.ts", "export * from './inner'\n");
-    upsert_non_sfc(&host, "/src/inner.ts", "export interface Props { label: string }\n");
+    upsert_non_sfc(
+        &host,
+        "/src/inner.ts",
+        "export interface Props { label: string }\n",
+    );
 
     host.set_import_dependencies(
         "/src/Consumer.vue",
@@ -1986,7 +1993,10 @@ defineProps<Props>()
             0,
         )
         .expect("second resolution should complete");
-    assert!(second.is_some(), "Props should resolve on the second request");
+    assert!(
+        second.is_some(),
+        "Props should resolve on the second request"
+    );
 
     let p = host.provenance().snapshot();
     assert!(
@@ -2083,8 +2093,16 @@ defineProps<Props>()
 <template><div /></template>"#,
     );
     upsert_non_sfc(&host, "/src/types.ts", "export { Props } from './dep'\n");
-    upsert_non_sfc(&host, "/src/old.ts", "export interface Props { old: string }\n");
-    upsert_non_sfc(&host, "/src/new.ts", "export interface Props { fresh: string }\n");
+    upsert_non_sfc(
+        &host,
+        "/src/old.ts",
+        "export interface Props { old: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/new.ts",
+        "export interface Props { fresh: string }\n",
+    );
 
     host.set_import_dependencies(
         "/src/Consumer.vue",

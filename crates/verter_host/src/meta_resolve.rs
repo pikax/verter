@@ -25,8 +25,8 @@ use crate::VerterHost;
 use std::sync::Arc;
 use std::time::Instant;
 use verter_resolver::{
-    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost,
-    RequestSource, SingleflightRole, StoreView,
+    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
+    SingleflightRole, StoreView,
 };
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
@@ -68,8 +68,10 @@ impl ComponentMetaRequestHost for VerterHost {
         view: &Self::View,
     ) -> Option<Self::CapturedInputs> {
         let snapshot = self.get_raw_analysis_snapshot_in_view(canonical, Some(view))?;
-        let (source, cached_parse, whole_hash) = self.current_eval_state_in_view(canonical, Some(view))?;
-        let owner_eval_source = VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+        let (source, cached_parse, whole_hash) =
+            self.current_eval_state_in_view(canonical, Some(view))?;
+        let owner_eval_source =
+            VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
         Some(CapturedComponentMetaInputs {
             whole_hash,
             snapshot,
@@ -96,12 +98,8 @@ impl ComponentMetaRequestHost for VerterHost {
         store_view: Option<&Self::View>,
     ) -> Option<Self::Resolution> {
         if let Some(captured) = captured {
-            return self.compute_component_meta_state_from_captured(
-                canonical,
-                mode,
-                captured,
-                store_view,
-            );
+            return self
+                .compute_component_meta_state_from_captured(canonical, mode, captured, store_view);
         }
 
         let whole_hash = store_view
@@ -180,7 +178,7 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let result = run_component_meta_request(
             self,
-            &self.resolved_meta_singleflight,
+            self.resolver_runtime().component_meta.singleflight(),
             &canonical,
             mode,
             STORE_VIEW_STABILITY_MAX_ATTEMPTS,
@@ -368,7 +366,7 @@ impl VerterHost {
         }
     }
 
-    fn try_get_cached_resolved_meta(
+    pub(crate) fn try_get_cached_resolved_meta(
         &self,
         canonical: &str,
         mode: ResolverMode,
@@ -376,7 +374,8 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let cache_key = resolved_meta_cache_key(canonical, mode);
         if let Some(cached) = self
-            .resolved_meta_cache
+            .resolver_runtime()
+            .component_meta
             .get_if_valid(&cache_key, store_view)
         {
             self.mirror_cached_resolved_meta_arc(canonical, mode, cached.clone());
@@ -394,7 +393,7 @@ impl VerterHost {
             {
                 return None;
             }
-            self.resolved_meta_cache.insert_arc(
+            self.resolver_runtime().component_meta.insert_arc(
                 cache_key,
                 cached.state.clone(),
                 cached.fact_versions.clone(),
@@ -416,7 +415,7 @@ impl VerterHost {
             {
                 return None;
             }
-            self.resolved_meta_cache.insert_arc(
+            self.resolver_runtime().component_meta.insert_arc(
                 cache_key,
                 cached.state.clone(),
                 cached.fact_versions.clone(),
@@ -433,7 +432,7 @@ impl VerterHost {
         fact_versions: &[verter_resolver::FactVersionRef],
     ) {
         let state = Arc::new(state.clone());
-        self.resolved_meta_cache.insert_arc(
+        self.resolver_runtime().component_meta.insert_arc(
             resolved_meta_cache_key(canonical, mode),
             state.clone(),
             fact_versions.to_vec(),
@@ -581,7 +580,10 @@ impl VerterHost {
                 }
                 #[cfg(not(feature = "scheduler"))]
                 {
-                    None
+                    crate::shared::read_lock(&self.files)
+                        .get(canonical_id)
+                        .and_then(|entry| entry.export_registry.as_ref())
+                        .map(|registry| registry.source_hash)
                 }
             }
             verter_resolver::DerivedFactKind::BarrelSurface => {
@@ -595,30 +597,39 @@ impl VerterHost {
                 }
                 #[cfg(not(feature = "scheduler"))]
                 {
-                    None
+                    crate::shared::read_lock(&self.files)
+                        .get(canonical_id)
+                        .and_then(|entry| entry.barrel_export_surface.as_ref())
+                        .map(|surface| surface.source_hash)
                 }
             }
             verter_resolver::DerivedFactKind::Route => {
                 #[cfg(feature = "scheduler")]
                 {
                     self.compile_cache.get(canonical_id).and_then(|cc| {
-                        (!cc.import_route_cache.is_empty())
-                            .then(|| crate::resolver_store::hash_import_route_cache(&cc.import_route_cache))
+                        (!cc.import_route_cache.is_empty()).then(|| {
+                            crate::resolver_store::hash_import_route_cache(&cc.import_route_cache)
+                        })
                     })
                 }
                 #[cfg(not(feature = "scheduler"))]
                 {
-                    None
+                    crate::shared::read_lock(&self.files)
+                        .get(canonical_id)
+                        .and_then(|entry| {
+                            (!entry.import_route_cache.is_empty()).then(|| {
+                                crate::resolver_store::hash_import_route_cache(
+                                    &entry.import_route_cache,
+                                )
+                            })
+                        })
                 }
             }
             verter_resolver::DerivedFactKind::ExactResolution => self
                 .dependency_resolutions_for_eval_in_view(canonical_id, None)
                 .and_then(|resolutions| {
-                    (!resolutions.is_empty()).then(|| {
-                        crate::resolver_store::hash_dependency_resolutions(
-                            &resolutions,
-                        )
-                    })
+                    (!resolutions.is_empty())
+                        .then(|| crate::resolver_store::hash_dependency_resolutions(&resolutions))
                 }),
         }
     }
@@ -635,8 +646,10 @@ impl VerterHost {
 
         #[cfg(not(feature = "scheduler"))]
         {
-            let _ = canonical_id;
-            None
+            crate::shared::read_lock(&self.files)
+                .get(canonical_id)
+                .and_then(|entry| entry.barrel_export_surface.as_ref())
+                .map(|surface| surface.generation)
         }
     }
 }
@@ -724,6 +737,14 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
     type Snapshot = FileAnalysisSnapshot;
     type EvalContext = CapturedComponentMetaInputs;
     type ImportedInputs = crate::host_manage::ImportedEvalInputs;
+
+    fn resolve_type_declaration(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> ResolvedTypeDeclaration {
+        resolve_type_declaration_in_view(self.host, dep_canonical, requested_name, self.store_view)
+    }
 
     fn snapshot_imports<'a>(
         &self,
@@ -915,11 +936,47 @@ pub(crate) fn resolve_type_declaration_in_view(
     requested_name: &str,
     store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> ResolvedTypeDeclaration {
-    verter_resolver::resolve_type_declaration(
-        &HostComponentMetaResolver { host, store_view },
-        dep_canonical,
-        requested_name,
-    )
+    let owned_view;
+    let current_view = if let Some(view) = store_view {
+        view
+    } else {
+        owned_view = host.resolver_store_view();
+        &owned_view
+    };
+    let resolver = HostComponentMetaResolver {
+        host,
+        store_view: Some(current_view),
+    };
+    let key = verter_resolver::symbol_resolver::declaration_node_key(dep_canonical, requested_name);
+    let mut ctx = verter_resolver::symbol_resolver::ResolveContext::new();
+    let result = host
+        .resolver_runtime()
+        .symbol
+        .resolve_node(key, current_view, &mut ctx, |_| {
+            let declaration =
+                verter_resolver::resolve_type_declaration(&resolver, dep_canonical, requested_name);
+            let mut tracked_deps = std::collections::BTreeSet::new();
+            if !declaration.canonical_source.is_empty()
+                && declaration.canonical_source != dep_canonical
+            {
+                tracked_deps.insert(declaration.canonical_source.clone());
+            }
+
+            verter_resolver::symbol_resolver::SymbolNodeResult {
+                value: verter_resolver::symbol_resolver::SymbolNodeValue::Declaration(declaration),
+                facts: host.current_dependency_fact_versions_in_view(
+                    dep_canonical,
+                    &tracked_deps,
+                    Some(current_view),
+                ),
+                diagnostics: Vec::new(),
+            }
+        });
+
+    match result.value {
+        verter_resolver::symbol_resolver::SymbolNodeValue::Declaration(declaration) => declaration,
+        _ => unreachable!("declaration resolution must return a declaration node result"),
+    }
 }
 
 fn read_full_source(
@@ -1090,6 +1147,7 @@ fn parse_jsdoc_tag_payload(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_jsdoc_tag_type(
     host: &VerterHost,
     canonical_source: &str,

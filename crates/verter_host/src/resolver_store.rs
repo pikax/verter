@@ -110,7 +110,10 @@ impl HostStoreView {
 
                     if !entry.import_route_cache.is_empty() {
                         view.derived_hashes.insert(
-                            (canonical_id.clone(), verter_resolver::DerivedFactKind::Route),
+                            (
+                                canonical_id.clone(),
+                                verter_resolver::DerivedFactKind::Route,
+                            ),
                             hash_import_route_cache(&entry.import_route_cache),
                         );
                     }
@@ -135,6 +138,38 @@ impl HostStoreView {
                             verter_resolver::DerivedFactKind::ExactResolution,
                         ),
                         hash_dependency_resolutions(&entry.dependency_resolutions),
+                    );
+                }
+
+                if let Some(registry) = entry.export_registry.as_ref() {
+                    view.derived_hashes.insert(
+                        (
+                            canonical_id.clone(),
+                            verter_resolver::DerivedFactKind::ExportRegistry,
+                        ),
+                        registry.source_hash,
+                    );
+                }
+
+                if let Some(surface) = entry.barrel_export_surface.as_ref() {
+                    view.derived_hashes.insert(
+                        (
+                            canonical_id.clone(),
+                            verter_resolver::DerivedFactKind::BarrelSurface,
+                        ),
+                        surface.source_hash,
+                    );
+                    view.barrel_generations
+                        .insert(canonical_id.clone(), surface.generation);
+                }
+
+                if !entry.import_route_cache.is_empty() {
+                    view.derived_hashes.insert(
+                        (
+                            canonical_id.clone(),
+                            verter_resolver::DerivedFactKind::Route,
+                        ),
+                        hash_import_route_cache(&entry.import_route_cache),
                     );
                 }
             }
@@ -280,18 +315,19 @@ impl HostStoreView {
 
         for import in &snapshot.imports {
             resolutions.entry(import.source.clone()).or_insert_with(|| {
-                let resolved_canonical_id = if import.is_type_only
-                    || is_declaration_companion_source(canonical_id)
-                {
-                    host.resolve_type_dependency_canonical(canonical_id, &import.source)
-                } else {
-                    host.resolve_loaded_dependency_canonical(
-                        canonical_id,
-                        &import.source,
-                        verter_vfs::ResolveRequestKind::EsmImport,
-                    )
-                    .or_else(|| host.resolve_type_dependency_canonical(canonical_id, &import.source))
-                };
+                let resolved_canonical_id =
+                    if import.is_type_only || is_declaration_companion_source(canonical_id) {
+                        host.resolve_type_dependency_canonical(canonical_id, &import.source)
+                    } else {
+                        host.resolve_loaded_dependency_canonical(
+                            canonical_id,
+                            &import.source,
+                            verter_vfs::ResolveRequestKind::EsmImport,
+                        )
+                        .or_else(|| {
+                            host.resolve_type_dependency_canonical(canonical_id, &import.source)
+                        })
+                    };
 
                 crate::types::DependencyResolution {
                     specifier: import.source.clone(),
@@ -341,56 +377,7 @@ impl HostStoreView {
     }
 
     fn compute_compat_token(&self) -> verter_resolver::StoreViewCompatToken {
-        let mut hasher = rustc_hash::FxHasher::default();
-        self.mutation_epoch.hash(&mut hasher);
-
-        let mut whole_hashes: Vec<_> = self.whole_hashes.iter().collect();
-        whole_hashes.sort_by(|a, b| a.0.cmp(b.0));
-        for (canonical_id, hash) in whole_hashes {
-            0u8.hash(&mut hasher);
-            canonical_id.hash(&mut hasher);
-            hash.hash(&mut hasher);
-        }
-
-        let mut dependency_resolutions: Vec<_> = self.dependency_resolutions.iter().collect();
-        dependency_resolutions.sort_by(|a, b| a.0.cmp(b.0));
-        for (canonical_id, resolutions) in dependency_resolutions {
-            let mut entries: Vec<_> = resolutions.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            for (specifier, resolution) in entries {
-                3u8.hash(&mut hasher);
-                canonical_id.hash(&mut hasher);
-                specifier.hash(&mut hasher);
-                resolution.specifier.hash(&mut hasher);
-                resolution.resolved_canonical_id.hash(&mut hasher);
-                let mut candidates = resolution.possible_canonical_ids.clone();
-                candidates.sort();
-                candidates.hash(&mut hasher);
-            }
-        }
-
-        let mut derived_hashes: Vec<_> = self.derived_hashes.iter().collect();
-        derived_hashes.sort_by(|a, b| {
-            a.0 .0
-                .cmp(&b.0 .0)
-                .then_with(|| derived_fact_kind_rank(a.0 .1).cmp(&derived_fact_kind_rank(b.0 .1)))
-        });
-        for ((canonical_id, kind), hash) in derived_hashes {
-            1u8.hash(&mut hasher);
-            canonical_id.hash(&mut hasher);
-            kind.hash(&mut hasher);
-            hash.hash(&mut hasher);
-        }
-
-        let mut barrel_generations: Vec<_> = self.barrel_generations.iter().collect();
-        barrel_generations.sort_by(|a, b| a.0.cmp(b.0));
-        for (canonical_id, generation) in barrel_generations {
-            2u8.hash(&mut hasher);
-            canonical_id.hash(&mut hasher);
-            generation.hash(&mut hasher);
-        }
-
-        verter_resolver::StoreViewCompatToken(hasher.finish())
+        verter_resolver::StoreViewCompatToken(self.mutation_epoch)
     }
 }
 
@@ -419,7 +406,6 @@ pub(crate) fn hash_dependency_resolutions(
     })
 }
 
-#[cfg(feature = "scheduler")]
 pub(crate) fn hash_import_route_cache(
     route_cache: &FxHashMap<
         (String, String, verter_vfs::ResolveRequestKind),
@@ -441,8 +427,16 @@ pub(crate) fn hash_import_route_cache(
             type_name.hash(hasher);
             resolve_request_kind_rank(*kind).hash(hasher);
             entry.owner_hash.hash(hasher);
-            entry.target.as_ref().map(|target| &target.final_canonical_id).hash(hasher);
-            entry.target.as_ref().map(|target| &target.exported_name).hash(hasher);
+            entry
+                .target
+                .as_ref()
+                .map(|target| &target.final_canonical_id)
+                .hash(hasher);
+            entry
+                .target
+                .as_ref()
+                .map(|target| &target.exported_name)
+                .hash(hasher);
             entry.tracked_deps.hash(hasher);
             let mut route_hashes = entry.route_hashes.clone();
             route_hashes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -467,23 +461,12 @@ fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
     out
 }
 
-#[cfg(feature = "scheduler")]
 fn resolve_request_kind_rank(kind: verter_vfs::ResolveRequestKind) -> u8 {
     match kind {
         verter_vfs::ResolveRequestKind::EsmImport => 0,
         verter_vfs::ResolveRequestKind::TypeImport => 1,
         verter_vfs::ResolveRequestKind::RequireCall => 2,
         verter_vfs::ResolveRequestKind::SfcSrcAttr => 3,
-    }
-}
-
-fn derived_fact_kind_rank(kind: verter_resolver::DerivedFactKind) -> u8 {
-    match kind {
-        verter_resolver::DerivedFactKind::ExportRegistry => 0,
-        verter_resolver::DerivedFactKind::Route => 1,
-        verter_resolver::DerivedFactKind::BarrelSurface => 2,
-        verter_resolver::DerivedFactKind::ExactResolution => 3,
-        verter_resolver::DerivedFactKind::DirectSource => 4,
     }
 }
 

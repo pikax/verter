@@ -525,6 +525,10 @@ impl VerterHost {
                     cached_parse: None,
                     cached_tsc_extract: None,
                     cached_resolved_meta: FxHashMap::default(),
+                    cached_fallthrough: None,
+                    barrel_export_surface: None,
+                    export_registry: None,
+                    import_route_cache: FxHashMap::default(),
                 });
 
             entry.file_kind = req.file_kind;

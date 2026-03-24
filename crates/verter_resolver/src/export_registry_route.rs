@@ -97,8 +97,11 @@ fn resolve_type_via_registry_inner<R: RegistryRouteResolver>(
                 source_specifier,
                 original_name,
             } => {
-                let source_canonical = resolver
-                    .resolve_loaded_dependency_canonical(canonical, source_specifier, kind)?;
+                let source_canonical = resolver.resolve_loaded_dependency_canonical(
+                    canonical,
+                    source_specifier,
+                    kind,
+                )?;
                 resolve_type_via_registry_inner(
                     resolver,
                     &source_canonical,
@@ -227,8 +230,8 @@ fn resolve_type_via_registry_inner<R: RegistryRouteResolver>(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_type_via_registry, ExportRegistryView, RegistryExportEntry,
-        RegistryResolvedTarget, RegistryRouteResolver,
+        resolve_type_via_registry, ExportRegistryView, RegistryExportEntry, RegistryResolvedTarget,
+        RegistryRouteResolver,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::BTreeMap;
@@ -278,10 +281,7 @@ mod tests {
             "/src/types.ts".to_string(),
             ExportRegistryView {
                 source_hash: [2; 16],
-                named: FxHashMap::from_iter([(
-                    "Props".to_string(),
-                    RegistryExportEntry::Defined,
-                )]),
+                named: FxHashMap::from_iter([("Props".to_string(), RegistryExportEntry::Defined)]),
                 wildcard_edges: Vec::new(),
             },
         );
@@ -332,10 +332,7 @@ mod tests {
             "/src/b.ts".to_string(),
             ExportRegistryView {
                 source_hash: [3; 16],
-                named: FxHashMap::from_iter([(
-                    "Props".to_string(),
-                    RegistryExportEntry::Defined,
-                )]),
+                named: FxHashMap::from_iter([("Props".to_string(), RegistryExportEntry::Defined)]),
                 wildcard_edges: Vec::new(),
             },
         );
@@ -343,10 +340,7 @@ mod tests {
             "/src/deep.ts".to_string(),
             ExportRegistryView {
                 source_hash: [4; 16],
-                named: FxHashMap::from_iter([(
-                    "Props".to_string(),
-                    RegistryExportEntry::Defined,
-                )]),
+                named: FxHashMap::from_iter([("Props".to_string(), RegistryExportEntry::Defined)]),
                 wildcard_edges: Vec::new(),
             },
         );

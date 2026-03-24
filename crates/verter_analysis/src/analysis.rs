@@ -524,6 +524,9 @@ pub fn build_script_analysis_with_scope(
     // ── Detect nested macro calls (macros inside functions/blocks/conditionals) ──
     let nested_macro_calls = collect_nested_macro_calls(program, 0);
 
+    // ── Collect local declaration entries for stable cross-file IDs ──
+    let declaration_entries = collect_declaration_entries(content, program);
+
     ScriptAnalysisSnapshot {
         imports,
         module_references,
@@ -543,6 +546,7 @@ pub fn build_script_analysis_with_scope(
         store_usages,
         store_definitions,
         is_typescript: source_type.is_typescript(),
+        declaration_entries,
     }
 }
 
@@ -2392,6 +2396,219 @@ const COMPILER_MACRO_NAMES: &[&str] = &[
     "defineSlots",
     "withDefaults",
 ];
+
+/// Collect top-level declaration entries from the AST for stable cross-file IDs.
+///
+/// Walks `program.body` and extracts interfaces, type aliases, classes, enums,
+/// functions, and variable declarations. Each gets a `LocalDeclarationEntry`
+/// with a content hash derived from the declaration's source text.
+fn collect_declaration_entries(content: &str, program: &Program<'_>) -> Vec<LocalDeclarationEntry> {
+    use crate::types::{hash_16, LocalDeclarationEntry, LocalDeclarationKind};
+
+    fn entry_from_span(
+        content: &str,
+        name: String,
+        kind: LocalDeclarationKind,
+        span: Span,
+    ) -> (String, LocalDeclarationKind, &str, Span) {
+        let body_text = content
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or("");
+        (name, kind, body_text, span)
+    }
+
+    fn extract_from_declaration<'a>(
+        content: &'a str,
+        decl: &Declaration<'_>,
+    ) -> Vec<(String, LocalDeclarationKind, &'a str, Span)> {
+        match decl {
+            Declaration::TSInterfaceDeclaration(d) => {
+                vec![entry_from_span(
+                    content,
+                    d.id.name.to_string(),
+                    LocalDeclarationKind::Type,
+                    d.span.into(),
+                )]
+            }
+            Declaration::TSTypeAliasDeclaration(d) => {
+                vec![entry_from_span(
+                    content,
+                    d.id.name.to_string(),
+                    LocalDeclarationKind::Type,
+                    d.span.into(),
+                )]
+            }
+            Declaration::TSEnumDeclaration(d) => {
+                vec![entry_from_span(
+                    content,
+                    d.id.name.to_string(),
+                    LocalDeclarationKind::TypeAndValue,
+                    d.span.into(),
+                )]
+            }
+            Declaration::ClassDeclaration(d) => {
+                if let Some(id) = &d.id {
+                    vec![entry_from_span(
+                        content,
+                        id.name.to_string(),
+                        LocalDeclarationKind::TypeAndValue,
+                        d.span.into(),
+                    )]
+                } else {
+                    vec![]
+                }
+            }
+            Declaration::FunctionDeclaration(d) => {
+                if let Some(id) = &d.id {
+                    vec![entry_from_span(
+                        content,
+                        id.name.to_string(),
+                        LocalDeclarationKind::Value,
+                        d.span.into(),
+                    )]
+                } else {
+                    vec![]
+                }
+            }
+            Declaration::VariableDeclaration(d) => {
+                let mut items = Vec::new();
+                for declarator in &d.declarations {
+                    if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                        items.push(entry_from_span(
+                            content,
+                            id.name.to_string(),
+                            LocalDeclarationKind::Value,
+                            declarator.span.into(),
+                        ));
+                    }
+                }
+                items
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Extract declaration entries from a statement, handling both bare and
+    /// exported forms.  Uses `extract_from_declaration` for `ExportNamedDeclaration`
+    /// and mirrors its logic for `Statement` variants that share the same inner
+    /// OXC types (Statement ↔ Declaration share the underlying AST nodes, but
+    /// OXC doesn't expose a Statement→Declaration cast, so we match through).
+    fn extract_from_statement<'a>(
+        content: &'a str,
+        stmt: &Statement<'_>,
+    ) -> Vec<(String, LocalDeclarationKind, &'a str, Span)> {
+        match stmt {
+            Statement::TSInterfaceDeclaration(d) => vec![entry_from_span(
+                content,
+                d.id.name.to_string(),
+                LocalDeclarationKind::Type,
+                d.span.into(),
+            )],
+            Statement::TSTypeAliasDeclaration(d) => vec![entry_from_span(
+                content,
+                d.id.name.to_string(),
+                LocalDeclarationKind::Type,
+                d.span.into(),
+            )],
+            Statement::TSEnumDeclaration(d) => vec![entry_from_span(
+                content,
+                d.id.name.to_string(),
+                LocalDeclarationKind::TypeAndValue,
+                d.span.into(),
+            )],
+            Statement::ClassDeclaration(d) => {
+                d.id.as_ref()
+                    .map(|id| {
+                        vec![entry_from_span(
+                            content,
+                            id.name.to_string(),
+                            LocalDeclarationKind::TypeAndValue,
+                            d.span.into(),
+                        )]
+                    })
+                    .unwrap_or_default()
+            }
+            Statement::FunctionDeclaration(d) => {
+                d.id.as_ref()
+                    .map(|id| {
+                        vec![entry_from_span(
+                            content,
+                            id.name.to_string(),
+                            LocalDeclarationKind::Value,
+                            d.span.into(),
+                        )]
+                    })
+                    .unwrap_or_default()
+            }
+            Statement::VariableDeclaration(d) => d
+                .declarations
+                .iter()
+                .filter_map(|declarator| {
+                    if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                        Some(entry_from_span(
+                            content,
+                            id.name.to_string(),
+                            LocalDeclarationKind::Value,
+                            declarator.span.into(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Statement::ExportNamedDeclaration(export) => export
+                .declaration
+                .as_ref()
+                .map(|decl| extract_from_declaration(content, decl))
+                .unwrap_or_default(),
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::ClassDeclaration(d) => {
+                    d.id.as_ref()
+                        .map(|id| {
+                            vec![entry_from_span(
+                                content,
+                                id.name.to_string(),
+                                LocalDeclarationKind::TypeAndValue,
+                                d.span.into(),
+                            )]
+                        })
+                        .unwrap_or_default()
+                }
+                ExportDefaultDeclarationKind::FunctionDeclaration(d) => {
+                    d.id.as_ref()
+                        .map(|id| {
+                            vec![entry_from_span(
+                                content,
+                                id.name.to_string(),
+                                LocalDeclarationKind::Value,
+                                d.span.into(),
+                            )]
+                        })
+                        .unwrap_or_default()
+                }
+                _ => vec![],
+            },
+            _ => vec![],
+        }
+    }
+
+    let mut entries: Vec<LocalDeclarationEntry> = Vec::new();
+
+    for stmt in &program.body {
+        let items = extract_from_statement(content, stmt);
+
+        for (name, kind, body_text, span) in items {
+            entries.push(LocalDeclarationEntry {
+                name,
+                kind,
+                content_hash: hash_16(body_text.as_bytes()),
+                span,
+            });
+        }
+    }
+
+    entries
+}
 
 /// Walk the entire AST and collect macro calls that are NOT at the top level.
 /// Top-level calls (directly in `program.body`) are excluded — those are valid.

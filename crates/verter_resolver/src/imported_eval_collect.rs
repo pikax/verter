@@ -79,6 +79,7 @@ pub struct ImportedEvalOwnerSnapshot<'a> {
     pub macro_type_deps: &'a [MacroTypeDep],
 }
 
+#[allow(clippy::obfuscated_if_else)]
 pub fn required_type_alias_names_for_import_binding(
     local_binding_name: &str,
     is_namespace: bool,
@@ -93,10 +94,11 @@ pub fn required_type_alias_names_for_import_binding(
             .collect();
     }
 
-    required_import_names
-        .contains(local_binding_name)
-        .then(|| vec![local_binding_name.to_string()])
-        .unwrap_or_default()
+    if required_import_names.contains(local_binding_name) {
+        vec![local_binding_name.to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn imported_member_name_for_type_alias(
@@ -472,12 +474,11 @@ pub fn build_imported_eval_inputs_with_owner_context<R: ImportedEvalOwnerContext
 mod tests {
     use super::{
         build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
-        collect_imported_eval_inputs,
-        imported_member_name_for_type_alias, record_required_source_merge_inputs_recursive,
+        collect_imported_eval_inputs, imported_member_name_for_type_alias,
+        record_required_source_merge_inputs_recursive,
         required_type_alias_names_for_import_binding, ImportedEvalBinding,
-        ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver,
-        ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
-        ImportedEvalTraversalBudget,
+        ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver,
+        ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
     };
     use crate::{
         DeclarationMetadataResolver, ImportedEvalSource, ImportedTypeAlias,

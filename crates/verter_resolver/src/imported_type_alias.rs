@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo};
+use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
 use verter_analysis::type_expr::{FunctionExpr, ObjectMember, TypeExpr};
 
 use crate::{ImportedTypeAlias, ImportedTypeAliasResolveRequest};
@@ -51,16 +51,12 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
     let resolved_source_canonical_id =
         resolver.canonicalize_imported_source(request.source_canonical_id.as_str());
 
-    let Some(mut dep_env) = resolver.dependency_eval_env(&resolved_source_canonical_id) else {
-        return None;
-    };
-    let Some(mut decl) = dep_env
-        .type_symbols
-        .get(request.exported_name.as_str())
-        .cloned()
-    else {
-        return None;
-    };
+    let mut dep_env = resolver.dependency_eval_env(&resolved_source_canonical_id);
+    let mut decl = dep_env.as_ref().and_then(|env| {
+        env.type_symbols
+            .get(request.exported_name.as_str())
+            .cloned()
+    });
 
     let mut tracked_deps = BTreeSet::new();
     let mut resolution_deps = BTreeSet::new();
@@ -88,15 +84,36 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         Err(ImportedTypeAliasPrepareError::Other) => None,
     };
 
-    let resolved_decl_body = should_attempt_owner_env_resolution(&decl, resolved_body.as_ref())
-        .then(|| {
-            resolver.evaluate_imported_decl_with_owner_env(
+    let resolved_decl_body = match decl.as_ref() {
+        Some(decl) if should_attempt_owner_env_resolution(decl, resolved_body.as_ref()) => resolver
+            .evaluate_imported_decl_with_owner_env(
                 &resolved_source_canonical_id,
                 request.exported_name.as_str(),
                 canonical_dependencies,
-            )
-        })
-        .flatten();
+            ),
+        None => resolver.evaluate_imported_decl_with_owner_env(
+            &resolved_source_canonical_id,
+            request.exported_name.as_str(),
+            canonical_dependencies,
+        ),
+        _ => None,
+    };
+
+    if decl.is_none() {
+        let body =
+            choose_preferred_imported_type_body(resolved_body.clone(), resolved_decl_body.clone())?;
+        decl = Some(TypeDeclInfo {
+            name: request.exported_name.clone(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body,
+        });
+        dep_env.get_or_insert_with(EvalEnv::new);
+    }
+
+    let mut dep_env = dep_env.unwrap_or_default();
+    let mut decl = decl.expect("decl must exist after synthesized fallback");
 
     canonical_dependencies.extend(tracked_deps);
     canonical_dependencies.extend(resolution_deps);

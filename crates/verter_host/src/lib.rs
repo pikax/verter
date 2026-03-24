@@ -89,6 +89,36 @@ pub use id::resolve_external;
 use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
 
+/// Consolidated resolver state: bundles the unified sub-node resolver runtime
+/// with host-level top caches and singleflight groups.
+///
+/// Replaces the 4 individual cache/singleflight fields that were previously
+/// scattered across `VerterHost`.
+pub(crate) struct HostResolverState {
+    /// Unified sub-node resolver runtime (symbol + fallthrough subsystems).
+    pub runtime: verter_resolver::resolver_runtime::UnifiedResolverRuntime<
+        crate::meta_resolve::ResolvedComponentMetaState,
+        crate::types::FallthroughResolution,
+    >,
+}
+
+impl HostResolverState {
+    fn new() -> Self {
+        Self {
+            runtime: verter_resolver::resolver_runtime::UnifiedResolverRuntime::new(),
+        }
+    }
+
+    fn clear_all(&self) {
+        self.runtime.clear_caches();
+    }
+
+    fn clear_fallthrough(&self) {
+        self.runtime.top_level_fallthrough_singleflight.clear();
+        self.runtime.fallthrough.clear_cache();
+    }
+}
+
 /// Central file store and compile cache for Vue SFC compilation.
 ///
 /// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
@@ -141,30 +171,9 @@ pub struct VerterHost {
     /// Bounded to RESOLVED_TYPE_CACHE_CAP entries; cleared on close/clear_compile_cache.
     pub(crate) resolved_type_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
-    /// Resolver-owned validated cache for fully materialized component-meta states.
-    pub(crate) resolved_meta_cache: verter_resolver::ValidatedFactCache<
-        verter_resolver::ResolutionNodeKey,
-        crate::meta_resolve::ResolvedComponentMetaState,
-    >,
-    /// In-flight coalescing for fully materialized component-meta states.
-    pub(crate) resolved_meta_singleflight: verter_resolver::SingleflightGroup<
-        verter_resolver::ResolutionNodeKey,
-        verter_resolver::StableExecutionValue<
-            Option<crate::meta_resolve::ResolvedComponentMetaState>,
-        >,
-        (),
-    >,
-    /// Resolver-owned validated cache for fallthrough inheritance results.
-    pub(crate) fallthrough_cache: verter_resolver::ValidatedFactCache<
-        verter_resolver::FallthroughNodeKey,
-        crate::types::FallthroughResolution,
-    >,
-    /// In-flight coalescing for fallthrough inheritance resolution.
-    pub(crate) fallthrough_singleflight: verter_resolver::SingleflightGroup<
-        verter_resolver::FallthroughNodeKey,
-        verter_resolver::StableExecutionValue<Option<crate::types::FallthroughResolution>>,
-        (),
-    >,
+    /// Consolidated resolver state: sub-node caches (symbol + fallthrough),
+    /// top-level host caches (meta + fallthrough), and singleflight groups.
+    pub(crate) resolver: HostResolverState,
     /// Cached pristine eval environments keyed by canonical id + whole_hash.
     /// Stored pre-evaluation and cloned per query to avoid reparsing the same
     /// script/declaration sources across component-meta requests.
@@ -225,10 +234,7 @@ impl VerterHost {
             compile_cache: dashmap::DashMap::new(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            resolved_meta_cache: verter_resolver::ValidatedFactCache::default(),
-            resolved_meta_singleflight: verter_resolver::SingleflightGroup::default(),
-            fallthrough_cache: verter_resolver::ValidatedFactCache::default(),
-            fallthrough_singleflight: verter_resolver::SingleflightGroup::default(),
+            resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
@@ -253,10 +259,7 @@ impl VerterHost {
             metrics: HostMetrics::default(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            resolved_meta_cache: verter_resolver::ValidatedFactCache::default(),
-            resolved_meta_singleflight: verter_resolver::SingleflightGroup::default(),
-            fallthrough_cache: verter_resolver::ValidatedFactCache::default(),
-            fallthrough_singleflight: verter_resolver::SingleflightGroup::default(),
+            resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
@@ -284,6 +287,16 @@ impl VerterHost {
     /// Get a clone of the workspace Arc.
     pub fn workspace(&self) -> Arc<dyn verter_vfs::WorkspaceAccess> {
         self.workspace.read().clone()
+    }
+
+    /// Access the unified resolver runtime for counter reads and diagnostics.
+    pub fn resolver_runtime(
+        &self,
+    ) -> &verter_resolver::resolver_runtime::UnifiedResolverRuntime<
+        crate::meta_resolve::ResolvedComponentMetaState,
+        crate::types::FallthroughResolution,
+    > {
+        &self.resolver.runtime
     }
 
     /// Swap the workspace backing this host.
@@ -573,13 +586,14 @@ impl VerterHost {
                 entry.compile_slots.clear();
                 entry.template_analysis = None;
                 entry.cached_resolved_meta.clear();
+                entry.cached_fallthrough = None;
+                entry.barrel_export_surface = None;
+                entry.export_registry = None;
+                entry.import_route_cache.clear();
             }
         }
         self.resolved_type_cache.lock().clear();
-        self.resolved_meta_cache.clear();
-        self.resolved_meta_singleflight.clear();
-        self.fallthrough_cache.clear();
-        self.fallthrough_singleflight.clear();
+        self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
         self.bump_store_view_epoch();
     }
@@ -592,8 +606,7 @@ impl VerterHost {
                 entry.cached_fallthrough = None;
             }
         }
-        self.fallthrough_cache.clear();
-        self.fallthrough_singleflight.clear();
+        self.resolver.clear_fallthrough();
         self.bump_store_view_epoch();
     }
 
@@ -669,10 +682,7 @@ impl VerterHost {
             self.scheduler.restart_driver();
         }
         self.resolved_type_cache.lock().clear();
-        self.resolved_meta_cache.clear();
-        self.resolved_meta_singleflight.clear();
-        self.fallthrough_cache.clear();
-        self.fallthrough_singleflight.clear();
+        self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
         self.provenance.reset();
         self.bump_store_view_epoch();

@@ -51,6 +51,23 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
         .collect()
 }
 
+fn clear_legacy_cached_resolved_state(project: &MetaProject, canonical: &str, mode: ResolverMode) {
+    #[cfg(feature = "scheduler")]
+    {
+        if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
+            entry.cached_resolved_meta.remove(&mode);
+        }
+    }
+
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let mut files = crate::shared::write_lock(&project.host().files);
+        if let Some(entry) = files.get_mut(canonical) {
+            entry.cached_resolved_meta.remove(&mode);
+        }
+    }
+}
+
 #[test]
 fn component_meta_request_executor_uses_captured_owner_inputs_after_owner_changes() {
     let project = make_project();
@@ -90,7 +107,7 @@ defineProps<{ bar: number }>()
         Some(&captured),
         Some(&view),
     )
-        .expect("component-meta should still resolve against captured owner inputs");
+    .expect("component-meta should still resolve against captured owner inputs");
 
     let snapshot_props: Vec<String> = state
         .snapshot
@@ -506,6 +523,61 @@ defineProps<Props>()
     assert_eq!(
         p2.resolver_node_cache_hits, 1,
         "repeat query should hit the resolver-owned cache once"
+    );
+}
+
+#[test]
+fn top_level_component_meta_lives_in_runtime_not_host_wrapper_cache() {
+    let project = make_project();
+    project
+        .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().provenance().reset();
+
+    let _first = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("first resolved-meta query should succeed");
+    let p1 = provenance(&project);
+    assert_eq!(
+        p1.component_meta_resolved_state_recomputes, 1,
+        "first query should compute resolved meta exactly once"
+    );
+    assert_eq!(
+        p1.resolver_node_cache_misses, 1,
+        "first query should miss the resolver-owned top-level cache once"
+    );
+
+    clear_legacy_cached_resolved_state(&project, "/App.vue", ResolverMode::Expanded);
+
+    let _second = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("second resolved-meta query should succeed");
+    let p2 = provenance(&project);
+
+    assert_eq!(
+        p2.component_meta_resolved_state_recomputes, 1,
+        "clearing host-visible wrapper caches must not force a recompute once runtime owns top-level component-meta"
+    );
+    assert_eq!(
+        p2.resolver_node_cache_misses, 1,
+        "second query should not introduce a second top-level cache miss"
+    );
+    assert_eq!(
+        p2.resolver_node_cache_hits, 1,
+        "second query should still hit the runtime-owned top-level cache"
     );
 }
 
@@ -1399,6 +1471,91 @@ defineProps<Props>()
     assert!(
         first_decl.declaration_id.is_some(),
         "resolved declarations should carry a stable id"
+    );
+}
+
+#[test]
+fn component_meta_reuses_runtime_symbol_cache_after_owner_only_change() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export interface Props {
+  label: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>first</div></template>"#,
+        )
+        .unwrap();
+
+    project.host().resolver_runtime().reset_counters();
+
+    let first = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("first resolve should succeed");
+    let after_first = project.host().resolver_runtime().counter_snapshot();
+
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>second</div></template>"#,
+        )
+        .unwrap();
+
+    let second = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("second resolve should succeed after owner-only change");
+    let after_second = project.host().resolver_runtime().counter_snapshot();
+
+    let first_props: Vec<_> = first.resolved_macros[0]
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    let second_props: Vec<_> = second.resolved_macros[0]
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+
+    assert!(
+        first_props.contains(&"label"),
+        "first resolve should include the imported prop"
+    );
+    assert!(
+        second_props.contains(&"label"),
+        "second resolve should still include the imported prop"
+    );
+    assert!(
+        !second_props.contains(&"missing"),
+        "owner-only recompute must not fabricate unrelated props"
+    );
+    assert!(
+        after_first.node_cache_misses > 0,
+        "first resolve should populate the runtime symbol cache, got {:?}",
+        after_first
+    );
+    assert!(
+        after_second.node_cache_hits > after_first.node_cache_hits,
+        "second resolve should reuse the runtime symbol cache after an owner-only change, before={:?} after={:?}",
+        after_first,
+        after_second
     );
 }
 

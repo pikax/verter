@@ -35,6 +35,29 @@ pub trait ExternalTypeGraphResolver {
     }
 
     fn debug_log(&self, _message: String) {}
+
+    /// Look up a previously resolved type in the host-level cache.
+    fn lookup_resolved_type_cache(
+        &self,
+        _dep_canonical: &str,
+        _type_name: &str,
+        _kind: ResolveRequestKind,
+    ) -> Option<crate::ExternalTypeResolvedCacheEntry> {
+        None
+    }
+
+    fn note_resolved_type_cache_hit(&self) {}
+
+    /// Called after successfully resolving a type body.
+    /// Implementations store into a host-level resolved type cache.
+    fn note_resolved_type(
+        &self,
+        _dep_canonical: &str,
+        _type_name: &str,
+        _resolved: Option<&ResolvedElements>,
+        _tracked_deps: &[String],
+    ) {
+    }
 }
 
 struct GraphBodyResolver<'a, R> {
@@ -61,6 +84,17 @@ where
 
     fn debug_log(&self, message: String) {
         self.resolver.debug_log(message);
+    }
+
+    fn note_resolved_type(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        resolved: Option<&ResolvedElements>,
+        tracked_deps: &[String],
+    ) {
+        self.resolver
+            .note_resolved_type(dep_canonical, type_name, resolved, tracked_deps);
     }
 
     fn resolve_external_type_recursive(
@@ -163,6 +197,18 @@ pub fn resolve_external_type_from_graph<R: ExternalTypeGraphResolver>(
     let cache_key = (dep_canonical.clone(), type_name.to_string());
     if let Some(cached) = cache.get(&cache_key) {
         return Ok(cached.clone());
+    }
+
+    // Check host-level resolved type cache before doing expensive source
+    // parsing. This enables cross-owner reuse: if component A already resolved
+    // Props from types.ts, component B can reuse the cached result.
+    if use_host_cache {
+        if let Some(entry) = resolver.lookup_resolved_type_cache(&dep_canonical, type_name, kind) {
+            resolver.note_resolved_type_cache_hit();
+            cache.insert(cache_key, entry.resolved.clone());
+            tracked_deps.extend(entry.tracked_deps.iter().cloned());
+            return Ok(entry.resolved);
+        }
     }
 
     let Some(effective_source) =
@@ -307,7 +353,8 @@ fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>
     }
 
     tracked_deps.insert(current_canonical.to_string());
-    let Some(current_source) = resolver.read_source_for_type_resolution(current_canonical, profile_hash)
+    let Some(current_source) =
+        resolver.read_source_for_type_resolution(current_canonical, profile_hash)
     else {
         return;
     };
@@ -418,9 +465,10 @@ mod tests {
             ("/src/types.ts".to_string(), "./dep".to_string()),
             "/src/dep.ts".to_string(),
         );
-        resolver
-            .sources
-            .insert("/src/types.ts".to_string(), "export { Props } from './dep'".to_string());
+        resolver.sources.insert(
+            "/src/types.ts".to_string(),
+            "export { Props } from './dep'".to_string(),
+        );
         resolver.sources.insert(
             "/src/dep.ts".to_string(),
             "export interface Props { msg: string }".to_string(),
@@ -463,9 +511,10 @@ mod tests {
             ("/src/barrel.ts".to_string(), "./deep".to_string()),
             "/src/deep.ts".to_string(),
         );
-        resolver
-            .sources
-            .insert("/src/barrel.ts".to_string(), "export * from './deep'".to_string());
+        resolver.sources.insert(
+            "/src/barrel.ts".to_string(),
+            "export * from './deep'".to_string(),
+        );
         resolver.sources.insert(
             "/src/deep.ts".to_string(),
             "export interface Props { msg: string }".to_string(),

@@ -25,6 +25,17 @@ pub trait ExternalTypeBodyResolver {
 
     fn note_cycle_detected(&self) {}
 
+    /// Called after successfully resolving a type from a source body.
+    /// Implementations can use this to populate a host-level cache.
+    fn note_resolved_type(
+        &self,
+        _dep_canonical: &str,
+        _type_name: &str,
+        _resolved: Option<&ResolvedElements>,
+        _tracked_deps: &[String],
+    ) {
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn resolve_external_type_recursive(
         &self,
@@ -221,6 +232,13 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
             resolved.is_some(),
         ));
     }
+
+    resolver.note_resolved_type(
+        dep_canonical,
+        type_name,
+        resolved.as_ref(),
+        &tracked_deps.iter().cloned().collect::<Vec<_>>(),
+    );
 
     Ok(resolved)
 }

@@ -1169,6 +1169,16 @@ pub(crate) struct FileEntry {
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
     /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
     pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
+    /// Cached fallthrough resolution keyed by semantic fact versions and
+    /// generic-root-propagation behavior.
+    pub(crate) cached_fallthrough: Option<CachedFallthroughEntry>,
+    /// Barrel export surface cache for non-scheduler hosts.
+    pub(crate) barrel_export_surface: Option<BarrelResolutionState>,
+    /// Per-file export registry for non-scheduler hosts.
+    pub(crate) export_registry: Option<FileExportRegistry>,
+    /// Cached import type routes for this file as an owner/importer.
+    pub(crate) import_route_cache:
+        FxHashMap<(String, String, verter_vfs::ResolveRequestKind), ImportTypeRouteEntry>,
 }
 
 impl FileMeta {
