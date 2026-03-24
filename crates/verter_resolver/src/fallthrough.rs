@@ -160,7 +160,7 @@ pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
                 if declared_prop_names.contains(member.name.as_str()) {
                     continue;
                 }
-                if consumed_attrs.iter().any(|attr| attr == member.name) {
+                if consumed_attrs.iter().any(|attr| attr == &member.name) {
                     continue;
                 }
                 inherited_props.push(FallthroughPropEntry {
@@ -180,7 +180,7 @@ pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
                 }
                 if consumed_listeners
                     .iter()
-                    .any(|listener| listener == member.name)
+                    .any(|listener| listener == &member.name)
                 {
                     continue;
                 }
@@ -1182,10 +1182,10 @@ mod tests {
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use verter_analysis::component_meta::{
-        AcceptedEventAnalysis, AcceptedEventKind, AcceptedPropAnalysis, AcceptedPropKind,
-        AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
-        FallthroughBranch, FallthroughSurface, InheritedSource, MemberAvailability,
-        MemberProvenance, ResolvedRootStep, RootBranch, RootReachability, RootTargetRef,
+        AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedPropKind, AcceptedSurfaceCompleteness,
+        BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings, FallthroughBranch,
+        FallthroughSurface, InheritedSource, MemberAvailability, MemberProvenance,
+        ResolvedRootStep, RootBranch, RootReachability, RootTargetRef,
     };
     use verter_analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
     use verter_analysis::template::{PropValueConstness, TemplatePropUsage};

@@ -14,12 +14,13 @@ use crate::types::*;
 use crate::VerterHost;
 use verter_resolver::{
     build_imported_eval_inputs, build_owner_eval_env_with_inputs,
+    component_meta_resolved_macros as resolver_component_meta_resolved_macros,
+    component_meta_type_registry as resolver_component_meta_type_registry,
     collect_dynamic_root_candidates_from_type,
     evaluate_imported_decl_with_owner_env as resolver_evaluate_imported_decl_with_owner_env,
     fallthrough_cache_key, known_spread_keys_from_type_expr,
     get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
-    inject_prop_type_overrides, materialize_imported_runtime_values_into_env,
-    push_partial_reason,
+    materialize_imported_runtime_values_into_env, push_partial_reason,
     resolve_exports_from_graph as resolver_resolve_exports_from_graph,
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
     resolve_usage_prop_type,
@@ -1237,6 +1238,7 @@ impl VerterHost {
         env
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn base_eval_env(
         &self,
         canonical_id: &str,
@@ -1339,6 +1341,7 @@ impl VerterHost {
         result.is_empty()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn current_eval_state(
         &self,
         canonical_id: &str,
@@ -1408,6 +1411,7 @@ impl VerterHost {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn dependency_resolutions_for_eval(
         &self,
         canonical_id: &str,
@@ -1461,6 +1465,7 @@ impl VerterHost {
 
     /// Load an evaluation dependency source, hydrating workspace-owned files into
     /// host state when necessary before reading them.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn load_eval_dependency_source_with_fallback(
         &self,
         dep_canonical: &str,
@@ -1539,6 +1544,7 @@ impl VerterHost {
         None
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn load_eval_dependency_canonical_with_fallback(&self, dep_canonical: &str) -> Option<String> {
         self.load_eval_dependency_source_with_fallback(dep_canonical)
             .map(|(canonical, _)| canonical)
@@ -1553,6 +1559,7 @@ impl VerterHost {
             .map(|(canonical, _)| canonical)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn load_eval_dependency_source_text_with_fallback(
         &self,
         dep_canonical: &str,
@@ -1570,6 +1577,7 @@ impl VerterHost {
             .map(|(_, source)| source)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn imported_eval_inputs(
         &self,
         owner_canonical_id: &str,
@@ -1585,6 +1593,7 @@ impl VerterHost {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn imported_eval_inputs_with_owner_context(
         &self,
         owner_canonical_id: &str,
@@ -2128,11 +2137,14 @@ impl VerterHost {
             whole_hash,
             store_view,
         )?;
-        let mut fallthrough_fact_versions = resolved.fact_versions.clone();
+        let fallthrough_fact_versions = resolved.fact_versions.clone();
 
-        let resolved_macros =
-            component_meta_resolved_macros(&resolved.snapshot, &resolved.resolved_macros);
-        let resolved_type_registry = component_meta_type_registry(&resolved.resolved_type_registry);
+        let resolved_macros = resolver_component_meta_resolved_macros(
+            resolved.snapshot.macros.as_ref(),
+            &resolved.resolved_macros,
+        );
+        let resolved_type_registry =
+            resolver_component_meta_type_registry(&resolved.resolved_type_registry);
         let input = verter_analysis::component_meta::ComponentMetaInput {
             macros: &resolved.snapshot.macros,
             bindings: &resolved.snapshot.bindings,
@@ -2245,6 +2257,7 @@ impl VerterHost {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn build_owner_eval_env_with_inputs(
         &self,
         canonical_id: &str,
@@ -2263,6 +2276,7 @@ impl VerterHost {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn build_owner_eval_env_with_inputs_in_view(
         &self,
         canonical_id: &str,
@@ -2283,6 +2297,7 @@ impl VerterHost {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn build_owner_eval_env_with_inputs_from_owner_env(
         &self,
         canonical_id: &str,
@@ -2341,6 +2356,7 @@ impl VerterHost {
         Some(built)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn materialize_imported_runtime_values_into_env(
         &self,
         snapshot: &FileAnalysisSnapshot,
@@ -6071,59 +6087,6 @@ fn should_recurse_surface_type_arguments(name: &str) -> bool {
 /// Handles both arrow-style (`(props: { row: Item }) => VNode[]`) and
 /// method-style (`(props: { row: Item }): VNode[]`) signatures.
 /// Returns `(bindings, return_type)`.
-fn component_meta_resolved_macros(
-    snapshot: &FileAnalysisSnapshot,
-    resolved_macros: &[crate::meta_resolve::ResolvedMacroMeta],
-) -> Vec<verter_analysis::component_meta::ResolvedMacroInput> {
-    resolved_macros
-        .iter()
-        .filter(|resolved| {
-            snapshot
-                .macros
-                .get(resolved.macro_index)
-                .is_none_or(|mac| !raw_macro_surface_is_authoritative(mac))
-        })
-        .map(
-            |resolved| verter_analysis::component_meta::ResolvedMacroInput {
-                macro_index: resolved.macro_index,
-                props: resolved.props.clone(),
-                emits: resolved.emits.clone(),
-                slots: resolved.slots.clone(),
-            },
-        )
-        .collect()
-}
-
-fn raw_macro_surface_is_authoritative(mac: &verter_analysis::AnalyzedMacro) -> bool {
-    match mac.kind {
-        verter_analysis::AnalyzedMacroKind::DefineProps
-        | verter_analysis::AnalyzedMacroKind::WithDefaults
-        | verter_analysis::AnalyzedMacroKind::DefineModel => !mac.prop_fields.is_empty(),
-        // Local emit parsing is often only a partial surface for type aliases
-        // that intersect with imported helpers. Keep resolved emit members so
-        // imported events can still merge in.
-        verter_analysis::AnalyzedMacroKind::DefineEmits => false,
-        verter_analysis::AnalyzedMacroKind::DefineSlots => !mac.slot_fields.is_empty(),
-        verter_analysis::AnalyzedMacroKind::DefineExpose => !mac.expose_fields.is_empty(),
-        verter_analysis::AnalyzedMacroKind::DefineOptions => false,
-    }
-}
-
-fn component_meta_type_registry(
-    resolved_type_registry: &[verter_analysis::component_meta::ResolvedTypeAnalysis],
-) -> Vec<verter_analysis::component_meta::ResolvedTypeAnalysis> {
-    let mut seen = rustc_hash::FxHashSet::default();
-    let mut registry = Vec::new();
-
-    for entry in resolved_type_registry {
-        if seen.insert(entry.name.clone()) {
-            registry.push(entry.clone());
-        }
-    }
-
-    registry
-}
-
 /// Build a `ComponentMetaAnalysis` from a resolved-meta state.
 /// Shared by `get_component_meta` and `get_component_meta_with_resolution`.
 fn extract_component_meta_from_inputs(
@@ -6183,9 +6146,12 @@ fn extract_component_meta_from_resolved(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
 ) -> verter_analysis::component_meta::ComponentMetaAnalysis {
-    let resolved_macros =
-        component_meta_resolved_macros(&resolved.snapshot, &resolved.resolved_macros);
-    let resolved_type_registry = component_meta_type_registry(&resolved.resolved_type_registry);
+    let resolved_macros = resolver_component_meta_resolved_macros(
+        resolved.snapshot.macros.as_ref(),
+        &resolved.resolved_macros,
+    );
+    let resolved_type_registry =
+        resolver_component_meta_type_registry(&resolved.resolved_type_registry);
     extract_component_meta_from_inputs(
         host,
         canonical_or_alias,

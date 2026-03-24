@@ -75,6 +75,43 @@ pub struct ResolvedComponentMetaParts<I> {
     pub fact_versions: Vec<FactVersionRef>,
 }
 
+pub fn component_meta_resolved_macros(
+    snapshot_macros: &[AnalyzedMacro],
+    resolved_macros: &[ResolvedMacroMeta],
+) -> Vec<verter_analysis::component_meta::ResolvedMacroInput> {
+    resolved_macros
+        .iter()
+        .filter(|resolved| {
+            snapshot_macros
+                .get(resolved.macro_index)
+                .is_none_or(|mac| !raw_macro_surface_is_authoritative(mac))
+        })
+        .map(
+            |resolved| verter_analysis::component_meta::ResolvedMacroInput {
+                macro_index: resolved.macro_index,
+                props: resolved.props.clone(),
+                emits: resolved.emits.clone(),
+                slots: resolved.slots.clone(),
+            },
+        )
+        .collect()
+}
+
+pub fn component_meta_type_registry(
+    resolved_type_registry: &[verter_analysis::component_meta::ResolvedTypeAnalysis],
+) -> Vec<verter_analysis::component_meta::ResolvedTypeAnalysis> {
+    let mut seen = FxHashSet::default();
+    let mut registry = Vec::new();
+
+    for entry in resolved_type_registry {
+        if seen.insert(entry.name.clone()) {
+            registry.push(entry.clone());
+        }
+    }
+
+    registry
+}
+
 pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     type Snapshot;
     type EvalContext;
@@ -123,6 +160,18 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         canonical: &str,
         tracked_deps: &BTreeSet<String>,
     ) -> Vec<FactVersionRef>;
+}
+
+fn raw_macro_surface_is_authoritative(mac: &AnalyzedMacro) -> bool {
+    match mac.kind {
+        AnalyzedMacroKind::DefineProps
+        | AnalyzedMacroKind::WithDefaults
+        | AnalyzedMacroKind::DefineModel => !mac.prop_fields.is_empty(),
+        AnalyzedMacroKind::DefineEmits => false,
+        AnalyzedMacroKind::DefineSlots => !mac.slot_fields.is_empty(),
+        AnalyzedMacroKind::DefineExpose => !mac.expose_fields.is_empty(),
+        AnalyzedMacroKind::DefineOptions => false,
+    }
 }
 
 pub fn resolve_component_meta_parts<H>(

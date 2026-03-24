@@ -18,6 +18,14 @@ fn make_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
 }
 
+fn strict_host() -> VerterHost {
+    VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    })
+}
+
 fn make_lazy_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
         analysis_level: AnalysisLevel::None,

@@ -328,6 +328,14 @@ mod tests {
         );
         assert_eq!(
             actual.env.type_symbols.get("Local").map(|decl| &decl.body),
+            Some(&TypeExpr::Primitive(PrimitiveName::String))
+        );
+        assert_eq!(
+            actual
+                .env
+                .value_symbols
+                .get("Local")
+                .and_then(|decl| decl.type_annotation.as_ref()),
             Some(&TypeExpr::Primitive(PrimitiveName::Number))
         );
         assert_eq!(

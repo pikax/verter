@@ -312,7 +312,7 @@ fn scan_barrel_export_surface_recursive<R: BarrelResolutionResolver>(
 #[cfg(test)]
 mod tests {
     use super::{resolve_type_through_barrel, BarrelResolutionResolver, BarrelResolutionState};
-    use crate::ExternalTypeBodyCache;
+    use crate::{ExternalTypeBodyCache, ResolverHash16};
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::BTreeSet;

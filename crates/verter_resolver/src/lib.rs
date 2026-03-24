@@ -27,9 +27,10 @@ pub use barrel_resolution::{
     resolve_type_through_barrel, BarrelResolutionResolver, BarrelResolutionState,
 };
 pub use component_meta::{
-    resolve_component_meta_parts, resolved_elements_to_type_expr_via_type_text,
-    ComponentMetaEvalOutputs, ComponentMetaResolverHost, ResolvedComponentMetaParts,
-    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
+    component_meta_resolved_macros, component_meta_type_registry, resolve_component_meta_parts,
+    resolved_elements_to_type_expr_via_type_text, ComponentMetaEvalOutputs,
+    ComponentMetaResolverHost, ResolvedComponentMetaParts, ResolvedJsdocBlock,
+    ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,

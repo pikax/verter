@@ -499,6 +499,7 @@ impl VerterHost {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn current_dependency_fact_versions(
         &self,
         canonical: &str,
@@ -913,14 +914,6 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         self.host
             .current_dependency_fact_versions_in_view(canonical, tracked_deps, self.store_view)
     }
-}
-
-pub(crate) fn resolve_type_declaration(
-    host: &VerterHost,
-    dep_canonical: &str,
-    requested_name: &str,
-) -> ResolvedTypeDeclaration {
-    resolve_type_declaration_in_view(host, dep_canonical, requested_name, None)
 }
 
 pub(crate) fn resolve_type_declaration_in_view(

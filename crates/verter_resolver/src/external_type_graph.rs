@@ -347,7 +347,6 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
-    use verter_core::utils::oxc::vue::resolve_type::ResolvedElements;
     use verter_vfs::ResolveRequestKind;
 
     #[derive(Default)]
