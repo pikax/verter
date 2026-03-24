@@ -122,8 +122,63 @@ impl HostStoreView {
             }
         }
 
+        view.snapshot_transitive_dependency_targets(host);
         view.compat_token = view.compute_compat_token();
         view
+    }
+
+    fn snapshot_whole_hash_if_known(&mut self, host: &VerterHost, canonical_id: &str) {
+        if self.whole_hashes.contains_key(canonical_id) {
+            return;
+        }
+
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(source) = host.scheduler.try_get_source(canonical_id) {
+                self.whole_hashes
+                    .insert(canonical_id.to_string(), source.whole_hash);
+                return;
+            }
+        }
+
+        if let Some(state) = host.effective_file_state(canonical_id, None) {
+            self.whole_hashes
+                .insert(canonical_id.to_string(), state.whole_hash);
+        }
+    }
+
+    fn snapshot_transitive_dependency_targets(&mut self, host: &VerterHost) {
+        let mut pending: Vec<String> = self
+            .dependency_resolutions
+            .values()
+            .flat_map(|resolutions| {
+                resolutions.values().filter_map(|resolution| {
+                    resolution
+                        .resolved_canonical_id
+                        .clone()
+                        .or_else(|| resolution.effective_target().map(str::to_string))
+                })
+            })
+            .collect();
+        let mut visited = rustc_hash::FxHashSet::default();
+
+        while let Some(canonical_id) = pending.pop() {
+            if !visited.insert(canonical_id.clone()) {
+                continue;
+            }
+
+            self.snapshot_whole_hash_if_known(host, &canonical_id);
+            self.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
+
+            if let Some(resolutions) = self.dependency_resolutions.get(&canonical_id) {
+                pending.extend(resolutions.values().filter_map(|resolution| {
+                    resolution
+                        .resolved_canonical_id
+                        .clone()
+                        .or_else(|| resolution.effective_target().map(str::to_string))
+                }));
+            }
+        }
     }
 
     pub(crate) fn mutation_epoch(&self) -> u64 {

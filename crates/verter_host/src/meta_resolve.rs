@@ -848,7 +848,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.host
-            .resolve_external_type_from_loaded_files(
+            .resolve_external_type_from_loaded_files_in_view(
                 owner_canonical,
                 import_source,
                 exported_name,
@@ -861,6 +861,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
                 true,
                 None,
                 0,
+                self.store_view,
             )
             .ok()
             .flatten()
@@ -1148,7 +1149,7 @@ fn resolve_jsdoc_tag_type(
                 continue;
             };
             let mut resolution_deps = std::collections::BTreeSet::new();
-            if let Ok(Some(resolved)) = host.resolve_external_type_from_loaded_files(
+            if let Ok(Some(resolved)) = host.resolve_external_type_from_loaded_files_in_view(
                 canonical_source,
                 &binding.source,
                 &imported_name,
@@ -1161,6 +1162,7 @@ fn resolve_jsdoc_tag_type(
                 true,
                 None,
                 0,
+                store_view,
             ) {
                 companion_types.entry(required_alias).or_insert(resolved);
             }

@@ -527,13 +527,9 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         import: &verter_analysis::AnalyzedImport,
     ) -> Option<String> {
-        self.host
-            .resolve_type_dependency_canonical_in_view(
-                owner_canonical_id,
-                &import.source,
-                self.store_view,
-            )
-            .or_else(|| import.resolved_canonical_id.clone())
+        import
+            .resolved_canonical_id
+            .clone()
             .or_else(|| {
                 self.dep_resolutions
                     .get(&import.source)
@@ -546,9 +542,14 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
                     .map(str::to_string)
             })
             .or_else(|| {
-                import
-                    .source
-                    .starts_with('.')
+                self.host.resolve_type_dependency_canonical_in_view(
+                    owner_canonical_id,
+                    &import.source,
+                    self.store_view,
+                )
+            })
+            .or_else(|| {
+                (self.store_view.is_none() && import.source.starts_with('.'))
                     .then(|| crate::id::resolve_external(owner_canonical_id, &import.source))
             })
     }
@@ -630,7 +631,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
     ) -> Result<Option<verter_analysis::type_expr::TypeExpr>, ImportedTypeAliasPrepareError> {
         let mut cache = rustc_hash::FxHashMap::default();
         let mut visiting = rustc_hash::FxHashSet::default();
-        match self.host.resolve_external_type_from_loaded_files(
+        match self.host.resolve_external_type_from_loaded_files_in_view(
             request.owner_canonical_id.as_str(),
             request.import_source.as_str(),
             request.imported_name.as_str(),
@@ -643,6 +644,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
             true,
             None,
             0,
+            self.store_view,
         ) {
             Ok(resolved) => Ok(resolved.map(|resolved| {
                 verter_resolver::resolved_elements_to_type_expr_via_type_text(&resolved)
@@ -681,13 +683,9 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         import: &verter_analysis::AnalyzedImport,
     ) -> Option<String> {
-        self.host
-            .resolve_type_dependency_canonical_in_view(
-                owner_canonical_id,
-                &import.source,
-                self.store_view,
-            )
-            .or_else(|| import.resolved_canonical_id.clone())
+        import
+            .resolved_canonical_id
+            .clone()
             .or_else(|| {
                 self.dep_resolutions
                     .get(&import.source)
@@ -700,9 +698,14 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
                     .map(str::to_string)
             })
             .or_else(|| {
-                import
-                    .source
-                    .starts_with('.')
+                self.host.resolve_type_dependency_canonical_in_view(
+                    owner_canonical_id,
+                    &import.source,
+                    self.store_view,
+                )
+            })
+            .or_else(|| {
+                (self.store_view.is_none() && import.source.starts_with('.'))
                     .then(|| crate::id::resolve_external(owner_canonical_id, &import.source))
             })
     }
@@ -740,6 +743,7 @@ impl ImportedEvalOwnerResolver for HostImportedEvalResolver<'_> {
         self.host.track_direct_eval_dependencies(
             owner_canonical_id,
             owner_snapshot,
+            self.store_view.is_none(),
             &self.dep_resolutions,
             canonical_dependencies,
         );
@@ -988,6 +992,17 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
             .resolved_canonical_id
             .clone()
             .or_else(|| {
+                self.dep_resolutions
+                    .get(&binding.source)
+                    .and_then(|resolution| resolution.resolved_canonical_id.clone())
+            })
+            .or_else(|| {
+                self.dep_resolutions
+                    .get(&binding.source)
+                    .and_then(DependencyResolution::effective_target)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
                 self.host.resolve_type_dependency_canonical_in_view(
                     owner_canonical_id,
                     &binding.source,
@@ -995,9 +1010,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
                 )
             })
             .or_else(|| {
-                binding
-                    .source
-                    .starts_with('.')
+                (self.store_view.is_none() && binding.source.starts_with('.'))
                     .then(|| crate::id::resolve_external(owner_canonical_id, &binding.source))
             })
     }
@@ -1284,9 +1297,11 @@ impl VerterHost {
     ) -> Option<rustc_hash::FxHashMap<String, DependencyResolution>> {
         if let Some(view) = store_view {
             self.current_eval_state_in_view(canonical_id, Some(view))?;
-            if let Some(resolutions) = view.dependency_resolutions(canonical_id) {
-                return Some(resolutions.clone());
-            }
+            return Some(
+                view.dependency_resolutions(canonical_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
 
         if self
@@ -1578,6 +1593,7 @@ impl VerterHost {
         &self,
         owner_canonical_id: &str,
         owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+        allow_relative_fallback: bool,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         canonical_dependencies: &mut std::collections::BTreeSet<String>,
     ) {
@@ -1590,7 +1606,7 @@ impl VerterHost {
                         .and_then(|resolution| resolution.resolved_canonical_id.clone())
                 })
                 .or_else(|| {
-                    dep.import_source.starts_with('.').then(|| {
+                    (allow_relative_fallback && dep.import_source.starts_with('.')).then(|| {
                         crate::id::resolve_external(owner_canonical_id, &dep.import_source)
                     })
                 })
@@ -1614,9 +1630,7 @@ impl VerterHost {
                         .map(str::to_string)
                 })
                 .or_else(|| {
-                    import
-                        .source
-                        .starts_with('.')
+                    (allow_relative_fallback && import.source.starts_with('.'))
                         .then(|| crate::id::resolve_external(owner_canonical_id, &import.source))
                 })
             {

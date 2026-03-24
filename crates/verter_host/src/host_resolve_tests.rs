@@ -1823,6 +1823,89 @@ defineProps<DynamicProps>()
 }
 
 #[test]
+fn stale_store_view_keeps_external_type_resolution_on_captured_dependency_routes() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/types.ts", "export { Props } from './dep'\n");
+    upsert_non_sfc(&host, "/src/old.ts", "export interface Props { old: string }\n");
+    upsert_non_sfc(&host, "/src/new.ts", "export interface Props { fresh: string }\n");
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some("/src/old.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let store_view = host.resolver_store_view();
+
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some("/src/new.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let resolved = host
+        .resolve_external_type_from_loaded_files_in_view(
+            "/src/Consumer.vue",
+            "./types",
+            "Props",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+            Some(&store_view),
+        )
+        .expect("resolution should complete")
+        .expect("captured view should still resolve the original Props route");
+
+    let names: Vec<_> = resolved
+        .props
+        .iter()
+        .filter_map(|prop| prop.key_name.as_deref())
+        .collect();
+    assert!(
+        names.iter().any(|name| *name == "old"),
+        "captured store view must keep the original external type route: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| *name != "fresh"),
+        "captured store view must not switch to the newer live route: {names:?}"
+    );
+}
+
+#[test]
 fn nested_barrel_warm_lookup_keeps_following_export_star_chain() {
     let host = strict_host();
 

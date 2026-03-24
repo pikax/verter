@@ -7,6 +7,7 @@ mod component_meta;
 mod declaration_metadata;
 mod eval_env_build;
 mod external_type_body;
+mod external_macro_types;
 mod fallthrough;
 mod imported_decl_eval;
 mod imported_eval_collect;
@@ -29,6 +30,10 @@ pub use declaration_metadata::{
 pub use eval_env_build::{collect_requested_binding_names, inject_imported_type_aliases};
 pub use external_type_body::{
     resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
+};
+pub use external_macro_types::{
+    collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,
+    ExternalMacroTypeDiagnostic,
 };
 pub use fallthrough::{
     append_component_candidate_branches, append_native_candidate_branch,

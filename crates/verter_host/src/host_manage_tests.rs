@@ -468,6 +468,55 @@ defineProps<Props>();
 }
 
 #[test]
+fn resolver_store_view_tracks_transitive_dependency_targets() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/types.ts", "export { Props } from './dep'\n");
+    upsert_non_sfc(&host, "/src/dep.ts", "export interface Props { msg: string }\n");
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some("/src/dep.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let view = host.resolver_store_view();
+
+    assert!(
+        view.whole_hash("/src/types.ts").is_some(),
+        "captured store view should include direct dependency whole hashes"
+    );
+    assert!(
+        view.whole_hash("/src/dep.ts").is_some(),
+        "captured store view should include transitive dependency whole hashes"
+    );
+    assert!(
+        view.dependency_resolution("/src/types.ts", "./dep").is_some(),
+        "captured store view should snapshot transitive dependency routes"
+    );
+}
+
+#[test]
 fn owner_env_resolution_is_retained_for_nested_heritage_like_surfaces() {
     let decl = verter_analysis::type_eval::TypeDeclInfo {
         name: "EditorOptions".to_string(),
