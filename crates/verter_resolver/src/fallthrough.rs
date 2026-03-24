@@ -2,9 +2,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::hash::{Hash, Hasher};
 use verter_analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedEventKind, AcceptedPropAnalysis, AcceptedPropKind,
-    AcceptedSurfaceCompleteness, BranchStatus, FallthroughBranch, FallthroughEventEntry,
-    FallthroughPropEntry, FallthroughSurface, InheritedSource, MemberAvailability,
-    MemberProvenance, PartialBranchReason, ResolvedRootStep, UnresolvedBranchReason,
+    AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
+    FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry, FallthroughSurface,
+    InheritedSource, MemberAvailability, MemberProvenance, PartialBranchReason, ResolvedRootStep,
+    RootReachability, RootTargetRef, UnresolvedBranchReason,
 };
 use verter_analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
 use verter_analysis::type_expr::TypeExpr;
@@ -35,6 +36,49 @@ pub trait FallthroughResolverHost {
         prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
         visiting: &mut FxHashSet<String>,
     ) -> Option<Self::ChildResolution>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedConsumedBindings {
+    pub bindings: ConsumedRootBindings,
+    pub partial_reasons: Vec<PartialBranchReason>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedFallthroughSurface {
+    pub accepted_props: Vec<AcceptedPropAnalysis>,
+    pub accepted_events: Vec<AcceptedEventAnalysis>,
+    pub accepted_surface_completeness: AcceptedSurfaceCompleteness,
+    pub fallthrough_surface: FallthroughSurface,
+    pub fact_versions: Vec<FactVersionRef>,
+}
+
+pub trait FallthroughComputeHost: FallthroughResolverHost {
+    type Snapshot;
+    type EvalEnv;
+
+    fn resolve_root_consumption(
+        &self,
+        snapshot: &Self::Snapshot,
+        element_index: u32,
+        base: &ConsumedRootBindings,
+        has_unknown_spread: bool,
+        eval_env: &mut Option<Self::EvalEnv>,
+    ) -> ResolvedConsumedBindings;
+
+    fn build_generic_child_prop_overrides(
+        &self,
+        snapshot: &Self::Snapshot,
+        usage_index: u32,
+        eval_env: &mut Option<Self::EvalEnv>,
+    ) -> Option<FxHashMap<String, TypeExpr>>;
+
+    fn resolve_dynamic_root_candidates(
+        &self,
+        snapshot: &Self::Snapshot,
+        usage_index: u32,
+        eval_env: &mut Option<Self::EvalEnv>,
+    ) -> Vec<DynamicRootCandidate>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +538,284 @@ pub fn merge_fallthrough_branches(
     }
 }
 
+pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
+    host: &H,
+    canonical_id: &str,
+    snapshot: &H::Snapshot,
+    base_meta: &ComponentMetaAnalysis,
+    _prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+    mut eval_env: Option<H::EvalEnv>,
+    mut fact_versions: Vec<FactVersionRef>,
+    visiting: &mut FxHashSet<String>,
+) -> ResolvedFallthroughSurface {
+    let declared_prop_names: FxHashSet<String> =
+        base_meta.props.iter().map(|prop| prop.name.clone()).collect();
+    let declared_event_names: FxHashSet<String> =
+        base_meta.events.iter().map(|event| event.name.clone()).collect();
+    let declared_listener_aliases: FxHashSet<String> = base_meta
+        .props
+        .iter()
+        .filter_map(|prop| verter_analysis::html_intrinsics::on_prop_to_event_name(&prop.name))
+        .collect();
+
+    let mut accepted_props: Vec<AcceptedPropAnalysis> = base_meta
+        .props
+        .iter()
+        .map(|prop| AcceptedPropAnalysis {
+            name: prop.name.clone(),
+            type_expr: prop.type_expr.clone(),
+            raw_type: prop.raw_type.clone(),
+            required: prop.required,
+            provenance: MemberProvenance::Declared,
+            availability: MemberAvailability::Always,
+            kind: AcceptedPropKind::DeclaredProp,
+        })
+        .collect();
+
+    let mut accepted_events: Vec<AcceptedEventAnalysis> = base_meta
+        .events
+        .iter()
+        .map(|event| AcceptedEventAnalysis {
+            name: event.name.clone(),
+            payload: event.payload.clone(),
+            raw_signature: event.raw_signature.clone(),
+            provenance: MemberProvenance::Declared,
+            availability: MemberAvailability::Always,
+            kind: AcceptedEventKind::DeclaredEmit,
+        })
+        .collect();
+
+    match &base_meta.root_reachability {
+        RootReachability::NoFallthrough { reason } => ResolvedFallthroughSurface {
+            accepted_props,
+            accepted_events,
+            accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface: FallthroughSurface::None {
+                reason: reason.clone(),
+            },
+            fact_versions,
+        },
+        RootReachability::Branches { branches } => {
+            let mut fallthrough_branches = Vec::new();
+            let mut any_partial = false;
+            let mut any_unresolved = false;
+
+            for branch in branches {
+                let branch_key = branch.branch_index.to_string();
+                let element_index = match &branch.target {
+                    RootTargetRef::NativeElement { element_index, .. }
+                    | RootTargetRef::DynamicComponentUsage { element_index, .. }
+                    | RootTargetRef::ComponentUsage { element_index, .. }
+                    | RootTargetRef::UnresolvedTarget { element_index, .. } => *element_index,
+                };
+                let resolved_consumed = host.resolve_root_consumption(
+                    snapshot,
+                    element_index,
+                    &branch.consumed,
+                    branch.has_unknown_spread,
+                    &mut eval_env,
+                );
+                let consumed = &resolved_consumed.bindings;
+                let parent_partial_reasons = resolved_consumed.partial_reasons.clone();
+
+                match &branch.target {
+                    RootTargetRef::NativeElement { tag, .. } => {
+                        append_native_candidate_branch(
+                            host,
+                            tag,
+                            branch_key,
+                            branch.condition_text.clone(),
+                            &consumed.attrs,
+                            &consumed.listeners,
+                            &parent_partial_reasons,
+                            &declared_prop_names,
+                            &declared_event_names,
+                            &declared_listener_aliases,
+                            &mut fallthrough_branches,
+                            &mut any_partial,
+                        );
+                    }
+                    RootTargetRef::DynamicComponentUsage { usage_index, .. } => {
+                        let child_prop_overrides = host.build_generic_child_prop_overrides(
+                            snapshot,
+                            *usage_index,
+                            &mut eval_env,
+                        );
+                        let candidates =
+                            host.resolve_dynamic_root_candidates(snapshot, *usage_index, &mut eval_env);
+
+                        if candidates.is_empty() {
+                            any_unresolved = true;
+                            fallthrough_branches.push(FallthroughBranch {
+                                branch_key,
+                                condition_text: branch.condition_text.clone(),
+                                props: Vec::new(),
+                                events: Vec::new(),
+                                root_chain: vec![ResolvedRootStep::Unresolved {
+                                    tag: "component".to_string(),
+                                    reason: UnresolvedBranchReason::DynamicComponentIs,
+                                }],
+                                status: BranchStatus::Unresolved {
+                                    reason: UnresolvedBranchReason::DynamicComponentIs,
+                                },
+                            });
+                            continue;
+                        }
+
+                        let multiple_candidates = candidates.len() > 1;
+                        for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+                            let candidate_key = if multiple_candidates {
+                                format!("{}.{}", branch_key, candidate_index)
+                            } else {
+                                branch_key.clone()
+                            };
+                            match candidate {
+                                DynamicRootCandidate::NativeTag { tag } => {
+                                    append_native_candidate_branch(
+                                        host,
+                                        &tag,
+                                        candidate_key,
+                                        branch.condition_text.clone(),
+                                        &consumed.attrs,
+                                        &consumed.listeners,
+                                        &parent_partial_reasons,
+                                        &declared_prop_names,
+                                        &declared_event_names,
+                                        &declared_listener_aliases,
+                                        &mut fallthrough_branches,
+                                        &mut any_partial,
+                                    );
+                                }
+                                DynamicRootCandidate::ComponentImport {
+                                    component_name,
+                                    import_source,
+                                } => {
+                                    append_component_candidate_branches(
+                                        host,
+                                        canonical_id,
+                                        &component_name,
+                                        &import_source,
+                                        candidate_key,
+                                        branch.condition_text.clone(),
+                                        &consumed.attrs,
+                                        &consumed.listeners,
+                                        &parent_partial_reasons,
+                                        child_prop_overrides.as_ref(),
+                                        &declared_prop_names,
+                                        &declared_event_names,
+                                        &declared_listener_aliases,
+                                        &mut fallthrough_branches,
+                                        &mut any_partial,
+                                        &mut any_unresolved,
+                                        &mut fact_versions,
+                                        visiting,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    RootTargetRef::ComponentUsage {
+                        usage_index,
+                        name,
+                        import_source,
+                        ..
+                    } => {
+                        let child_prop_overrides = host.build_generic_child_prop_overrides(
+                            snapshot,
+                            *usage_index,
+                            &mut eval_env,
+                        );
+
+                        match import_source.as_deref() {
+                            Some(import_source) => {
+                                append_component_candidate_branches(
+                                    host,
+                                    canonical_id,
+                                    name,
+                                    import_source,
+                                    branch_key,
+                                    branch.condition_text.clone(),
+                                    &consumed.attrs,
+                                    &consumed.listeners,
+                                    &parent_partial_reasons,
+                                    child_prop_overrides.as_ref(),
+                                    &declared_prop_names,
+                                    &declared_event_names,
+                                    &declared_listener_aliases,
+                                    &mut fallthrough_branches,
+                                    &mut any_partial,
+                                    &mut any_unresolved,
+                                    &mut fact_versions,
+                                    visiting,
+                                );
+                            }
+                            None => {
+                                any_unresolved = true;
+                                fallthrough_branches.push(FallthroughBranch {
+                                    branch_key,
+                                    condition_text: branch.condition_text.clone(),
+                                    props: Vec::new(),
+                                    events: Vec::new(),
+                                    root_chain: vec![ResolvedRootStep::Unresolved {
+                                        tag: name.clone(),
+                                        reason: UnresolvedBranchReason::UnresolvedChildImport {
+                                            import_source: None,
+                                        },
+                                    }],
+                                    status: BranchStatus::Unresolved {
+                                        reason: UnresolvedBranchReason::UnresolvedChildImport {
+                                            import_source: None,
+                                        },
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    RootTargetRef::UnresolvedTarget { tag, reason, .. } => {
+                        any_unresolved = true;
+                        fallthrough_branches.push(FallthroughBranch {
+                            branch_key,
+                            condition_text: branch.condition_text.clone(),
+                            props: Vec::new(),
+                            events: Vec::new(),
+                            root_chain: vec![ResolvedRootStep::Unresolved {
+                                tag: tag.clone(),
+                                reason: UnresolvedBranchReason::RootTarget {
+                                    reason: reason.clone(),
+                                },
+                            }],
+                            status: BranchStatus::Unresolved {
+                                reason: UnresolvedBranchReason::RootTarget {
+                                    reason: reason.clone(),
+                                },
+                            },
+                        });
+                    }
+                }
+            }
+
+            fallthrough_branches.sort_by(|a, b| a.branch_key.cmp(&b.branch_key));
+            let completeness = merge_fallthrough_branches(
+                &mut accepted_props,
+                &mut accepted_events,
+                &fallthrough_branches,
+                any_partial,
+                any_unresolved,
+            );
+
+            ResolvedFallthroughSurface {
+                accepted_props,
+                accepted_events,
+                accepted_surface_completeness: completeness,
+                fallthrough_surface: FallthroughSurface::Branches {
+                    branches: fallthrough_branches,
+                },
+                fact_versions,
+            }
+        }
+    }
+}
+
 pub fn inject_prop_type_overrides(
     env: &mut verter_analysis::type_eval::EvalEnv,
     overrides: &FxHashMap<String, TypeExpr>,
@@ -854,14 +1176,16 @@ mod tests {
         append_component_candidate_branches, append_native_candidate_branch,
         collect_dynamic_root_candidates_from_type, fallthrough_cache_key,
         hash_prop_type_overrides, inject_prop_type_overrides, known_spread_keys_from_type_expr,
-        merge_fallthrough_branches, resolve_usage_prop_type, FallthroughResolutionView,
-        FallthroughResolverHost,
+        merge_fallthrough_branches, resolve_fallthrough_surface, resolve_usage_prop_type,
+        DynamicRootCandidate, FallthroughComputeHost, FallthroughResolutionView,
+        FallthroughResolverHost, ResolvedConsumedBindings,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use verter_analysis::component_meta::{
         AcceptedEventAnalysis, AcceptedEventKind, AcceptedPropAnalysis, AcceptedPropKind,
-        AcceptedSurfaceCompleteness, BranchStatus, FallthroughBranch, FallthroughSurface,
-        InheritedSource, MemberAvailability, MemberProvenance, ResolvedRootStep,
+        AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
+        FallthroughBranch, FallthroughSurface, InheritedSource, MemberAvailability,
+        MemberProvenance, ResolvedRootStep, RootBranch, RootReachability, RootTargetRef,
     };
     use verter_analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
     use verter_analysis::template::{PropValueConstness, TemplatePropUsage};
@@ -936,6 +1260,70 @@ mod tests {
             _visiting: &mut FxHashSet<String>,
         ) -> Option<Self::ChildResolution> {
             self.child_resolutions.get(canonical_id).cloned()
+        }
+    }
+
+    impl FallthroughComputeHost for TestHost {
+        type Snapshot = ();
+        type EvalEnv = ();
+
+        fn resolve_root_consumption(
+            &self,
+            _snapshot: &Self::Snapshot,
+            _element_index: u32,
+            base: &ConsumedRootBindings,
+            _has_unknown_spread: bool,
+            _eval_env: &mut Option<Self::EvalEnv>,
+        ) -> ResolvedConsumedBindings {
+            ResolvedConsumedBindings {
+                bindings: base.clone(),
+                partial_reasons: Vec::new(),
+            }
+        }
+
+        fn build_generic_child_prop_overrides(
+            &self,
+            _snapshot: &Self::Snapshot,
+            _usage_index: u32,
+            _eval_env: &mut Option<Self::EvalEnv>,
+        ) -> Option<FxHashMap<String, TypeExpr>> {
+            None
+        }
+
+        fn resolve_dynamic_root_candidates(
+            &self,
+            _snapshot: &Self::Snapshot,
+            _usage_index: u32,
+            _eval_env: &mut Option<Self::EvalEnv>,
+        ) -> Vec<DynamicRootCandidate> {
+            Vec::new()
+        }
+    }
+
+    fn empty_component_meta(root_reachability: RootReachability) -> ComponentMetaAnalysis {
+        ComponentMetaAnalysis {
+            props: Vec::new(),
+            events: Vec::new(),
+            slots: Vec::new(),
+            models: Vec::new(),
+            exposed: Vec::new(),
+            type_registry: Vec::new(),
+            components: Vec::new(),
+            template_refs: Vec::new(),
+            imports: Vec::new(),
+            bindings: Vec::new(),
+            vue_api_calls: Vec::new(),
+            styles: Vec::new(),
+            flags: Default::default(),
+            root_reachability,
+            accepted_props: Vec::new(),
+            accepted_events: Vec::new(),
+            accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface: FallthroughSurface::None {
+                reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
+            options_api: false,
+            file_path: "/App.vue".to_string(),
         }
     }
 
@@ -1235,5 +1623,66 @@ mod tests {
             resolve_usage_prop_type(&bound_prop, &mut env),
             Some(TypeExpr::number_literal(42.0))
         );
+    }
+
+    #[test]
+    fn resolve_fallthrough_surface_orchestrates_component_branch_inheritance() {
+        let mut host = TestHost::default();
+        host.canonical_routes.insert(
+            ("/App.vue".to_string(), "./Child.vue".to_string()),
+            "/Child.vue".to_string(),
+        );
+        host.child_resolutions.insert(
+            "/Child.vue".to_string(),
+            TestResolution {
+                accepted_props: vec![AcceptedPropAnalysis {
+                    name: "id".to_string(),
+                    type_expr: TypeExpr::primitive(PrimitiveName::String),
+                    raw_type: Some("string".to_string()),
+                    required: false,
+                    provenance: MemberProvenance::Declared,
+                    availability: MemberAvailability::Always,
+                    kind: AcceptedPropKind::DeclaredProp,
+                }],
+                accepted_events: vec![],
+                fallthrough_surface: FallthroughSurface::None {
+                    reason: verter_analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
+                },
+                fact_versions: vec![crate::FactVersionRef::FileWholeHash {
+                    canonical_id: "/Child.vue".to_string(),
+                    hash: [3; 16],
+                }],
+            },
+        );
+
+        let meta = empty_component_meta(RootReachability::Branches {
+            branches: vec![RootBranch {
+                branch_index: 0,
+                condition_text: None,
+                target: RootTargetRef::ComponentUsage {
+                    element_index: 0,
+                    usage_index: 0,
+                    name: "Child".to_string(),
+                    import_source: Some("./Child.vue".to_string()),
+                },
+                consumed: ConsumedRootBindings::default(),
+                has_unknown_spread: false,
+            }],
+        });
+
+        let resolved = resolve_fallthrough_surface(
+            &host,
+            "/App.vue",
+            &(),
+            &meta,
+            None,
+            None,
+            Vec::new(),
+            &mut FxHashSet::default(),
+        );
+
+        assert_eq!(resolved.accepted_props.len(), 1);
+        assert_eq!(resolved.accepted_props[0].name, "id");
+        assert_eq!(resolved.fact_versions.len(), 2);
     }
 }

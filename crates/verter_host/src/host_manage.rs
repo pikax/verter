@@ -13,21 +13,21 @@ use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
 use verter_resolver::{
-    append_component_candidate_branches, append_native_candidate_branch,
     build_imported_eval_inputs, collect_dynamic_root_candidates_from_type,
     collect_requested_binding_names,
     evaluate_imported_decl_with_owner_env as resolver_evaluate_imported_decl_with_owner_env,
     fallthrough_cache_key, inject_imported_type_aliases, known_spread_keys_from_type_expr,
     inject_prop_type_overrides, materialize_imported_runtime_values_into_env,
-    merge_fallthrough_branches, push_partial_reason, resolve_usage_prop_type,
-    run_stable_request, DeclarationMetadataResolver, DynamicRootCandidate,
+    push_partial_reason, resolve_usage_prop_type,
+    resolve_fallthrough_surface as resolver_resolve_fallthrough_surface, run_stable_request,
+    DeclarationMetadataResolver, DynamicRootCandidate, FallthroughComputeHost,
     FallthroughResolutionView, FallthroughResolverHost, ImportedDeclEvalResolver,
     ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalLookup,
     ImportedEvalLookupResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
     ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
     ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
-    PreparedImportedDeclContext, RequestSource, ResolvedExportTarget, SingleflightRole,
-    StableRequestExecutor, StoreView,
+    PreparedImportedDeclContext, RequestSource, ResolvedConsumedBindings, ResolvedExportTarget,
+    SingleflightRole, StableRequestExecutor, StoreView,
 };
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -275,6 +275,52 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             visiting,
             self.store_view,
         )
+    }
+}
+
+impl FallthroughComputeHost for HostFallthroughResolver<'_> {
+    type Snapshot = FileAnalysisSnapshot;
+    type EvalEnv = verter_analysis::type_eval::EvalEnv;
+
+    fn resolve_root_consumption(
+        &self,
+        snapshot: &Self::Snapshot,
+        element_index: u32,
+        base: &verter_analysis::component_meta::ConsumedRootBindings,
+        has_unknown_spread: bool,
+        eval_env: &mut Option<Self::EvalEnv>,
+    ) -> ResolvedConsumedBindings {
+        let resolved = self.host.resolve_root_consumption(
+            snapshot,
+            element_index,
+            base,
+            has_unknown_spread,
+            eval_env,
+        );
+        ResolvedConsumedBindings {
+            bindings: resolved.bindings,
+            partial_reasons: resolved.partial_reasons,
+        }
+    }
+
+    fn build_generic_child_prop_overrides(
+        &self,
+        snapshot: &Self::Snapshot,
+        usage_index: u32,
+        eval_env: &mut Option<Self::EvalEnv>,
+    ) -> Option<rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>> {
+        self.host
+            .build_generic_child_prop_overrides(snapshot, usage_index, eval_env)
+    }
+
+    fn resolve_dynamic_root_candidates(
+        &self,
+        snapshot: &Self::Snapshot,
+        usage_index: u32,
+        eval_env: &mut Option<Self::EvalEnv>,
+    ) -> Vec<DynamicRootCandidate> {
+        self.host
+            .resolve_dynamic_root_candidates(snapshot, usage_index, eval_env)
     }
 }
 
@@ -1819,22 +1865,6 @@ impl VerterHost {
         )
     }
 
-    fn resolve_fallthrough_surface_internal_with_overrides(
-        &self,
-        canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-        >,
-        visiting: &mut rustc_hash::FxHashSet<String>,
-    ) -> Option<crate::types::FallthroughResolution> {
-        self.resolve_fallthrough_surface_internal_with_overrides_in_view(
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-            None,
-        )
-    }
-
     fn resolve_fallthrough_surface_internal_with_overrides_in_view(
         &self,
         canonical_id: &str,
@@ -1948,8 +1978,6 @@ impl VerterHost {
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<crate::types::FallthroughResolution> {
-        use verter_analysis::component_meta::*;
-
         let whole_hash = store_view
             .and_then(|view| view.whole_hash(canonical_id))
             .or_else(|| self.get_whole_hash(canonical_id))
@@ -1965,7 +1993,7 @@ impl VerterHost {
         let resolved_macros =
             component_meta_resolved_macros(&resolved.snapshot, &resolved.resolved_macros);
         let resolved_type_registry = component_meta_type_registry(&resolved.resolved_type_registry);
-        let input = ComponentMetaInput {
+        let input = verter_analysis::component_meta::ComponentMetaInput {
             macros: &resolved.snapshot.macros,
             bindings: &resolved.snapshot.bindings,
             imports: &resolved.snapshot.imports,
@@ -1982,314 +2010,47 @@ impl VerterHost {
             evaluated_types: resolved.evaluated_types.as_ref(),
             file_path: canonical_id,
         };
-        let base_meta = extract_component_meta(input);
+        let base_meta = verter_analysis::component_meta::extract_component_meta(input);
+        let fallthrough_resolver = HostFallthroughResolver {
+            host: self,
+            parent_canonical_id: canonical_id,
+            store_view,
+        };
+        let eval_env = if let Some(ref cached_inputs) = resolved.cached_eval_inputs {
+            self.build_fallthrough_eval_env_with_inputs_in_view(
+                canonical_id,
+                &resolved.snapshot,
+                prop_type_overrides,
+                cached_inputs,
+                store_view,
+            )
+        } else {
+            self.build_fallthrough_eval_env_in_view(
+                canonical_id,
+                &resolved.snapshot,
+                prop_type_overrides,
+                store_view,
+            )
+        };
 
-        let declared_prop_names: rustc_hash::FxHashSet<String> =
-            base_meta.props.iter().map(|p| p.name.clone()).collect();
-        let declared_event_names: rustc_hash::FxHashSet<String> =
-            base_meta.events.iter().map(|e| e.name.clone()).collect();
-        let declared_listener_aliases: rustc_hash::FxHashSet<String> = base_meta
-            .props
-            .iter()
-            .filter_map(|p| verter_analysis::html_intrinsics::on_prop_to_event_name(&p.name))
-            .collect();
+        let resolved_surface = resolver_resolve_fallthrough_surface(
+            &fallthrough_resolver,
+            canonical_id,
+            &resolved.snapshot,
+            &base_meta,
+            prop_type_overrides,
+            eval_env,
+            fallthrough_fact_versions,
+            visiting,
+        );
 
-        let mut accepted_props: Vec<AcceptedPropAnalysis> = base_meta
-            .props
-            .iter()
-            .map(|p| AcceptedPropAnalysis {
-                name: p.name.clone(),
-                type_expr: p.type_expr.clone(),
-                raw_type: p.raw_type.clone(),
-                required: p.required,
-                provenance: MemberProvenance::Declared,
-                availability: MemberAvailability::Always,
-                kind: AcceptedPropKind::DeclaredProp,
-            })
-            .collect();
-
-        let mut accepted_events: Vec<AcceptedEventAnalysis> = base_meta
-            .events
-            .iter()
-            .map(|e| AcceptedEventAnalysis {
-                name: e.name.clone(),
-                payload: e.payload.clone(),
-                raw_signature: e.raw_signature.clone(),
-                provenance: MemberProvenance::Declared,
-                availability: MemberAvailability::Always,
-                kind: AcceptedEventKind::DeclaredEmit,
-            })
-            .collect();
-
-        match &base_meta.root_reachability {
-            RootReachability::NoFallthrough { reason } => {
-                Some(crate::types::FallthroughResolution {
-                    accepted_props,
-                    accepted_events,
-                    accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
-                    fallthrough_surface: FallthroughSurface::None {
-                        reason: reason.clone(),
-                    },
-                    fact_versions: fallthrough_fact_versions,
-                })
-            }
-            RootReachability::Branches { branches } => {
-                let mut fallthrough_branches = Vec::new();
-                let mut any_partial = false;
-                let mut any_unresolved = false;
-                let fallthrough_resolver = HostFallthroughResolver {
-                    host: self,
-                    parent_canonical_id: canonical_id,
-                    store_view,
-                };
-                let mut eval_env = if let Some(ref cached_inputs) = resolved.cached_eval_inputs {
-                    self.build_fallthrough_eval_env_with_inputs_in_view(
-                        canonical_id,
-                        &resolved.snapshot,
-                        prop_type_overrides,
-                        cached_inputs,
-                        store_view,
-                    )
-                } else {
-                    self.build_fallthrough_eval_env_in_view(
-                        canonical_id,
-                        &resolved.snapshot,
-                        prop_type_overrides,
-                        store_view,
-                    )
-                };
-
-                for branch in branches {
-                    let branch_key = branch.branch_index.to_string();
-                    let element_index = match &branch.target {
-                        RootTargetRef::NativeElement { element_index, .. }
-                        | RootTargetRef::DynamicComponentUsage { element_index, .. }
-                        | RootTargetRef::ComponentUsage { element_index, .. }
-                        | RootTargetRef::UnresolvedTarget { element_index, .. } => *element_index,
-                    };
-                    let resolved_consumed = self.resolve_root_consumption(
-                        &resolved.snapshot,
-                        element_index,
-                        &branch.consumed,
-                        branch.has_unknown_spread,
-                        &mut eval_env,
-                    );
-                    let consumed = &resolved_consumed.bindings;
-                    let parent_partial_reasons = resolved_consumed.partial_reasons.clone();
-
-                    match &branch.target {
-                        RootTargetRef::NativeElement { tag, .. } => {
-                            append_native_candidate_branch(
-                                &fallthrough_resolver,
-                                tag,
-                                branch_key,
-                                branch.condition_text.clone(),
-                                &consumed.attrs,
-                                &consumed.listeners,
-                                &parent_partial_reasons,
-                                &declared_prop_names,
-                                &declared_event_names,
-                                &declared_listener_aliases,
-                                &mut fallthrough_branches,
-                                &mut any_partial,
-                            );
-                        }
-
-                        RootTargetRef::DynamicComponentUsage { usage_index, .. } => {
-                            let child_prop_overrides = self.build_generic_child_prop_overrides(
-                                &resolved.snapshot,
-                                *usage_index,
-                                &mut eval_env,
-                            );
-                            let candidates = self.resolve_dynamic_root_candidates(
-                                &resolved.snapshot,
-                                *usage_index,
-                                &mut eval_env,
-                            );
-
-                            if candidates.is_empty() {
-                                any_unresolved = true;
-                                fallthrough_branches.push(FallthroughBranch {
-                                    branch_key,
-                                    condition_text: branch.condition_text.clone(),
-                                    props: Vec::new(),
-                                    events: Vec::new(),
-                                    root_chain: vec![ResolvedRootStep::Unresolved {
-                                        tag: "component".to_string(),
-                                        reason: UnresolvedBranchReason::DynamicComponentIs,
-                                    }],
-                                    status: BranchStatus::Unresolved {
-                                        reason: UnresolvedBranchReason::DynamicComponentIs,
-                                    },
-                                });
-                                continue;
-                            }
-
-                            let multiple_candidates = candidates.len() > 1;
-                            for (candidate_index, candidate) in candidates.into_iter().enumerate() {
-                                let candidate_key = if multiple_candidates {
-                                    format!("{}.{}", branch_key, candidate_index)
-                                } else {
-                                    branch_key.clone()
-                                };
-                                match candidate {
-                                    DynamicRootCandidate::NativeTag { tag } => {
-                                        append_native_candidate_branch(
-                                            &fallthrough_resolver,
-                                            &tag,
-                                            candidate_key,
-                                            branch.condition_text.clone(),
-                                            &consumed.attrs,
-                                            &consumed.listeners,
-                                            &parent_partial_reasons,
-                                            &declared_prop_names,
-                                            &declared_event_names,
-                                            &declared_listener_aliases,
-                                            &mut fallthrough_branches,
-                                            &mut any_partial,
-                                        );
-                                    }
-                                    DynamicRootCandidate::ComponentImport {
-                                        component_name,
-                                        import_source,
-                                    } => {
-                                        append_component_candidate_branches(
-                                            &fallthrough_resolver,
-                                            canonical_id,
-                                            &component_name,
-                                            &import_source,
-                                            candidate_key,
-                                            branch.condition_text.clone(),
-                                            &consumed.attrs,
-                                            &consumed.listeners,
-                                            &parent_partial_reasons,
-                                            child_prop_overrides.as_ref(),
-                                            &declared_prop_names,
-                                            &declared_event_names,
-                                            &declared_listener_aliases,
-                                            &mut fallthrough_branches,
-                                            &mut any_partial,
-                                            &mut any_unresolved,
-                                            &mut fallthrough_fact_versions,
-                                            visiting,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        RootTargetRef::ComponentUsage {
-                            usage_index,
-                            name,
-                            import_source,
-                            ..
-                        } => {
-                            let child_prop_overrides = self.build_generic_child_prop_overrides(
-                                &resolved.snapshot,
-                                *usage_index,
-                                &mut eval_env,
-                            );
-
-                            match import_source.as_deref() {
-                                Some(import_source) => {
-                                    append_component_candidate_branches(
-                                        &fallthrough_resolver,
-                                        canonical_id,
-                                        name,
-                                        import_source,
-                                        branch_key,
-                                        branch.condition_text.clone(),
-                                        &consumed.attrs,
-                                        &consumed.listeners,
-                                        &parent_partial_reasons,
-                                        child_prop_overrides.as_ref(),
-                                        &declared_prop_names,
-                                        &declared_event_names,
-                                        &declared_listener_aliases,
-                                        &mut fallthrough_branches,
-                                        &mut any_partial,
-                                        &mut any_unresolved,
-                                        &mut fallthrough_fact_versions,
-                                        visiting,
-                                    );
-                                }
-                                None => {
-                                    any_unresolved = true;
-                                    fallthrough_branches.push(FallthroughBranch {
-                                        branch_key,
-                                        condition_text: branch.condition_text.clone(),
-                                        props: Vec::new(),
-                                        events: Vec::new(),
-                                        root_chain: vec![ResolvedRootStep::Unresolved {
-                                            tag: name.clone(),
-                                            reason: UnresolvedBranchReason::UnresolvedChildImport {
-                                                import_source: None,
-                                            },
-                                        }],
-                                        status: BranchStatus::Unresolved {
-                                            reason: UnresolvedBranchReason::UnresolvedChildImport {
-                                                import_source: None,
-                                            },
-                                        },
-                                    });
-                                }
-                            }
-                        }
-
-                        RootTargetRef::UnresolvedTarget { tag, reason, .. } => {
-                            any_unresolved = true;
-                            fallthrough_branches.push(FallthroughBranch {
-                                branch_key,
-                                condition_text: branch.condition_text.clone(),
-                                props: Vec::new(),
-                                events: Vec::new(),
-                                root_chain: vec![ResolvedRootStep::Unresolved {
-                                    tag: tag.clone(),
-                                    reason: UnresolvedBranchReason::RootTarget {
-                                        reason: reason.clone(),
-                                    },
-                                }],
-                                status: BranchStatus::Unresolved {
-                                    reason: UnresolvedBranchReason::RootTarget {
-                                        reason: reason.clone(),
-                                    },
-                                },
-                            });
-                        }
-                    }
-                }
-
-                fallthrough_branches.sort_by(|a, b| a.branch_key.cmp(&b.branch_key));
-                let completeness = merge_fallthrough_branches(
-                    &mut accepted_props,
-                    &mut accepted_events,
-                    &fallthrough_branches,
-                    any_partial,
-                    any_unresolved,
-                );
-
-                Some(crate::types::FallthroughResolution {
-                    accepted_props,
-                    accepted_events,
-                    accepted_surface_completeness: completeness,
-                    fallthrough_surface: FallthroughSurface::Branches {
-                        branches: fallthrough_branches,
-                    },
-                    fact_versions: fallthrough_fact_versions,
-                })
-            }
-        }
-    }
-
-    fn build_fallthrough_eval_env(
-        &self,
-        canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-        >,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
-        self.build_fallthrough_eval_env_in_view(canonical_id, snapshot, prop_type_overrides, None)
+        Some(crate::types::FallthroughResolution {
+            accepted_props: resolved_surface.accepted_props,
+            accepted_events: resolved_surface.accepted_events,
+            accepted_surface_completeness: resolved_surface.accepted_surface_completeness,
+            fallthrough_surface: resolved_surface.fallthrough_surface,
+            fact_versions: resolved_surface.fact_versions,
+        })
     }
 
     fn build_fallthrough_eval_env_in_view(
@@ -2318,24 +2079,6 @@ impl VerterHost {
             prop_type_overrides,
             &imported_inputs,
             store_view,
-        )
-    }
-
-    fn build_fallthrough_eval_env_with_inputs(
-        &self,
-        canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-        >,
-        imported_inputs: &ImportedEvalInputs,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
-        self.build_fallthrough_eval_env_with_inputs_in_view(
-            canonical_id,
-            snapshot,
-            prop_type_overrides,
-            imported_inputs,
-            None,
         )
     }
 
@@ -6554,12 +6297,6 @@ fn resolve_reexport_target(
         };
         host.resolve_via_vfs(canonical_id, source, ctx)
     }
-}
-
-#[derive(Debug, Clone, Default)]
-struct ResolvedConsumedBindings {
-    bindings: verter_analysis::component_meta::ConsumedRootBindings,
-    partial_reasons: Vec<verter_analysis::component_meta::PartialBranchReason>,
 }
 
 /// Extract slot bindings from a type_text that encodes a slot's function signature.

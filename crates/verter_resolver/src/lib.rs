@@ -35,8 +35,9 @@ pub use fallthrough::{
     collect_dynamic_root_candidates_from_type, extend_unique_fact_versions,
     fallthrough_cache_key, hash_prop_type_overrides, known_spread_keys_from_type_expr,
     inject_prop_type_overrides, merge_fallthrough_branches, push_partial_reason,
-    resolve_usage_prop_type, DynamicRootCandidate, FallthroughResolutionView,
-    FallthroughResolverHost, KnownSpreadKeys,
+    resolve_fallthrough_surface, resolve_usage_prop_type, DynamicRootCandidate,
+    FallthroughComputeHost, FallthroughResolutionView, FallthroughResolverHost,
+    KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
 pub use imported_decl_eval::{
     evaluate_imported_decl_with_owner_env, ImportedDeclEvalResolver, PreparedImportedDeclContext,
