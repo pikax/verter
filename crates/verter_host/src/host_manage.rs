@@ -13,7 +13,8 @@ use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
 use verter_resolver::{
-    build_imported_eval_inputs, build_owner_eval_env_with_inputs,
+    build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
+    build_owner_eval_env_with_inputs,
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry,
     collect_dynamic_root_candidates_from_type,
@@ -29,8 +30,9 @@ use verter_resolver::{
     ExportGraphResolver, ExportSurface, FallthroughComputeHost,
     FallthroughResolutionView, FallthroughResolverHost, ImportedDeclEvalResolver,
     ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalLookup,
-    ImportedEvalLookupResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
-    ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
+    ImportedEvalLookupResolver, ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver,
+    ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
+    ImportedRuntimeValueResolver,
     ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
     OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource,
     ResolvedConsumedBindings, ResolvedExportTarget, SingleflightRole,
@@ -853,6 +855,34 @@ impl ImportedEvalOwnerResolver for HostImportedEvalResolver<'_> {
     }
 }
 
+impl ImportedEvalOwnerContextResolver for HostImportedEvalResolver<'_> {
+    fn load_owner_eval_source(
+        &self,
+        owner_canonical_id: &str,
+        _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+    ) -> String {
+        self.host
+            .current_eval_state_in_view(owner_canonical_id, self.store_view)
+            .map(|(source, cached_parse, _)| {
+                VerterHost::build_eval_script_source(&source, cached_parse.as_deref())
+            })
+            .unwrap_or_default()
+    }
+
+    fn load_owner_eval_env(
+        &self,
+        owner_canonical_id: &str,
+        _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+        owner_eval_source: &str,
+    ) -> verter_analysis::type_eval::EvalEnv {
+        self.host
+            .base_eval_env_in_view(owner_canonical_id, self.store_view)
+            .unwrap_or_else(|| {
+                verter_analysis::type_eval_build::parse_and_build_env(owner_eval_source)
+            })
+    }
+}
+
 impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
     fn budget_is_exhausted(&self) -> bool {
         self.budget.is_exhausted()
@@ -1302,7 +1332,7 @@ impl VerterHost {
         }
     }
 
-    fn build_snapshot_from_source(
+    pub(crate) fn build_snapshot_from_source(
         &self,
         canonical: &str,
         source: &Arc<str>,
@@ -1481,7 +1511,9 @@ impl VerterHost {
         let read_candidate = |candidate: &str| -> Option<Arc<str>> {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let _ = self.ensure_loaded(candidate);
+                if store_view.is_none() {
+                    let _ = self.ensure_loaded(candidate);
+                }
             }
 
             if let Some((source, cached_parse, whole_hash)) =
@@ -1496,7 +1528,7 @@ impl VerterHost {
                 )));
             }
 
-            self.read_dep_source_for_type_resolution(candidate, None)
+            self.read_dep_source_for_type_resolution_in_view(candidate, None, store_view)
                 .and_then(|source| {
                     let whole_hash = crate::hash::hash_16(source.as_bytes());
                     if !self.store_view_allows_current_whole_hash(candidate, whole_hash, store_view)
@@ -1624,59 +1656,17 @@ impl VerterHost {
         self.provenance
             .imported_eval_inputs_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut alias_env_stack = rustc_hash::FxHashSet::default();
-        alias_env_stack.insert(owner_canonical_id.to_string());
-        let mut budget = ImportedEvalTraversalBudget::new(
-            owner_canonical_id,
-            COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
-        );
-        self.imported_eval_inputs_inner(
-            owner_canonical_id,
-            snapshot,
-            dep_resolutions,
-            owner_eval_source,
-            owner_env,
-            None,
-            &mut alias_env_stack,
-            &mut budget,
-            store_view,
-        )
-    }
-
-    fn imported_eval_inputs_inner(
-        &self,
-        owner_canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-        owner_eval_source: Option<&str>,
-        owner_env_override: Option<&verter_analysis::type_eval::EvalEnv>,
-        additional_required_import_names: Option<&rustc_hash::FxHashSet<String>>,
-        alias_env_stack: &mut rustc_hash::FxHashSet<String>,
-        budget: &mut ImportedEvalTraversalBudget,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> ImportedEvalInputs {
         let started = component_meta_debug_enabled().then(Instant::now);
-        let owner_eval_source = owner_eval_source
-            .map(str::to_string)
-            .or_else(|| {
-                self.current_eval_state_in_view(owner_canonical_id, store_view)
-                    .map(|(source, cached_parse, _)| {
-                        Self::build_eval_script_source(&source, cached_parse.as_deref())
-                    })
-            })
-            .unwrap_or_default();
-        let owner_env = owner_env_override
-            .cloned()
-            .or_else(|| self.base_eval_env_in_view(owner_canonical_id, store_view))
-            .unwrap_or_else(|| {
-                verter_analysis::type_eval_build::parse_and_build_env(&owner_eval_source)
-            });
         let owner_snapshot = ImportedEvalOwnerSnapshot {
             imports: snapshot.imports.as_slice(),
             macros: snapshot.macros.as_ref(),
             bindings: snapshot.bindings.as_ref(),
             macro_type_deps: snapshot.macro_type_deps.as_ref(),
         };
+        let mut budget = ImportedEvalTraversalBudget::new(
+            owner_canonical_id,
+            COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
+        );
         if let Some(started) = started {
             component_meta_debug(format!(
                 "imported_eval_inputs:start owner={} imports={} prework_took {:?}",
@@ -1691,17 +1681,15 @@ impl VerterHost {
             dep_resolutions.clone(),
             store_view,
         );
-        collector.alias_env_stack = alias_env_stack.clone();
-        let imported_inputs = build_imported_eval_inputs(
+        let imported_inputs = build_imported_eval_inputs_with_owner_context(
             &mut collector,
             owner_canonical_id,
             &owner_snapshot,
-            owner_eval_source.as_str(),
-            &owner_env,
-            additional_required_import_names,
-            budget,
+            owner_eval_source,
+            owner_env,
+            None,
+            &mut budget,
         );
-        *alias_env_stack = collector.alias_env_stack;
 
         if component_meta_debug_enabled() {
             component_meta_debug(format!(

@@ -255,11 +255,47 @@ impl HostStoreView {
 
         for import in &snapshot.imports {
             resolutions.entry(import.source.clone()).or_insert_with(|| {
+                let resolved_canonical_id = if import.is_type_only
+                    || is_declaration_companion_source(canonical_id)
+                {
+                    host.resolve_type_dependency_canonical(canonical_id, &import.source)
+                } else {
+                    host.resolve_loaded_dependency_canonical(
+                        canonical_id,
+                        &import.source,
+                        verter_vfs::ResolveRequestKind::EsmImport,
+                    )
+                    .or_else(|| host.resolve_type_dependency_canonical(canonical_id, &import.source))
+                };
+
                 crate::types::DependencyResolution {
                     specifier: import.source.clone(),
-                    // A captured StoreView must not synthesize fresher routes than the
-                    // analysis snapshot already observed.
-                    resolved_canonical_id: import.resolved_canonical_id.clone(),
+                    resolved_canonical_id,
+                    possible_canonical_ids: Vec::new(),
+                }
+            });
+        }
+
+        for sig in snapshot.export_signatures.iter() {
+            let Some(source) = sig.reexport_source.as_ref() else {
+                continue;
+            };
+
+            resolutions.entry(source.clone()).or_insert_with(|| {
+                let resolved_canonical_id = if sig.is_type {
+                    host.resolve_type_dependency_canonical(canonical_id, source)
+                } else {
+                    host.resolve_loaded_dependency_canonical(
+                        canonical_id,
+                        source,
+                        verter_vfs::ResolveRequestKind::EsmImport,
+                    )
+                    .or_else(|| host.resolve_type_dependency_canonical(canonical_id, source))
+                };
+
+                crate::types::DependencyResolution {
+                    specifier: source.clone(),
+                    resolved_canonical_id,
                     possible_canonical_ids: Vec::new(),
                 }
             });
@@ -323,6 +359,12 @@ impl HostStoreView {
 
         verter_resolver::StoreViewCompatToken(hasher.finish())
     }
+}
+
+fn is_declaration_companion_source(canonical_id: &str) -> bool {
+    canonical_id.ends_with(".d.ts")
+        || canonical_id.ends_with(".d.mts")
+        || canonical_id.ends_with(".d.cts")
 }
 
 fn derived_fact_kind_rank(kind: verter_resolver::DerivedFactKind) -> u8 {

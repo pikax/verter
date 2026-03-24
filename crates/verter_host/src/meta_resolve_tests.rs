@@ -509,7 +509,7 @@ defineProps<Props>()
 // ===========================================================================
 
 #[test]
-fn type_mode_skips_traversal_and_expanded_mode_uses_host_cache() {
+fn type_mode_skips_expansion_and_expanded_mode_uses_resolver_cache() {
     let project = make_project();
     project
         .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
@@ -528,7 +528,7 @@ defineProps<Props>()
     project.host().provenance().reset();
 
     // Type mode should NOT perform the expensive external type traversal
-    let _type_state = project
+    let type_state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Type)
         .expect("Type mode should return result");
@@ -544,16 +544,23 @@ defineProps<Props>()
     );
 
     // Expanded mode performs the traversal
-    let _expanded_state = project
+    let expanded_state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
         .expect("Expanded mode should return result");
 
     let p2 = provenance(&project);
-    // Expanded mode should have done at least one traversal
     assert!(
-        p2.resolved_external_type_cache_misses > 0 || p2.resolved_external_type_cache_hits > 0,
-        "Expanded mode should use the host traversal cache"
+        prop_names_from_resolved(&type_state).is_empty(),
+        "Type mode result must not include expanded props"
+    );
+    assert!(
+        prop_names_from_resolved(&expanded_state).contains(&"a".to_string()),
+        "Expanded mode should materialize imported props"
+    );
+    assert!(
+        p2.resolver_node_cache_misses > p1.resolver_node_cache_misses,
+        "Expanded mode should perform additional resolver-owned cache work"
     );
 
     // Second Expanded call should hit the resolved-meta cache (no recompute)

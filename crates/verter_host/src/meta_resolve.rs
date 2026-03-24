@@ -362,11 +362,17 @@ impl VerterHost {
 
         #[cfg(feature = "scheduler")]
         {
-            let mut snapshot = self.build_snapshot_from_scheduler(canonical)?;
-            let whole_hash = self.get_whole_hash(canonical).unwrap_or_default();
-            if !self.store_view_allows_current_whole_hash(canonical, whole_hash, store_view) {
-                return None;
-            }
+            let mut snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical)
+            {
+                let whole_hash = self.get_whole_hash(canonical).unwrap_or_default();
+                if !self.store_view_allows_current_whole_hash(canonical, whole_hash, store_view) {
+                    return None;
+                }
+                snapshot
+            } else {
+                let source = self.read_analysis_source_in_view(canonical, store_view)?;
+                self.build_snapshot_from_source(canonical, &source)
+            };
             self.resolve_snapshot_imports(canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.config.effective_scope().needs_template_analysis() {

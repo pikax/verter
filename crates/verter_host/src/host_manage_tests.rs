@@ -525,6 +525,101 @@ defineProps<Props>()
 }
 
 #[test]
+fn resolver_store_view_tracks_reexport_dependency_routes() {
+    let host = strict_host();
+
+    upsert_non_sfc(&host, "/src/dep.ts", "export interface Props { msg: string }\n");
+    upsert_non_sfc(&host, "/src/index.ts", "export { Props } from './dep'\n");
+
+    let view = host.resolver_store_view();
+
+    assert_eq!(
+        view.dependency_resolution("/src/index.ts", "./dep")
+            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        Some("/src/dep.ts"),
+        "captured store view should snapshot re-export dependency routes"
+    );
+}
+
+#[test]
+fn resolver_store_view_prefers_declaration_companion_routes_for_dts_imports() {
+    let host = strict_host();
+
+    upsert_non_sfc(
+        &host,
+        "/src/index.d.ts",
+        "import { Props } from './inner.js'\nexport type { Props }\n",
+    );
+    upsert_non_sfc(&host, "/src/inner.d.ts", "export interface Props { msg: string }\n");
+    upsert_non_sfc(&host, "/src/inner.js", "export const runtimeOnly = true\n");
+
+    let view = host.resolver_store_view();
+
+    assert_eq!(
+        view.dependency_resolution("/src/index.d.ts", "./inner.js")
+            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        Some("/src/inner.d.ts"),
+        "captured store view should resolve declaration-file imports through the declaration companion",
+    );
+}
+
+#[test]
+fn resolver_store_view_resolves_exports_for_unloaded_workspace_barrels() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/types/index.ts".to_string(),
+        Arc::from("export * from '../Button.vue'\n"),
+    );
+    ws.inject_file(
+        "/workspace/Button.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export interface ButtonProps {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(
+            r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    assert!(
+        host.ensure_loaded("/workspace/App.vue"),
+        "entry file should load from workspace",
+    );
+
+    let view = host.resolver_store_view();
+    let exports = host.resolve_exports_in_view("/workspace/types/index.ts", Some(&view));
+
+    assert!(
+        exports.iter().any(|export| {
+            export.name == "ButtonProps"
+                && export.source_canonical_id.as_deref() == Some("/workspace/Button.vue")
+        }),
+        "captured store view should resolve exports for unloaded workspace barrels, got: {exports:?}",
+    );
+}
+
+#[test]
 fn stale_store_view_keeps_resolved_exports_on_captured_reexport_graph() {
     let host = make_host();
 

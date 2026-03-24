@@ -179,6 +179,21 @@ pub trait ImportedEvalOwnerResolver: ImportedEvalCollectorResolver {
     );
 }
 
+pub trait ImportedEvalOwnerContextResolver: ImportedEvalOwnerResolver {
+    fn load_owner_eval_source(
+        &self,
+        owner_canonical_id: &str,
+        owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+    ) -> String;
+
+    fn load_owner_eval_env(
+        &self,
+        owner_canonical_id: &str,
+        owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+        owner_eval_source: &str,
+    ) -> EvalEnv;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn record_required_source_merge_inputs_recursive<R: ImportedEvalSourceMergeResolver>(
     resolver: &mut R,
@@ -425,14 +440,44 @@ pub fn build_imported_eval_inputs<R: ImportedEvalOwnerResolver>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_imported_eval_inputs_with_owner_context<R: ImportedEvalOwnerContextResolver>(
+    resolver: &mut R,
+    owner_canonical_id: &str,
+    owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+    owner_eval_source: Option<&str>,
+    owner_env_override: Option<&EvalEnv>,
+    additional_required_import_names: Option<&FxHashSet<String>>,
+    budget: &mut ImportedEvalTraversalBudget,
+) -> crate::ImportedEvalInputs {
+    let owner_eval_source = owner_eval_source
+        .map(str::to_string)
+        .unwrap_or_else(|| resolver.load_owner_eval_source(owner_canonical_id, owner_snapshot));
+    let owner_env = owner_env_override.cloned().unwrap_or_else(|| {
+        resolver.load_owner_eval_env(owner_canonical_id, owner_snapshot, &owner_eval_source)
+    });
+
+    build_imported_eval_inputs(
+        resolver,
+        owner_canonical_id,
+        owner_snapshot,
+        owner_eval_source.as_str(),
+        &owner_env,
+        additional_required_import_names,
+        budget,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_imported_eval_inputs, collect_imported_eval_inputs,
+        build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
+        collect_imported_eval_inputs,
         imported_member_name_for_type_alias, record_required_source_merge_inputs_recursive,
         required_type_alias_names_for_import_binding, ImportedEvalBinding,
-        ImportedEvalCollectorResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
-        ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
+        ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver,
+        ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
+        ImportedEvalTraversalBudget,
     };
     use crate::{
         DeclarationMetadataResolver, ImportedEvalSource, ImportedTypeAlias,
@@ -440,6 +485,7 @@ mod tests {
         ResolvedTypeDeclaration,
     };
     use rustc_hash::FxHashSet;
+    use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
     use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
@@ -498,6 +544,10 @@ mod tests {
         merge_bindings: BTreeMap<String, Vec<ImportedEvalBinding>>,
         prepared_requests: Vec<ImportedTypeAliasResolveRequest>,
         recorded_sources: Vec<String>,
+        owner_eval_source: String,
+        owner_env: EvalEnv,
+        owner_eval_source_loads: Cell<usize>,
+        owner_eval_env_loads: Cell<usize>,
     }
 
     impl DeclarationMetadataResolver for TestCollectorResolver {
@@ -667,6 +717,29 @@ mod tests {
         }
     }
 
+    impl ImportedEvalOwnerContextResolver for TestCollectorResolver {
+        fn load_owner_eval_source(
+            &self,
+            _owner_canonical_id: &str,
+            _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+        ) -> String {
+            self.owner_eval_source_loads
+                .set(self.owner_eval_source_loads.get() + 1);
+            self.owner_eval_source.clone()
+        }
+
+        fn load_owner_eval_env(
+            &self,
+            _owner_canonical_id: &str,
+            _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+            _owner_eval_source: &str,
+        ) -> EvalEnv {
+            self.owner_eval_env_loads
+                .set(self.owner_eval_env_loads.get() + 1);
+            self.owner_env.clone()
+        }
+    }
+
     fn analyzed_import(
         source: &str,
         bindings: Vec<AnalyzedImportBinding>,
@@ -819,6 +892,59 @@ mod tests {
         assert!(inputs.canonical_dependencies.contains("/src/App.vue"));
         assert!(inputs.canonical_dependencies.contains("/src/dep.ts"));
         assert!(inputs.canonical_dependencies.contains("/src/real.ts"));
+    }
+
+    #[test]
+    fn build_imported_eval_inputs_with_owner_context_loads_missing_source_and_env() {
+        let imports = vec![analyzed_import(
+            "./dep",
+            vec![binding("Types", ImportBindingKind::Namespace, None, true)],
+            true,
+        )];
+        let owner_snapshot = ImportedEvalOwnerSnapshot {
+            imports: &imports,
+            macros: &[] as &[AnalyzedMacro],
+            bindings: &[],
+            macro_type_deps: &[] as &[MacroTypeDep],
+        };
+        let mut resolver = TestCollectorResolver::default();
+        resolver.owner_eval_source = "defineProps<Types.User>()".to_string();
+        resolver.owner_env = EvalEnv::new();
+        resolver
+            .import_targets
+            .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
+        resolver.declarations.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ResolvedTypeDeclaration {
+                requested_name: "User".to_string(),
+                declaration_id: None,
+                resolved_name: "User".to_string(),
+                canonical_source: "/src/real.ts".to_string(),
+                span: Span::new(0, 0),
+                kind: ResolvedDeclarationKind::Interface,
+                text: None,
+            },
+        );
+        resolver.source_texts.insert(
+            "/src/real.ts".to_string(),
+            "export interface User {}".to_string(),
+        );
+        let mut budget = ImportedEvalTraversalBudget::new("/src/App.vue", 8);
+
+        let inputs = build_imported_eval_inputs_with_owner_context(
+            &mut resolver,
+            "/src/App.vue",
+            &owner_snapshot,
+            None,
+            None,
+            None,
+            &mut budget,
+        );
+
+        assert_eq!(resolver.owner_eval_source_loads.get(), 1);
+        assert_eq!(resolver.owner_eval_env_loads.get(), 1);
+        assert_eq!(inputs.type_aliases.len(), 1);
+        assert_eq!(inputs.sources.len(), 1);
     }
 
     #[test]

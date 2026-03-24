@@ -74,10 +74,12 @@ pub use imported_decl_eval::{
     evaluate_imported_decl_with_owner_env, ImportedDeclEvalResolver, PreparedImportedDeclContext,
 };
 pub use imported_eval_collect::{
-    build_imported_eval_inputs, collect_imported_eval_inputs, imported_member_name_for_type_alias,
+    build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
+    collect_imported_eval_inputs, imported_member_name_for_type_alias,
     record_required_source_merge_inputs_recursive, required_type_alias_names_for_import_binding,
-    ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalOwnerResolver,
-    ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
+    ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver,
+    ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
+    ImportedEvalTraversalBudget,
 };
 pub use imported_eval_lookup::{
     ImportedEvalLookup, ImportedEvalLookupResolver, ImportedTypeAliasResolveRequest,
