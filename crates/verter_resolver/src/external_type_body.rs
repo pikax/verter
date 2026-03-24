@@ -23,6 +23,8 @@ pub trait ExternalTypeBodyResolver {
 
     fn debug_log(&self, _message: String) {}
 
+    fn note_cycle_detected(&self) {}
+
     #[allow(clippy::too_many_arguments)]
     fn resolve_external_type_recursive(
         &self,
@@ -80,6 +82,7 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
     }
 
     if !visiting.insert(cache_key.clone()) {
+        resolver.note_cycle_detected();
         if resolver.debug_enabled() {
             resolver.debug_log(format!(
                 "resolve_external_type cycle dep={} type={}",

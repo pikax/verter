@@ -1931,6 +1931,9 @@ impl VerterHost {
 
         // Cycle detection
         if !visiting.insert(canonical_id.to_string()) {
+            self.provenance
+                .resolver_cycle_detections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(crate::types::FallthroughResolution {
                 accepted_props: Vec::new(),
                 accepted_events: Vec::new(),

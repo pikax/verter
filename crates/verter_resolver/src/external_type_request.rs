@@ -64,6 +64,8 @@ pub trait ExternalTypeRequestResolver: ExternalTypeBodyResolver {
 
     fn note_resolved_type_cache_miss(&self) {}
 
+    fn note_route_fact_reuse(&self) {}
+
     fn resolve_type_via_registry(
         &self,
         _canonical: &str,
@@ -140,6 +142,7 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
         if let Some(route_entry) =
             resolver.lookup_route_cache(owner_canonical, import_source, type_name, kind)
         {
+            resolver.note_route_fact_reuse();
             for dep in &route_entry.tracked_deps {
                 tracked_deps.insert(dep.clone());
                 resolution_deps.insert(dep.clone());

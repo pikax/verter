@@ -76,6 +76,15 @@ impl HostStoreView {
                 if let Some(entry) = host.compile_cache.get(&canonical_id) {
                     view.dependency_resolutions
                         .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
+                    if !entry.dependency_resolutions.is_empty() {
+                        view.derived_hashes.insert(
+                            (
+                                canonical_id.clone(),
+                                verter_resolver::DerivedFactKind::ExactResolution,
+                            ),
+                            hash_dependency_resolutions(&entry.dependency_resolutions),
+                        );
+                    }
 
                     if let Some(registry) = entry.export_registry.as_ref() {
                         view.derived_hashes.insert(
@@ -98,6 +107,13 @@ impl HostStoreView {
                         view.barrel_generations
                             .insert(canonical_id.clone(), surface.generation);
                     }
+
+                    if !entry.import_route_cache.is_empty() {
+                        view.derived_hashes.insert(
+                            (canonical_id.clone(), verter_resolver::DerivedFactKind::Route),
+                            hash_import_route_cache(&entry.import_route_cache),
+                        );
+                    }
                 }
 
                 view.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
@@ -112,6 +128,15 @@ impl HostStoreView {
                     .insert(canonical_id.clone(), entry.whole_hash);
                 view.dependency_resolutions
                     .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
+                if !entry.dependency_resolutions.is_empty() {
+                    view.derived_hashes.insert(
+                        (
+                            canonical_id.clone(),
+                            verter_resolver::DerivedFactKind::ExactResolution,
+                        ),
+                        hash_dependency_resolutions(&entry.dependency_resolutions),
+                    );
+                }
             }
             drop(files);
 
@@ -302,8 +327,16 @@ impl HostStoreView {
         }
 
         if !resolutions.is_empty() {
+            let exact_hash = hash_dependency_resolutions(&resolutions);
             self.dependency_resolutions
                 .insert(canonical_id.to_string(), resolutions);
+            self.derived_hashes.insert(
+                (
+                    canonical_id.to_string(),
+                    verter_resolver::DerivedFactKind::ExactResolution,
+                ),
+                exact_hash,
+            );
         }
     }
 
@@ -365,6 +398,83 @@ fn is_declaration_companion_source(canonical_id: &str) -> bool {
     canonical_id.ends_with(".d.ts")
         || canonical_id.ends_with(".d.mts")
         || canonical_id.ends_with(".d.cts")
+}
+
+pub(crate) fn hash_dependency_resolutions(
+    resolutions: &FxHashMap<String, crate::types::DependencyResolution>,
+) -> Hash16 {
+    let mut entries: Vec<_> = resolutions.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    hash16_from_sorted(|hasher| {
+        for (specifier, resolution) in &entries {
+            0u8.hash(hasher);
+            specifier.hash(hasher);
+            resolution.specifier.hash(hasher);
+            resolution.resolved_canonical_id.hash(hasher);
+            let mut candidates = resolution.possible_canonical_ids.clone();
+            candidates.sort();
+            candidates.hash(hasher);
+        }
+    })
+}
+
+#[cfg(feature = "scheduler")]
+pub(crate) fn hash_import_route_cache(
+    route_cache: &FxHashMap<
+        (String, String, verter_vfs::ResolveRequestKind),
+        crate::types::ImportTypeRouteEntry,
+    >,
+) -> Hash16 {
+    let mut entries: Vec<_> = route_cache.iter().collect();
+    entries.sort_by(|a, b| {
+        a.0 .0
+            .cmp(&b.0 .0)
+            .then_with(|| a.0 .1.cmp(&b.0 .1))
+            .then_with(|| resolve_request_kind_rank(a.0 .2).cmp(&resolve_request_kind_rank(b.0 .2)))
+    });
+
+    hash16_from_sorted(|hasher| {
+        for ((import_source, type_name, kind), entry) in &entries {
+            1u8.hash(hasher);
+            import_source.hash(hasher);
+            type_name.hash(hasher);
+            resolve_request_kind_rank(*kind).hash(hasher);
+            entry.owner_hash.hash(hasher);
+            entry.target.as_ref().map(|target| &target.final_canonical_id).hash(hasher);
+            entry.target.as_ref().map(|target| &target.exported_name).hash(hasher);
+            entry.tracked_deps.hash(hasher);
+            let mut route_hashes = entry.route_hashes.clone();
+            route_hashes.sort_by(|a, b| a.0.cmp(&b.0));
+            route_hashes.hash(hasher);
+            entry.negative_barrel_gen.hash(hasher);
+        }
+    })
+}
+
+fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
+    let mut left = rustc_hash::FxHasher::default();
+    0u8.hash(&mut left);
+    f(&mut left);
+
+    let mut right = rustc_hash::FxHasher::default();
+    1u8.hash(&mut right);
+    f(&mut right);
+
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&left.finish().to_le_bytes());
+    out[8..].copy_from_slice(&right.finish().to_le_bytes());
+    out
+}
+
+#[cfg(feature = "scheduler")]
+fn resolve_request_kind_rank(kind: verter_vfs::ResolveRequestKind) -> u8 {
+    match kind {
+        verter_vfs::ResolveRequestKind::EsmImport => 0,
+        verter_vfs::ResolveRequestKind::TypeImport => 1,
+        verter_vfs::ResolveRequestKind::RequireCall => 2,
+        verter_vfs::ResolveRequestKind::SfcSrcAttr => 3,
+    }
 }
 
 fn derived_fact_kind_rank(kind: verter_resolver::DerivedFactKind) -> u8 {

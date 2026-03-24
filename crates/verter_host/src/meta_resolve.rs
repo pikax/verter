@@ -530,7 +530,9 @@ impl VerterHost {
 
         for kind in [
             verter_resolver::DerivedFactKind::ExportRegistry,
+            verter_resolver::DerivedFactKind::Route,
             verter_resolver::DerivedFactKind::BarrelSurface,
+            verter_resolver::DerivedFactKind::ExactResolution,
         ] {
             if let Some(hash) = store_view
                 .and_then(|view| view.derived_hash(canonical, kind))
@@ -596,8 +598,28 @@ impl VerterHost {
                     None
                 }
             }
-            verter_resolver::DerivedFactKind::Route
-            | verter_resolver::DerivedFactKind::ExactResolution => None,
+            verter_resolver::DerivedFactKind::Route => {
+                #[cfg(feature = "scheduler")]
+                {
+                    self.compile_cache.get(canonical_id).and_then(|cc| {
+                        (!cc.import_route_cache.is_empty())
+                            .then(|| crate::resolver_store::hash_import_route_cache(&cc.import_route_cache))
+                    })
+                }
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    None
+                }
+            }
+            verter_resolver::DerivedFactKind::ExactResolution => self
+                .dependency_resolutions_for_eval_in_view(canonical_id, None)
+                .and_then(|resolutions| {
+                    (!resolutions.is_empty()).then(|| {
+                        crate::resolver_store::hash_dependency_resolutions(
+                            &resolutions,
+                        )
+                    })
+                }),
         }
     }
 

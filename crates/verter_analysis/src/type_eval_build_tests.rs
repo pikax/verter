@@ -71,8 +71,10 @@ fn parse_and_build_env_assigns_stable_type_declaration_ids_for_unchanged_source(
 
 #[test]
 fn parse_and_build_env_assigns_stable_value_declaration_ids_for_unchanged_source() {
-    let env_a = parse_and_build_env("const count: number = 1\nfunction greet(): string { return '' }");
-    let env_b = parse_and_build_env("const count: number = 1\nfunction greet(): string { return '' }");
+    let env_a =
+        parse_and_build_env("const count: number = 1\nfunction greet(): string { return '' }");
+    let env_b =
+        parse_and_build_env("const count: number = 1\nfunction greet(): string { return '' }");
 
     assert_eq!(
         env_a.value_declaration_id("count"),

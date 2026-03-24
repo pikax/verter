@@ -297,6 +297,13 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         external_type_debug(message);
     }
 
+    fn note_cycle_detected(&self) {
+        self.host
+            .provenance
+            .resolver_cycle_detections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn resolve_external_type_recursive(
         &self,
         owner_canonical: &str,
@@ -485,6 +492,13 @@ impl BarrelResolutionResolver for ViewExternalTypeResolver<'_> {
         );
     }
 
+    fn note_barrel_fact_reuse(&self) {
+        self.host
+            .provenance
+            .resolver_barrel_fact_reuse
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn debug_enabled(&self) -> bool {
         external_type_debug_enabled()
     }
@@ -515,6 +529,13 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
 
     fn debug_log(&self, message: String) {
         external_type_debug(message);
+    }
+
+    fn note_cycle_detected(&self) {
+        self.host
+            .provenance
+            .resolver_cycle_detections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn resolve_external_type_recursive(
@@ -724,6 +745,13 @@ impl ExternalTypeRequestResolver for HostLiveExternalTypeRequestResolver<'_> {
         self.host
             .provenance
             .resolved_external_type_cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn note_route_fact_reuse(&self) {
+        self.host
+            .provenance
+            .resolver_route_fact_reuse
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 

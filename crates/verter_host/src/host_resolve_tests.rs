@@ -1823,6 +1823,253 @@ defineProps<DynamicProps>()
 }
 
 #[test]
+fn route_cache_hits_increment_route_fact_reuse_counter() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>consumer</div></template>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string }\n",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let first = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./types",
+            "Props",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("first resolution should complete");
+    assert!(first.is_some(), "Props should resolve on the first request");
+
+    host.provenance().reset();
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let second = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./types",
+            "Props",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("second resolution should complete");
+    assert!(second.is_some(), "Props should resolve on the second request");
+
+    let p = host.provenance().snapshot();
+    assert!(
+        p.resolver_route_fact_reuse >= 1,
+        "expected a route-cache reuse on the second request, got {:?}",
+        p
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn barrel_cache_hits_increment_barrel_fact_reuse_counter() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './barrel'
+defineProps<Props>()
+</script>
+<template><div>consumer</div></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/barrel.ts", "export * from './inner'\n");
+    upsert_non_sfc(&host, "/src/inner.ts", "export interface Props { label: string }\n");
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./barrel".to_string(),
+            resolved_canonical_id: Some("/src/barrel.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./inner".to_string(),
+            resolved_canonical_id: Some("/src/inner.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let first = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./barrel",
+            "Props",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("first resolution should complete");
+    assert!(first.is_some(), "Props should resolve on the first request");
+
+    if let Some(mut entry) = host.compile_cache.get_mut("/src/Consumer.vue") {
+        entry.import_route_cache.clear();
+    }
+    host.resolved_type_cache.lock().clear();
+    host.provenance().reset();
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let second = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./barrel",
+            "Props",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("second resolution should complete");
+    assert!(second.is_some(), "Props should resolve on the second request");
+
+    let p = host.provenance().snapshot();
+    assert!(
+        p.resolver_barrel_fact_reuse >= 1,
+        "expected barrel export-surface reuse on the second request, got {:?}",
+        p
+    );
+}
+
+#[test]
+fn external_type_cycles_increment_cycle_detection_counter() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './a'
+defineProps<Props>()
+</script>
+<template><div>consumer</div></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/a.ts", "export { Props } from './b'\n");
+    upsert_non_sfc(&host, "/src/b.ts", "export { Props } from './a'\n");
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./a".to_string(),
+            resolved_canonical_id: Some("/src/a.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/a.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./b".to_string(),
+            resolved_canonical_id: Some("/src/b.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/b.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./a".to_string(),
+            resolved_canonical_id: Some("/src/a.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    host.provenance().reset();
+
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let resolved = host
+        .resolve_external_type_from_loaded_files(
+            "/src/Consumer.vue",
+            "./a",
+            "Props",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("cycle resolution should complete");
+    assert!(
+        resolved.is_none(),
+        "cyclic re-export should terminate without inventing a payload"
+    );
+    assert!(
+        host.provenance().snapshot().resolver_cycle_detections >= 1,
+        "cycle detection counter should increment for cyclic external type traversal"
+    );
+}
+
+#[test]
 fn stale_store_view_keeps_external_type_resolution_on_captured_dependency_routes() {
     let host = strict_host();
 

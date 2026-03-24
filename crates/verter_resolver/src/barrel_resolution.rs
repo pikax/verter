@@ -64,6 +64,8 @@ pub trait BarrelResolutionResolver {
     ) {
     }
 
+    fn note_barrel_fact_reuse(&self) {}
+
     fn debug_enabled(&self) -> bool {
         false
     }
@@ -103,6 +105,7 @@ pub fn resolve_type_through_barrel<R: BarrelResolutionResolver>(
     let rebuilt_from_scratch = valid_barrel.is_none();
 
     if let Some(ref barrel_state) = valid_barrel {
+        resolver.note_barrel_fact_reuse();
         tracked_deps.extend(barrel_state.tracked_deps.iter().cloned());
         resolution_deps.extend(barrel_state.tracked_deps.iter().cloned());
 

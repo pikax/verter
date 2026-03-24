@@ -64,8 +64,7 @@ fn add_type_preserves_existing_stable_declaration_id_on_reinsert() {
     });
 
     assert_eq!(
-        env.type_symbols["User"].declaration_id,
-        stable_id,
+        env.type_symbols["User"].declaration_id, stable_id,
         "reinserted declarations should keep the existing stable id"
     );
     assert_eq!(env.type_declaration_id("User"), Some(stable_id));

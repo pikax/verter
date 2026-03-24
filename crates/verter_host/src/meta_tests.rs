@@ -166,12 +166,23 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     project
         .upsert_base("/index.ts", "export * from './inner'")
         .unwrap();
+    project
+        .upsert_base("/inner.ts", "export interface Inner {}")
+        .unwrap();
 
     let mut entry = project
         .host()
         .compile_cache
         .get_mut("/index.ts")
         .expect("compile cache entry should exist");
+    entry.dependency_resolutions.insert(
+        "./inner".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./inner".to_string(),
+            resolved_canonical_id: Some("/inner.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        },
+    );
     entry.export_registry = Some(crate::types::FileExportRegistry {
         source_hash: [1; 16],
         named: rustc_hash::FxHashMap::default(),
@@ -186,7 +197,50 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
         fully_resolved: true,
         generation: 7,
     });
+    entry.import_route_cache.insert(
+        (
+            "./inner".to_string(),
+            "Inner".to_string(),
+            verter_vfs::ResolveRequestKind::TypeImport,
+        ),
+        crate::types::ImportTypeRouteEntry {
+            owner_hash: project
+                .host()
+                .get_whole_hash("/index.ts")
+                .expect("owner hash should exist"),
+            target: Some(crate::types::NormalizedTypeTarget {
+                final_canonical_id: "/inner.ts".to_string(),
+                exported_name: "Inner".to_string(),
+            }),
+            tracked_deps: vec!["/inner.ts".to_string()],
+            route_hashes: vec![(
+                "/inner.ts".to_string(),
+                project
+                    .host()
+                    .get_whole_hash("/inner.ts")
+                    .expect("inner hash should exist"),
+            )],
+            negative_barrel_gen: None,
+        },
+    );
     drop(entry);
+
+    let route_hash = {
+        let entry = project
+            .host()
+            .compile_cache
+            .get("/index.ts")
+            .expect("compile cache entry should exist");
+        crate::resolver_store::hash_import_route_cache(&entry.import_route_cache)
+    };
+    let exact_hash = {
+        let entry = project
+            .host()
+            .compile_cache
+            .get("/index.ts")
+            .expect("compile cache entry should exist");
+        crate::resolver_store::hash_dependency_resolutions(&entry.dependency_resolutions)
+    };
 
     assert!(project.host().fact_versions_match(&[
         verter_resolver::FactVersionRef::DerivedFactHash {
@@ -196,8 +250,18 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
         },
         verter_resolver::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::Route,
+            hash: route_hash,
+        },
+        verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
             kind: verter_resolver::DerivedFactKind::BarrelSurface,
             hash: [2; 16],
+        },
+        verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::ExactResolution,
+            hash: exact_hash,
         },
         verter_resolver::FactVersionRef::BarrelGeneration {
             canonical_id: "/index.ts".to_string(),
@@ -296,6 +360,14 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         .compile_cache
         .get_mut("/index.ts")
         .expect("compile cache entry should exist");
+    entry.dependency_resolutions.insert(
+        "./inner".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./inner".to_string(),
+            resolved_canonical_id: Some("/inner.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        },
+    );
     entry.export_registry = Some(crate::types::FileExportRegistry {
         source_hash: [3; 16],
         named: rustc_hash::FxHashMap::default(),
@@ -310,6 +382,23 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         fully_resolved: true,
         generation: 11,
     });
+    entry.import_route_cache.insert(
+        (
+            "./inner".to_string(),
+            "Inner".to_string(),
+            verter_vfs::ResolveRequestKind::TypeImport,
+        ),
+        crate::types::ImportTypeRouteEntry {
+            owner_hash: whole_hash,
+            target: Some(crate::types::NormalizedTypeTarget {
+                final_canonical_id: "/inner.ts".to_string(),
+                exported_name: "Inner".to_string(),
+            }),
+            tracked_deps: vec!["/inner.ts".to_string()],
+            route_hashes: vec![("/inner.ts".to_string(), [5; 16])],
+            negative_barrel_gen: None,
+        },
+    );
     drop(entry);
 
     let facts = project
@@ -332,8 +421,36 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
     assert!(
         facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::Route,
+            hash: {
+                let entry = project
+                    .host()
+                    .compile_cache
+                    .get("/index.ts")
+                    .expect("compile cache entry should exist");
+                crate::resolver_store::hash_import_route_cache(&entry.import_route_cache)
+            },
+        })
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
             kind: verter_resolver::DerivedFactKind::BarrelSurface,
             hash: [4; 16],
+        })
+    );
+    assert!(
+        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+            canonical_id: "/index.ts".to_string(),
+            kind: verter_resolver::DerivedFactKind::ExactResolution,
+            hash: {
+                let entry = project
+                    .host()
+                    .compile_cache
+                    .get("/index.ts")
+                    .expect("compile cache entry should exist");
+                crate::resolver_store::hash_dependency_resolutions(&entry.dependency_resolutions)
+            },
         })
     );
     assert!(
@@ -4943,6 +5060,7 @@ import A from './A.vue'
         )
         .unwrap();
 
+    project.host().provenance().reset();
     let meta = get_meta(&project, "/A.vue");
     let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
         panic!("expected FallthroughSurface::Branches");
@@ -4975,6 +5093,10 @@ import A from './A.vue'
             })
         }),
         "cycle branches must preserve the structured cycle reason in the root chain"
+    );
+    assert!(
+        provenance(&project).resolver_cycle_detections >= 1,
+        "fallthrough cycles should increment the shared resolver cycle counter"
     );
 }
 

@@ -1540,6 +1540,9 @@ pub struct MetaProvenance {
     pub resolver_node_cache_misses: std::sync::atomic::AtomicU64,
     pub resolver_singleflight_coalesced: std::sync::atomic::AtomicU64,
     pub resolver_cross_view_lane_forks: std::sync::atomic::AtomicU64,
+    pub resolver_cycle_detections: std::sync::atomic::AtomicU64,
+    pub resolver_route_fact_reuse: std::sync::atomic::AtomicU64,
+    pub resolver_barrel_fact_reuse: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1556,6 +1559,9 @@ impl Default for MetaProvenance {
             resolver_node_cache_misses: std::sync::atomic::AtomicU64::new(0),
             resolver_singleflight_coalesced: std::sync::atomic::AtomicU64::new(0),
             resolver_cross_view_lane_forks: std::sync::atomic::AtomicU64::new(0),
+            resolver_cycle_detections: std::sync::atomic::AtomicU64::new(0),
+            resolver_route_fact_reuse: std::sync::atomic::AtomicU64::new(0),
+            resolver_barrel_fact_reuse: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1605,6 +1611,18 @@ impl std::fmt::Debug for MetaProvenance {
                 "resolver_cross_view_lane_forks",
                 &self.resolver_cross_view_lane_forks.load(Relaxed),
             )
+            .field(
+                "resolver_cycle_detections",
+                &self.resolver_cycle_detections.load(Relaxed),
+            )
+            .field(
+                "resolver_route_fact_reuse",
+                &self.resolver_route_fact_reuse.load(Relaxed),
+            )
+            .field(
+                "resolver_barrel_fact_reuse",
+                &self.resolver_barrel_fact_reuse.load(Relaxed),
+            )
             .finish()
     }
 }
@@ -1629,6 +1647,9 @@ impl MetaProvenance {
             resolver_node_cache_misses: self.resolver_node_cache_misses.load(Relaxed),
             resolver_singleflight_coalesced: self.resolver_singleflight_coalesced.load(Relaxed),
             resolver_cross_view_lane_forks: self.resolver_cross_view_lane_forks.load(Relaxed),
+            resolver_cycle_detections: self.resolver_cycle_detections.load(Relaxed),
+            resolver_route_fact_reuse: self.resolver_route_fact_reuse.load(Relaxed),
+            resolver_barrel_fact_reuse: self.resolver_barrel_fact_reuse.load(Relaxed),
         }
     }
 
@@ -1647,6 +1668,9 @@ impl MetaProvenance {
         self.resolver_node_cache_misses.store(0, Relaxed);
         self.resolver_singleflight_coalesced.store(0, Relaxed);
         self.resolver_cross_view_lane_forks.store(0, Relaxed);
+        self.resolver_cycle_detections.store(0, Relaxed);
+        self.resolver_route_fact_reuse.store(0, Relaxed);
+        self.resolver_barrel_fact_reuse.store(0, Relaxed);
     }
 }
 
@@ -1687,6 +1711,9 @@ pub struct MetaProvenanceSnapshot {
     pub resolver_node_cache_misses: u64,
     pub resolver_singleflight_coalesced: u64,
     pub resolver_cross_view_lane_forks: u64,
+    pub resolver_cycle_detections: u64,
+    pub resolver_route_fact_reuse: u64,
+    pub resolver_barrel_fact_reuse: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.
