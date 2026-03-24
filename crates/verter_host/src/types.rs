@@ -1348,7 +1348,7 @@ pub(crate) const MAX_EXTERNAL_TYPE_RESOLVE_STEPS: usize = 2_000;
 
 /// Error from [`VerterHost::resolve_external_type_from_loaded_files`].
 #[derive(Debug, Clone)]
-pub(crate) enum ExternalTypeResolveError {
+pub enum ExternalTypeResolveError {
     /// The root dependency could not be resolved.
     MissingRootDependency,
     /// Recursion depth exceeded the configured limit.

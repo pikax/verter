@@ -5,7 +5,14 @@ use std::sync::Arc;
 
 mod component_meta;
 mod declaration_metadata;
+mod eval_env_build;
+mod external_type_body;
+mod imported_decl_eval;
+mod imported_eval_collect;
 mod imported_eval_lookup;
+mod imported_eval_types;
+mod imported_type_alias;
+mod runtime_values;
 mod surface_projector;
 
 pub type ResolverHash16 = verter_analysis::Hash16;
@@ -18,8 +25,33 @@ pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedTypeDeclaration,
 };
+pub use eval_env_build::{collect_requested_binding_names, inject_imported_type_aliases};
+pub use external_type_body::{
+    resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
+};
+pub use imported_decl_eval::{
+    evaluate_imported_decl_with_owner_env, ImportedDeclEvalResolver, PreparedImportedDeclContext,
+};
+pub use imported_eval_collect::{
+    build_imported_eval_inputs, collect_imported_eval_inputs, imported_member_name_for_type_alias,
+    record_required_source_merge_inputs_recursive, required_type_alias_names_for_import_binding,
+    ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalOwnerResolver,
+    ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
+};
 pub use imported_eval_lookup::{
     ImportedEvalLookup, ImportedEvalLookupResolver, ImportedTypeAliasResolveRequest,
+};
+pub use imported_eval_types::{
+    ComputedEvaluatedTypes, ImportedEvalInputs, ImportedEvalOverflow, ImportedEvalSource,
+    ImportedTypeAlias,
+};
+pub use imported_type_alias::{
+    choose_preferred_imported_type_body, imported_type_body_specificity_score,
+    prepare_imported_type_alias, should_attempt_owner_env_resolution,
+    ImportedTypeAliasPrepareError, ImportedTypeAliasResolver,
+};
+pub use runtime_values::{
+    materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
 };
 pub use surface_projector::{
     extract_slot_info_from_type_text, project_macro_surfaces, ProjectedMacroSurfaces,

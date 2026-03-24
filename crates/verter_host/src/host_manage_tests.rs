@@ -1,5 +1,9 @@
 use super::*;
 use std::sync::Arc;
+use verter_resolver::{
+    choose_preferred_imported_type_body, imported_type_body_specificity_score,
+    should_attempt_owner_env_resolution, ImportedEvalLookupResolver,
+};
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
 <script setup>
@@ -271,6 +275,195 @@ fn owner_env_resolution_is_retained_for_top_level_non_object_surfaces() {
     assert!(
         should_attempt_owner_env_resolution(&decl, Some(&resolved_body)),
         "top-level non-object surfaces still need the owner env to recover missing members"
+    );
+}
+
+#[test]
+fn stale_store_view_rejects_changed_dependency_eval_state() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/types.ts",
+        "export interface Props { label: string }",
+    );
+
+    let before_view = host.resolver_store_view();
+    assert!(
+        host.current_eval_state_in_view("/types.ts", Some(&before_view))
+            .is_some(),
+        "captured view should accept the dependency state it was created from"
+    );
+    assert!(
+        host.base_eval_env_in_view("/types.ts", Some(&before_view))
+            .is_some(),
+        "captured view should accept the dependency env it was created from"
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/types.ts",
+        "export interface Props { disabled: boolean }",
+    );
+
+    assert!(
+        host.current_eval_state_in_view("/types.ts", Some(&before_view))
+            .is_none(),
+        "stale views must reject dependency source reads after the file changes"
+    );
+    assert!(
+        host.base_eval_env_in_view("/types.ts", Some(&before_view))
+            .is_none(),
+        "stale views must reject dependency eval env reads after the file changes"
+    );
+    assert!(
+        host.dependency_resolutions_for_eval_in_view("/types.ts", Some(&before_view))
+            .is_none(),
+        "stale views must reject dependency resolution reads after the file changes"
+    );
+}
+
+#[test]
+fn imported_eval_lookup_resolver_rejects_stale_dependency_envs() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/types.ts",
+        "export interface Props { label: string }",
+    );
+
+    let before_view = host.resolver_store_view();
+    let resolver = HostImportedEvalResolver::new(&host, "/types.ts", Some(&before_view));
+    assert!(
+        ImportedEvalLookupResolver::dependency_eval_env(&resolver, "/types.ts").is_some(),
+        "lookup resolver should accept dependency envs from its captured view"
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/types.ts",
+        "export interface Props { disabled: boolean }",
+    );
+
+    assert!(
+        ImportedEvalLookupResolver::dependency_eval_env(&resolver, "/types.ts").is_none(),
+        "lookup resolver must reject dependency envs that changed after the view was captured"
+    );
+}
+
+#[test]
+fn stale_store_view_rejects_changed_dependency_routes_and_reexports() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from "./types";
+defineProps<Props>();
+</script>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        r#"export { Props } from "./types";"#,
+    );
+
+    let before_view = host.resolver_store_view();
+    assert_eq!(
+        host.resolve_type_dependency_canonical_in_view(
+            "/src/App.vue",
+            "./types",
+            Some(&before_view)
+        )
+        .as_deref(),
+        Some("/src/types.ts"),
+        "captured view should resolve the original owner import route",
+    );
+    assert!(
+        host.get_export_span_follow_reexports_in_view("/src/index.ts", "Props", Some(&before_view))
+            .is_some(),
+        "captured view should resolve the original re-export chain",
+    );
+
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from "./other";
+defineProps<Props>();
+</script>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Renamed { disabled: boolean }",
+    );
+
+    assert!(
+        host.resolve_type_dependency_canonical_in_view(
+            "/src/App.vue",
+            "./types",
+            Some(&before_view)
+        )
+        .is_none(),
+        "stale views must reject owner import routes after the owner file changes",
+    );
+    assert!(
+        host.get_export_span_follow_reexports_in_view("/src/index.ts", "Props", Some(&before_view))
+            .is_none(),
+        "stale views must reject re-export chains after a downstream file changes",
+    );
+    assert!(
+        host.resolve_exports_in_view("/src/index.ts", Some(&before_view))
+            .is_empty(),
+        "stale views must reject export surfaces whose re-export targets changed",
+    );
+}
+
+#[test]
+fn stale_store_view_keeps_owner_dependency_route_when_workspace_candidates_change() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from "./types";
+defineProps<Props>();
+</script>"#,
+    );
+    upsert_non_sfc(&host, "/src/types.js", "export const runtime = true;");
+
+    let before_view = host.resolver_store_view();
+    assert_eq!(
+        host.resolve_type_dependency_canonical_in_view(
+            "/src/App.vue",
+            "./types",
+            Some(&before_view)
+        )
+        .as_deref(),
+        Some("/src/types.js"),
+        "captured view should preserve the owner's original resolved dependency",
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string }",
+    );
+
+    assert_eq!(
+        host.resolve_type_dependency_canonical_in_view(
+            "/src/App.vue",
+            "./types",
+            Some(&before_view)
+        )
+        .as_deref(),
+        Some("/src/types.js"),
+        "stale views must not switch owner dependency routes to newer workspace candidates",
     );
 }
 

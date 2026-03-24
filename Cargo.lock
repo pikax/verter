@@ -3630,6 +3630,7 @@ dependencies = [
  "verter_analysis",
  "verter_core",
  "verter_span",
+ "verter_vfs",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@ use crate::types::Hash16;
 use crate::VerterHost;
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
+use verter_resolver::StoreView;
 
 #[cfg(not(feature = "scheduler"))]
 use crate::shared::read_lock;
@@ -13,6 +14,8 @@ pub struct HostStoreView {
     compat_token: verter_resolver::StoreViewCompatToken,
     mutation_epoch: u64,
     whole_hashes: FxHashMap<String, Hash16>,
+    dependency_resolutions:
+        FxHashMap<String, FxHashMap<String, crate::types::DependencyResolution>>,
     derived_hashes: FxHashMap<(String, verter_resolver::DerivedFactKind), Hash16>,
     barrel_generations: FxHashMap<String, u64>,
 }
@@ -23,6 +26,7 @@ impl Default for HostStoreView {
             compat_token: verter_resolver::StoreViewCompatToken(0),
             mutation_epoch: 0,
             whole_hashes: FxHashMap::default(),
+            dependency_resolutions: FxHashMap::default(),
             derived_hashes: FxHashMap::default(),
             barrel_generations: FxHashMap::default(),
         }
@@ -70,6 +74,9 @@ impl HostStoreView {
                 }
 
                 if let Some(entry) = host.compile_cache.get(&canonical_id) {
+                    view.dependency_resolutions
+                        .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
+
                     if let Some(registry) = entry.export_registry.as_ref() {
                         view.derived_hashes.insert(
                             (
@@ -92,6 +99,8 @@ impl HostStoreView {
                             .insert(canonical_id.clone(), surface.generation);
                     }
                 }
+
+                view.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
             }
         }
 
@@ -101,6 +110,15 @@ impl HostStoreView {
             for (canonical_id, entry) in files.iter() {
                 view.whole_hashes
                     .insert(canonical_id.clone(), entry.whole_hash);
+                view.dependency_resolutions
+                    .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
+            }
+            drop(files);
+
+            let mut canonical_ids: Vec<_> = view.whole_hashes.keys().cloned().collect();
+            canonical_ids.sort();
+            for canonical_id in canonical_ids {
+                view.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
             }
         }
 
@@ -110,6 +128,74 @@ impl HostStoreView {
 
     pub(crate) fn mutation_epoch(&self) -> u64 {
         self.mutation_epoch
+    }
+
+    pub(crate) fn accepts_whole_hash(&self, canonical_id: &str, hash: Hash16) -> bool {
+        self.validates(&verter_resolver::FactVersionRef::FileWholeHash {
+            canonical_id: canonical_id.to_string(),
+            hash,
+        })
+    }
+
+    pub(crate) fn tracks_whole_hash(&self, canonical_id: &str) -> bool {
+        self.whole_hashes.contains_key(canonical_id)
+    }
+
+    pub(crate) fn dependency_resolution(
+        &self,
+        canonical_id: &str,
+        import_source: &str,
+    ) -> Option<&crate::types::DependencyResolution> {
+        self.dependency_resolutions
+            .get(canonical_id)
+            .and_then(|resolutions| resolutions.get(import_source))
+    }
+
+    pub(crate) fn dependency_resolutions(
+        &self,
+        canonical_id: &str,
+    ) -> Option<&FxHashMap<String, crate::types::DependencyResolution>> {
+        self.dependency_resolutions.get(canonical_id)
+    }
+
+    fn snapshot_dependency_resolutions_if_missing(
+        &mut self,
+        host: &VerterHost,
+        canonical_id: &str,
+    ) {
+        if self
+            .dependency_resolutions
+            .get(canonical_id)
+            .is_some_and(|resolutions| !resolutions.is_empty())
+        {
+            return;
+        }
+
+        let Some(snapshot) = host.get_raw_analysis_snapshot_in_view(canonical_id, None) else {
+            return;
+        };
+
+        let mut resolutions = self
+            .dependency_resolutions
+            .remove(canonical_id)
+            .unwrap_or_default();
+
+        for import in &snapshot.imports {
+            resolutions.entry(import.source.clone()).or_insert_with(|| {
+                crate::types::DependencyResolution {
+                    specifier: import.source.clone(),
+                    resolved_canonical_id: import.resolved_canonical_id.clone().or_else(|| {
+                        host.resolve_type_dependency_canonical(canonical_id, &import.source)
+                    }),
+                    possible_canonical_ids: Vec::new(),
+                }
+            });
+        }
+
+        if !resolutions.is_empty() {
+            self.dependency_resolutions
+                .insert(canonical_id.to_string(), resolutions);
+        }
     }
 
     fn compute_compat_token(&self) -> verter_resolver::StoreViewCompatToken {
@@ -122,6 +208,23 @@ impl HostStoreView {
             0u8.hash(&mut hasher);
             canonical_id.hash(&mut hasher);
             hash.hash(&mut hasher);
+        }
+
+        let mut dependency_resolutions: Vec<_> = self.dependency_resolutions.iter().collect();
+        dependency_resolutions.sort_by(|a, b| a.0.cmp(b.0));
+        for (canonical_id, resolutions) in dependency_resolutions {
+            let mut entries: Vec<_> = resolutions.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            for (specifier, resolution) in entries {
+                3u8.hash(&mut hasher);
+                canonical_id.hash(&mut hasher);
+                specifier.hash(&mut hasher);
+                resolution.specifier.hash(&mut hasher);
+                resolution.resolved_canonical_id.hash(&mut hasher);
+                let mut candidates = resolution.possible_canonical_ids.clone();
+                candidates.sort();
+                candidates.hash(&mut hasher);
+            }
         }
 
         let mut derived_hashes: Vec<_> = self.derived_hashes.iter().collect();

@@ -30,6 +30,7 @@ use verter_core::compile::CodegenOptions;
 use verter_core::compile::{
     compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
+use verter_resolver::{resolve_external_type_from_source_body, ExternalTypeBodyResolver};
 
 #[cfg(not(feature = "scheduler"))]
 use crate::cache::enforce_profile_cap;
@@ -57,6 +58,94 @@ fn external_type_debug_enabled() -> bool {
 fn external_type_debug(message: impl AsRef<str>) {
     if external_type_debug_enabled() {
         eprintln!("[verter-meta] {}", message.as_ref());
+    }
+}
+
+impl ExternalTypeBodyResolver for VerterHost {
+    type Error = crate::types::ExternalTypeResolveError;
+
+    fn max_external_type_resolve_steps(&self) -> usize {
+        crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS
+    }
+
+    fn step_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
+        crate::types::ExternalTypeResolveError::StepLimitExceeded {
+            limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
+            type_name: type_name.to_string(),
+            last_dep: last_dep.to_string(),
+        }
+    }
+
+    fn debug_enabled(&self) -> bool {
+        external_type_debug_enabled()
+    }
+
+    fn debug_log(&self, message: String) {
+        external_type_debug(message);
+    }
+
+    fn resolve_external_type_recursive(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+        required_root_dep: bool,
+        kind: verter_vfs::ResolveRequestKind,
+        use_host_cache: bool,
+        profile_hash: Option<u64>,
+        depth: usize,
+    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    {
+        self.resolve_external_type_from_loaded_files(
+            owner_canonical,
+            import_source,
+            type_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            visiting,
+            required_root_dep,
+            kind,
+            use_host_cache,
+            profile_hash,
+            depth,
+        )
+    }
+
+    fn resolve_type_through_barrel(
+        &self,
+        barrel_canonical: &str,
+        type_name: &str,
+        wildcard_sources: &[String],
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+        kind: verter_vfs::ResolveRequestKind,
+        use_host_cache: bool,
+        profile_hash: Option<u64>,
+        depth: usize,
+        debug_enabled: bool,
+    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    {
+        self.resolve_type_through_barrel(
+            barrel_canonical,
+            type_name,
+            wildcard_sources,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            visiting,
+            kind,
+            use_host_cache,
+            profile_hash,
+            depth,
+            debug_enabled,
+        )
     }
 }
 
@@ -118,6 +207,26 @@ impl VerterHost {
                 verter_vfs::ResolveRequestKind::EsmImport,
             )
         })
+    }
+
+    pub(crate) fn resolve_type_dependency_canonical_in_view(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<String> {
+        if let Some(view) = store_view {
+            self.current_eval_state_in_view(owner_canonical, Some(view))?;
+            if let Some(resolution) = view.dependency_resolution(owner_canonical, import_source) {
+                if let Some(resolved) = resolution.resolved_canonical_id.clone() {
+                    return Some(resolved);
+                }
+                if let Some(target) = resolution.effective_target() {
+                    return Some(target.to_string());
+                }
+            }
+        }
+        self.resolve_type_dependency_canonical(owner_canonical, import_source)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -392,205 +501,20 @@ impl VerterHost {
             }
         }
 
-        let resolve_steps = cache.len() + visiting.len();
-        if resolve_steps >= crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS {
-            return Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
-                limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-                type_name: type_name.to_string(),
-                last_dep: dep_canonical,
-            });
-        }
-
-        if !visiting.insert(cache_key.clone()) {
-            if debug_enabled {
-                external_type_debug(format!(
-                    "resolve_external_type cycle dep={} type={}",
-                    dep_canonical, type_name
-                ));
-            }
-            return Ok(None);
-        }
-
-        let import_alloc = oxc_allocator::Allocator::new();
-        let extracted = verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
+        let resolved = resolve_external_type_from_source_body(
+            self,
+            &dep_canonical,
+            type_name,
             &effective_source,
-            &import_alloc,
-        );
-        // Critical invariant: only imports reachable from the requested type's
-        // declaration graph are eligible companion deps. Unrelated file imports
-        // must not expand this traversal.
-        let required_import_names =
-            verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
-                type_name,
-                &effective_source,
-                &import_alloc,
-            );
-        let projected_steps = cache.len() + visiting.len() + required_import_names.len();
-        if projected_steps > crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS {
-            visiting.remove(&cache_key);
-            return Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
-                limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-                type_name: type_name.to_string(),
-                last_dep: dep_canonical.clone(),
-            });
-        }
-        if debug_enabled {
-            let mut required_list = required_import_names.iter().cloned().collect::<Vec<_>>();
-            required_list.sort();
-            external_type_debug(format!(
-                "resolve_external_type required-imports dep={} type={} imports=[{}]",
-                dep_canonical,
-                type_name,
-                required_list.join(", "),
-            ));
-        }
-
-        // Optimization: if the target type is directly re-exported from this file,
-        // follow the re-export chain immediately instead of resolving ALL bindings.
-        // This avoids O(N) workspace reads for barrel files with many re-exports.
-        let direct_reexport = extracted
-            .reexport_bindings
-            .iter()
-            .find(|b| b.local_name == type_name);
-        if let Some(target) = direct_reexport {
-            if debug_enabled {
-                external_type_debug(format!(
-                    "resolve_external_type direct-reexport dep={} type={} -> {}:{}",
-                    dep_canonical, type_name, target.source, target.imported_name
-                ));
-            }
-            if let Some(resolved) = self.resolve_external_type_from_loaded_files(
-                &dep_canonical,
-                &target.source,
-                &target.imported_name,
-                tracked_deps,
-                resolution_deps,
-                cache,
-                visiting,
-                false,
-                kind,
-                use_host_cache,
-                profile_hash,
-                depth + 1,
-            )? {
-                visiting.remove(&cache_key);
-                cache.insert(cache_key, Some(resolved.clone()));
-                if use_host_cache {
-                    if let Some(dep_hash) = dep_source_hash {
-                        let host_key = crate::types::ResolvedTypeCacheKey {
-                            dep_canonical_id: dep_canonical.clone(),
-                            dep_source_hash: dep_hash,
-                            type_name: type_name.to_string(),
-                            resolve_kind: kind,
-                        };
-                        let mut host_cache = self.resolved_type_cache.lock();
-                        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-                            host_cache.clear();
-                        }
-                        host_cache.insert(
-                            host_key,
-                            crate::types::ResolvedTypeCacheEntry {
-                                resolved: Some(resolved.clone()),
-                                tracked_deps: resolution_deps.iter().cloned().collect(),
-                            },
-                        );
-                    }
-                }
-                return Ok(Some(resolved));
-            }
-        }
-
-        let mut companion_types = rustc_hash::FxHashMap::default();
-        for binding in &extracted.bindings {
-            let required_aliases =
-                verter_core::utils::oxc::vue::resolve_type::required_import_alias_names_for_binding(
-                    binding,
-                    &required_import_names,
-                );
-            for required_alias in required_aliases {
-                let Some(imported_name) =
-                    verter_core::utils::oxc::vue::resolve_type::imported_member_name_for_required_alias(
-                        binding,
-                        &required_alias,
-                    )
-                else {
-                    continue;
-                };
-                if debug_enabled {
-                    external_type_debug(format!(
-                        "resolve_external_type companion-binding dep={} type={} binding={} -> {}:{}",
-                        dep_canonical,
-                        type_name,
-                        required_alias,
-                        binding.source,
-                        imported_name,
-                    ));
-                }
-                if let Some(resolved) = self.resolve_external_type_from_loaded_files(
-                    &dep_canonical,
-                    &binding.source,
-                    &imported_name,
-                    tracked_deps,
-                    resolution_deps,
-                    cache,
-                    visiting,
-                    false,
-                    kind,
-                    use_host_cache,
-                    profile_hash,
-                    depth + 1,
-                )? {
-                    companion_types.entry(required_alias).or_insert(resolved);
-                }
-            }
-        }
-
-        let resolve_alloc = oxc_allocator::Allocator::new();
-        let mut resolved =
-            verter_core::utils::oxc::vue::resolve_type::resolve_external_type_with_companion(
-                type_name,
-                &effective_source,
-                &companion_types,
-                &resolve_alloc,
-            );
-        if debug_enabled {
-            external_type_debug(format!(
-                "resolve_external_type local-eval dep={} type={} companion_keys={} resolved={}",
-                dep_canonical,
-                type_name,
-                companion_types.len(),
-                resolved.is_some(),
-            ));
-        }
-
-        // If the type wasn't found directly, try `export * from` wildcard re-export sources.
-        // Uses the barrel resolution cache to avoid scanning all sources on every lookup.
-        if resolved.is_none() && !extracted.wildcard_reexport_sources.is_empty() {
-            resolved = self.resolve_type_through_barrel(
-                &dep_canonical,
-                type_name,
-                &extracted.wildcard_reexport_sources,
-                tracked_deps,
-                resolution_deps,
-                cache,
-                visiting,
-                kind,
-                use_host_cache,
-                profile_hash,
-                depth,
-                debug_enabled,
-            )?;
-        }
-
-        visiting.remove(&cache_key);
-        if debug_enabled {
-            external_type_debug(format!(
-                "resolve_external_type exit dep={} type={} resolved={}",
-                dep_canonical,
-                type_name,
-                resolved.is_some(),
-            ));
-        }
+            tracked_deps,
+            resolution_deps,
+            cache,
+            visiting,
+            kind,
+            use_host_cache,
+            profile_hash,
+            depth,
+        )?;
 
         // Store in host-level persistent cache (bounded).
         // Skip when profile overrides are in play (hash is raw, not override-aware).
