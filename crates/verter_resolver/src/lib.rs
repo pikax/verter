@@ -4,6 +4,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 mod component_meta;
+mod barrel_resolution;
 mod declaration_metadata;
 mod eval_env_build;
 mod export_graph;
@@ -11,6 +12,7 @@ mod export_registry_route;
 mod external_type_body;
 mod external_macro_types;
 mod external_type_graph;
+mod external_type_request;
 mod fallthrough;
 mod imported_decl_eval;
 mod imported_eval_collect;
@@ -21,6 +23,9 @@ mod runtime_values;
 mod surface_projector;
 
 pub type ResolverHash16 = verter_analysis::Hash16;
+pub use barrel_resolution::{
+    resolve_type_through_barrel, BarrelResolutionResolver, BarrelResolutionState,
+};
 pub use component_meta::{
     resolve_component_meta_parts, resolved_elements_to_type_expr_via_type_text,
     ComponentMetaEvalOutputs, ComponentMetaResolverHost, ResolvedComponentMetaParts,
@@ -42,6 +47,10 @@ pub use export_registry_route::{
 };
 pub use external_type_body::{
     resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
+};
+pub use external_type_request::{
+    resolve_external_type_request, ExternalTypeRequestResolver, ExternalTypeResolvedCacheEntry,
+    ExternalTypeRouteEntry,
 };
 pub use external_macro_types::{
     collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,
