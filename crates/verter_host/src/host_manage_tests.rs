@@ -476,6 +476,47 @@ defineProps<Props>();
 }
 
 #[test]
+fn imported_eval_merge_keeps_captured_dependency_import_routes_when_candidates_change() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "import type { Props } from './types'\nexport type { Props }\n",
+    );
+    upsert_non_sfc(&host, "/src/types.js", "export const runtime = true\n");
+
+    let before_view = host.resolver_store_view();
+    let mut resolver = HostImportedEvalResolver::new(&host, "/src/index.ts", Some(&before_view));
+    let eval_source = ImportedEvalSourceMergeResolver::load_eval_source_for_merge(
+        &mut resolver,
+        "/src/index.ts",
+    )
+    .expect("captured view should load merge source");
+
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string }\n",
+    );
+
+    let bindings = ImportedEvalSourceMergeResolver::import_bindings_for_merge(
+        &mut resolver,
+        "/src/index.ts",
+        &eval_source,
+    );
+    let props_binding = bindings
+        .into_iter()
+        .find(|binding| binding.local_name == "Props")
+        .expect("merged bindings should include Props");
+
+    assert_eq!(
+        props_binding.resolved_canonical_id.as_deref(),
+        Some("/src/types.js"),
+        "captured merge bindings must preserve the dependency route from the captured view",
+    );
+}
+
+#[test]
 fn resolver_store_view_tracks_transitive_dependency_targets() {
     let host = strict_host();
 

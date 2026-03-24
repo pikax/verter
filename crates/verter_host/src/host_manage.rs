@@ -1008,20 +1008,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         let snapshot = self
             .snapshot_cache
             .entry(canonical_id.to_string())
-            .or_insert_with(|| {
-                let snapshot = self
-                    .host
-                    .get_analysis_snapshot_internal(canonical_id, None)?;
-                let whole_hash = self.host.get_whole_hash(canonical_id).unwrap_or_default();
-                if !self.host.store_view_allows_current_whole_hash(
-                    canonical_id,
-                    whole_hash,
-                    self.store_view,
-                ) {
-                    return None;
-                }
-                Some(snapshot)
-            })
+            .or_insert_with(|| self.host.get_raw_analysis_snapshot_in_view(canonical_id, self.store_view))
             .clone();
 
         if let Some(snapshot) = snapshot {
@@ -3524,18 +3511,36 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
+        self.resolve_snapshot_imports_in_view(parent_canonical_id, snapshot, None);
+    }
+
+    pub(crate) fn resolve_snapshot_imports_in_view(
+        &self,
+        parent_canonical_id: &str,
+        snapshot: &mut FileAnalysisSnapshot,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) {
         for import in &mut snapshot.imports {
             if import.resolved_canonical_id.is_none() {
-                let ctx = verter_vfs::ResolutionContext {
-                    phase: verter_vfs::ResolvePhase::CodegenBlocker,
-                    kind: if import.is_type_only {
-                        verter_vfs::ResolveRequestKind::TypeImport
-                    } else {
-                        verter_vfs::ResolveRequestKind::EsmImport
-                    },
+                import.resolved_canonical_id = if let Some(view) = store_view {
+                    view.dependency_resolution(parent_canonical_id, &import.source)
+                        .and_then(|resolution| {
+                            resolution
+                                .resolved_canonical_id
+                                .clone()
+                                .or_else(|| resolution.effective_target().map(str::to_string))
+                        })
+                } else {
+                    let ctx = verter_vfs::ResolutionContext {
+                        phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                        kind: if import.is_type_only {
+                            verter_vfs::ResolveRequestKind::TypeImport
+                        } else {
+                            verter_vfs::ResolveRequestKind::EsmImport
+                        },
+                    };
+                    self.resolve_via_vfs(parent_canonical_id, &import.source, ctx)
                 };
-                import.resolved_canonical_id =
-                    self.resolve_via_vfs(parent_canonical_id, &import.source, ctx);
             }
         }
     }
