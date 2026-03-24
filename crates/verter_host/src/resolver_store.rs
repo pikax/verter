@@ -141,6 +141,24 @@ impl HostStoreView {
         self.whole_hashes.contains_key(canonical_id)
     }
 
+    pub(crate) fn whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
+        self.whole_hashes.get(canonical_id).copied()
+    }
+
+    pub(crate) fn derived_hash(
+        &self,
+        canonical_id: &str,
+        kind: verter_resolver::DerivedFactKind,
+    ) -> Option<Hash16> {
+        self.derived_hashes
+            .get(&(canonical_id.to_string(), kind))
+            .copied()
+    }
+
+    pub(crate) fn barrel_generation(&self, canonical_id: &str) -> Option<u64> {
+        self.barrel_generations.get(canonical_id).copied()
+    }
+
     pub(crate) fn dependency_resolution(
         &self,
         canonical_id: &str,
@@ -184,9 +202,9 @@ impl HostStoreView {
             resolutions.entry(import.source.clone()).or_insert_with(|| {
                 crate::types::DependencyResolution {
                     specifier: import.source.clone(),
-                    resolved_canonical_id: import.resolved_canonical_id.clone().or_else(|| {
-                        host.resolve_type_dependency_canonical(canonical_id, &import.source)
-                    }),
+                    // A captured StoreView must not synthesize fresher routes than the
+                    // analysis snapshot already observed.
+                    resolved_canonical_id: import.resolved_canonical_id.clone(),
                     possible_canonical_ids: Vec::new(),
                 }
             });

@@ -7,6 +7,7 @@ mod component_meta;
 mod declaration_metadata;
 mod eval_env_build;
 mod external_type_body;
+mod fallthrough;
 mod imported_decl_eval;
 mod imported_eval_collect;
 mod imported_eval_lookup;
@@ -28,6 +29,14 @@ pub use declaration_metadata::{
 pub use eval_env_build::{collect_requested_binding_names, inject_imported_type_aliases};
 pub use external_type_body::{
     resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
+};
+pub use fallthrough::{
+    append_component_candidate_branches, append_native_candidate_branch,
+    collect_dynamic_root_candidates_from_type, extend_unique_fact_versions,
+    fallthrough_cache_key, hash_prop_type_overrides, known_spread_keys_from_type_expr,
+    inject_prop_type_overrides, merge_fallthrough_branches, push_partial_reason,
+    resolve_usage_prop_type, DynamicRootCandidate, FallthroughResolutionView,
+    FallthroughResolverHost, KnownSpreadKeys,
 };
 pub use imported_decl_eval::{
     evaluate_imported_decl_with_owner_env, ImportedDeclEvalResolver, PreparedImportedDeclContext,

@@ -504,12 +504,26 @@ impl VerterHost {
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
     ) -> Vec<verter_resolver::FactVersionRef> {
+        self.current_dependency_fact_versions_in_view(canonical, tracked_deps, None)
+    }
+
+    pub(crate) fn current_dependency_fact_versions_in_view(
+        &self,
+        canonical: &str,
+        tracked_deps: &std::collections::BTreeSet<String>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Vec<verter_resolver::FactVersionRef> {
         let mut facts = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
 
-        self.append_dependency_fact_versions(canonical, &mut facts, &mut seen);
+        self.append_dependency_fact_versions_in_view(canonical, &mut facts, &mut seen, store_view);
         for dep in tracked_deps {
-            self.append_dependency_fact_versions(dep.as_str(), &mut facts, &mut seen);
+            self.append_dependency_fact_versions_in_view(
+                dep.as_str(),
+                &mut facts,
+                &mut seen,
+                store_view,
+            );
         }
 
         facts
@@ -524,15 +538,19 @@ impl VerterHost {
         fact_versions.iter().all(|fact| view.validates(fact))
     }
 
-    fn append_dependency_fact_versions(
+    fn append_dependency_fact_versions_in_view(
         &self,
         canonical: &str,
         facts: &mut Vec<verter_resolver::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<verter_resolver::FactVersionRef>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         let file_fact = verter_resolver::FactVersionRef::FileWholeHash {
             canonical_id: canonical.to_string(),
-            hash: self.get_whole_hash(canonical).unwrap_or_default(),
+            hash: store_view
+                .and_then(|view| view.whole_hash(canonical))
+                .or_else(|| self.get_whole_hash(canonical))
+                .unwrap_or_default(),
         };
         if seen.insert(file_fact.clone()) {
             facts.push(file_fact);
@@ -542,7 +560,10 @@ impl VerterHost {
             verter_resolver::DerivedFactKind::ExportRegistry,
             verter_resolver::DerivedFactKind::BarrelSurface,
         ] {
-            if let Some(hash) = self.current_derived_fact_hash(canonical, kind) {
+            if let Some(hash) = store_view
+                .and_then(|view| view.derived_hash(canonical, kind))
+                .or_else(|| self.current_derived_fact_hash(canonical, kind))
+            {
                 let fact = verter_resolver::FactVersionRef::DerivedFactHash {
                     canonical_id: canonical.to_string(),
                     kind,
@@ -554,7 +575,10 @@ impl VerterHost {
             }
         }
 
-        if let Some(generation) = self.current_barrel_generation(canonical) {
+        if let Some(generation) = store_view
+            .and_then(|view| view.barrel_generation(canonical))
+            .or_else(|| self.current_barrel_generation(canonical))
+        {
             let fact = verter_resolver::FactVersionRef::BarrelGeneration {
                 canonical_id: canonical.to_string(),
                 generation,
@@ -886,7 +910,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         tracked_deps: &std::collections::BTreeSet<String>,
     ) -> Vec<verter_resolver::FactVersionRef> {
         self.host
-            .current_dependency_fact_versions(canonical, tracked_deps)
+            .current_dependency_fact_versions_in_view(canonical, tracked_deps, self.store_view)
     }
 }
 

@@ -8,19 +8,26 @@ use std::time::Instant;
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
+use crate::resolver_store::HostStoreView;
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
 use verter_resolver::{
-    build_imported_eval_inputs, collect_requested_binding_names,
+    append_component_candidate_branches, append_native_candidate_branch,
+    build_imported_eval_inputs, collect_dynamic_root_candidates_from_type,
+    collect_requested_binding_names,
     evaluate_imported_decl_with_owner_env as resolver_evaluate_imported_decl_with_owner_env,
-    inject_imported_type_aliases, materialize_imported_runtime_values_into_env, run_stable_request,
-    DeclarationMetadataResolver, ImportedDeclEvalResolver, ImportedEvalBinding,
-    ImportedEvalCollectorResolver, ImportedEvalLookup, ImportedEvalLookupResolver,
-    ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
-    ImportedEvalTraversalBudget, ImportedRuntimeValueResolver, ImportedTypeAliasPrepareError,
-    ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver, PreparedImportedDeclContext,
-    RequestSource, ResolvedExportTarget, SingleflightRole, StableRequestExecutor, StoreView,
+    fallthrough_cache_key, inject_imported_type_aliases, known_spread_keys_from_type_expr,
+    inject_prop_type_overrides, materialize_imported_runtime_values_into_env,
+    merge_fallthrough_branches, push_partial_reason, resolve_usage_prop_type,
+    run_stable_request, DeclarationMetadataResolver, DynamicRootCandidate,
+    FallthroughResolutionView, FallthroughResolverHost, ImportedDeclEvalResolver,
+    ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalLookup,
+    ImportedEvalLookupResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
+    ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
+    ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
+    PreparedImportedDeclContext, RequestSource, ResolvedExportTarget, SingleflightRole,
+    StableRequestExecutor, StoreView,
 };
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -51,6 +58,7 @@ struct FallthroughRequestExecutor<'a, 'b> {
     prop_type_overrides:
         Option<&'a rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>>,
     visiting: &'b mut rustc_hash::FxHashSet<String>,
+    fixed_store_view: Option<HostStoreView>,
     last_snapshot_epoch: Option<u64>,
 }
 
@@ -68,8 +76,14 @@ impl<'a, 'b> FallthroughRequestExecutor<'a, 'b> {
             canonical_id,
             prop_type_overrides,
             visiting,
+            fixed_store_view: None,
             last_snapshot_epoch: None,
         }
+    }
+
+    fn with_fixed_view(mut self, store_view: Option<&HostStoreView>) -> Self {
+        self.fixed_store_view = store_view.cloned();
+        self
     }
 }
 
@@ -91,6 +105,10 @@ impl<'a, 'b>
     }
 
     fn snapshot_view(&mut self) -> Self::View {
+        if let Some(view) = self.fixed_store_view.as_ref() {
+            self.last_snapshot_epoch = Some(view.mutation_epoch());
+            return view.clone();
+        }
         let view = self.host.resolver_store_view();
         self.last_snapshot_epoch = Some(view.mutation_epoch());
         view
@@ -157,6 +175,9 @@ impl<'a, 'b>
     }
 
     fn is_stable(&mut self, _view: &Self::View) -> bool {
+        if self.fixed_store_view.is_some() {
+            return true;
+        }
         self.last_snapshot_epoch
             .is_some_and(|epoch| self.host.current_store_view_epoch() == epoch)
     }
@@ -173,6 +194,87 @@ impl<'a, 'b>
 
     fn max_attempts(&self) -> usize {
         STORE_VIEW_STABILITY_MAX_ATTEMPTS
+    }
+}
+
+impl FallthroughResolutionView for crate::types::FallthroughResolution {
+    fn accepted_props(&self) -> &[verter_analysis::component_meta::AcceptedPropAnalysis] {
+        &self.accepted_props
+    }
+
+    fn accepted_events(&self) -> &[verter_analysis::component_meta::AcceptedEventAnalysis] {
+        &self.accepted_events
+    }
+
+    fn fallthrough_surface(&self) -> &verter_analysis::component_meta::FallthroughSurface {
+        &self.fallthrough_surface
+    }
+
+    fn fact_versions(&self) -> &[verter_resolver::FactVersionRef] {
+        &self.fact_versions
+    }
+}
+
+struct HostFallthroughResolver<'a> {
+    host: &'a VerterHost,
+    parent_canonical_id: &'a str,
+    store_view: Option<&'a HostStoreView>,
+}
+
+impl FallthroughResolverHost for HostFallthroughResolver<'_> {
+    type ChildResolution = crate::types::FallthroughResolution;
+
+    fn intrinsic_members_for_tag(
+        &self,
+        tag: &str,
+    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
+        self.host.intrinsic_members_for_tag(tag)
+    }
+
+    fn resolve_child_component_canonical(
+        &self,
+        parent_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        debug_assert_eq!(self.parent_canonical_id, parent_canonical);
+        if let Some(view) = self.store_view {
+            if let Some(resolution) = view.dependency_resolution(parent_canonical, import_source) {
+                return resolution.resolved_canonical_id.clone();
+            }
+        }
+        self.host.resolve_loaded_dependency_canonical(
+            parent_canonical,
+            import_source,
+            verter_vfs::ResolveRequestKind::EsmImport,
+        )
+    }
+
+    fn current_dependency_fact_versions(
+        &self,
+        canonical_id: &str,
+    ) -> Vec<verter_resolver::FactVersionRef> {
+        self.host
+            .current_dependency_fact_versions_in_view(
+                canonical_id,
+                &std::collections::BTreeSet::new(),
+                self.store_view,
+            )
+    }
+
+    fn resolve_child_fallthrough(
+        &self,
+        canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+    ) -> Option<Self::ChildResolution> {
+        self.host.resolve_fallthrough_surface_internal_with_overrides_in_view(
+            canonical_id,
+            prop_type_overrides,
+            visiting,
+            self.store_view,
+        )
     }
 }
 
@@ -1709,7 +1811,12 @@ impl VerterHost {
         canonical_id: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
-        self.resolve_fallthrough_surface_internal_with_overrides(canonical_id, None, visiting)
+        self.resolve_fallthrough_surface_internal_with_overrides_in_view(
+            canonical_id,
+            None,
+            visiting,
+            None,
+        )
     }
 
     fn resolve_fallthrough_surface_internal_with_overrides(
@@ -1719,6 +1826,23 @@ impl VerterHost {
             &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
+    ) -> Option<crate::types::FallthroughResolution> {
+        self.resolve_fallthrough_surface_internal_with_overrides_in_view(
+            canonical_id,
+            prop_type_overrides,
+            visiting,
+            None,
+        )
+    }
+
+    fn resolve_fallthrough_surface_internal_with_overrides_in_view(
+        &self,
+        canonical_id: &str,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+        store_view: Option<&HostStoreView>,
     ) -> Option<crate::types::FallthroughResolution> {
         use verter_analysis::component_meta::*;
         let started = component_meta_debug_enabled().then(Instant::now);
@@ -1748,9 +1872,10 @@ impl VerterHost {
                         },
                     }],
                 },
-                fact_versions: self.current_dependency_fact_versions(
+                fact_versions: self.current_dependency_fact_versions_in_view(
                     canonical_id,
                     &std::collections::BTreeSet::new(),
+                    store_view,
                 ),
             });
         }
@@ -1760,7 +1885,8 @@ impl VerterHost {
             canonical_id.to_string(),
             prop_type_overrides,
             visiting,
-        );
+        )
+        .with_fixed_view(store_view);
         let result = run_stable_request(&self.fallthrough_singleflight, &mut executor)
             .expect("fallthrough request execution is infallible");
 
@@ -1824,10 +1950,14 @@ impl VerterHost {
     ) -> Option<crate::types::FallthroughResolution> {
         use verter_analysis::component_meta::*;
 
+        let whole_hash = store_view
+            .and_then(|view| view.whole_hash(canonical_id))
+            .or_else(|| self.get_whole_hash(canonical_id))
+            .unwrap_or_default();
         let resolved = self.compute_component_meta_state(
             canonical_id,
             crate::types::ResolverMode::Expanded,
-            self.get_whole_hash(canonical_id).unwrap_or_default(),
+            whole_hash,
             store_view,
         )?;
         let mut fallthrough_fact_versions = resolved.fact_versions.clone();
@@ -1907,12 +2037,18 @@ impl VerterHost {
                 let mut fallthrough_branches = Vec::new();
                 let mut any_partial = false;
                 let mut any_unresolved = false;
+                let fallthrough_resolver = HostFallthroughResolver {
+                    host: self,
+                    parent_canonical_id: canonical_id,
+                    store_view,
+                };
                 let mut eval_env = if let Some(ref cached_inputs) = resolved.cached_eval_inputs {
-                    self.build_fallthrough_eval_env_with_inputs(
+                    self.build_fallthrough_eval_env_with_inputs_in_view(
                         canonical_id,
                         &resolved.snapshot,
                         prop_type_overrides,
                         cached_inputs,
+                        store_view,
                     )
                 } else {
                     self.build_fallthrough_eval_env_in_view(
@@ -1943,12 +2079,13 @@ impl VerterHost {
 
                     match &branch.target {
                         RootTargetRef::NativeElement { tag, .. } => {
-                            push_native_candidate_branch(
-                                self,
+                            append_native_candidate_branch(
+                                &fallthrough_resolver,
                                 tag,
                                 branch_key,
                                 branch.condition_text.clone(),
-                                consumed,
+                                &consumed.attrs,
+                                &consumed.listeners,
                                 &parent_partial_reasons,
                                 &declared_prop_names,
                                 &declared_event_names,
@@ -1997,12 +2134,13 @@ impl VerterHost {
                                 };
                                 match candidate {
                                     DynamicRootCandidate::NativeTag { tag } => {
-                                        push_native_candidate_branch(
-                                            self,
+                                        append_native_candidate_branch(
+                                            &fallthrough_resolver,
                                             &tag,
                                             candidate_key,
                                             branch.condition_text.clone(),
-                                            consumed,
+                                            &consumed.attrs,
+                                            &consumed.listeners,
                                             &parent_partial_reasons,
                                             &declared_prop_names,
                                             &declared_event_names,
@@ -2016,13 +2154,14 @@ impl VerterHost {
                                         import_source,
                                     } => {
                                         append_component_candidate_branches(
-                                            self,
+                                            &fallthrough_resolver,
                                             canonical_id,
                                             &component_name,
                                             &import_source,
                                             candidate_key,
                                             branch.condition_text.clone(),
-                                            consumed,
+                                            &consumed.attrs,
+                                            &consumed.listeners,
                                             &parent_partial_reasons,
                                             child_prop_overrides.as_ref(),
                                             &declared_prop_names,
@@ -2054,13 +2193,14 @@ impl VerterHost {
                             match import_source.as_deref() {
                                 Some(import_source) => {
                                     append_component_candidate_branches(
-                                        self,
+                                        &fallthrough_resolver,
                                         canonical_id,
                                         name,
                                         import_source,
                                         branch_key,
                                         branch.condition_text.clone(),
-                                        consumed,
+                                        &consumed.attrs,
+                                        &consumed.listeners,
                                         &parent_partial_reasons,
                                         child_prop_overrides.as_ref(),
                                         &declared_prop_names,
@@ -2120,117 +2260,13 @@ impl VerterHost {
                 }
 
                 fallthrough_branches.sort_by(|a, b| a.branch_key.cmp(&b.branch_key));
-                let total_branches = fallthrough_branches.len();
-                let force_conditional = any_partial || any_unresolved;
-
-                let mut inherited_prop_map: rustc_hash::FxHashMap<
-                    String,
-                    (AcceptedPropAnalysis, Vec<String>),
-                > = rustc_hash::FxHashMap::default();
-                let mut inherited_event_map: rustc_hash::FxHashMap<
-                    String,
-                    (AcceptedEventAnalysis, Vec<String>),
-                > = rustc_hash::FxHashMap::default();
-
-                for fb in &fallthrough_branches {
-                    if matches!(fb.status, BranchStatus::Unresolved { .. }) {
-                        continue;
-                    }
-
-                    for fp in &fb.props {
-                        let entry =
-                            inherited_prop_map
-                                .entry(fp.name.clone())
-                                .or_insert_with(|| {
-                                    (
-                                        AcceptedPropAnalysis {
-                                            name: fp.name.clone(),
-                                            type_expr: fp.type_expr.clone(),
-                                            raw_type: fp.raw_type.clone(),
-                                            required: false,
-                                            provenance: MemberProvenance::Inherited {
-                                                sources: fp.sources.clone(),
-                                            },
-                                            availability: MemberAvailability::Always,
-                                            kind: AcceptedPropKind::Attr,
-                                        },
-                                        Vec::new(),
-                                    )
-                                });
-                        merge_type_expr(&mut entry.0.type_expr, &fp.type_expr);
-                        if entry.0.raw_type != fp.raw_type {
-                            entry.0.raw_type = None;
-                        }
-                        if let MemberProvenance::Inherited { sources } = &mut entry.0.provenance {
-                            merge_inherited_sources(sources, &fp.sources);
-                        }
-                        entry.1.push(fb.branch_key.clone());
-                    }
-
-                    for fe in &fb.events {
-                        let entry =
-                            inherited_event_map
-                                .entry(fe.name.clone())
-                                .or_insert_with(|| {
-                                    (
-                                        AcceptedEventAnalysis {
-                                            name: fe.name.clone(),
-                                            payload: fe.payload.clone(),
-                                            raw_signature: fe.raw_signature.clone(),
-                                            provenance: MemberProvenance::Inherited {
-                                                sources: fe.sources.clone(),
-                                            },
-                                            availability: MemberAvailability::Always,
-                                            kind: AcceptedEventKind::Listener,
-                                        },
-                                        Vec::new(),
-                                    )
-                                });
-                        merge_type_expr(&mut entry.0.payload, &fe.payload);
-                        if entry.0.raw_signature != fe.raw_signature {
-                            entry.0.raw_signature = None;
-                        }
-                        if let MemberProvenance::Inherited { sources } = &mut entry.0.provenance {
-                            merge_inherited_sources(sources, &fe.sources);
-                        }
-                        entry.1.push(fb.branch_key.clone());
-                    }
-                }
-
-                for (_, (prop, branch_keys)) in inherited_prop_map.iter_mut() {
-                    branch_keys.sort();
-                    branch_keys.dedup();
-                    if force_conditional || branch_keys.len() < total_branches {
-                        prop.availability = MemberAvailability::Conditional {
-                            branch_keys: branch_keys.clone(),
-                        };
-                    }
-                }
-                for (_, (event, branch_keys)) in inherited_event_map.iter_mut() {
-                    branch_keys.sort();
-                    branch_keys.dedup();
-                    if force_conditional || branch_keys.len() < total_branches {
-                        event.availability = MemberAvailability::Conditional {
-                            branch_keys: branch_keys.clone(),
-                        };
-                    }
-                }
-
-                let mut inherited_props: Vec<AcceptedPropAnalysis> =
-                    inherited_prop_map.into_values().map(|(p, _)| p).collect();
-                inherited_props.sort_by(|a, b| a.name.cmp(&b.name));
-                accepted_props.extend(inherited_props);
-
-                let mut inherited_events: Vec<AcceptedEventAnalysis> =
-                    inherited_event_map.into_values().map(|(e, _)| e).collect();
-                inherited_events.sort_by(|a, b| a.name.cmp(&b.name));
-                accepted_events.extend(inherited_events);
-
-                let completeness = if any_partial || any_unresolved {
-                    AcceptedSurfaceCompleteness::LowerBound
-                } else {
-                    AcceptedSurfaceCompleteness::Exact
-                };
+                let completeness = merge_fallthrough_branches(
+                    &mut accepted_props,
+                    &mut accepted_events,
+                    &fallthrough_branches,
+                    any_partial,
+                    any_unresolved,
+                );
 
                 Some(crate::types::FallthroughResolution {
                     accepted_props,
@@ -2683,7 +2719,8 @@ impl VerterHost {
             verter_analysis::type_eval_build::parse_value_expression_type(&expression)
         {
             candidates.extend(collect_dynamic_root_candidates_from_type(
-                &lowered, snapshot,
+                &lowered,
+                snapshot.imports.as_slice(),
             ));
         }
         if let Some(env) = eval_env.as_mut() {
@@ -2691,7 +2728,8 @@ impl VerterHost {
                 verter_analysis::type_eval_build::evaluate_value_expression(&expression, env)
             {
                 candidates.extend(collect_dynamic_root_candidates_from_type(
-                    &evaluated, snapshot,
+                    &evaluated,
+                    snapshot.imports.as_slice(),
                 ));
             }
         }
@@ -6522,721 +6560,6 @@ fn resolve_reexport_target(
 struct ResolvedConsumedBindings {
     bindings: verter_analysis::component_meta::ConsumedRootBindings,
     partial_reasons: Vec<verter_analysis::component_meta::PartialBranchReason>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DynamicRootCandidate {
-    NativeTag {
-        tag: String,
-    },
-    ComponentImport {
-        component_name: String,
-        import_source: String,
-    },
-}
-
-#[derive(Debug, Clone, Default)]
-struct KnownSpreadKeys {
-    attrs: std::collections::BTreeSet<String>,
-    listeners: std::collections::BTreeSet<String>,
-    exact: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_native_candidate_branch(
-    host: &VerterHost,
-    tag: &str,
-    branch_key: String,
-    condition_text: Option<String>,
-    consumed: &verter_analysis::component_meta::ConsumedRootBindings,
-    parent_partial_reasons: &[verter_analysis::component_meta::PartialBranchReason],
-    declared_prop_names: &rustc_hash::FxHashSet<String>,
-    declared_event_names: &rustc_hash::FxHashSet<String>,
-    declared_listener_aliases: &rustc_hash::FxHashSet<String>,
-    fallthrough_branches: &mut Vec<verter_analysis::component_meta::FallthroughBranch>,
-    any_partial: &mut bool,
-) {
-    use verter_analysis::component_meta::*;
-
-    let intrinsic_members = host.intrinsic_members_for_tag(tag);
-
-    let mut inherited_props = Vec::new();
-    let mut inherited_events = Vec::new();
-
-    for member in &intrinsic_members {
-        match member.kind {
-            verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => {
-                if declared_prop_names.contains(member.name.as_str()) {
-                    continue;
-                }
-                if consumed.attrs.iter().any(|attr| attr == &member.name) {
-                    continue;
-                }
-                inherited_props.push(FallthroughPropEntry {
-                    name: member.name.clone(),
-                    type_expr: member.type_expr.clone(),
-                    raw_type: None,
-                    sources: vec![InheritedSource::NativeTag {
-                        tag: tag.to_string(),
-                    }],
-                });
-            }
-            verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
-                if declared_event_names.contains(member.name.as_str())
-                    || declared_listener_aliases.contains(member.name.as_str())
-                {
-                    continue;
-                }
-                if consumed
-                    .listeners
-                    .iter()
-                    .any(|listener| listener == &member.name)
-                {
-                    continue;
-                }
-                inherited_events.push(FallthroughEventEntry {
-                    name: member.name.clone(),
-                    payload: member.type_expr.clone(),
-                    raw_signature: None,
-                    sources: vec![InheritedSource::NativeTag {
-                        tag: tag.to_string(),
-                    }],
-                });
-            }
-        }
-    }
-
-    inherited_props.sort_by(|left, right| left.name.cmp(&right.name));
-    inherited_events.sort_by(|left, right| left.name.cmp(&right.name));
-
-    let status = if parent_partial_reasons.is_empty() {
-        BranchStatus::Resolved
-    } else {
-        *any_partial = true;
-        BranchStatus::PartiallyUnresolved {
-            reasons: parent_partial_reasons.to_vec(),
-        }
-    };
-
-    fallthrough_branches.push(FallthroughBranch {
-        branch_key,
-        condition_text,
-        props: inherited_props,
-        events: inherited_events,
-        root_chain: vec![ResolvedRootStep::NativeTag {
-            tag: tag.to_string(),
-        }],
-        status,
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_component_candidate_branches(
-    host: &VerterHost,
-    canonical_id: &str,
-    component_name: &str,
-    import_source: &str,
-    branch_key: String,
-    condition_text: Option<String>,
-    consumed: &verter_analysis::component_meta::ConsumedRootBindings,
-    parent_partial_reasons: &[verter_analysis::component_meta::PartialBranchReason],
-    child_prop_overrides: Option<
-        &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-    >,
-    declared_prop_names: &rustc_hash::FxHashSet<String>,
-    declared_event_names: &rustc_hash::FxHashSet<String>,
-    declared_listener_aliases: &rustc_hash::FxHashSet<String>,
-    fallthrough_branches: &mut Vec<verter_analysis::component_meta::FallthroughBranch>,
-    any_partial: &mut bool,
-    any_unresolved: &mut bool,
-    fact_versions: &mut Vec<verter_resolver::FactVersionRef>,
-    visiting: &mut rustc_hash::FxHashSet<String>,
-) {
-    use verter_analysis::component_meta::*;
-
-    let child_canonical = host.resolve_loaded_dependency_canonical(
-        canonical_id,
-        import_source,
-        verter_vfs::ResolveRequestKind::EsmImport,
-    );
-
-    let Some(child_id) = child_canonical else {
-        *any_unresolved = true;
-        fallthrough_branches.push(FallthroughBranch {
-            branch_key,
-            condition_text,
-            props: Vec::new(),
-            events: Vec::new(),
-            root_chain: vec![ResolvedRootStep::Unresolved {
-                tag: component_name.to_string(),
-                reason: UnresolvedBranchReason::UnresolvedChildImport {
-                    import_source: Some(import_source.to_string()),
-                },
-            }],
-            status: BranchStatus::Unresolved {
-                reason: UnresolvedBranchReason::UnresolvedChildImport {
-                    import_source: Some(import_source.to_string()),
-                },
-            },
-        });
-        return;
-    };
-
-    extend_unique_fact_versions(
-        fact_versions,
-        host.current_dependency_fact_versions(&child_id, &std::collections::BTreeSet::new()),
-    );
-
-    // Fallthrough inheritance depends on Vue root reachability facts. When the
-    // imported child resolves to a non-SFC entrypoint (package declarations,
-    // TS helpers, runtime JS), recursing cannot produce a stable inherited
-    // surface and only drags the query through external graphs.
-    if !child_id.ends_with(".vue") {
-        *any_unresolved = true;
-        fallthrough_branches.push(FallthroughBranch {
-            branch_key,
-            condition_text,
-            props: Vec::new(),
-            events: Vec::new(),
-            root_chain: vec![ResolvedRootStep::Component {
-                canonical_id: child_id,
-                component_name: component_name.to_string(),
-            }],
-            status: BranchStatus::Unresolved {
-                reason: UnresolvedBranchReason::ChildResolutionFailed,
-            },
-        });
-        return;
-    }
-
-    let Some(child_resolution) = host.resolve_fallthrough_surface_internal_with_overrides(
-        &child_id,
-        child_prop_overrides,
-        visiting,
-    ) else {
-        *any_unresolved = true;
-        fallthrough_branches.push(FallthroughBranch {
-            branch_key,
-            condition_text,
-            props: Vec::new(),
-            events: Vec::new(),
-            root_chain: vec![ResolvedRootStep::Component {
-                canonical_id: child_id.clone(),
-                component_name: component_name.to_string(),
-            }],
-            status: BranchStatus::Unresolved {
-                reason: UnresolvedBranchReason::ChildResolutionFailed,
-            },
-        });
-        return;
-    };
-
-    extend_unique_fact_versions(
-        fact_versions,
-        child_resolution.fact_versions.iter().cloned(),
-    );
-
-    match &child_resolution.fallthrough_surface {
-        FallthroughSurface::None { .. } => {
-            let mut inherited_props = Vec::new();
-            let mut inherited_events = Vec::new();
-
-            for prop in &child_resolution.accepted_props {
-                if declared_prop_names.contains(&prop.name) {
-                    continue;
-                }
-                if consumed.attrs.iter().any(|attr| attr == &prop.name) {
-                    continue;
-                }
-                inherited_props.push(FallthroughPropEntry {
-                    name: prop.name.clone(),
-                    type_expr: prop.type_expr.clone(),
-                    raw_type: prop.raw_type.clone(),
-                    sources: vec![InheritedSource::Component {
-                        canonical_id: child_id.clone(),
-                    }],
-                });
-            }
-
-            for event in &child_resolution.accepted_events {
-                if declared_event_names.contains(&event.name)
-                    || declared_listener_aliases.contains(&event.name)
-                {
-                    continue;
-                }
-                if consumed
-                    .listeners
-                    .iter()
-                    .any(|listener| listener == &event.name)
-                {
-                    continue;
-                }
-                inherited_events.push(FallthroughEventEntry {
-                    name: event.name.clone(),
-                    payload: event.payload.clone(),
-                    raw_signature: event.raw_signature.clone(),
-                    sources: vec![InheritedSource::Component {
-                        canonical_id: child_id.clone(),
-                    }],
-                });
-            }
-
-            inherited_props.sort_by(|left, right| left.name.cmp(&right.name));
-            inherited_events.sort_by(|left, right| left.name.cmp(&right.name));
-
-            let status = if parent_partial_reasons.is_empty() {
-                BranchStatus::Resolved
-            } else {
-                *any_partial = true;
-                BranchStatus::PartiallyUnresolved {
-                    reasons: parent_partial_reasons.to_vec(),
-                }
-            };
-
-            fallthrough_branches.push(FallthroughBranch {
-                branch_key,
-                condition_text,
-                props: inherited_props,
-                events: inherited_events,
-                root_chain: vec![ResolvedRootStep::Component {
-                    canonical_id: child_id,
-                    component_name: component_name.to_string(),
-                }],
-                status,
-            });
-        }
-        FallthroughSurface::Branches {
-            branches: child_branches,
-        } => {
-            let child_declared_props: Vec<_> = child_resolution
-                .accepted_props
-                .iter()
-                .filter(|prop| matches!(prop.provenance, MemberProvenance::Declared))
-                .collect();
-            let child_declared_events: Vec<_> = child_resolution
-                .accepted_events
-                .iter()
-                .filter(|event| matches!(event.provenance, MemberProvenance::Declared))
-                .collect();
-
-            for child_branch in child_branches {
-                let composed_key = format!("{}.{}", branch_key, child_branch.branch_key);
-
-                let mut inherited_props = Vec::new();
-                let mut inherited_events = Vec::new();
-
-                for prop in &child_declared_props {
-                    if declared_prop_names.contains(&prop.name) {
-                        continue;
-                    }
-                    if consumed.attrs.iter().any(|attr| attr == &prop.name) {
-                        continue;
-                    }
-                    inherited_props.push(FallthroughPropEntry {
-                        name: prop.name.clone(),
-                        type_expr: prop.type_expr.clone(),
-                        raw_type: prop.raw_type.clone(),
-                        sources: vec![InheritedSource::Component {
-                            canonical_id: child_id.clone(),
-                        }],
-                    });
-                }
-
-                for prop in &child_branch.props {
-                    if declared_prop_names.contains(&prop.name) {
-                        continue;
-                    }
-                    if consumed.attrs.iter().any(|attr| attr == &prop.name) {
-                        continue;
-                    }
-                    inherited_props.push(prop.clone());
-                }
-
-                for event in &child_declared_events {
-                    if declared_event_names.contains(&event.name)
-                        || declared_listener_aliases.contains(&event.name)
-                    {
-                        continue;
-                    }
-                    if consumed
-                        .listeners
-                        .iter()
-                        .any(|listener| listener == &event.name)
-                    {
-                        continue;
-                    }
-                    inherited_events.push(FallthroughEventEntry {
-                        name: event.name.clone(),
-                        payload: event.payload.clone(),
-                        raw_signature: event.raw_signature.clone(),
-                        sources: vec![InheritedSource::Component {
-                            canonical_id: child_id.clone(),
-                        }],
-                    });
-                }
-
-                for event in &child_branch.events {
-                    if declared_event_names.contains(&event.name)
-                        || declared_listener_aliases.contains(&event.name)
-                    {
-                        continue;
-                    }
-                    if consumed
-                        .listeners
-                        .iter()
-                        .any(|listener| listener == &event.name)
-                    {
-                        continue;
-                    }
-                    inherited_events.push(event.clone());
-                }
-
-                inherited_props.sort_by(|left, right| left.name.cmp(&right.name));
-                inherited_events.sort_by(|left, right| left.name.cmp(&right.name));
-
-                let mut root_chain = vec![ResolvedRootStep::Component {
-                    canonical_id: child_id.clone(),
-                    component_name: component_name.to_string(),
-                }];
-                root_chain.extend(child_branch.root_chain.clone());
-
-                let status = match &child_branch.status {
-                    BranchStatus::Resolved => {
-                        if parent_partial_reasons.is_empty() {
-                            BranchStatus::Resolved
-                        } else {
-                            *any_partial = true;
-                            BranchStatus::PartiallyUnresolved {
-                                reasons: parent_partial_reasons.to_vec(),
-                            }
-                        }
-                    }
-                    BranchStatus::PartiallyUnresolved { reasons } => {
-                        *any_partial = true;
-                        let mut combined = reasons.clone();
-                        combined.extend(parent_partial_reasons.iter().cloned());
-                        combined.sort();
-                        combined.dedup();
-                        BranchStatus::PartiallyUnresolved { reasons: combined }
-                    }
-                    BranchStatus::Unresolved { reason } => {
-                        if !parent_partial_reasons.is_empty() {
-                            *any_partial = true;
-                        }
-                        *any_unresolved = true;
-                        BranchStatus::Unresolved {
-                            reason: reason.clone(),
-                        }
-                    }
-                };
-
-                fallthrough_branches.push(FallthroughBranch {
-                    branch_key: composed_key,
-                    condition_text: condition_text.clone(),
-                    props: inherited_props,
-                    events: inherited_events,
-                    root_chain,
-                    status,
-                });
-            }
-        }
-    }
-}
-
-fn extend_unique_fact_versions<I>(
-    fact_versions: &mut Vec<verter_resolver::FactVersionRef>,
-    new_facts: I,
-) where
-    I: IntoIterator<Item = verter_resolver::FactVersionRef>,
-{
-    let mut seen: rustc_hash::FxHashSet<verter_resolver::FactVersionRef> =
-        fact_versions.iter().cloned().collect();
-    for fact in new_facts {
-        if seen.insert(fact.clone()) {
-            fact_versions.push(fact);
-        }
-    }
-}
-
-fn fallthrough_cache_key(
-    canonical_id: &str,
-    generic_root_propagation: bool,
-    prop_type_overrides: Option<
-        &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-    >,
-) -> verter_resolver::FallthroughNodeKey {
-    verter_resolver::FallthroughNodeKey {
-        canonical_component_id: canonical_id.to_string(),
-        node_kind: verter_resolver::FallthroughNodeKind::BranchUnionMerge,
-        override_fingerprint: prop_type_overrides
-            .map(hash_prop_type_overrides)
-            .unwrap_or_default(),
-        behavior_flags: u32::from(generic_root_propagation),
-        branch_selector: None,
-    }
-}
-
-fn hash_prop_type_overrides(
-    overrides: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-
-    let mut pairs: Vec<_> = overrides.iter().collect();
-    pairs.sort_by(|a, b| a.0.cmp(b.0));
-
-    let mut hasher = rustc_hash::FxHasher::default();
-    for (name, ty) in pairs {
-        name.hash(&mut hasher);
-        ty.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn inject_prop_type_overrides(
-    env: &mut verter_analysis::type_eval::EvalEnv,
-    overrides: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
-) {
-    for (name, ty) in overrides {
-        env.add_value(verter_analysis::type_eval::ValueDeclInfo {
-            name: name.clone(),
-            declaration_id: 0,
-            kind: verter_analysis::type_eval::ValueDeclKind::Const,
-            type_annotation: Some(ty.clone()),
-            function_signature: None,
-            object_shape: None,
-        });
-    }
-}
-
-fn resolve_usage_prop_type(
-    prop: &verter_analysis::template::TemplatePropUsage,
-    eval_env: &mut Option<verter_analysis::type_eval::EvalEnv>,
-) -> Option<verter_analysis::type_expr::TypeExpr> {
-    use verter_analysis::type_expr::TypeExpr;
-
-    if prop.from_spread {
-        return None;
-    }
-
-    if !prop.is_bound {
-        return match &prop.expression {
-            Some(expression) => Some(TypeExpr::string_literal(expression.clone())),
-            None => Some(TypeExpr::boolean_literal(true)),
-        };
-    }
-
-    if let Some(expression) = &prop.expression {
-        if let Some(env) = eval_env.as_mut() {
-            if let Some(ty) =
-                verter_analysis::type_eval_build::evaluate_value_expression(expression, env)
-            {
-                return Some(ty);
-            }
-        }
-
-        if let Some(ty) = verter_analysis::type_eval_build::parse_value_expression_type(expression)
-        {
-            return Some(ty);
-        }
-    }
-
-    if prop.is_shorthand {
-        if let Some(env) = eval_env.as_mut() {
-            if let Some(ty) =
-                verter_analysis::type_eval_build::evaluate_value_expression(&prop.name, env)
-            {
-                return Some(ty);
-            }
-        }
-
-        if let Some(ty) = verter_analysis::type_eval_build::parse_value_expression_type(&prop.name)
-        {
-            return Some(ty);
-        }
-    }
-
-    None
-}
-
-fn merge_type_expr(
-    existing: &mut verter_analysis::type_expr::TypeExpr,
-    incoming: &verter_analysis::type_expr::TypeExpr,
-) {
-    use verter_analysis::type_expr::TypeExpr;
-
-    if existing == incoming {
-        return;
-    }
-
-    match existing {
-        TypeExpr::Union(types) => {
-            if !types.iter().any(|t| t == incoming) {
-                types.push(incoming.clone());
-            }
-        }
-        _ => {
-            *existing = TypeExpr::union(vec![existing.clone(), incoming.clone()]);
-        }
-    }
-}
-
-fn merge_inherited_sources(
-    existing: &mut Vec<verter_analysis::component_meta::InheritedSource>,
-    incoming: &[verter_analysis::component_meta::InheritedSource],
-) {
-    existing.extend(incoming.iter().cloned());
-    existing.sort();
-    existing.dedup();
-}
-
-fn push_partial_reason(
-    reasons: &mut Vec<verter_analysis::component_meta::PartialBranchReason>,
-    reason: verter_analysis::component_meta::PartialBranchReason,
-) {
-    if !reasons.iter().any(|existing| existing == &reason) {
-        reasons.push(reason);
-    }
-}
-
-fn normalize_public_spread_key(
-    key: &str,
-    attrs: &mut std::collections::BTreeSet<String>,
-    listeners: &mut std::collections::BTreeSet<String>,
-) {
-    if key == "class" || key == "style" {
-        return;
-    }
-    if let Some(event_name) = verter_analysis::html_intrinsics::on_prop_to_event_name(key) {
-        listeners.insert(event_name.to_string());
-    } else {
-        attrs.insert(key.to_string());
-    }
-}
-
-fn known_spread_keys_from_object(
-    object: &verter_analysis::type_expr::ObjectExpr,
-) -> KnownSpreadKeys {
-    let mut result = KnownSpreadKeys {
-        exact: true,
-        ..KnownSpreadKeys::default()
-    };
-
-    for member in &object.properties {
-        match member {
-            verter_analysis::type_expr::ObjectMember::Property(prop) => {
-                normalize_public_spread_key(&prop.name, &mut result.attrs, &mut result.listeners)
-            }
-            verter_analysis::type_expr::ObjectMember::Method(method) => {
-                normalize_public_spread_key(&method.name, &mut result.attrs, &mut result.listeners)
-            }
-            verter_analysis::type_expr::ObjectMember::IndexSignature(_)
-            | verter_analysis::type_expr::ObjectMember::CallSignature(_)
-            | verter_analysis::type_expr::ObjectMember::ConstructSignature(_) => {
-                result.exact = false;
-            }
-        }
-    }
-
-    result
-}
-
-fn intersect_known_spread_keys(
-    mut left: KnownSpreadKeys,
-    right: KnownSpreadKeys,
-) -> KnownSpreadKeys {
-    left.attrs = left.attrs.intersection(&right.attrs).cloned().collect();
-    left.listeners = left
-        .listeners
-        .intersection(&right.listeners)
-        .cloned()
-        .collect();
-    left.exact &= right.exact;
-    left
-}
-
-fn known_spread_keys_from_type_expr(
-    ty: &verter_analysis::type_expr::TypeExpr,
-) -> Option<KnownSpreadKeys> {
-    use verter_analysis::type_expr::TypeExpr;
-
-    match ty {
-        TypeExpr::Object(obj) => Some(known_spread_keys_from_object(obj)),
-        TypeExpr::Parenthesized(inner) => known_spread_keys_from_type_expr(inner),
-        TypeExpr::Intersection(types) => {
-            let mut result = KnownSpreadKeys {
-                exact: true,
-                ..KnownSpreadKeys::default()
-            };
-            let mut saw_any = false;
-            for part in types {
-                let Some(summary) = known_spread_keys_from_type_expr(part) else {
-                    result.exact = false;
-                    continue;
-                };
-                saw_any = true;
-                result.attrs.extend(summary.attrs);
-                result.listeners.extend(summary.listeners);
-                result.exact &= summary.exact;
-            }
-            saw_any.then_some(result)
-        }
-        TypeExpr::Union(types) => {
-            let mut iter = types.iter();
-            let first = known_spread_keys_from_type_expr(iter.next()?)?;
-            let mut result = first.clone();
-            let mut exact_same_keys = first.exact;
-            for ty in iter {
-                let Some(summary) = known_spread_keys_from_type_expr(ty) else {
-                    result.exact = false;
-                    return Some(result);
-                };
-                exact_same_keys &= summary.exact
-                    && summary.attrs == result.attrs
-                    && summary.listeners == result.listeners;
-                result = intersect_known_spread_keys(result, summary);
-            }
-            result.exact = exact_same_keys;
-            Some(result)
-        }
-        _ => None,
-    }
-}
-
-fn collect_dynamic_root_candidates_from_type(
-    ty: &verter_analysis::type_expr::TypeExpr,
-    snapshot: &FileAnalysisSnapshot,
-) -> Vec<DynamicRootCandidate> {
-    use verter_analysis::type_expr::{LiteralValue, TypeExpr};
-
-    match ty {
-        TypeExpr::Literal(LiteralValue::String(tag)) => {
-            vec![DynamicRootCandidate::NativeTag { tag: tag.clone() }]
-        }
-        TypeExpr::Union(types) => types
-            .iter()
-            .flat_map(|branch| collect_dynamic_root_candidates_from_type(branch, snapshot))
-            .collect(),
-        TypeExpr::Parenthesized(inner) => {
-            collect_dynamic_root_candidates_from_type(inner, snapshot)
-        }
-        TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => snapshot
-            .imports
-            .iter()
-            .filter(|import| !import.is_type_only)
-            .find_map(|import| {
-                import
-                    .bindings
-                    .iter()
-                    .find(|binding| !binding.is_type_only && binding.name == value_ref.path[0])
-                    .map(|_| DynamicRootCandidate::ComponentImport {
-                        component_name: value_ref.path[0].clone(),
-                        import_source: import.source.clone(),
-                    })
-            })
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 /// Extract slot bindings from a type_text that encodes a slot's function signature.
