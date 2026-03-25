@@ -1156,7 +1156,7 @@ fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> crate::type_expr::T
         })
         .collect();
 
-    TypeExpr::Object(ObjectExpr { properties })
+    TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
 }
 
 /// Try to extract macros from an expression statement.

@@ -3,6 +3,7 @@ use crate::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
 use crate::type_expr::{
     MappedModifier, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, TypeParam,
 };
+use std::sync::Arc;
 
 /// Helper to build an EvalEnv with the given type declarations.
 fn env_with_types(types: Vec<TypeDeclInfo>) -> EvalEnv {
@@ -21,10 +22,10 @@ fn default_budget() -> ExpansionBudget {
 fn apply_expansion_budget_resets_counters_for_fresh_expansion() {
     let mut env = EvalEnv::new();
     let expr = TypeExpr::Conditional {
-        check: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        extends: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        true_type: Box::new(TypeExpr::string_literal("yes")),
-        false_type: Box::new(TypeExpr::string_literal("no")),
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        true_type: Arc::new(TypeExpr::string_literal("yes")),
+        false_type: Arc::new(TypeExpr::string_literal("no")),
     };
 
     let _ = expand_normalized_expr(&expr, &mut env, &default_budget());
@@ -53,7 +54,7 @@ fn expand_object_shape_simple_interface() {
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "name".to_string(),
@@ -74,7 +75,7 @@ fn expand_object_shape_simple_interface() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     };
     let mut env = env_with_types(vec![user]);
     let result = expand_object_shape(&TypeExpr::named("User"), &mut env, &default_budget());
@@ -107,7 +108,7 @@ fn expand_object_shape_generic_instantiation() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "value".to_string(),
@@ -122,7 +123,7 @@ fn expand_object_shape_generic_instantiation() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     };
     let mut env = env_with_types(vec![wrapper]);
     let expr =
@@ -149,12 +150,12 @@ fn expand_object_shape_mapped_type() {
         type_parameters: vec![],
         body: TypeExpr::Mapped {
             parameter: "K".to_string(),
-            source: Box::new(TypeExpr::Union(vec![
+            source: Arc::new(TypeExpr::union(vec![
                 TypeExpr::string_literal("a"),
                 TypeExpr::string_literal("b"),
                 TypeExpr::string_literal("c"),
             ])),
-            value: Box::new(TypeExpr::Primitive(PrimitiveName::Boolean)),
+            value: Arc::new(TypeExpr::Primitive(PrimitiveName::Boolean)),
             optional: MappedModifier::None,
             readonly: MappedModifier::None,
             name_type: None,
@@ -193,24 +194,24 @@ fn expand_object_shape_indeterminate_conditional_no_hang() {
             default: None,
         }],
         body: TypeExpr::Conditional {
-            check: Box::new(TypeExpr::named("X")),
-            extends: Box::new(TypeExpr::named("SomeRef")),
-            true_type: Box::new(TypeExpr::Object(ObjectExpr {
+            check: Arc::new(TypeExpr::named("X")),
+            extends: Arc::new(TypeExpr::named("SomeRef")),
+            true_type: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "a".to_string(),
                     ty: TypeExpr::Primitive(PrimitiveName::String),
                     optional: false,
                     readonly: false,
                 })],
-            })),
-            false_type: Box::new(TypeExpr::Object(ObjectExpr {
+            }))),
+            false_type: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "b".to_string(),
                     ty: TypeExpr::Primitive(PrimitiveName::Number),
                     optional: false,
                     readonly: false,
                 })],
-            })),
+            }))),
         },
     };
     let mut env = env_with_types(vec![t]);
@@ -243,7 +244,7 @@ fn expand_object_shape_nested_mapped_depth_limit() {
     // 3 levels of nested mapped types, each with 4 keys
     // Budget: max_mapped_depth = 2
     // Outer and middle levels expand; innermost preserved as Mapped
-    let keys = TypeExpr::Union(vec![
+    let keys = TypeExpr::union(vec![
         TypeExpr::string_literal("x"),
         TypeExpr::string_literal("y"),
         TypeExpr::string_literal("z"),
@@ -253,8 +254,8 @@ fn expand_object_shape_nested_mapped_depth_limit() {
     // Level 3 (innermost): { [I in Keys]: string }
     let level3 = TypeExpr::Mapped {
         parameter: "I".to_string(),
-        source: Box::new(keys.clone()),
-        value: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
+        source: Arc::new(keys.clone()),
+        value: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         optional: MappedModifier::None,
         readonly: MappedModifier::None,
         name_type: None,
@@ -263,8 +264,8 @@ fn expand_object_shape_nested_mapped_depth_limit() {
     // Level 2: { [J in Keys]: Level3 }
     let level2 = TypeExpr::Mapped {
         parameter: "J".to_string(),
-        source: Box::new(keys.clone()),
-        value: Box::new(level3),
+        source: Arc::new(keys.clone()),
+        value: Arc::new(level3),
         optional: MappedModifier::None,
         readonly: MappedModifier::None,
         name_type: None,
@@ -278,8 +279,8 @@ fn expand_object_shape_nested_mapped_depth_limit() {
         type_parameters: vec![],
         body: TypeExpr::Mapped {
             parameter: "K".to_string(),
-            source: Box::new(keys),
-            value: Box::new(level2),
+            source: Arc::new(keys),
+            value: Arc::new(level2),
             optional: MappedModifier::None,
             readonly: MappedModifier::None,
             name_type: None,
@@ -315,23 +316,23 @@ fn expand_object_shape_nested_mapped_depth_limit() {
 #[test]
 fn expand_object_shape_intersection_merge() {
     // { a: string } & { b: number }
-    let expr = TypeExpr::Intersection(vec![
-        TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::intersection(vec![
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: false,
                 readonly: false,
             })],
-        }),
-        TypeExpr::Object(ObjectExpr {
+        })),
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "b".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::Number),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     ]);
 
     let mut env = EvalEnv::new();
@@ -353,8 +354,8 @@ fn expand_object_shape_intersection_merge() {
 fn expand_object_shape_union_variants_vue_merge() {
     // { a: string; b: number } | { a: string; c: boolean }
     // Vue merge semantics: a = required, b = optional, c = optional
-    let expr = TypeExpr::Union(vec![
-        TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::union(vec![
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "a".to_string(),
@@ -369,8 +370,8 @@ fn expand_object_shape_union_variants_vue_merge() {
                     readonly: false,
                 }),
             ],
-        }),
-        TypeExpr::Object(ObjectExpr {
+        })),
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "a".to_string(),
@@ -385,7 +386,7 @@ fn expand_object_shape_union_variants_vue_merge() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     ]);
 
     let mut env = EvalEnv::new();
@@ -438,7 +439,7 @@ fn expand_recursive_generic_terminates() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "value".to_string(),
@@ -449,7 +450,7 @@ fn expand_recursive_generic_terminates() {
                 ObjectMember::Property(ObjectProperty {
                     name: "children".to_string(),
                     ty: TypeExpr::Array {
-                        element: Box::new(TypeExpr::named_with_args(
+                        element: Arc::new(TypeExpr::named_with_args(
                             "Tree",
                             vec![TypeExpr::named("T")],
                         )),
@@ -459,7 +460,7 @@ fn expand_recursive_generic_terminates() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     };
     let mut env = env_with_types(vec![tree]);
     let expr = TypeExpr::named_with_args("Tree", vec![TypeExpr::Primitive(PrimitiveName::String)]);
@@ -485,8 +486,8 @@ fn expand_mapped_infinite_key_space_partial() {
     // { [K in string]: number } — infinite key space, cannot expand
     let expr = TypeExpr::Mapped {
         parameter: "K".to_string(),
-        source: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        value: Box::new(TypeExpr::Primitive(PrimitiveName::Number)),
+        source: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        value: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
         optional: MappedModifier::None,
         readonly: MappedModifier::None,
         name_type: None,
@@ -514,23 +515,23 @@ fn expand_mapped_infinite_key_space_partial() {
 fn expand_intersection_conflicting_optionality() {
     // { a?: string } & { a: string }
     // Intersection removes optionality — a should be required
-    let expr = TypeExpr::Intersection(vec![
-        TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::intersection(vec![
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: true,
                 readonly: false,
             })],
-        }),
-        TypeExpr::Object(ObjectExpr {
+        })),
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     ]);
 
     let mut env = EvalEnv::new();
@@ -552,10 +553,10 @@ fn expand_intersection_conflicting_optionality() {
 fn expand_normalized_preserves_indeterminate_conditional() {
     // T extends U ? A : B where T and U are unresolved
     let expr = TypeExpr::Conditional {
-        check: Box::new(TypeExpr::named("T")),
-        extends: Box::new(TypeExpr::named("U")),
-        true_type: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        false_type: Box::new(TypeExpr::Primitive(PrimitiveName::Number)),
+        check: Arc::new(TypeExpr::named("T")),
+        extends: Arc::new(TypeExpr::named("U")),
+        true_type: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
     };
 
     let mut env = EvalEnv::new();
@@ -587,7 +588,7 @@ fn expand_normalized_preserves_indeterminate_conditional() {
 #[test]
 fn expand_normalized_resolves_utility_types() {
     // Partial<{ a: string; b: number }> -> { a?: string; b?: number }
-    let obj = TypeExpr::Object(ObjectExpr {
+    let obj = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
             ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
@@ -602,7 +603,7 @@ fn expand_normalized_resolves_utility_types() {
                 readonly: false,
             }),
         ],
-    });
+    }));
     let expr = TypeExpr::named_with_args("Partial", vec![obj]);
 
     let mut env = EvalEnv::new();
@@ -647,7 +648,7 @@ fn expand_normalized_marks_unresolved_reference_partial() {
 #[test]
 fn expand_object_shape_deterministic_ordering() {
     // Run the same expansion twice — property order, diagnostics, completeness must match
-    let expr = TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
             ObjectMember::Property(ObjectProperty {
                 name: "z".to_string(),
@@ -668,7 +669,7 @@ fn expand_object_shape_deterministic_ordering() {
                 readonly: false,
             }),
         ],
-    });
+    }));
 
     let mut env1 = EvalEnv::new();
     let result1 = expand_object_shape(&expr, &mut env1, &default_budget());
@@ -689,10 +690,10 @@ fn expand_object_shape_deterministic_ordering() {
 fn expand_normalized_resolves_determinate_conditional() {
     // string extends string ? "yes" : "no" → Literal("yes")
     let expr = TypeExpr::Conditional {
-        check: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        extends: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        true_type: Box::new(TypeExpr::string_literal("yes")),
-        false_type: Box::new(TypeExpr::string_literal("no")),
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        true_type: Arc::new(TypeExpr::string_literal("yes")),
+        false_type: Arc::new(TypeExpr::string_literal("no")),
     };
 
     let mut env = EvalEnv::new();
@@ -715,10 +716,10 @@ fn expand_normalized_resolves_determinate_conditional() {
 fn expand_normalized_resolves_negative_conditional() {
     // number extends string ? "yes" : "no" → Literal("no")
     let expr = TypeExpr::Conditional {
-        check: Box::new(TypeExpr::Primitive(PrimitiveName::Number)),
-        extends: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        true_type: Box::new(TypeExpr::string_literal("yes")),
-        false_type: Box::new(TypeExpr::string_literal("no")),
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+        extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        true_type: Arc::new(TypeExpr::string_literal("yes")),
+        false_type: Arc::new(TypeExpr::string_literal("no")),
     };
 
     let mut env = EvalEnv::new();
@@ -731,21 +732,21 @@ fn expand_normalized_resolves_negative_conditional() {
 #[test]
 fn expand_object_shape_nested_object_preserves_types() {
     // { outer: { inner: string } }
-    let expr = TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![ObjectMember::Property(ObjectProperty {
             name: "outer".to_string(),
-            ty: TypeExpr::Object(ObjectExpr {
+            ty: TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "inner".to_string(),
                     ty: TypeExpr::Primitive(PrimitiveName::String),
                     optional: false,
                     readonly: false,
                 })],
-            }),
+            })),
             optional: false,
             readonly: false,
         })],
-    });
+    }));
 
     let mut env = EvalEnv::new();
     let result = expand_object_shape(&expr, &mut env, &default_budget());
@@ -772,24 +773,24 @@ fn expand_object_shape_nested_object_preserves_types() {
 
 #[test]
 fn expand_object_shape_normalizes_inline_property_types() {
-    let expr = TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![ObjectMember::Property(ObjectProperty {
             name: "config".to_string(),
             ty: TypeExpr::named_with_args(
                 "Partial",
-                vec![TypeExpr::Object(ObjectExpr {
+                vec![TypeExpr::Object(Arc::new(ObjectExpr {
                     properties: vec![ObjectMember::Property(ObjectProperty {
                         name: "ready".to_string(),
                         ty: TypeExpr::Primitive(PrimitiveName::Boolean),
                         optional: false,
                         readonly: false,
                     })],
-                })],
+                }))],
             ),
             optional: false,
             readonly: false,
         })],
-    });
+    }));
 
     let mut env = EvalEnv::new();
     let result = expand_object_shape(&expr, &mut env, &default_budget());
@@ -815,26 +816,26 @@ fn expand_object_shape_normalizes_inline_property_types() {
 fn expand_object_shape_intersection_different_types() {
     // { a: string | number } & { a: string }
     // Should intersect the property types
-    let expr = TypeExpr::Intersection(vec![
-        TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::intersection(vec![
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
-                ty: TypeExpr::Union(vec![
+                ty: TypeExpr::union(vec![
                     TypeExpr::Primitive(PrimitiveName::String),
                     TypeExpr::Primitive(PrimitiveName::Number),
                 ]),
                 optional: false,
                 readonly: false,
             })],
-        }),
-        TypeExpr::Object(ObjectExpr {
+        })),
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     ]);
 
     let mut env = EvalEnv::new();
@@ -854,23 +855,23 @@ fn expand_object_shape_intersection_different_types() {
 fn expand_union_optional_in_some_required_in_others() {
     // { a?: string } | { a: string }
     // Vue semantics: a is present in both but optional in one → optional
-    let expr = TypeExpr::Union(vec![
-        TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::union(vec![
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: true,
                 readonly: false,
             })],
-        }),
-        TypeExpr::Object(ObjectExpr {
+        })),
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     ]);
 
     let mut env = EvalEnv::new();

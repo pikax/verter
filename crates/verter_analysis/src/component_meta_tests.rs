@@ -1,6 +1,7 @@
 use super::*;
 use crate::type_expr::PrimitiveName;
 use crate::types::AnalyzedExposeField;
+use std::sync::Arc;
 
 fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
     ComponentMetaInput {
@@ -468,12 +469,12 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         crate::type_expand::ExpandedProperty {
                             name: "escapeKeyDown".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: vec![crate::type_expr::TupleElement {
+                                elements: Arc::from(vec![crate::type_expr::TupleElement {
                                     label: Some("event".to_string()),
                                     ty: TypeExpr::named("KeyboardEvent"),
                                     optional: false,
                                     rest: false,
-                                }],
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -482,12 +483,12 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         crate::type_expand::ExpandedProperty {
                             name: "closeAutoFocus".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: vec![crate::type_expr::TupleElement {
+                                elements: Arc::from(vec![crate::type_expr::TupleElement {
                                     label: Some("event".to_string()),
                                     ty: TypeExpr::named("Event"),
                                     optional: false,
                                     rest: false,
-                                }],
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -496,12 +497,12 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         crate::type_expand::ExpandedProperty {
                             name: "update:searchTerm".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: vec![crate::type_expr::TupleElement {
+                                elements: Arc::from(vec![crate::type_expr::TupleElement {
                                     label: Some("value".to_string()),
                                     ty: TypeExpr::Primitive(PrimitiveName::String),
                                     optional: false,
                                     rest: false,
-                                }],
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -587,12 +588,12 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         crate::type_expand::ExpandedProperty {
                             name: "escapeKeyDown".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: vec![crate::type_expr::TupleElement {
+                                elements: Arc::from(vec![crate::type_expr::TupleElement {
                                     label: Some("event".to_string()),
                                     ty: TypeExpr::named("KeyboardEvent"),
                                     optional: false,
                                     rest: false,
-                                }],
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -601,7 +602,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         crate::type_expand::ExpandedProperty {
                             name: "closeAutoFocus".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: Vec::new(),
+                                elements: Arc::from(vec![]),
                                 readonly: false,
                             },
                             optional: false,
@@ -610,7 +611,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         crate::type_expand::ExpandedProperty {
                             name: "openAutoFocus".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: Vec::new(),
+                                elements: Arc::from(vec![]),
                                 readonly: false,
                             },
                             optional: false,
@@ -619,7 +620,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         crate::type_expand::ExpandedProperty {
                             name: "entryFocus".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: Vec::new(),
+                                elements: Arc::from(vec![]),
                                 readonly: false,
                             },
                             optional: false,
@@ -1333,7 +1334,7 @@ fn root_reachability_component_usage_link_preserved() {
                     usage_index,
                     ..
                 } => {
-                    assert_eq!(name, "MyComp");
+                    assert_eq!(&**name, "MyComp");
                     assert_eq!(import_source.as_deref(), Some("./MyComp.vue"));
                     assert_eq!(*usage_index, 0);
                 }

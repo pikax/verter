@@ -110,9 +110,10 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
         )?;
         let decl = dep_env.type_symbols.get(exported_name)?.clone();
         for param in &decl.type_parameters {
-            dep_env
-                .type_bindings
-                .insert(param.name.clone(), TypeExpr::named(param.name.clone()));
+            dep_env.type_bindings.insert(
+                param.name.clone(),
+                std::sync::Arc::new(TypeExpr::named(param.name.clone())),
+            );
         }
         Some(verter_analysis::type_eval::evaluate(
             &decl.body,

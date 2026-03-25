@@ -62,7 +62,7 @@ fn object_with_props(names: &[&str]) -> verter_analysis::type_expr::TypeExpr {
         ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
     };
 
-    TypeExpr::Object(ObjectExpr {
+    TypeExpr::Object(Arc::new(ObjectExpr {
         properties: names
             .iter()
             .map(|name| {
@@ -74,13 +74,15 @@ fn object_with_props(names: &[&str]) -> verter_analysis::type_expr::TypeExpr {
                 })
             })
             .collect(),
-    })
+    }))
 }
 
 fn empty_object() -> verter_analysis::type_expr::TypeExpr {
-    verter_analysis::type_expr::TypeExpr::Object(verter_analysis::type_expr::ObjectExpr {
-        properties: Vec::new(),
-    })
+    verter_analysis::type_expr::TypeExpr::Object(std::sync::Arc::new(
+        verter_analysis::type_expr::ObjectExpr {
+            properties: Vec::new(),
+        },
+    ))
 }
 
 #[cfg(not(feature = "scheduler"))]
@@ -207,7 +209,7 @@ fn imported_type_body_specificity_rewards_richer_object_surfaces() {
 fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested_members() {
     let resolved_body = Some(object_with_props(&["next"]));
     let decl_body = Some(verter_analysis::type_expr::TypeExpr::Object(
-        verter_analysis::type_expr::ObjectExpr {
+        std::sync::Arc::new(verter_analysis::type_expr::ObjectExpr {
             properties: vec![
                 verter_analysis::type_expr::ObjectMember::Property(
                     verter_analysis::type_expr::ObjectProperty {
@@ -238,7 +240,7 @@ fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested
                     },
                 ),
             ],
-        },
+        }),
     ));
 
     let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
@@ -273,7 +275,7 @@ fn owner_env_resolution_is_retained_for_top_level_non_object_surfaces() {
         declaration_id: 0,
         kind: verter_analysis::type_eval::TypeDeclKind::Alias,
         type_parameters: Vec::new(),
-        body: verter_analysis::type_expr::TypeExpr::Intersection(vec![
+        body: verter_analysis::type_expr::TypeExpr::intersection(vec![
             object_with_props(&["label"]),
             verter_analysis::type_expr::TypeExpr::named("Shared"),
         ]),

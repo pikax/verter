@@ -927,7 +927,7 @@ pub fn known_spread_keys_from_type_expr(ty: &TypeExpr) -> Option<KnownSpreadKeys
                 ..KnownSpreadKeys::default()
             };
             let mut saw_any = false;
-            for part in types {
+            for part in types.iter() {
                 let Some(summary) = known_spread_keys_from_type_expr(part) else {
                     result.exact = false;
                     continue;
@@ -1147,7 +1147,9 @@ fn merge_type_expr(existing: &mut TypeExpr, incoming: &TypeExpr) {
     match existing {
         TypeExpr::Union(types) => {
             if !types.iter().any(|ty| ty == incoming) {
-                types.push(incoming.clone());
+                let mut vec: Vec<TypeExpr> = types.iter().cloned().collect();
+                vec.push(incoming.clone());
+                *existing = TypeExpr::union(vec);
             }
         }
         _ => {
@@ -1229,6 +1231,7 @@ mod tests {
         ResolvedConsumedBindings,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
+    use std::sync::Arc;
     use verter_analysis::component_meta::{
         AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedPropKind, AcceptedSurfaceCompleteness,
         BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings, FallthroughBranch,
@@ -1563,15 +1566,15 @@ mod tests {
     #[test]
     fn known_spread_keys_from_type_expr_intersects_union_keys() {
         let summary = known_spread_keys_from_type_expr(&TypeExpr::union(vec![
-            TypeExpr::Object(ObjectExpr {
+            TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "id".to_string(),
                     optional: false,
                     readonly: false,
                     ty: TypeExpr::primitive(PrimitiveName::String),
                 })],
-            }),
-            TypeExpr::Object(ObjectExpr {
+            })),
+            TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
                     ObjectMember::Property(ObjectProperty {
                         name: "id".to_string(),
@@ -1586,7 +1589,7 @@ mod tests {
                         ty: TypeExpr::primitive(PrimitiveName::String),
                     }),
                 ],
-            }),
+            })),
         ]))
         .expect("union object spread keys should resolve");
 

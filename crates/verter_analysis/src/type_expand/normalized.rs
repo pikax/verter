@@ -112,8 +112,8 @@ pub(crate) fn normalize_expr_with_diagnostics_with_lookup(
                     None,
                 );
                 TypeExpr::Conditional {
-                    check: Box::new(check_eval),
-                    extends: Box::new(extends_eval),
+                    check: std::sync::Arc::new(check_eval),
+                    extends: std::sync::Arc::new(extends_eval),
                     true_type: true_type.clone(),
                     false_type: false_type.clone(),
                 }
@@ -141,7 +141,7 @@ pub(crate) fn record_partial_markers(
                 format!("unresolved type reference '{name}'"),
                 property_name,
             );
-            for arg in type_arguments {
+            for arg in type_arguments.iter() {
                 record_partial_markers(arg, diagnostics, property_name);
             }
         }
@@ -228,7 +228,7 @@ pub(crate) fn record_partial_markers(
                     }
                     ObjectMember::Method(method) => {
                         record_partial_markers(
-                            &TypeExpr::Function(method.function.clone()),
+                            &TypeExpr::Function(std::sync::Arc::new(method.function.clone())),
                             diagnostics,
                             property_name,
                         );
@@ -254,7 +254,7 @@ pub(crate) fn record_partial_markers(
             record_partial_markers(element, diagnostics, property_name);
         }
         TypeExpr::Tuple { elements, .. } => {
-            for element in elements {
+            for element in elements.iter() {
                 record_partial_markers(&element.ty, diagnostics, property_name);
             }
         }
@@ -263,7 +263,7 @@ pub(crate) fn record_partial_markers(
         | TypeExpr::TemplateLiteral {
             expressions: types, ..
         } => {
-            for ty in types {
+            for ty in types.iter() {
                 record_partial_markers(ty, diagnostics, property_name);
             }
         }

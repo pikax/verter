@@ -2382,7 +2382,7 @@ defineProps<ExternalProps>()
 
     assert_eq!(
         status.type_expr,
-        TypeExpr::Union(vec![
+        TypeExpr::union(vec![
             TypeExpr::string_literal("idle"),
             TypeExpr::string_literal("busy"),
         ]),

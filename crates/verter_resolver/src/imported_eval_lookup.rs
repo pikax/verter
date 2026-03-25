@@ -183,13 +183,16 @@ impl<R: ImportedEvalLookupResolver> ImportedEvalLookup<'_, R> {
         let mut current = if let Some(type_annotation) = decl.type_annotation.as_ref() {
             verter_analysis::type_eval::evaluate(type_annotation, dep_env)
         } else if let Some(function_signature) = decl.function_signature.as_ref() {
-            TypeExpr::Function(FunctionExpr {
+            TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
                 parameters: function_signature.parameters.clone(),
-                return_type: function_signature.return_type.clone().map(Box::new),
+                return_type: function_signature
+                    .return_type
+                    .as_ref()
+                    .map(|t| std::sync::Arc::new(t.clone())),
                 type_parameters: function_signature.type_parameters.clone(),
-            })
+            }))
         } else if let Some(object_shape) = decl.object_shape.as_ref() {
-            TypeExpr::Object(object_shape.clone())
+            TypeExpr::Object(std::sync::Arc::new(object_shape.clone()))
         } else {
             return None;
         };
@@ -197,8 +200,8 @@ impl<R: ImportedEvalLookupResolver> ImportedEvalLookup<'_, R> {
         for segment in remaining_path {
             current = verter_analysis::type_eval::evaluate(
                 &TypeExpr::IndexedAccess {
-                    object: Box::new(current),
-                    index: Box::new(TypeExpr::string_literal(segment.as_str())),
+                    object: std::sync::Arc::new(current),
+                    index: std::sync::Arc::new(TypeExpr::string_literal(segment.as_str())),
                 },
                 dep_env,
             );

@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "project_index_bench"
 harness = false
+
+[[bench]]
+name = "type_eval_bench"
+harness = false

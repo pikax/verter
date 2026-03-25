@@ -2,6 +2,7 @@ use super::type_eval::*;
 use super::type_expr::*;
 use super::type_expr_lower::parse_type_annotation;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 fn env_with_user_type() -> EvalEnv {
     let mut env = EvalEnv::new();
@@ -11,7 +12,7 @@ fn env_with_user_type() -> EvalEnv {
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "id".to_string(),
@@ -38,7 +39,7 @@ fn env_with_user_type() -> EvalEnv {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
     env
 }
@@ -51,7 +52,7 @@ fn add_type_preserves_existing_stable_declaration_id_on_reinsert() {
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr { properties: vec![] }),
+        body: TypeExpr::Object(Arc::new(ObjectExpr { properties: vec![] })),
     });
     let stable_id = env.type_symbols["User"].declaration_id;
 
@@ -60,7 +61,7 @@ fn add_type_preserves_existing_stable_declaration_id_on_reinsert() {
         declaration_id: stable_id + 41,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr { properties: vec![] }),
+        body: TypeExpr::Object(Arc::new(ObjectExpr { properties: vec![] })),
     });
 
     assert_eq!(
@@ -245,8 +246,8 @@ fn eval_ref_cycle_detection() {
 #[test]
 fn eval_intersection_child_override_wins() {
     let mut env = EvalEnv::new();
-    let expr = TypeExpr::Intersection(vec![
-        TypeExpr::Object(ObjectExpr {
+    let expr = TypeExpr::intersection(vec![
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "label".to_string(),
@@ -261,8 +262,8 @@ fn eval_intersection_child_override_wins() {
                     readonly: false,
                 }),
             ],
-        }),
-        TypeExpr::Object(ObjectExpr {
+        })),
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "shared".to_string(),
@@ -277,7 +278,7 @@ fn eval_intersection_child_override_wins() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     ]);
 
     let result = evaluate(&expr, &mut env);
@@ -323,14 +324,14 @@ fn eval_with_lookup_resolves_external_type_reference() {
             declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
-            body: TypeExpr::Object(ObjectExpr {
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "title".to_string(),
                     ty: TypeExpr::Primitive(PrimitiveName::String),
                     optional: false,
                     readonly: false,
                 })],
-            }),
+            })),
         },
     );
 
@@ -356,14 +357,14 @@ fn eval_with_lookup_resolves_external_typeof() {
             name: "remoteConfig".to_string(),
             declaration_id: 0,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(TypeExpr::Object(ObjectExpr {
+            type_annotation: Some(TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "theme".to_string(),
                     ty: TypeExpr::Primitive(PrimitiveName::String),
                     optional: false,
                     readonly: false,
                 })],
-            })),
+            }))),
             function_signature: None,
             object_shape: None,
         },
@@ -397,7 +398,7 @@ fn eval_with_lookup_resolves_lazy_member_projection_from_external_ref() {
             declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
-            body: TypeExpr::Object(ObjectExpr {
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
                     ObjectMember::Property(ObjectProperty {
                         name: "title".to_string(),
@@ -412,14 +413,14 @@ fn eval_with_lookup_resolves_lazy_member_projection_from_external_ref() {
                         readonly: false,
                     }),
                 ],
-            }),
+            })),
         },
     );
 
     let result = evaluate_with_lookup(
         &TypeExpr::IndexedAccess {
-            object: Box::new(TypeExpr::named("RemoteProps")),
-            index: Box::new(TypeExpr::string_literal("title")),
+            object: Arc::new(TypeExpr::named("RemoteProps")),
+            index: Arc::new(TypeExpr::string_literal("title")),
         },
         &mut env,
         &mut lookup,
@@ -446,14 +447,14 @@ fn eval_with_lookup_allows_shadowing_builtin_pick() {
                 constraint: None,
                 default: None,
             }],
-            body: TypeExpr::Object(ObjectExpr {
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "picked".to_string(),
                     ty: TypeExpr::named("T"),
                     optional: false,
                     readonly: false,
                 })],
-            }),
+            })),
         },
     );
 
@@ -485,14 +486,14 @@ fn eval_with_lookup_instantiates_generic_with_external_argument() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "value".to_string(),
                 ty: TypeExpr::named("T"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     let mut lookup = TestLookup::default();
@@ -503,14 +504,14 @@ fn eval_with_lookup_instantiates_generic_with_external_argument() {
             declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
-            body: TypeExpr::Object(ObjectExpr {
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "title".to_string(),
                     ty: TypeExpr::Primitive(PrimitiveName::String),
                     optional: false,
                     readonly: false,
                 })],
-            }),
+            })),
         },
     );
 
@@ -553,14 +554,14 @@ fn eval_generic_alias() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "value".to_string(),
                 ty: TypeExpr::named("T"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     let expr = TypeExpr::named_with_args("Box", vec![TypeExpr::Primitive(PrimitiveName::String)]);
@@ -588,16 +589,16 @@ fn eval_generic_with_default() {
         type_parameters: vec![TypeParam {
             name: "T".to_string(),
             constraint: None,
-            default: Some(Box::new(TypeExpr::Primitive(PrimitiveName::Number))),
+            default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "data".to_string(),
                 ty: TypeExpr::named("T"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     // Wrapper (no args → uses default)
@@ -663,7 +664,7 @@ fn eval_required() {
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "theme".to_string(),
@@ -678,7 +679,7 @@ fn eval_required() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     let expr = parse_type_annotation("Required<Config>");
@@ -782,7 +783,7 @@ fn eval_omit_with_nested_literal_union_keys() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Union(vec![
+        body: TypeExpr::union(vec![
             TypeExpr::Literal(LiteralValue::String("email".to_string())),
             TypeExpr::Literal(LiteralValue::String("password".to_string())),
         ]),
@@ -867,12 +868,12 @@ fn eval_record_string_index() {
 fn eval_extract() {
     let mut env = EvalEnv::new();
     // Extract<"a" | "b" | "c", "a" | "b"> → "a" | "b"
-    let source = TypeExpr::Union(vec![
+    let source = TypeExpr::union(vec![
         TypeExpr::string_literal("a"),
         TypeExpr::string_literal("b"),
         TypeExpr::string_literal("c"),
     ]);
-    let target = TypeExpr::Union(vec![
+    let target = TypeExpr::union(vec![
         TypeExpr::string_literal("a"),
         TypeExpr::string_literal("b"),
     ]);
@@ -893,7 +894,7 @@ fn eval_extract() {
 fn eval_exclude() {
     let mut env = EvalEnv::new();
     // Exclude<"a" | "b" | "c", "a"> → "b" | "c"
-    let source = TypeExpr::Union(vec![
+    let source = TypeExpr::union(vec![
         TypeExpr::string_literal("a"),
         TypeExpr::string_literal("b"),
         TypeExpr::string_literal("c"),
@@ -924,7 +925,7 @@ fn eval_non_nullable() {
     let mut env = EvalEnv::new();
     let expr = TypeExpr::named_with_args(
         "NonNullable",
-        vec![TypeExpr::Union(vec![
+        vec![TypeExpr::union(vec![
             TypeExpr::Primitive(PrimitiveName::String),
             TypeExpr::Primitive(PrimitiveName::Null),
             TypeExpr::Primitive(PrimitiveName::Undefined),
@@ -942,7 +943,7 @@ fn eval_non_nullable() {
 #[test]
 fn eval_keyof_object() {
     let mut env = env_with_user_type();
-    let expr = TypeExpr::KeyOf(Box::new(TypeExpr::named("User")));
+    let expr = TypeExpr::KeyOf(Arc::new(TypeExpr::named("User")));
     let result = evaluate(&expr, &mut env);
     match &result {
         TypeExpr::Union(types) => {
@@ -959,7 +960,7 @@ fn eval_keyof_object() {
 #[test]
 fn eval_keyof_inline_object() {
     let mut env = EvalEnv::new();
-    let obj = TypeExpr::Object(ObjectExpr {
+    let obj = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
             ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
@@ -974,8 +975,8 @@ fn eval_keyof_inline_object() {
                 readonly: false,
             }),
         ],
-    });
-    let expr = TypeExpr::KeyOf(Box::new(obj));
+    }));
+    let expr = TypeExpr::KeyOf(Arc::new(obj));
     let result = evaluate(&expr, &mut env);
     match &result {
         TypeExpr::Union(types) => {
@@ -1001,7 +1002,7 @@ fn eval_typeof_function() {
         type_annotation: None,
         function_signature: Some(FunctionSignature {
             parameters: vec![],
-            return_type: Some(TypeExpr::Object(ObjectExpr {
+            return_type: Some(TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
                     ObjectMember::Property(ObjectProperty {
                         name: "theme".to_string(),
@@ -1016,7 +1017,7 @@ fn eval_typeof_function() {
                         readonly: false,
                     }),
                 ],
-            })),
+            }))),
             type_parameters: vec![],
         }),
         object_shape: None,
@@ -1074,7 +1075,7 @@ fn eval_return_type() {
         type_annotation: None,
         function_signature: Some(FunctionSignature {
             parameters: vec![],
-            return_type: Some(TypeExpr::Object(ObjectExpr {
+            return_type: Some(TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
                     ObjectMember::Property(ObjectProperty {
                         name: "theme".to_string(),
@@ -1089,7 +1090,7 @@ fn eval_return_type() {
                         readonly: false,
                     }),
                 ],
-            })),
+            }))),
             type_parameters: vec![],
         }),
         object_shape: None,
@@ -1185,14 +1186,14 @@ fn eval_constructor_parameters_from_class_typeof() {
         declaration_id: 0,
         kind: TypeDeclKind::Class,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "id".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::Number),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
     env.add_value(ValueDeclInfo {
         name: "Widget".to_string(),
@@ -1217,7 +1218,7 @@ fn eval_constructor_parameters_from_class_typeof() {
                     optional: false,
                     rest: false,
                 }],
-                return_type: Some(Box::new(TypeExpr::named("Widget"))),
+                return_type: Some(Arc::new(TypeExpr::named("Widget"))),
                 type_parameters: vec![],
             })],
         }),
@@ -1249,7 +1250,7 @@ fn eval_instance_type_from_class_typeof() {
         declaration_id: 0,
         kind: TypeDeclKind::Class,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "id".to_string(),
@@ -1264,7 +1265,7 @@ fn eval_instance_type_from_class_typeof() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
     env.add_value(ValueDeclInfo {
         name: "Widget".to_string(),
@@ -1279,7 +1280,7 @@ fn eval_instance_type_from_class_typeof() {
         object_shape: Some(ObjectExpr {
             properties: vec![ObjectMember::ConstructSignature(FunctionExpr {
                 parameters: vec![],
-                return_type: Some(Box::new(TypeExpr::named("Widget"))),
+                return_type: Some(Arc::new(TypeExpr::named("Widget"))),
                 type_parameters: vec![],
             })],
         }),
@@ -1362,8 +1363,8 @@ fn eval_awaited_non_promise() {
 fn eval_indexed_access_property() {
     let mut env = env_with_user_type();
     let expr = TypeExpr::IndexedAccess {
-        object: Box::new(TypeExpr::named("User")),
-        index: Box::new(TypeExpr::string_literal("name")),
+        object: Arc::new(TypeExpr::named("User")),
+        index: Arc::new(TypeExpr::string_literal("name")),
     };
     let result = evaluate(&expr, &mut env);
     assert_eq!(result, TypeExpr::Primitive(PrimitiveName::String));
@@ -1373,11 +1374,11 @@ fn eval_indexed_access_property() {
 fn eval_indexed_access_array_number() {
     let mut env = EvalEnv::new();
     let expr = TypeExpr::IndexedAccess {
-        object: Box::new(TypeExpr::Array {
-            element: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
+        object: Arc::new(TypeExpr::Array {
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
             readonly: false,
         }),
-        index: Box::new(TypeExpr::Primitive(PrimitiveName::Number)),
+        index: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
     };
     let result = evaluate(&expr, &mut env);
     assert_eq!(result, TypeExpr::Primitive(PrimitiveName::String));
@@ -1387,8 +1388,8 @@ fn eval_indexed_access_array_number() {
 fn eval_indexed_access_tuple_literal() {
     let mut env = EvalEnv::new();
     let expr = TypeExpr::IndexedAccess {
-        object: Box::new(TypeExpr::Tuple {
-            elements: vec![
+        object: Arc::new(TypeExpr::Tuple {
+            elements: Arc::from(vec![
                 TupleElement {
                     label: None,
                     ty: TypeExpr::Primitive(PrimitiveName::String),
@@ -1401,10 +1402,10 @@ fn eval_indexed_access_tuple_literal() {
                     optional: false,
                     rest: false,
                 },
-            ],
+            ]),
             readonly: false,
         }),
-        index: Box::new(TypeExpr::number_literal(1.0)),
+        index: Arc::new(TypeExpr::number_literal(1.0)),
     };
     let result = evaluate(&expr, &mut env);
     assert_eq!(result, TypeExpr::Primitive(PrimitiveName::Number));
@@ -1415,8 +1416,8 @@ fn eval_indexed_access_union_keys() {
     let mut env = env_with_user_type();
     // User["id" | "name"] → number | string
     let expr = TypeExpr::IndexedAccess {
-        object: Box::new(TypeExpr::named("User")),
-        index: Box::new(TypeExpr::Union(vec![
+        object: Arc::new(TypeExpr::named("User")),
+        index: Arc::new(TypeExpr::union(vec![
             TypeExpr::string_literal("id"),
             TypeExpr::string_literal("name"),
         ])),
@@ -1441,10 +1442,10 @@ fn eval_conditional_true_branch() {
     let mut env = EvalEnv::new();
     // "hello" extends string ? true : false → true
     let expr = TypeExpr::Conditional {
-        check: Box::new(TypeExpr::string_literal("hello")),
-        extends: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        true_type: Box::new(TypeExpr::boolean_literal(true)),
-        false_type: Box::new(TypeExpr::boolean_literal(false)),
+        check: Arc::new(TypeExpr::string_literal("hello")),
+        extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        true_type: Arc::new(TypeExpr::boolean_literal(true)),
+        false_type: Arc::new(TypeExpr::boolean_literal(false)),
     };
     let result = evaluate(&expr, &mut env);
     assert_eq!(result, TypeExpr::boolean_literal(true));
@@ -1455,10 +1456,10 @@ fn eval_conditional_false_branch() {
     let mut env = EvalEnv::new();
     // number extends string ? true : false → false
     let expr = TypeExpr::Conditional {
-        check: Box::new(TypeExpr::Primitive(PrimitiveName::Number)),
-        extends: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
-        true_type: Box::new(TypeExpr::boolean_literal(true)),
-        false_type: Box::new(TypeExpr::boolean_literal(false)),
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+        extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        true_type: Arc::new(TypeExpr::boolean_literal(true)),
+        false_type: Arc::new(TypeExpr::boolean_literal(false)),
     };
     let result = evaluate(&expr, &mut env);
     assert_eq!(result, TypeExpr::boolean_literal(false));
@@ -1476,7 +1477,7 @@ fn eval_mapped_keyof() {
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "a".to_string(),
@@ -1491,16 +1492,16 @@ fn eval_mapped_keyof() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     // { [K in keyof T]?: T[K] } — essentially Partial<T>
     let expr = TypeExpr::Mapped {
         parameter: "K".to_string(),
-        source: Box::new(TypeExpr::KeyOf(Box::new(TypeExpr::named("T")))),
-        value: Box::new(TypeExpr::IndexedAccess {
-            object: Box::new(TypeExpr::named("T")),
-            index: Box::new(TypeExpr::named("K")),
+        source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+        value: Arc::new(TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("T")),
+            index: Arc::new(TypeExpr::named("K")),
         }),
         optional: MappedModifier::Add,
         readonly: MappedModifier::None,
@@ -1530,10 +1531,10 @@ fn eval_template_literal_finite() {
     // `btn-${"sm" | "lg"}` → "btn-sm" | "btn-lg"
     let expr = TypeExpr::TemplateLiteral {
         quasis: vec!["btn-".to_string(), "".to_string()],
-        expressions: vec![TypeExpr::Union(vec![
+        expressions: Arc::from(vec![TypeExpr::union(vec![
             TypeExpr::string_literal("sm"),
             TypeExpr::string_literal("lg"),
-        ])],
+        ])]),
     };
     let result = evaluate(&expr, &mut env);
     match &result {
@@ -1552,7 +1553,7 @@ fn eval_template_literal_infinite_degrades() {
     // `${number}px` → string (can't expand infinite set)
     let expr = TypeExpr::TemplateLiteral {
         quasis: vec!["".to_string(), "px".to_string()],
-        expressions: vec![TypeExpr::Primitive(PrimitiveName::Number)],
+        expressions: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::Number)]),
     };
     let result = evaluate(&expr, &mut env);
     assert_eq!(result, TypeExpr::Primitive(PrimitiveName::String));
@@ -1609,14 +1610,14 @@ fn eval_respects_depth_limit() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "inner".to_string(),
                 ty: TypeExpr::named("Deep"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
     // Should not stack overflow
     let result = evaluate(&TypeExpr::named("Deep"), &mut env);
@@ -1678,7 +1679,7 @@ fn opaque_typeof_arg_bails_generic_instantiation_quickly() {
                 default: None,
             },
         ],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "slots".to_string(),
@@ -1699,7 +1700,7 @@ fn opaque_typeof_arg_bails_generic_instantiation_quickly() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     // `typeof theme` — theme is NOT in value_symbols → opaque
@@ -1755,14 +1756,14 @@ fn opaque_typeof_bailout_skips_unrelated_expensive_generic_args() {
                 default: None,
             },
         ],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "slots".to_string(),
                 ty: TypeExpr::named("T"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     let result = evaluate(
@@ -1805,14 +1806,14 @@ fn nested_opaque_typeof_in_arg_bails_generic() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "data".to_string(),
                 ty: TypeExpr::named("T"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     // Container<Pick<typeof theme, 'key'>> — typeof theme is opaque
@@ -1867,7 +1868,7 @@ fn unresolved_ref_arg_bails_generic() {
                 default: None,
             },
         ],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "value".to_string(),
@@ -1882,7 +1883,7 @@ fn unresolved_ref_arg_bails_generic() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     // Wrapper<SomeUnknownType, Expensive> — unresolved ref should bail before
@@ -1934,7 +1935,7 @@ fn nested_missing_type_inside_structural_arg_bails_generic() {
                 default: None,
             },
         ],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "value".to_string(),
@@ -1949,18 +1950,18 @@ fn nested_missing_type_inside_structural_arg_bails_generic() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     let nested_missing = TypeExpr::Array {
-        element: Box::new(TypeExpr::Object(ObjectExpr {
+        element: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "item".to_string(),
                 ty: TypeExpr::named("MissingType"),
                 optional: false,
                 readonly: false,
             })],
-        })),
+        }))),
         readonly: false,
     };
 
@@ -1993,14 +1994,14 @@ fn resolved_typeof_arg_still_expands_generic() {
     env.add_value(ValueDeclInfo {
         name: "theme".to_string(),
         declaration_id: 0,
-        type_annotation: Some(TypeExpr::Object(ObjectExpr {
+        type_annotation: Some(TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "color".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: false,
                 readonly: false,
             })],
-        })),
+        }))),
         kind: ValueDeclKind::Const,
         function_signature: None,
         object_shape: None,
@@ -2016,14 +2017,14 @@ fn resolved_typeof_arg_still_expands_generic() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "value".to_string(),
                 ty: TypeExpr::named("T"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     // Wrapper<typeof theme> — theme IS resolvable
@@ -2058,7 +2059,7 @@ fn lazy_indexed_access_only_evaluates_requested_member() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "expensive".to_string(),
@@ -2073,16 +2074,16 @@ fn lazy_indexed_access_only_evaluates_requested_member() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     // Config<SomeType>['cheap'] — should get `string` without touching `expensive`
     let expr = TypeExpr::IndexedAccess {
-        object: Box::new(TypeExpr::named_with_args(
+        object: Arc::new(TypeExpr::named_with_args(
             "Config",
             vec![TypeExpr::named("SomeArg")],
         )),
-        index: Box::new(TypeExpr::Literal(LiteralValue::String("cheap".to_string()))),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String("cheap".to_string()))),
     };
 
     let result = evaluate(&expr, &mut env);
@@ -2105,20 +2106,20 @@ fn indexed_access_with_non_literal_index_falls_back() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "a".to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::Number),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     // Config[keyof Config] — non-literal index, should still work via fallback
     let expr = TypeExpr::IndexedAccess {
-        object: Box::new(TypeExpr::named("Config")),
-        index: Box::new(TypeExpr::KeyOf(Box::new(TypeExpr::named("Config")))),
+        object: Arc::new(TypeExpr::named("Config")),
+        index: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("Config")))),
     };
 
     let result = evaluate(&expr, &mut env);
@@ -2149,14 +2150,14 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
             constraint: None,
             default: None,
         }],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "header".to_string(),
                 ty: TypeExpr::named("T"),
                 optional: false,
                 readonly: false,
             })],
-        }),
+        })),
     });
 
     env.add_type(TypeDeclInfo {
@@ -2180,7 +2181,7 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
                 default: None,
             },
         ],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "AppConfig".to_string(),
@@ -2207,7 +2208,7 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     env.add_type(TypeDeclInfo {
@@ -2229,8 +2230,8 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
 
     let result = evaluate(
         &TypeExpr::IndexedAccess {
-            object: Box::new(TypeExpr::named("Accordion")),
-            index: Box::new(TypeExpr::Literal(LiteralValue::String("slots".to_string()))),
+            object: Arc::new(TypeExpr::named("Accordion")),
+            index: Arc::new(TypeExpr::Literal(LiteralValue::String("slots".to_string()))),
         },
         &mut env,
     );
@@ -2241,7 +2242,7 @@ fn lazy_indexed_access_skips_unrelated_expensive_generic_args() {
         env.steps()
     );
     assert!(
-        matches!(result, TypeExpr::Ref { ref name, .. } if name == "ComponentSlots"),
+        matches!(result, TypeExpr::Ref { ref name, .. } if &**name == "ComponentSlots"),
         "should still resolve the targeted slots member symbolically, got: {:?}",
         result
     );
@@ -2261,7 +2262,7 @@ fn lazy_indexed_access_through_required_wrapper_skips_unrelated_members() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "cheap".to_string(),
@@ -2276,16 +2277,16 @@ fn lazy_indexed_access_through_required_wrapper_skips_unrelated_members() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     let result = evaluate(
         &TypeExpr::IndexedAccess {
-            object: Box::new(TypeExpr::named_with_args(
+            object: Arc::new(TypeExpr::named_with_args(
                 "Required",
                 vec![TypeExpr::named("Config")],
             )),
-            index: Box::new(TypeExpr::Literal(LiteralValue::String("cheap".to_string()))),
+            index: Arc::new(TypeExpr::Literal(LiteralValue::String("cheap".to_string()))),
         },
         &mut env,
     );
@@ -2316,7 +2317,7 @@ fn pick_skips_unselected_expensive_members() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "keep".to_string(),
@@ -2331,7 +2332,7 @@ fn pick_skips_unselected_expensive_members() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     let result = evaluate(
@@ -2373,13 +2374,13 @@ fn pick_projection_keeps_selected_methods() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Method(MethodSignature {
                     name: "render".to_string(),
                     function: FunctionExpr {
                         parameters: vec![],
-                        return_type: Some(Box::new(TypeExpr::Primitive(PrimitiveName::String))),
+                        return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
                         type_parameters: vec![],
                     },
                     optional: false,
@@ -2391,7 +2392,7 @@ fn pick_projection_keeps_selected_methods() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     let result = evaluate(
@@ -2425,13 +2426,13 @@ fn omit_projection_drops_selected_methods() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Method(MethodSignature {
                     name: "render".to_string(),
                     function: FunctionExpr {
                         parameters: vec![],
-                        return_type: Some(Box::new(TypeExpr::Primitive(PrimitiveName::String))),
+                        return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
                         type_parameters: vec![],
                     },
                     optional: false,
@@ -2443,7 +2444,7 @@ fn omit_projection_drops_selected_methods() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     let result = evaluate(
@@ -2481,7 +2482,7 @@ fn omit_skips_removed_expensive_members() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "keep".to_string(),
@@ -2496,7 +2497,7 @@ fn omit_skips_removed_expensive_members() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
 
     let result = evaluate(
@@ -2538,7 +2539,7 @@ fn omit_projection_keeps_nested_utility_members() {
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: vec![],
-        body: TypeExpr::Union(vec![
+        body: TypeExpr::union(vec![
             TypeExpr::Literal(LiteralValue::String("replace".to_string())),
             TypeExpr::Literal(LiteralValue::String("activeClass".to_string())),
             TypeExpr::Literal(LiteralValue::String("ariaCurrentValue".to_string())),
@@ -2549,7 +2550,7 @@ fn omit_projection_keeps_nested_utility_members() {
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "replace".to_string(),
@@ -2570,16 +2571,16 @@ fn omit_projection_keeps_nested_utility_members() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
     env.add_type(TypeDeclInfo {
         name: "LinkProps".to_string(),
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Intersection(vec![
+        body: TypeExpr::intersection(vec![
             TypeExpr::named("RouterLinkOptions"),
-            TypeExpr::Object(ObjectExpr {
+            TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
                     ObjectMember::Property(ObjectProperty {
                         name: "href".to_string(),
@@ -2600,7 +2601,7 @@ fn omit_projection_keeps_nested_utility_members() {
                         readonly: false,
                     }),
                 ],
-            }),
+            })),
         ]),
     });
     env.add_type(TypeDeclInfo {
@@ -2608,7 +2609,7 @@ fn omit_projection_keeps_nested_utility_members() {
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Object(ObjectExpr {
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
                 ObjectMember::Property(ObjectProperty {
                     name: "icon".to_string(),
@@ -2623,26 +2624,26 @@ fn omit_projection_keeps_nested_utility_members() {
                     readonly: false,
                 }),
             ],
-        }),
+        })),
     });
     env.add_type(TypeDeclInfo {
         name: "ButtonProps".to_string(),
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters: vec![],
-        body: TypeExpr::Intersection(vec![
+        body: TypeExpr::intersection(vec![
             TypeExpr::named("UseComponentIconsProps"),
             TypeExpr::named_with_args(
                 "Omit",
                 vec![
                     TypeExpr::named("LinkProps"),
-                    TypeExpr::Union(vec![
+                    TypeExpr::union(vec![
                         TypeExpr::Literal(LiteralValue::String("raw".to_string())),
                         TypeExpr::Literal(LiteralValue::String("custom".to_string())),
                     ]),
                 ],
             ),
-            TypeExpr::Object(ObjectExpr {
+            TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
                     ObjectMember::Property(ObjectProperty {
                         name: "label".to_string(),
@@ -2657,7 +2658,7 @@ fn omit_projection_keeps_nested_utility_members() {
                         readonly: false,
                     }),
                 ],
-            }),
+            })),
         ]),
     });
 

@@ -16,6 +16,7 @@
 use serde::ser::Serialize;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, LazyLock};
 
 // ---------------------------------------------------------------------------
 // Core AST
@@ -37,66 +38,66 @@ pub enum TypeExpr {
 
     // -- Compound --
     /// `A | B | C`
-    Union(Vec<TypeExpr>),
+    Union(Arc<[TypeExpr]>),
 
     /// `A & B & C`
-    Intersection(Vec<TypeExpr>),
+    Intersection(Arc<[TypeExpr]>),
 
     /// `T[]` or `Array<T>` or `ReadonlyArray<T>`.
     Array {
-        element: Box<TypeExpr>,
+        element: Arc<TypeExpr>,
         readonly: bool,
     },
 
     /// `[A, B, C]` — optionally labeled.
     Tuple {
-        elements: Vec<TupleElement>,
+        elements: Arc<[TupleElement]>,
         readonly: bool,
     },
 
     /// `{ prop: Type; prop?: Type; [key: string]: Type }`
-    Object(ObjectExpr),
+    Object(Arc<ObjectExpr>),
 
     /// `(x: T, y: U) => R`
-    Function(FunctionExpr),
+    Function(Arc<FunctionExpr>),
 
     // -- References --
     /// A named type reference, optionally with type arguments.
     /// `MyType`, `Partial<T>`, `Record<K, V>`.
     Ref {
-        name: String,
-        type_arguments: Vec<TypeExpr>,
+        name: Arc<str>,
+        type_arguments: Arc<[TypeExpr]>,
     },
 
     // -- Operators --
     /// `keyof T`
-    KeyOf(Box<TypeExpr>),
+    KeyOf(Arc<TypeExpr>),
 
     /// `typeof x` — refers to a value binding.
     TypeOf(ValueRef),
 
     /// `T[K]` — indexed access.
     IndexedAccess {
-        object: Box<TypeExpr>,
-        index: Box<TypeExpr>,
+        object: Arc<TypeExpr>,
+        index: Arc<TypeExpr>,
     },
 
     /// `T extends U ? A : B`
     Conditional {
-        check: Box<TypeExpr>,
-        extends: Box<TypeExpr>,
-        true_type: Box<TypeExpr>,
-        false_type: Box<TypeExpr>,
+        check: Arc<TypeExpr>,
+        extends: Arc<TypeExpr>,
+        true_type: Arc<TypeExpr>,
+        false_type: Arc<TypeExpr>,
     },
 
     /// `{ [K in Source]: Value }` — mapped type.
     Mapped {
         parameter: String,
-        source: Box<TypeExpr>,
-        value: Box<TypeExpr>,
+        source: Arc<TypeExpr>,
+        value: Arc<TypeExpr>,
         optional: MappedModifier,
         readonly: MappedModifier,
-        name_type: Option<Box<TypeExpr>>,
+        name_type: Option<Arc<TypeExpr>>,
     },
 
     /// `` `prefix${T}suffix` `` — template literal type.
@@ -104,7 +105,7 @@ pub enum TypeExpr {
         /// Alternating text spans and type expressions.
         /// `quasis[0]` expr[0] `quasis[1]` expr[1] ... `quasis[n]`
         quasis: Vec<String>,
-        expressions: Vec<TypeExpr>,
+        expressions: Arc<[TypeExpr]>,
     },
 
     /// `infer T` — only valid inside conditional types.
@@ -112,11 +113,11 @@ pub enum TypeExpr {
 
     /// `readonly T` or rest `...T` at tuple level (handled by TupleElement).
     /// This variant catches standalone `readonly` or rest when not in tuple context.
-    Rest(Box<TypeExpr>),
+    Rest(Arc<TypeExpr>),
 
     /// Parenthesized type — `(A | B)`. Preserved for fidelity but
     /// transparent to evaluation.
-    Parenthesized(Box<TypeExpr>),
+    Parenthesized(Arc<TypeExpr>),
 
     /// A type the lowering could not represent.
     /// Carries the raw source text for diagnostics.
@@ -164,26 +165,26 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
         }
         "union" => {
             let types = json_array_to_type_exprs(v.get("types")?)?;
-            Some(TypeExpr::Union(types))
+            Some(TypeExpr::Union(Arc::from(types)))
         }
         "intersection" => {
             let types = json_array_to_type_exprs(v.get("types")?)?;
-            Some(TypeExpr::Intersection(types))
+            Some(TypeExpr::Intersection(Arc::from(types)))
         }
         "array" => {
             let element = type_expr_from_json(v.get("element")?)?;
             let readonly = v.get("readonly").and_then(|r| r.as_bool()).unwrap_or(false);
             Some(TypeExpr::Array {
-                element: Box::new(element),
+                element: Arc::new(element),
                 readonly,
             })
         }
         "object" => {
             let props = v.get("properties")?.as_array()?;
             let members = props.iter().filter_map(json_to_object_member).collect();
-            Some(TypeExpr::Object(ObjectExpr {
+            Some(TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: members,
-            }))
+            })))
         }
         "function" => {
             let params = json_to_func_params(v.get("parameters")?)?;
@@ -194,11 +195,11 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                     type_expr_from_json(r)
                 }
             });
-            Some(TypeExpr::Function(FunctionExpr {
+            Some(TypeExpr::Function(Arc::new(FunctionExpr {
                 parameters: params,
-                return_type: ret.map(Box::new),
+                return_type: ret.map(Arc::new),
                 type_parameters: vec![],
-            }))
+            })))
         }
         "ref" => {
             let name = v.get("name")?.as_str()?.to_string();
@@ -207,13 +208,13 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 .and_then(json_array_to_type_exprs)
                 .unwrap_or_default();
             Some(TypeExpr::Ref {
-                name,
-                type_arguments: args,
+                name: Arc::from(name),
+                type_arguments: Arc::from(args),
             })
         }
         "keyOf" => {
             let operand = type_expr_from_json(v.get("operand")?)?;
-            Some(TypeExpr::KeyOf(Box::new(operand)))
+            Some(TypeExpr::KeyOf(Arc::new(operand)))
         }
         "typeOf" => {
             let path = v
@@ -228,18 +229,18 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
             let obj = type_expr_from_json(v.get("object")?)?;
             let idx = type_expr_from_json(v.get("index")?)?;
             Some(TypeExpr::IndexedAccess {
-                object: Box::new(obj),
-                index: Box::new(idx),
+                object: Arc::new(obj),
+                index: Arc::new(idx),
             })
         }
         "conditional" => Some(TypeExpr::Conditional {
-            check: Box::new(type_expr_from_json(v.get("check")?)?),
-            extends: Box::new(type_expr_from_json(v.get("extends")?)?),
-            true_type: Box::new(type_expr_from_json(v.get("trueType")?)?),
-            false_type: Box::new(type_expr_from_json(v.get("falseType")?)?),
+            check: Arc::new(type_expr_from_json(v.get("check")?)?),
+            extends: Arc::new(type_expr_from_json(v.get("extends")?)?),
+            true_type: Arc::new(type_expr_from_json(v.get("trueType")?)?),
+            false_type: Arc::new(type_expr_from_json(v.get("falseType")?)?),
         }),
         "tuple" => {
-            let elements = v
+            let elements: Vec<TupleElement> = v
                 .get("elements")?
                 .as_array()?
                 .iter()
@@ -253,12 +254,15 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 })
                 .collect();
             let readonly = v.get("readonly").and_then(|r| r.as_bool()).unwrap_or(false);
-            Some(TypeExpr::Tuple { elements, readonly })
+            Some(TypeExpr::Tuple {
+                elements: Arc::from(elements),
+                readonly,
+            })
         }
         "mapped" => Some(TypeExpr::Mapped {
             parameter: v.get("parameter")?.as_str()?.to_string(),
-            source: Box::new(type_expr_from_json(v.get("source")?)?),
-            value: Box::new(type_expr_from_json(v.get("value")?)?),
+            source: Arc::new(type_expr_from_json(v.get("source")?)?),
+            value: Arc::new(type_expr_from_json(v.get("value")?)?),
             optional: parse_modifier(v.get("optional")),
             readonly: parse_modifier(v.get("readonly")),
             name_type: v
@@ -270,7 +274,7 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                         type_expr_from_json(n)
                     }
                 })
-                .map(Box::new),
+                .map(Arc::new),
         }),
         "templateLiteral" => {
             let quasis = v
@@ -282,16 +286,16 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
             let expressions = json_array_to_type_exprs(v.get("expressions")?)?;
             Some(TypeExpr::TemplateLiteral {
                 quasis,
-                expressions,
+                expressions: Arc::from(expressions),
             })
         }
         "infer" => Some(TypeExpr::Infer {
             name: v.get("name")?.as_str()?.to_string(),
         }),
-        "rest" => Some(TypeExpr::Rest(Box::new(type_expr_from_json(
+        "rest" => Some(TypeExpr::Rest(Arc::new(type_expr_from_json(
             v.get("inner")?,
         )?))),
-        "parenthesized" => Some(TypeExpr::Parenthesized(Box::new(type_expr_from_json(
+        "parenthesized" => Some(TypeExpr::Parenthesized(Arc::new(type_expr_from_json(
             v.get("inner")?,
         )?))),
         "unknown" => {
@@ -369,7 +373,7 @@ fn json_to_function_expr(v: &serde_json::Value) -> Option<FunctionExpr> {
                     type_expr_from_json(ret)
                 }
             })
-            .map(Box::new),
+            .map(Arc::new),
         type_parameters: vec![],
     })
 }
@@ -580,7 +584,7 @@ pub struct MethodSignature {
 #[serde(rename_all = "camelCase")]
 pub struct FunctionExpr {
     pub parameters: Vec<FunctionParam>,
-    pub return_type: Option<Box<TypeExpr>>,
+    pub return_type: Option<Arc<TypeExpr>>,
     pub type_parameters: Vec<TypeParam>,
 }
 
@@ -599,8 +603,8 @@ pub struct FunctionParam {
 #[serde(rename_all = "camelCase")]
 pub struct TypeParam {
     pub name: String,
-    pub constraint: Option<Box<TypeExpr>>,
-    pub default: Option<Box<TypeExpr>>,
+    pub constraint: Option<Arc<TypeExpr>>,
+    pub default: Option<Arc<TypeExpr>>,
 }
 
 /// Modifier for mapped type `optional` and `readonly` fields.
@@ -613,6 +617,16 @@ pub enum MappedModifier {
     Add,
     /// `-` modifier (remove).
     Remove,
+}
+
+// ---------------------------------------------------------------------------
+// Shared constants
+// ---------------------------------------------------------------------------
+
+/// Returns a shared empty type argument slice, avoiding per-call allocation.
+pub fn empty_type_args() -> Arc<[TypeExpr]> {
+    static EMPTY: LazyLock<Arc<[TypeExpr]>> = LazyLock::new(|| Arc::from(Vec::<TypeExpr>::new()));
+    Arc::clone(&EMPTY)
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +659,7 @@ impl TypeExpr {
         match types.len() {
             0 => Self::Primitive(PrimitiveName::Never),
             1 => types.into_iter().next().unwrap(),
-            _ => Self::Union(types),
+            _ => Self::Union(Arc::from(types)),
         }
     }
 
@@ -654,23 +668,23 @@ impl TypeExpr {
         match types.len() {
             0 => Self::Primitive(PrimitiveName::Unknown),
             1 => types.into_iter().next().unwrap(),
-            _ => Self::Intersection(types),
+            _ => Self::Intersection(Arc::from(types)),
         }
     }
 
     /// Create a type reference without type arguments.
     pub fn named(name: impl Into<String>) -> Self {
         Self::Ref {
-            name: name.into(),
-            type_arguments: Vec::new(),
+            name: Arc::from(name.into()),
+            type_arguments: empty_type_args(),
         }
     }
 
     /// Create a type reference with type arguments.
     pub fn named_with_args(name: impl Into<String>, args: Vec<TypeExpr>) -> Self {
         Self::Ref {
-            name: name.into(),
-            type_arguments: args,
+            name: Arc::from(name.into()),
+            type_arguments: Arc::from(args),
         }
     }
 

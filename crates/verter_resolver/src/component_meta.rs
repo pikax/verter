@@ -389,7 +389,7 @@ pub fn resolved_elements_to_type_expr_via_type_text(
         })
         .collect();
 
-    TypeExpr::Object(ObjectExpr { properties })
+    TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
 }
 
 fn should_ignore_external_macro_type(dep: &MacroTypeDep) -> bool {

@@ -1,7 +1,7 @@
 //! ObjectShape expansion: extracts a materialized object surface from a `TypeExpr`.
 
 use crate::type_eval::{evaluate_with_lookup, EvalEnv, EvalLookup, NoopEvalLookup};
-use crate::type_expr::{ObjectExpr, ObjectMember, TypeExpr};
+use crate::type_expr::{LiteralValue, ObjectExpr, ObjectMember, TypeExpr};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::normalized::record_partial_markers;
@@ -73,8 +73,13 @@ fn extract_shape(
     lookup: &mut dyn EvalLookup,
 ) -> ExpandedObjectShape {
     match expr {
-        // Direct object — extract properties
-        TypeExpr::Object(obj) => object_expr_to_shape(obj, env, diagnostics, true, lookup),
+        // Direct object — extract properties.
+        // normalize_members = false: property types are preserved as-is rather than
+        // deeply evaluated. This avoids burning expansion budget on complex nested types
+        // like VNode (200+ symbols) that appear in slot return types or prop types.
+        // The shape captures structural information (names, optionality, readonly);
+        // deep type normalization happens separately per-field if the consumer needs it.
+        TypeExpr::Object(obj) => object_expr_to_shape(obj, env, diagnostics, false, lookup),
 
         TypeExpr::Parenthesized(inner) => extract_shape(inner, env, diagnostics, lookup),
 
@@ -104,20 +109,37 @@ fn extract_shape(
             name,
             type_arguments,
         } => {
+            if type_arguments.is_empty() {
+                if let Some(bound) = env.type_bindings.get(name.as_ref()).cloned() {
+                    return extract_shape(bound.as_ref(), env, diagnostics, lookup);
+                }
+            }
+
+            // Handle builtin utility types at the shape level to avoid costly
+            // deep evaluation of every property type via evaluate_with_lookup.
+            // Instead of evaluating Omit<X, K> → Object → extract_shape,
+            // we extract_shape(X) → filter shape properties. This avoids burning
+            // expansion budget on property type evaluation (e.g., VNode with 200+ symbols).
+            if let Some(shape) =
+                try_extract_utility_shape(name, type_arguments, env, diagnostics, lookup)
+            {
+                return shape;
+            }
+
             let decl = env
                 .type_symbols
-                .get(name)
+                .get(name.as_ref())
                 .cloned()
                 .or_else(|| lookup.resolve_type_decl(name));
             if let Some(decl) = decl {
-                if env.active.contains(name) {
+                if env.active.contains(name.as_ref()) {
                     return ExpandedObjectShape::empty();
                 }
                 env.active.insert(name.to_string());
                 let saved = crate::type_eval::bind_type_parameters(&decl, type_arguments, env);
                 let shape = extract_shape(&decl.body, env, diagnostics, lookup);
                 crate::type_eval::restore_type_parameters(saved, env);
-                env.active.remove(name);
+                env.active.remove(&**name);
                 return shape;
             }
 
@@ -166,8 +188,8 @@ fn extract_shape(
                 ExpandedObjectShape {
                     properties: Vec::new(),
                     index_signatures: vec![ExpandedIndexSignature {
-                        key_type: *source.clone(),
-                        value_type: *value.clone(),
+                        key_type: (**source).clone(),
+                        value_type: (**value).clone(),
                         readonly: false,
                     }],
                     call_signatures: Vec::new(),
@@ -234,6 +256,106 @@ fn extract_shape(
     }
 }
 
+/// Handle builtin utility types (Omit, Pick, Partial, Required, Readonly) at the
+/// shape level without going through `evaluate_with_lookup`. This avoids burning
+/// expansion budget on deep property type evaluation (e.g., VNode with 200+ symbols).
+///
+/// Instead of: evaluate Omit<X,K> → Object → extract_shape
+/// We do:      extract_shape(X) → filter/transform shape properties
+fn try_extract_utility_shape(
+    name: &str,
+    type_arguments: &[TypeExpr],
+    env: &mut EvalEnv,
+    diagnostics: &mut Vec<ExpansionDiagnostic>,
+    lookup: &mut dyn EvalLookup,
+) -> Option<ExpandedObjectShape> {
+    match name {
+        "Omit" if type_arguments.len() == 2 => {
+            let key_set = extract_key_set_from_type(&type_arguments[1], env, lookup);
+            if key_set.is_empty() {
+                return None; // fall through to normal evaluation
+            }
+            let mut shape = extract_shape(&type_arguments[0], env, diagnostics, lookup);
+            shape.properties.retain(|p| !key_set.contains(&p.name));
+            Some(shape)
+        }
+        "Pick" if type_arguments.len() == 2 => {
+            let key_set = extract_key_set_from_type(&type_arguments[1], env, lookup);
+            if key_set.is_empty() {
+                return None;
+            }
+            let mut shape = extract_shape(&type_arguments[0], env, diagnostics, lookup);
+            shape.properties.retain(|p| key_set.contains(&p.name));
+            shape.index_signatures.clear();
+            shape.call_signatures.clear();
+            Some(shape)
+        }
+        "Partial" if type_arguments.len() == 1 => {
+            let mut shape = extract_shape(&type_arguments[0], env, diagnostics, lookup);
+            for prop in &mut shape.properties {
+                prop.optional = true;
+            }
+            Some(shape)
+        }
+        "Required" if type_arguments.len() == 1 => {
+            let mut shape = extract_shape(&type_arguments[0], env, diagnostics, lookup);
+            for prop in &mut shape.properties {
+                prop.optional = false;
+            }
+            Some(shape)
+        }
+        "Readonly" if type_arguments.len() == 1 => {
+            let mut shape = extract_shape(&type_arguments[0], env, diagnostics, lookup);
+            for prop in &mut shape.properties {
+                prop.readonly = true;
+            }
+            Some(shape)
+        }
+        _ => None,
+    }
+}
+
+/// Extract a set of string literal keys from a type expression.
+/// Used for Omit/Pick key extraction at the shape level.
+fn extract_key_set_from_type(
+    expr: &TypeExpr,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> rustc_hash::FxHashSet<String> {
+    let mut keys = rustc_hash::FxHashSet::default();
+    collect_string_keys(expr, &mut keys, env, lookup);
+    keys
+}
+
+fn collect_string_keys(
+    expr: &TypeExpr,
+    keys: &mut rustc_hash::FxHashSet<String>,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) {
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(s)) => {
+            keys.insert(s.clone());
+        }
+        TypeExpr::Union(types) => {
+            for ty in types.iter() {
+                collect_string_keys(ty, keys, env, lookup);
+            }
+        }
+        TypeExpr::Ref { .. } => {
+            // Evaluate the ref to resolve type aliases like `type Keys = 'a' | 'b'`
+            let evaluated = evaluate_with_lookup(expr, env, lookup);
+            if &evaluated != expr {
+                collect_string_keys(&evaluated, keys, env, lookup);
+            }
+        }
+        TypeExpr::Parenthesized(inner) => {
+            collect_string_keys(inner, keys, env, lookup);
+        }
+        _ => {}
+    }
+}
+
 /// Convert a `ObjectExpr` (from TypeExpr::Object) to `ExpandedObjectShape`.
 fn object_expr_to_shape(
     obj: &ObjectExpr,
@@ -293,13 +415,13 @@ fn object_expr_to_shape(
             ObjectMember::Method(method) => {
                 properties.push(ExpandedProperty {
                     name: method.name.clone(),
-                    ty: TypeExpr::Function(function_expr_to_type(
+                    ty: TypeExpr::Function(std::sync::Arc::new(function_expr_to_type(
                         &method.function,
                         env,
                         diagnostics,
                         normalize_members,
                         lookup,
-                    )),
+                    ))),
                     optional: method.optional,
                     readonly: false,
                 });
@@ -321,7 +443,7 @@ fn normalize_member_type(
     normalize_members: bool,
     lookup: &mut dyn EvalLookup,
 ) -> TypeExpr {
-    if normalize_members {
+    if normalize_members || should_normalize_member_type(expr, env) {
         super::normalized::normalize_expr_with_diagnostics_with_lookup(
             expr,
             env,
@@ -331,6 +453,40 @@ fn normalize_member_type(
     } else {
         expr.clone()
     }
+}
+
+fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
+    match expr {
+        TypeExpr::Parenthesized(inner) => should_normalize_member_type(inner, env),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            (type_arguments.is_empty() && env.type_bindings.contains_key(name.as_ref()))
+                || is_builtin_member_utility(name)
+        }
+        _ => false,
+    }
+}
+
+fn is_builtin_member_utility(name: &str) -> bool {
+    matches!(
+        name,
+        "Partial"
+            | "Required"
+            | "Readonly"
+            | "Pick"
+            | "Omit"
+            | "Record"
+            | "Extract"
+            | "Exclude"
+            | "NonNullable"
+            | "ReturnType"
+            | "Parameters"
+            | "ConstructorParameters"
+            | "InstanceType"
+            | "Awaited"
+    )
 }
 
 fn function_expr_to_type(
@@ -365,7 +521,7 @@ fn merge_intersection_shapes(shapes: Vec<ExpandedObjectShape>) -> ExpandedObject
                 existing.readonly = existing.readonly || prop.readonly;
                 // Intersection: intersect property types when they differ
                 if existing.ty != prop.ty {
-                    existing.ty = TypeExpr::Intersection(vec![existing.ty.clone(), prop.ty]);
+                    existing.ty = TypeExpr::intersection(vec![existing.ty.clone(), prop.ty]);
                 }
             } else {
                 merged_props.push(prop);
@@ -515,7 +671,7 @@ fn normalize_function_expr(
             })
             .collect(),
         return_type: sig.return_type.as_ref().map(|ret| {
-            Box::new(
+            std::sync::Arc::new(
                 super::normalized::normalize_expr_with_diagnostics_with_lookup(
                     ret,
                     env,

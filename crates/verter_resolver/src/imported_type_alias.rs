@@ -146,18 +146,20 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
     } else if let Some(body) = selected_body {
         let mut normalized_env = dep_env.clone();
         for param in &decl.type_parameters {
-            normalized_env
-                .type_bindings
-                .insert(param.name.clone(), TypeExpr::named(param.name.clone()));
+            normalized_env.type_bindings.insert(
+                param.name.clone(),
+                std::sync::Arc::new(TypeExpr::named(param.name.clone())),
+            );
         }
         let normalized_body = verter_analysis::type_eval::evaluate(&body, &mut normalized_env);
         decl.body = choose_preferred_imported_type_body(Some(body), Some(normalized_body))
             .expect("preferred imported type body should exist");
     } else {
         for param in &decl.type_parameters {
-            dep_env
-                .type_bindings
-                .insert(param.name.clone(), TypeExpr::named(param.name.clone()));
+            dep_env.type_bindings.insert(
+                param.name.clone(),
+                std::sync::Arc::new(TypeExpr::named(param.name.clone())),
+            );
         }
         decl.body = verter_analysis::type_eval::evaluate(&decl.body, &mut dep_env);
     }
@@ -374,7 +376,7 @@ fn extracted_surface_property_count(expr: &TypeExpr) -> Option<usize> {
         TypeExpr::Intersection(types) => {
             let mut total = 0usize;
             let mut saw_surface = false;
-            for ty in types {
+            for ty in types.iter() {
                 let count = extracted_surface_property_count(ty)?;
                 total += count;
                 saw_surface = true;
@@ -546,6 +548,7 @@ fn imported_function_specificity_score(func: &FunctionExpr) -> usize {
 mod tests {
     use super::*;
     use rustc_hash::FxHashMap;
+    use std::sync::Arc;
     use verter_analysis::type_eval::{DeclarationId, TypeDeclKind};
     use verter_analysis::type_expr::{ObjectExpr, ObjectProperty, PrimitiveName, TypeExpr};
 
@@ -605,18 +608,18 @@ mod tests {
     }
 
     fn empty_object() -> TypeExpr {
-        TypeExpr::Object(ObjectExpr { properties: vec![] })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties: vec![] }))
     }
 
     fn object_with_string_prop(name: &str) -> TypeExpr {
-        TypeExpr::Object(ObjectExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: name.to_string(),
                 ty: TypeExpr::Primitive(PrimitiveName::String),
                 optional: false,
                 readonly: false,
             })],
-        })
+        }))
     }
 
     fn env_with_decl(name: &str, body: TypeExpr) -> EvalEnv {
@@ -647,7 +650,7 @@ mod tests {
             "/src/types.ts".to_string(),
             env_with_decl(
                 "ImportedProps",
-                TypeExpr::Intersection(vec![
+                TypeExpr::intersection(vec![
                     TypeExpr::named("BaseProps"),
                     TypeExpr::named("OtherProps"),
                 ]),

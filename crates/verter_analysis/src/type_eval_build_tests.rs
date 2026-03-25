@@ -4,6 +4,7 @@ use super::type_eval_build::{
 };
 use super::type_expr::*;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 #[derive(Default)]
 struct BuildLookup {
@@ -429,7 +430,7 @@ fn e2e_pick_from_interface() {
         "Pick",
         vec![
             TypeExpr::named("User"),
-            TypeExpr::Union(vec![
+            TypeExpr::union(vec![
                 TypeExpr::string_literal("id"),
                 TypeExpr::string_literal("name"),
             ]),
@@ -484,7 +485,7 @@ fn e2e_keyof_interface() {
     let env = parse_and_build_env("interface User { id: number; name: string; email: string }");
 
     let mut eval_env = env;
-    let expr = TypeExpr::KeyOf(Box::new(TypeExpr::named("User")));
+    let expr = TypeExpr::KeyOf(Arc::new(TypeExpr::named("User")));
     let result = evaluate(&expr, &mut eval_env);
     match &result {
         TypeExpr::Union(types) => {
@@ -969,14 +970,14 @@ defineProps<RemoteProps>()
             declaration_id: 0,
             kind: TypeDeclKind::Interface,
             type_parameters: vec![],
-            body: TypeExpr::Object(ObjectExpr {
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "title".to_string(),
                     ty: TypeExpr::Primitive(PrimitiveName::String),
                     optional: false,
                     readonly: false,
                 })],
-            }),
+            })),
         },
     );
 

@@ -5242,7 +5242,7 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
         | TypeExpr::Unknown { .. }
         | TypeExpr::TypeOf(_) => {}
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types {
+            for ty in types.iter() {
                 collect_slot_eval_import_names_from_expr_with_mode(
                     ty,
                     owner_env,
@@ -5272,7 +5272,7 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
             SlotImportWalkMode::KeySpace,
         ),
         TypeExpr::Tuple { elements, .. } => {
-            for element in elements {
+            for element in elements.iter() {
                 collect_slot_eval_import_names_from_expr_with_mode(
                     &element.ty,
                     owner_env,
@@ -5363,7 +5363,7 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
             name,
             type_arguments,
         } => {
-            if let Some(bound) = type_bindings.get(name) {
+            if let Some(bound) = type_bindings.get(&**name) {
                 let binding_guard = slot_import_guard("type", mode, name);
                 if !active_locals.insert(binding_guard.clone()) {
                     return;
@@ -5380,7 +5380,7 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
                 return;
             }
 
-            if let Some(decl) = owner_env.type_symbols.get(name) {
+            if let Some(decl) = owner_env.type_symbols.get(&**name) {
                 let decl_guard = slot_import_guard("decl", mode, name);
                 if !active_locals.insert(decl_guard.clone()) {
                     return;
@@ -5393,7 +5393,7 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
                         .cloned()
                         .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
                     if let Some(arg) = arg {
-                        local_bindings.insert(param.name.clone(), arg);
+                        local_bindings.insert(param.name.to_string(), arg);
                     }
                 }
 
@@ -5409,9 +5409,9 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
                 return;
             }
 
-            required.insert(name.clone());
+            required.insert(name.to_string());
             if should_recurse_surface_type_arguments(name) {
-                for arg in type_arguments {
+                for arg in type_arguments.iter() {
                     collect_slot_eval_import_names_from_expr_with_mode(
                         arg,
                         owner_env,
@@ -5553,7 +5553,7 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
             } else {
                 SlotImportWalkMode::KeySpace
             };
-            for expr in expressions {
+            for expr in expressions.iter() {
                 collect_slot_eval_import_names_from_expr_with_mode(
                     expr,
                     owner_env,
@@ -5670,7 +5670,7 @@ fn collect_slot_eval_import_names_for_member(
             name,
             type_arguments,
         } => {
-            if let Some(bound) = type_bindings.get(name) {
+            if let Some(bound) = type_bindings.get(&**name) {
                 let binding_guard = slot_import_guard("type", mode, name);
                 if !active_locals.insert(binding_guard.clone()) {
                     return;
@@ -5688,7 +5688,7 @@ fn collect_slot_eval_import_names_for_member(
                 return;
             }
 
-            if let Some(decl) = owner_env.type_symbols.get(name) {
+            if let Some(decl) = owner_env.type_symbols.get(&**name) {
                 let decl_guard = slot_import_guard("decl", mode, name);
                 if !active_locals.insert(decl_guard.clone()) {
                     return;
@@ -5701,7 +5701,7 @@ fn collect_slot_eval_import_names_for_member(
                         .cloned()
                         .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
                     if let Some(arg) = arg {
-                        local_bindings.insert(param.name.clone(), arg);
+                        local_bindings.insert(param.name.to_string(), arg);
                     }
                 }
 
@@ -5718,7 +5718,7 @@ fn collect_slot_eval_import_names_for_member(
                 return;
             }
 
-            required.insert(name.clone());
+            required.insert(name.to_string());
             collect_slot_eval_import_names_for_builtin_member(
                 name,
                 type_arguments,
@@ -5740,7 +5740,7 @@ fn collect_slot_eval_import_names_for_member(
             mode,
         ),
         TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            for ty in types {
+            for ty in types.iter() {
                 collect_slot_eval_import_names_for_member(
                     ty,
                     key,
@@ -5863,7 +5863,7 @@ fn collect_surface_eval_import_names_from_expr(
         | TypeExpr::Infer { .. }
         | TypeExpr::Unknown { .. } => {}
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types {
+            for ty in types.iter() {
                 collect_surface_eval_import_names_from_expr(
                     ty,
                     owner_env,
@@ -5884,7 +5884,7 @@ fn collect_surface_eval_import_names_from_expr(
             required,
         ),
         TypeExpr::Tuple { elements, .. } => {
-            for element in elements {
+            for element in elements.iter() {
                 collect_surface_eval_import_names_from_expr(
                     &element.ty,
                     owner_env,
@@ -5952,7 +5952,7 @@ fn collect_surface_eval_import_names_from_expr(
             name,
             type_arguments,
         } => {
-            if let Some(bound) = type_bindings.get(name) {
+            if let Some(bound) = type_bindings.get(&**name) {
                 let binding_guard = format!("$type:{name}");
                 if !active_locals.insert(binding_guard.clone()) {
                     return;
@@ -5968,8 +5968,8 @@ fn collect_surface_eval_import_names_from_expr(
                 return;
             }
 
-            if let Some(decl) = owner_env.type_symbols.get(name) {
-                if !active_locals.insert(name.clone()) {
+            if let Some(decl) = owner_env.type_symbols.get(&**name) {
+                if !active_locals.insert(name.to_string()) {
                     return;
                 }
 
@@ -5980,7 +5980,7 @@ fn collect_surface_eval_import_names_from_expr(
                         .cloned()
                         .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
                     if let Some(arg) = arg {
-                        local_bindings.insert(param.name.clone(), arg);
+                        local_bindings.insert(param.name.to_string(), arg);
                     }
                 }
 
@@ -5991,13 +5991,13 @@ fn collect_surface_eval_import_names_from_expr(
                     active_locals,
                     required,
                 );
-                active_locals.remove(name);
+                active_locals.remove(&**name);
                 return;
             }
 
-            required.insert(name.clone());
+            required.insert(name.to_string());
             if should_recurse_surface_type_arguments(name) {
-                for arg in type_arguments {
+                for arg in type_arguments.iter() {
                     collect_surface_eval_import_names_from_expr(
                         arg,
                         owner_env,
@@ -6085,7 +6085,7 @@ fn collect_surface_eval_import_names_from_expr(
             }
         }
         TypeExpr::TemplateLiteral { expressions, .. } => {
-            for expr in expressions {
+            for expr in expressions.iter() {
                 collect_surface_eval_import_names_from_expr(
                     expr,
                     owner_env,
@@ -6140,7 +6140,7 @@ fn collect_surface_eval_import_names_for_member(
             name,
             type_arguments,
         } => {
-            if let Some(bound) = type_bindings.get(name) {
+            if let Some(bound) = type_bindings.get(&**name) {
                 let binding_guard = format!("$type:{name}");
                 if !active_locals.insert(binding_guard.clone()) {
                     return;
@@ -6157,8 +6157,8 @@ fn collect_surface_eval_import_names_for_member(
                 return;
             }
 
-            if let Some(decl) = owner_env.type_symbols.get(name) {
-                if !active_locals.insert(name.clone()) {
+            if let Some(decl) = owner_env.type_symbols.get(&**name) {
+                if !active_locals.insert(name.to_string()) {
                     return;
                 }
 
@@ -6169,7 +6169,7 @@ fn collect_surface_eval_import_names_for_member(
                         .cloned()
                         .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
                     if let Some(arg) = arg {
-                        local_bindings.insert(param.name.clone(), arg);
+                        local_bindings.insert(param.name.to_string(), arg);
                     }
                 }
 
@@ -6181,11 +6181,11 @@ fn collect_surface_eval_import_names_for_member(
                     active_locals,
                     required,
                 );
-                active_locals.remove(name);
+                active_locals.remove(&**name);
                 return;
             }
 
-            required.insert(name.clone());
+            required.insert(name.to_string());
             collect_surface_eval_import_names_for_builtin_member(
                 name,
                 type_arguments,
@@ -6205,7 +6205,7 @@ fn collect_surface_eval_import_names_for_member(
             required,
         ),
         TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            for ty in types {
+            for ty in types.iter() {
                 collect_surface_eval_import_names_for_member(
                     ty,
                     key,
@@ -6307,7 +6307,7 @@ fn collect_string_literal_keys(
             keys.insert(value.clone());
         }
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types {
+            for ty in types.iter() {
                 keys.extend(collect_string_literal_keys(ty));
             }
         }

@@ -1,5 +1,6 @@
 use super::type_expr::*;
 use super::type_expr_lower::parse_type_annotation;
+use std::sync::Arc;
 
 // =============================================================================
 // Primitive types
@@ -156,7 +157,7 @@ fn union_two_primitives() {
     let expr = parse_type_annotation("string | number");
     assert_eq!(
         expr,
-        TypeExpr::Union(vec![
+        TypeExpr::union(vec![
             TypeExpr::Primitive(PrimitiveName::String),
             TypeExpr::Primitive(PrimitiveName::Number),
         ])
@@ -169,7 +170,7 @@ fn union_three_types() {
     let expr = parse_type_annotation("string | number | boolean");
     assert_eq!(
         expr,
-        TypeExpr::Union(vec![
+        TypeExpr::union(vec![
             TypeExpr::Primitive(PrimitiveName::String),
             TypeExpr::Primitive(PrimitiveName::Number),
             TypeExpr::Primitive(PrimitiveName::Boolean),
@@ -182,7 +183,7 @@ fn union_with_null() {
     let expr = parse_type_annotation("string | null");
     assert_eq!(
         expr,
-        TypeExpr::Union(vec![
+        TypeExpr::union(vec![
             TypeExpr::Primitive(PrimitiveName::String),
             TypeExpr::Primitive(PrimitiveName::Null),
         ])
@@ -194,7 +195,7 @@ fn union_with_literals() {
     let expr = parse_type_annotation("\"red\" | \"blue\" | \"green\"");
     assert_eq!(
         expr,
-        TypeExpr::Union(vec![
+        TypeExpr::union(vec![
             TypeExpr::string_literal("red"),
             TypeExpr::string_literal("blue"),
             TypeExpr::string_literal("green"),
@@ -218,7 +219,7 @@ fn intersection_two_refs() {
     let expr = parse_type_annotation("A & B");
     assert_eq!(
         expr,
-        TypeExpr::Intersection(vec![TypeExpr::named("A"), TypeExpr::named("B"),])
+        TypeExpr::intersection(vec![TypeExpr::named("A"), TypeExpr::named("B"),])
     );
 }
 
@@ -245,7 +246,7 @@ fn array_bracket_syntax() {
     assert_eq!(
         expr,
         TypeExpr::Array {
-            element: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
             readonly: false,
         }
     );
@@ -257,7 +258,7 @@ fn array_generic_syntax() {
     assert_eq!(
         expr,
         TypeExpr::Array {
-            element: Box::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
             readonly: false,
         }
     );
@@ -269,7 +270,7 @@ fn readonly_array() {
     assert_eq!(
         expr,
         TypeExpr::Array {
-            element: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
             readonly: true,
         }
     );
@@ -281,7 +282,7 @@ fn readonly_operator_array() {
     assert_eq!(
         expr,
         TypeExpr::Array {
-            element: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
             readonly: true,
         }
     );
@@ -293,8 +294,8 @@ fn nested_array() {
     assert_eq!(
         expr,
         TypeExpr::Array {
-            element: Box::new(TypeExpr::Array {
-                element: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
+            element: Arc::new(TypeExpr::Array {
+                element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
                 readonly: false,
             }),
             readonly: false,
@@ -627,7 +628,7 @@ fn ref_array_normalized() {
     assert_eq!(
         expr,
         TypeExpr::Array {
-            element: Box::new(TypeExpr::Primitive(PrimitiveName::String)),
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
             readonly: false,
         }
     );
@@ -667,12 +668,12 @@ fn ref_pick() {
             name,
             type_arguments,
         } => {
-            assert_eq!(name, "Pick");
+            assert_eq!(&**name, "Pick");
             assert_eq!(type_arguments.len(), 2);
             assert_eq!(type_arguments[0], TypeExpr::named("User"));
             assert_eq!(
                 type_arguments[1],
-                TypeExpr::Union(vec![
+                TypeExpr::union(vec![
                     TypeExpr::string_literal("id"),
                     TypeExpr::string_literal("name"),
                 ])
@@ -689,7 +690,7 @@ fn ref_pick() {
 #[test]
 fn keyof_ref() {
     let expr = parse_type_annotation("keyof T");
-    assert_eq!(expr, TypeExpr::KeyOf(Box::new(TypeExpr::named("T"))));
+    assert_eq!(expr, TypeExpr::KeyOf(Arc::new(TypeExpr::named("T"))));
 }
 
 #[test]
@@ -739,8 +740,8 @@ fn indexed_access_basic() {
     assert_eq!(
         expr,
         TypeExpr::IndexedAccess {
-            object: Box::new(TypeExpr::named("T")),
-            index: Box::new(TypeExpr::string_literal("key")),
+            object: Arc::new(TypeExpr::named("T")),
+            index: Arc::new(TypeExpr::string_literal("key")),
         }
     );
 }
@@ -751,8 +752,8 @@ fn indexed_access_number() {
     assert_eq!(
         expr,
         TypeExpr::IndexedAccess {
-            object: Box::new(TypeExpr::named("T")),
-            index: Box::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            object: Arc::new(TypeExpr::named("T")),
+            index: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
         }
     );
 }
@@ -927,7 +928,7 @@ fn complex_return_type() {
             name,
             type_arguments,
         } => {
-            assert_eq!(name, "ReturnType");
+            assert_eq!(&**name, "ReturnType");
             assert_eq!(type_arguments.len(), 1);
             assert!(matches!(
                 &type_arguments[0],
@@ -941,10 +942,10 @@ fn complex_return_type() {
 #[test]
 fn complex_pick_omit() {
     let expr = parse_type_annotation("Pick<User, \"id\" | \"name\">");
-    assert!(matches!(&expr, TypeExpr::Ref { name, .. } if name == "Pick"));
+    assert!(matches!(&expr, TypeExpr::Ref { name, .. } if &**name == "Pick"));
 
     let expr2 = parse_type_annotation("Omit<User, \"password\">");
-    assert!(matches!(&expr2, TypeExpr::Ref { name, .. } if name == "Omit"));
+    assert!(matches!(&expr2, TypeExpr::Ref { name, .. } if &**name == "Omit"));
 }
 
 #[test]
@@ -955,7 +956,7 @@ fn complex_record_string_literal_keys() {
             name,
             type_arguments,
         } => {
-            assert_eq!(name, "Record");
+            assert_eq!(&**name, "Record");
             assert_eq!(type_arguments.len(), 2);
             assert!(matches!(&type_arguments[0], TypeExpr::Union(_)));
             assert_eq!(
@@ -975,11 +976,11 @@ fn complex_nested_utility() {
             name,
             type_arguments,
         } => {
-            assert_eq!(name, "Partial");
+            assert_eq!(&**name, "Partial");
             assert_eq!(type_arguments.len(), 1);
             assert!(matches!(
                 &type_arguments[0],
-                TypeExpr::Ref { name, .. } if name == "Pick"
+                TypeExpr::Ref { name, .. } if &**name == "Pick"
             ));
         }
         _ => panic!("expected Partial ref, got {expr:?}"),
@@ -1008,11 +1009,11 @@ fn complex_awaited() {
             name,
             type_arguments,
         } => {
-            assert_eq!(name, "Awaited");
+            assert_eq!(&**name, "Awaited");
             assert_eq!(type_arguments.len(), 1);
             assert!(matches!(
                 &type_arguments[0],
-                TypeExpr::Ref { name, .. } if name == "Promise"
+                TypeExpr::Ref { name, .. } if &**name == "Promise"
             ));
         }
         _ => panic!("expected Awaited ref, got {expr:?}"),

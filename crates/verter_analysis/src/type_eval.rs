@@ -13,6 +13,9 @@
 //!
 //! Evaluation is demand-driven with cycle detection and configurable limits.
 
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::type_expr::*;
@@ -86,13 +89,13 @@ pub struct EvalEnv {
     /// Value declarations: functions, constants, classes.
     pub value_symbols: FxHashMap<String, ValueDeclInfo>,
     /// Memoized evaluations for non-generic type references.
-    resolved_refs: FxHashMap<RefCacheKey, TypeExpr>,
+    resolved_refs: FxHashMap<RefCacheKey, Arc<TypeExpr>>,
     /// Stable ids assigned to type declarations inserted into this environment.
     type_decl_ids: FxHashMap<String, DeclarationId>,
     /// Stable ids assigned to value declarations inserted into this environment.
     value_decl_ids: FxHashMap<String, DeclarationId>,
     /// Generic type parameter bindings for the current instantiation.
-    pub type_bindings: FxHashMap<String, TypeExpr>,
+    pub type_bindings: FxHashMap<String, Arc<TypeExpr>>,
     /// Currently being evaluated (cycle detection).
     pub(crate) active: FxHashSet<String>,
     /// Evaluation limits.
@@ -103,6 +106,10 @@ pub struct EvalEnv {
     mapped_depth: usize,
     /// Total evaluation steps consumed (monotonically increasing).
     steps: usize,
+    /// Current type-reference resolution nesting depth.
+    ref_depth: usize,
+    /// Session-scoped interner for type argument lists.
+    interner: TypeArgInterner,
     /// Monotonic declaration ordinal used to assign stable ids.
     next_declaration_id: DeclarationId,
 }
@@ -117,6 +124,8 @@ pub struct EvalLimits {
     pub max_mapped_depth: usize,
     /// Safety-net total step limit. Default: 50_000.
     pub max_steps: usize,
+    /// Maximum nested `evaluate_ref` calls (reference chain depth). Default: 8.
+    pub max_ref_depth: usize,
 }
 
 impl Default for EvalLimits {
@@ -127,6 +136,7 @@ impl Default for EvalLimits {
             max_mapped_keys: 128,
             max_mapped_depth: 3,
             max_steps: 50_000,
+            max_ref_depth: 8,
         }
     }
 }
@@ -146,6 +156,8 @@ impl EvalEnv {
             depth: 0,
             mapped_depth: 0,
             steps: 0,
+            ref_depth: 0,
+            interner: TypeArgInterner::default(),
             next_declaration_id: 0,
         }
     }
@@ -179,6 +191,11 @@ impl EvalEnv {
         self.steps
     }
 
+    /// Returns the current type-reference resolution nesting depth.
+    pub fn ref_depth(&self) -> usize {
+        self.ref_depth
+    }
+
     /// Returns whether the step budget has been exhausted.
     pub fn budget_exhausted(&self) -> bool {
         self.steps >= self.limits.max_steps
@@ -194,6 +211,7 @@ impl EvalEnv {
         self.depth = 0;
         self.mapped_depth = 0;
         self.steps = 0;
+        self.ref_depth = 0;
     }
 
     /// Merge declarations from another environment without overwriting
@@ -296,17 +314,84 @@ impl Default for EvalEnv {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Cache key for resolved type references. Uses `DeclarationId` for O(1) identity
+/// instead of string comparison, and a precomputed structural hash of args as a
+/// prefilter (not semantic identity — collisions tolerated because `PartialEq`
+/// falls back to structural comparison).
+#[derive(Debug, Clone)]
 struct RefCacheKey {
-    name: String,
-    args: Vec<TypeExpr>,
+    /// Stable declaration ID — unique per type name in the environment.
+    decl_id: DeclarationId,
+    /// The evaluated type arguments, shared via Arc (O(1) clone from Phase 2).
+    args: Arc<[TypeExpr]>,
+    /// Precomputed structural hash of `args` — used as a prefilter only.
+    args_hash: u64,
 }
 
-fn ref_cache_key(name: &str, args: &[TypeExpr]) -> RefCacheKey {
-    RefCacheKey {
-        name: name.to_string(),
-        args: args.to_vec(),
+impl Hash for RefCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.decl_id.hash(state);
+        self.args_hash.hash(state);
     }
+}
+
+impl PartialEq for RefCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.decl_id == other.decl_id
+            && self.args_hash == other.args_hash
+            && (Arc::ptr_eq(&self.args, &other.args) || self.args == other.args)
+    }
+}
+
+impl Eq for RefCacheKey {}
+
+fn compute_structural_hash(args: &[TypeExpr]) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(args)
+}
+
+/// Session-scoped interner for type argument lists. Canonicalizes structurally
+/// identical arg slices to the same `Arc<[TypeExpr]>` allocation, enabling
+/// `Arc::ptr_eq` fast paths in cache key equality.
+#[derive(Debug, Clone, Default)]
+struct TypeArgInterner {
+    /// Hash-consing table: structural hash → bucket of canonicalized arg slices.
+    table: FxHashMap<u64, Vec<Arc<[TypeExpr]>>>,
+}
+
+impl TypeArgInterner {
+    /// Intern args, returning (canonical Arc, structural hash).
+    /// The hash is returned so `ref_cache_key` can reuse it without recomputing.
+    /// Type argument lists are already in canonical form from the evaluator,
+    /// so structural equality is sufficient for interning.
+    fn intern(&mut self, args: Vec<TypeExpr>) -> (Arc<[TypeExpr]>, u64) {
+        let hash = compute_structural_hash(&args);
+        let bucket = self.table.entry(hash).or_default();
+        for existing in bucket.iter() {
+            if existing.as_ref() == args.as_slice() {
+                return (Arc::clone(existing), hash);
+            }
+        }
+        let arc: Arc<[TypeExpr]> = Arc::from(args);
+        bucket.push(Arc::clone(&arc));
+        (arc, hash)
+    }
+}
+
+/// Build a cache key for a resolved type reference. Returns `None` if the type
+/// has no registered `DeclarationId` (unresolved types are not cached).
+fn ref_cache_key(
+    name: &str,
+    args: &Arc<[TypeExpr]>,
+    args_hash: u64,
+    env: &EvalEnv,
+) -> Option<RefCacheKey> {
+    let decl_id = env.type_decl_ids.get(name).copied()?;
+    Some(RefCacheKey {
+        decl_id,
+        args: Arc::clone(args),
+        args_hash,
+    })
 }
 
 fn is_builtin_utility_name(name: &str) -> bool {
@@ -420,13 +505,13 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLooku
 
         // Array — evaluate element
         TypeExpr::Array { element, readonly } => TypeExpr::Array {
-            element: Box::new(evaluate_with_lookup(element, env, lookup)),
+            element: Arc::new(evaluate_with_lookup(element, env, lookup)),
             readonly: *readonly,
         },
 
         // Tuple — evaluate each element
         TypeExpr::Tuple { elements, readonly } => {
-            let evaluated = elements
+            let evaluated: Vec<TupleElement> = elements
                 .iter()
                 .map(|e| TupleElement {
                     label: e.label.clone(),
@@ -436,7 +521,7 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLooku
                 })
                 .collect();
             TypeExpr::Tuple {
-                elements: evaluated,
+                elements: Arc::from(evaluated),
                 readonly: *readonly,
             }
         }
@@ -448,11 +533,13 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLooku
                 .iter()
                 .map(|m| evaluate_object_member(m, env, lookup))
                 .collect();
-            TypeExpr::Object(ObjectExpr { properties })
+            TypeExpr::Object(Arc::new(ObjectExpr { properties }))
         }
 
         // Function — evaluate param and return types
-        TypeExpr::Function(func) => TypeExpr::Function(evaluate_function(func, env, lookup)),
+        TypeExpr::Function(func) => {
+            TypeExpr::Function(Arc::new(evaluate_function(func, env, lookup)))
+        }
 
         // Type reference — resolve
         TypeExpr::Ref {
@@ -516,8 +603,8 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLooku
                 // Conditional nodes (extract_object_shape, etc.) ignore them
                 // entirely, making the branch evaluation wasted work.
                 TypeExpr::Conditional {
-                    check: Box::new(check_eval),
-                    extends: Box::new(extends_eval),
+                    check: Arc::new(check_eval),
+                    extends: Arc::new(extends_eval),
                     true_type: true_type.clone(),
                     false_type: false_type.clone(),
                 }
@@ -546,7 +633,7 @@ fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLooku
         TypeExpr::Infer { .. } => expr.clone(),
 
         // Rest — evaluate inner
-        TypeExpr::Rest(inner) => TypeExpr::Rest(Box::new(evaluate_with_lookup(inner, env, lookup))),
+        TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(evaluate_with_lookup(inner, env, lookup))),
     }
 }
 
@@ -563,7 +650,7 @@ fn evaluate_ref(
     // Check type bindings first (generic parameters)
     if type_arguments.is_empty() {
         if let Some(bound) = env.type_bindings.get(name).cloned() {
-            return evaluate_with_lookup(&bound, env, lookup);
+            return evaluate_with_lookup(bound.as_ref(), env, lookup);
         }
     }
 
@@ -607,9 +694,52 @@ fn evaluate_ref(
             .map(|a| evaluate_with_lookup(a, env, lookup))
             .collect()
     };
-    let cache_key = ref_cache_key(name, &evaluated_args);
-    if let Some(cached) = env.resolved_refs.get(&cache_key).cloned() {
-        return cached;
+    let (args_arc, args_hash) = env.interner.intern(evaluated_args);
+
+    // ref_depth check: after args are evaluated, before resolving the target.
+    // ref_depth is NOT incremented on the fallback path — no guard needed there.
+    // Fallback results are NOT cached (they represent partial resolution).
+    if env.ref_depth >= env.limits.max_ref_depth {
+        return TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: args_arc,
+        };
+    }
+
+    env.ref_depth += 1;
+    let result = evaluate_ref_resolved(
+        name,
+        args_arc,
+        args_hash,
+        local_decl,
+        external_decl,
+        env,
+        lookup,
+    );
+    env.ref_depth -= 1;
+    result
+}
+
+/// Inner resolution body for `evaluate_ref`. Separated so that `ref_depth`
+/// increment/decrement in the caller has a single entry/exit point, matching
+/// the `evaluate_with_lookup`/`evaluate_inner` pattern.
+fn evaluate_ref_resolved(
+    name: &str,
+    args_arc: Arc<[TypeExpr]>,
+    args_hash: u64,
+    local_decl: Option<TypeDeclInfo>,
+    external_decl: Option<TypeDeclInfo>,
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> TypeExpr {
+    let cache_key = ref_cache_key(name, &args_arc, args_hash, env);
+
+    // Cache hit: clone outer TypeExpr node (Arc children shared via refcount)
+    if let Some(key) = &cache_key {
+        if let Some(cached) = env.resolved_refs.get(key) {
+            // TODO: return Arc<TypeExpr> from evaluate_ref to eliminate this shallow copy
+            return (**cached).clone();
+        }
     }
 
     // Look up in type symbol table
@@ -621,21 +751,33 @@ fn evaluate_ref(
         env.active.insert(name.to_string());
 
         let result = if !decl.type_parameters.is_empty() {
-            instantiate_generic(&decl, &evaluated_args, env, lookup)
+            // Arc<[TypeExpr]> derefs to &[TypeExpr] — no Vec reconstruction needed
+            instantiate_generic(&decl, &args_arc, env, lookup)
         } else {
             evaluate_with_lookup(&decl.body, env, lookup)
         };
 
         env.active.remove(name);
-        env.resolved_refs.insert(cache_key, result.clone());
-        return result;
-    }
 
-    // Unresolved — return as-is with evaluated type arguments
-    if evaluated_args.is_empty() {
-        TypeExpr::named(name)
+        // Cacheable: move result into Arc, insert, return clone of contents
+        match cache_key {
+            Some(key) => {
+                let arc = Arc::new(result);
+                env.resolved_refs.insert(key, Arc::clone(&arc));
+                (*arc).clone()
+            }
+            None => result,
+        }
     } else {
-        TypeExpr::named_with_args(name, evaluated_args)
+        // Unresolved — return as-is with evaluated type arguments
+        if args_arc.is_empty() {
+            TypeExpr::named(name)
+        } else {
+            TypeExpr::Ref {
+                name: Arc::from(name),
+                type_arguments: args_arc,
+            }
+        }
     }
 }
 
@@ -681,8 +823,8 @@ fn is_opaque_for_instantiation(
                     .iter()
                     .any(|a| is_opaque_for_instantiation(a, env, lookup));
             }
-            if env.type_bindings.contains_key(name.as_str())
-                || env.type_symbols.contains_key(name)
+            if env.type_bindings.contains_key(name.as_ref())
+                || env.type_symbols.contains_key(name.as_ref())
                 || lookup.resolve_type_decl(name).is_some()
             {
                 return type_arguments
@@ -801,7 +943,7 @@ pub(crate) fn bind_type_parameters(
     decl: &TypeDeclInfo,
     args: &[TypeExpr],
     env: &mut EvalEnv,
-) -> Vec<(String, Option<TypeExpr>)> {
+) -> Vec<(String, Option<Arc<TypeExpr>>)> {
     // Save current bindings
     let saved = decl
         .type_parameters
@@ -812,11 +954,11 @@ pub(crate) fn bind_type_parameters(
     // Bind type parameters to arguments
     for (i, param) in decl.type_parameters.iter().enumerate() {
         let arg = if i < args.len() {
-            args[i].clone()
+            Arc::new(args[i].clone())
         } else if let Some(ref default) = param.default {
-            *default.clone()
+            Arc::clone(default)
         } else {
-            TypeExpr::Primitive(PrimitiveName::Any)
+            Arc::new(TypeExpr::Primitive(PrimitiveName::Any))
         };
         env.type_bindings.insert(param.name.clone(), arg);
     }
@@ -824,7 +966,10 @@ pub(crate) fn bind_type_parameters(
     saved
 }
 
-pub(crate) fn restore_type_parameters(saved: Vec<(String, Option<TypeExpr>)>, env: &mut EvalEnv) {
+pub(crate) fn restore_type_parameters(
+    saved: Vec<(String, Option<Arc<TypeExpr>>)>,
+    env: &mut EvalEnv,
+) {
     for (name, prev) in saved {
         if let Some(prev) = prev {
             env.type_bindings.insert(name, prev);
@@ -848,7 +993,7 @@ pub(crate) fn try_evaluate_conditional_with_infer(
 
     let mut saved = Vec::with_capacity(inferred.len());
     for (name, ty) in inferred {
-        saved.push((name.clone(), env.type_bindings.insert(name, ty)));
+        saved.push((name.clone(), env.type_bindings.insert(name, Arc::new(ty))));
     }
     let result = evaluate_with_lookup(true_type, env, lookup);
     restore_type_parameters(saved, env);
@@ -921,12 +1066,11 @@ fn collect_infer_bindings(
             if actual_elements.len() != pattern_elements.len() {
                 return false;
             }
-            actual_elements
-                .iter()
-                .zip(pattern_elements)
-                .all(|(actual_element, pattern_element)| {
+            actual_elements.iter().zip(pattern_elements.iter()).all(
+                |(actual_element, pattern_element)| {
                     collect_infer_bindings(&actual_element.ty, &pattern_element.ty, inferred)
-                })
+                },
+            )
         }
         TypeExpr::Parenthesized(inner) => collect_infer_bindings(actual, inner, inferred),
         TypeExpr::Primitive(PrimitiveName::Any | PrimitiveName::Unknown) => true,
@@ -1006,7 +1150,7 @@ fn try_builtin_utility(
                 if let Some(obj) =
                     try_project_object_shape(&type_arguments[0], &key_set, false, env, lookup)
                 {
-                    return Some(TypeExpr::Object(obj));
+                    return Some(TypeExpr::Object(Arc::new(obj)));
                 }
             }
             let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
@@ -1020,7 +1164,7 @@ fn try_builtin_utility(
                 if let Some(obj) =
                     try_project_object_shape(&type_arguments[0], &key_set, true, env, lookup)
                 {
-                    return Some(TypeExpr::Object(obj));
+                    return Some(TypeExpr::Object(Arc::new(obj)));
                 }
             }
             let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
@@ -1084,7 +1228,7 @@ fn apply_partial(ty: &TypeExpr) -> TypeExpr {
                 other => other.clone(),
             })
             .collect();
-        TypeExpr::Object(ObjectExpr { properties })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties }))
     } else {
         TypeExpr::named_with_args("Partial", vec![ty.clone()])
     }
@@ -1105,7 +1249,7 @@ fn apply_required(ty: &TypeExpr) -> TypeExpr {
                 other => other.clone(),
             })
             .collect();
-        TypeExpr::Object(ObjectExpr { properties })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties }))
     } else {
         TypeExpr::named_with_args("Required", vec![ty.clone()])
     }
@@ -1126,7 +1270,7 @@ fn apply_readonly(ty: &TypeExpr) -> TypeExpr {
                 other => other.clone(),
             })
             .collect();
-        TypeExpr::Object(ObjectExpr { properties })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties }))
     } else {
         TypeExpr::named_with_args("Readonly", vec![ty.clone()])
     }
@@ -1151,7 +1295,7 @@ fn apply_pick(ty: &TypeExpr, keys: &TypeExpr) -> TypeExpr {
             })
             .cloned()
             .collect();
-        TypeExpr::Object(ObjectExpr { properties })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties }))
     } else {
         TypeExpr::named_with_args("Pick", vec![ty.clone(), keys.clone()])
     }
@@ -1176,7 +1320,7 @@ fn apply_omit(ty: &TypeExpr, keys: &TypeExpr) -> TypeExpr {
             })
             .cloned()
             .collect();
-        TypeExpr::Object(ObjectExpr { properties })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties }))
     } else {
         TypeExpr::named_with_args("Omit", vec![ty.clone(), keys.clone()])
     }
@@ -1199,20 +1343,20 @@ fn apply_record(keys: &TypeExpr, value: &TypeExpr) -> TypeExpr {
                 })
             })
             .collect();
-        TypeExpr::Object(ObjectExpr { properties })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties }))
     } else if matches!(
         keys,
         TypeExpr::Primitive(PrimitiveName::String | PrimitiveName::Number)
     ) {
         // Index signature
-        TypeExpr::Object(ObjectExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::IndexSignature(IndexSignature {
                 key_name: "key".to_string(),
                 key_type: keys.clone(),
                 value_type: value.clone(),
                 readonly: false,
             })],
-        })
+        }))
     } else {
         TypeExpr::named_with_args("Record", vec![keys.clone(), value.clone()])
     }
@@ -1316,7 +1460,7 @@ fn extract_return_type(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLo
 fn extract_parameters(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup) -> TypeExpr {
     match ty {
         TypeExpr::Function(func) => {
-            let elements = func
+            let elements: Vec<TupleElement> = func
                 .parameters
                 .iter()
                 .map(|p| TupleElement {
@@ -1327,7 +1471,7 @@ fn extract_parameters(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLoo
                 })
                 .collect();
             TypeExpr::Tuple {
-                elements,
+                elements: Arc::from(elements),
                 readonly: false,
             }
         }
@@ -1353,7 +1497,7 @@ fn extract_constructor_parameters(
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
                 if let ObjectMember::ConstructSignature(func) = member {
-                    let elements = func
+                    let elements: Vec<TupleElement> = func
                         .parameters
                         .iter()
                         .map(|p| TupleElement {
@@ -1364,7 +1508,7 @@ fn extract_constructor_parameters(
                         })
                         .collect();
                     return TypeExpr::Tuple {
-                        elements,
+                        elements: Arc::from(elements),
                         readonly: false,
                     };
                 }
@@ -1404,7 +1548,7 @@ fn unwrap_awaited(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup)
         TypeExpr::Ref {
             name,
             type_arguments,
-        } if name == "Promise" && type_arguments.len() == 1 => {
+        } if &**name == "Promise" && type_arguments.len() == 1 => {
             let inner = evaluate_with_lookup(&type_arguments[0], env, lookup);
             // Recursively unwrap nested Promises
             unwrap_awaited(&inner, env, lookup)
@@ -1436,7 +1580,7 @@ fn evaluate_keyof(ty: &TypeExpr) -> TypeExpr {
                 TypeExpr::union(keys)
             }
         }
-        _ => TypeExpr::KeyOf(Box::new(ty.clone())),
+        _ => TypeExpr::KeyOf(Arc::new(ty.clone())),
     }
 }
 
@@ -1480,22 +1624,22 @@ fn resolve_typeof(
     // ConstructorParameters<typeof C> and InstanceType<typeof C>.
     if decl.kind == ValueDeclKind::Class {
         if let Some(ref shape) = decl.object_shape {
-            return Some(TypeExpr::Object(shape.clone()));
+            return Some(TypeExpr::Object(Arc::new(shape.clone())));
         }
     }
 
     // If it's a function, synthesize a function type
     if let Some(ref sig) = decl.function_signature {
-        return Some(TypeExpr::Function(FunctionExpr {
+        return Some(TypeExpr::Function(Arc::new(FunctionExpr {
             parameters: sig.parameters.clone(),
-            return_type: sig.return_type.clone().map(Box::new),
+            return_type: sig.return_type.clone().map(Arc::new),
             type_parameters: sig.type_parameters.clone(),
-        }));
+        })));
     }
 
     // If it's an object literal, use the shape
     if let Some(ref shape) = decl.object_shape {
-        return Some(TypeExpr::Object(shape.clone()));
+        return Some(TypeExpr::Object(Arc::new(shape.clone())));
     }
 
     None
@@ -1539,7 +1683,7 @@ fn try_lazy_member_lookup(
                 }
                 if let ObjectMember::Method(m) = member {
                     if m.name == key {
-                        return Some(TypeExpr::Function(m.function.clone()));
+                        return Some(TypeExpr::Function(Arc::new(m.function.clone())));
                     }
                 }
             }
@@ -1550,24 +1694,24 @@ fn try_lazy_member_lookup(
             type_arguments,
         } => {
             if let Some(result) =
-                try_lazy_builtin_member_lookup(name.as_str(), type_arguments, key, env, lookup)
+                try_lazy_builtin_member_lookup(name, type_arguments, key, env, lookup)
             {
                 return Some(result);
             }
 
             let decl = env
                 .type_symbols
-                .get(name)
+                .get(&**name)
                 .cloned()
                 .or_else(|| lookup.resolve_type_decl(name))?;
-            if env.active.contains(name) {
+            if env.active.contains(&**name) {
                 return None;
             }
             env.active.insert(name.to_string());
             let saved = bind_type_parameters(&decl, type_arguments, env);
             let result = try_lazy_member_lookup(&decl.body, key, env, lookup);
             restore_type_parameters(saved, env);
-            env.active.remove(name);
+            env.active.remove(&**name);
             result
         }
         TypeExpr::Parenthesized(inner) => try_lazy_member_lookup(inner, key, env, lookup),
@@ -1629,18 +1773,18 @@ fn try_project_object_shape(
         } => {
             let decl = env
                 .type_symbols
-                .get(name)
+                .get(&**name)
                 .cloned()
                 .or_else(|| lookup.resolve_type_decl(name));
             if let Some(decl) = decl {
-                if env.active.contains(name) {
+                if env.active.contains(&**name) {
                     return None;
                 }
                 env.active.insert(name.to_string());
                 let saved = bind_type_parameters(&decl, type_arguments, env);
                 let projected = try_project_object_shape(&decl.body, keys, omit_mode, env, lookup);
                 restore_type_parameters(saved, env);
-                env.active.remove(name);
+                env.active.remove(&**name);
                 if let Some(projected) = projected {
                     return Some(projected);
                 }
@@ -1723,7 +1867,7 @@ fn project_object_members(
                     return_type: sig
                         .return_type
                         .as_ref()
-                        .map(|ret| Box::new(evaluate_with_lookup(ret, env, lookup))),
+                        .map(|ret| Arc::new(evaluate_with_lookup(ret, env, lookup))),
                     type_parameters: sig.type_parameters.clone(),
                 })
             }),
@@ -1740,7 +1884,7 @@ fn project_object_members(
                     return_type: sig
                         .return_type
                         .as_ref()
-                        .map(|ret| Box::new(evaluate_with_lookup(ret, env, lookup))),
+                        .map(|ret| Arc::new(evaluate_with_lookup(ret, env, lookup))),
                     type_parameters: sig.type_parameters.clone(),
                 })
             }),
@@ -1762,7 +1906,7 @@ fn evaluate_indexed_access(object: &TypeExpr, index: &TypeExpr) -> TypeExpr {
                 }
                 if let ObjectMember::Method(m) = member {
                     if m.name == *key {
-                        return TypeExpr::Function(m.function.clone());
+                        return TypeExpr::Function(Arc::new(m.function.clone()));
                     }
                 }
             }
@@ -1786,20 +1930,20 @@ fn evaluate_indexed_access(object: &TypeExpr, index: &TypeExpr) -> TypeExpr {
                 }
             }
             TypeExpr::IndexedAccess {
-                object: Box::new(object.clone()),
-                index: Box::new(index.clone()),
+                object: Arc::new(object.clone()),
+                index: Arc::new(index.clone()),
             }
         }
         (TypeExpr::Array { element, .. }, TypeExpr::Primitive(PrimitiveName::Number)) => {
             // T[][number] → T
-            *element.clone()
+            (**element).clone()
         }
         (TypeExpr::Tuple { elements, .. }, TypeExpr::Literal(LiteralValue::Number(n))) => {
             // [A, B, C][0] → A
             if n.fract() != 0.0 || *n < 0.0 || !n.is_finite() {
                 return TypeExpr::IndexedAccess {
-                    object: Box::new(object.clone()),
-                    index: Box::new(index.clone()),
+                    object: Arc::new(object.clone()),
+                    index: Arc::new(index.clone()),
                 };
             }
             let idx = *n as usize;
@@ -1818,8 +1962,8 @@ fn evaluate_indexed_access(object: &TypeExpr, index: &TypeExpr) -> TypeExpr {
             TypeExpr::union(results)
         }
         _ => TypeExpr::IndexedAccess {
-            object: Box::new(object.clone()),
-            index: Box::new(index.clone()),
+            object: Arc::new(object.clone()),
+            index: Arc::new(index.clone()),
         },
     }
 }
@@ -1835,7 +1979,7 @@ fn evaluate_mapped(
     value: &TypeExpr,
     optional: MappedModifier,
     readonly: MappedModifier,
-    name_type: &Option<Box<TypeExpr>>,
+    name_type: &Option<Arc<TypeExpr>>,
     env: &mut EvalEnv,
     lookup: &mut dyn EvalLookup,
 ) -> TypeExpr {
@@ -1843,8 +1987,8 @@ fn evaluate_mapped(
     if env.mapped_depth >= env.limits.max_mapped_depth {
         return TypeExpr::Mapped {
             parameter: parameter.to_string(),
-            source: Box::new(evaluate_with_lookup(source, env, lookup)),
-            value: Box::new(value.clone()),
+            source: Arc::new(evaluate_with_lookup(source, env, lookup)),
+            value: Arc::new(value.clone()),
             optional,
             readonly,
             name_type: name_type.clone(),
@@ -1859,8 +2003,8 @@ fn evaluate_mapped(
         env.mapped_depth -= 1;
         return TypeExpr::Mapped {
             parameter: parameter.to_string(),
-            source: Box::new(resolved_source),
-            value: Box::new(value.clone()),
+            source: Arc::new(resolved_source),
+            value: Arc::new(value.clone()),
             optional,
             readonly,
             name_type: name_type.clone(),
@@ -1876,8 +2020,10 @@ fn evaluate_mapped(
     let properties: Vec<ObjectMember> = keys
         .into_iter()
         .map(|key| {
-            env.type_bindings
-                .insert(parameter.to_string(), TypeExpr::string_literal(&key));
+            env.type_bindings.insert(
+                parameter.to_string(),
+                Arc::new(TypeExpr::string_literal(&key)),
+            );
             let prop_type = evaluate_with_lookup(value, env, lookup);
             let src = source_props.get(key.as_str());
             let is_optional = match optional {
@@ -1907,7 +2053,7 @@ fn evaluate_mapped(
     }
 
     env.mapped_depth -= 1;
-    TypeExpr::Object(ObjectExpr { properties })
+    TypeExpr::Object(Arc::new(ObjectExpr { properties }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,7 +2164,7 @@ fn extract_source_property_modifiers(
 
 pub(crate) fn extract_object_shape(ty: &TypeExpr) -> Option<ObjectExpr> {
     match ty {
-        TypeExpr::Object(obj) => Some(obj.clone()),
+        TypeExpr::Object(obj) => Some((**obj).clone()),
         TypeExpr::Parenthesized(inner) => extract_object_shape(inner),
         TypeExpr::Intersection(types) => merge_object_branches(
             types
@@ -2068,23 +2214,23 @@ fn merge_intersection(types: Vec<TypeExpr>) -> TypeExpr {
         let mut merged = Vec::new();
         for t in types {
             if let TypeExpr::Object(obj) = t {
-                for member in obj.properties {
-                    if let ObjectMember::Property(ref p) = member {
+                for member in &obj.properties {
+                    if let ObjectMember::Property(p) = member {
                         if let Some(existing_index) = merged.iter().position(|existing| {
                             matches!(existing, ObjectMember::Property(existing_prop) if existing_prop.name == p.name)
                         }) {
                             merged.remove(existing_index);
                         }
-                        merged.push(member);
+                        merged.push(member.clone());
                     } else {
-                        merged.push(member);
+                        merged.push(member.clone());
                     }
                 }
             }
         }
-        TypeExpr::Object(ObjectExpr { properties: merged })
+        TypeExpr::Object(Arc::new(ObjectExpr { properties: merged }))
     } else {
-        TypeExpr::Intersection(types)
+        TypeExpr::Intersection(Arc::from(types))
     }
 }
 
@@ -2107,7 +2253,7 @@ fn evaluate_function(
         return_type: func
             .return_type
             .as_ref()
-            .map(|r| Box::new(evaluate_with_lookup(r, env, lookup))),
+            .map(|r| Arc::new(evaluate_with_lookup(r, env, lookup))),
         type_parameters: func.type_parameters.clone(),
     }
 }
@@ -2119,7 +2265,7 @@ fn extract_string_keys(ty: &TypeExpr) -> Vec<String> {
         TypeExpr::Literal(LiteralValue::String(s)) => vec![s.clone()],
         TypeExpr::Union(types) => {
             let mut keys = Vec::new();
-            for t in types {
+            for t in types.iter() {
                 match t {
                     TypeExpr::Literal(LiteralValue::String(s)) => keys.push(s.clone()),
                     _ => return Vec::new(), // Non-literal in union → give up

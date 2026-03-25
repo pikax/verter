@@ -4,7 +4,7 @@
 //! symbol tables so the evaluator can resolve references.
 
 use std::io::Write;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use oxc_ast::ast::{
@@ -159,9 +159,9 @@ fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut 
     }
 
     // Handle extends clauses — merge inherited properties
-    let mut body = TypeExpr::Object(ObjectExpr {
+    let mut body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: members,
-    });
+    }));
 
     if !decl.extends.is_empty() {
         let mut parts = Vec::new();
@@ -240,7 +240,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                             name: method_name,
                             function: FunctionExpr {
                                 parameters: func.parameters,
-                                return_type: func.return_type.map(Box::new),
+                                return_type: func.return_type.map(Arc::new),
                                 type_parameters: func.type_parameters,
                             },
                             optional: method.optional,
@@ -258,9 +258,9 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         .map(|tp| lower_type_param_decls(tp, source))
         .unwrap_or_default();
 
-    let body = TypeExpr::Object(ObjectExpr {
+    let body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: members,
-    });
+    }));
 
     env.add_type(TypeDeclInfo {
         name: name.clone(),
@@ -279,7 +279,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
     let constructor_shape = ObjectExpr {
         properties: vec![ObjectMember::ConstructSignature(FunctionExpr {
             parameters: constructor_signature.parameters.clone(),
-            return_type: constructor_signature.return_type.clone().map(Box::new),
+            return_type: constructor_signature.return_type.clone().map(Arc::new),
             type_parameters: constructor_signature.type_parameters.clone(),
         })],
     };
@@ -559,10 +559,12 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
             infer_expression_type(&paren.expression, source)
         }
         Expression::ArrayExpression(_) => TypeExpr::Array {
-            element: Box::new(TypeExpr::Primitive(PrimitiveName::Any)),
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::Any)),
             readonly: false,
         },
-        Expression::ObjectExpression(obj) => TypeExpr::Object(extract_object_literal(obj, source)),
+        Expression::ObjectExpression(obj) => {
+            TypeExpr::Object(Arc::new(extract_object_literal(obj, source)))
+        }
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
             let mut value = String::new();
             for quasi in &tpl.quasis {
@@ -572,11 +574,11 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
         }
         Expression::ArrowFunctionExpression(arrow) => {
             let sig = extract_arrow_signature(arrow, source);
-            TypeExpr::Function(FunctionExpr {
+            TypeExpr::Function(Arc::new(FunctionExpr {
                 parameters: sig.parameters,
-                return_type: sig.return_type.map(Box::new),
+                return_type: sig.return_type.map(Arc::new),
                 type_parameters: sig.type_parameters,
-            })
+            }))
         }
         Expression::TSAsExpression(ts_as) => {
             // const x = value as SomeType → use the asserted type
@@ -622,7 +624,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 name,
                 function: FunctionExpr {
                     parameters: params,
-                    return_type: return_type.map(Box::new),
+                    return_type: return_type.map(Arc::new),
                     type_parameters,
                 },
                 optional: method.optional,
@@ -641,7 +643,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .unwrap_or_default();
             Some(ObjectMember::CallSignature(FunctionExpr {
                 parameters: params,
-                return_type: return_type.map(Box::new),
+                return_type: return_type.map(Arc::new),
                 type_parameters,
             }))
         }
@@ -678,7 +680,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .unwrap_or_default();
             Some(ObjectMember::ConstructSignature(FunctionExpr {
                 parameters: params,
-                return_type: return_type.map(Box::new),
+                return_type: return_type.map(Arc::new),
                 type_parameters,
             }))
         }
@@ -738,11 +740,11 @@ fn lower_type_param_decls(
             constraint: p
                 .constraint
                 .as_ref()
-                .map(|c| Box::new(lower_ts_type(c, source))),
+                .map(|c| Arc::new(lower_ts_type(c, source))),
             default: p
                 .default
                 .as_ref()
-                .map(|d| Box::new(lower_ts_type(d, source))),
+                .map(|d| Arc::new(lower_ts_type(d, source))),
         })
         .collect()
 }

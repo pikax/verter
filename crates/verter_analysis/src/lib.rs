@@ -53,6 +53,10 @@ mod type_expr_tests;
 mod type_eval_tests;
 
 #[cfg(test)]
+#[path = "type_eval_memory_tests.rs"]
+mod type_eval_memory_tests;
+
+#[cfg(test)]
 #[path = "type_eval_build_tests.rs"]
 mod type_eval_build_tests;
 

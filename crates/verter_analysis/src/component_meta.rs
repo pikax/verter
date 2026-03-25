@@ -1579,17 +1579,18 @@ fn expanded_define_emit_events(
             continue;
         };
         let payload = TypeExpr::Tuple {
-            elements: sig
-                .parameters
-                .iter()
-                .skip(1)
-                .map(|param| TupleElement {
-                    label: (!param.name.is_empty()).then(|| param.name.clone()),
-                    ty: param.ty.clone(),
-                    optional: param.optional,
-                    rest: param.rest,
-                })
-                .collect(),
+            elements: std::sync::Arc::from(
+                sig.parameters
+                    .iter()
+                    .skip(1)
+                    .map(|param| TupleElement {
+                        label: (!param.name.is_empty()).then(|| param.name.clone()),
+                        ty: param.ty.clone(),
+                        optional: param.optional,
+                        rest: param.rest,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             readonly: false,
         };
         let payload_expansion = Some(crate::type_expand::ExpansionMetadata {
@@ -1608,7 +1609,7 @@ fn expanded_define_emit_events(
                 }
             }
             TypeExpr::Union(types) => {
-                for ty in types {
+                for ty in types.iter() {
                     let TypeExpr::Literal(LiteralValue::String(name)) = ty else {
                         continue;
                     };
@@ -1722,7 +1723,7 @@ fn collect_slot_bindings_from_object_type(
             collect_slot_bindings_from_object_type(inner, type_expansion, seen, out);
         }
         TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            for inner in types {
+            for inner in types.iter() {
                 collect_slot_bindings_from_object_type(inner, type_expansion, seen, out);
             }
         }
@@ -1840,7 +1841,7 @@ fn synthesize_model_prop_and_event(
         if has_default {
             type_expr = match type_expr {
                 TypeExpr::Unknown { .. } => type_expr,
-                other => TypeExpr::Union(vec![
+                other => TypeExpr::union(vec![
                     other,
                     TypeExpr::Primitive(crate::type_expr::PrimitiveName::Undefined),
                 ]),

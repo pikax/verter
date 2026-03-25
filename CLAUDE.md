@@ -190,6 +190,16 @@ Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` gene
 
 **Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string — the source map still reflects the pre-replace byte offsets.
 
+### Type Evaluator Sharing & Depth Limits
+
+`verter_analysis::type_eval` is the shared lightweight type evaluator used by analysis, host, and resolver surfaces. Its memory and caching invariants matter across the workspace.
+
+- Recursive `TypeExpr` structure is Arc-backed (`Arc<TypeExpr>`, `Arc<[TypeExpr]>`, `Arc<ObjectExpr>`, `Arc<FunctionExpr>`) so clones stay shallow.
+- `EvalEnv.type_bindings` stores `Arc<TypeExpr>`, not owned `TypeExpr`, so generic instantiation does not re-copy bound subtrees.
+- `resolved_refs` caches `Arc<TypeExpr>` values keyed by stable declaration identity plus interned type arguments. Cache-hit callers may clone the outer `TypeExpr`, but child allocations must stay shared.
+- `max_ref_depth` is a safety valve for nested `evaluate_ref` chains only. When the limit is hit, return a symbolic `TypeExpr::Ref` built from the already-interned evaluated args. Do not cache that fallback result.
+- Structural-sharing regressions should be covered in dedicated evaluator tests and the Criterion pathological-graph bench in `crates/verter_analysis/benches/type_eval_bench.rs`.
+
 ### IDE Script Error Recovery
 
 When OXC encounters parse errors during typing (e.g., `count.` mid-expression), the IDE script codegen (`ide/script.rs`) uses a **truncate-and-reparse** strategy instead of falling back to degraded file-scope output:

@@ -19,6 +19,8 @@ use oxc_ast::ast::{
 };
 use oxc_span::GetSpan;
 
+use std::sync::Arc;
+
 use crate::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, MappedModifier, MethodSignature, ObjectExpr,
     ObjectMember, ObjectProperty, PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
@@ -68,19 +70,19 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
 
         // -- Array --
         TSType::TSArrayType(arr) => TypeExpr::Array {
-            element: Box::new(lower_ts_type(&arr.element_type, source)),
+            element: Arc::new(lower_ts_type(&arr.element_type, source)),
             readonly: false,
         },
 
         // -- Tuple --
         TSType::TSTupleType(tuple) => {
-            let elements = tuple
+            let elements: Vec<TupleElement> = tuple
                 .element_types
                 .iter()
                 .map(|elem| lower_tuple_element(elem, source))
                 .collect();
             TypeExpr::Tuple {
-                elements,
+                elements: Arc::from(elements),
                 readonly: false,
             }
         }
@@ -92,19 +94,21 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
                 .iter()
                 .filter_map(|m| lower_ts_signature(m, source))
                 .collect();
-            TypeExpr::Object(ObjectExpr {
+            TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: members,
-            })
+            }))
         }
 
         // -- Function type --
-        TSType::TSFunctionType(func) => TypeExpr::Function(lower_function_type(func, source)),
+        TSType::TSFunctionType(func) => {
+            TypeExpr::Function(Arc::new(lower_function_type(func, source)))
+        }
 
         // -- Constructor type --
         TSType::TSConstructorType(ctor) => {
             let func = FunctionExpr {
                 parameters: lower_formal_parameters(&ctor.params, source),
-                return_type: Some(Box::new(lower_ts_type(
+                return_type: Some(Arc::new(lower_ts_type(
                     &ctor.return_type.type_annotation,
                     source,
                 ))),
@@ -114,9 +118,9 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
                     .map(|tp| lower_type_params(tp, source))
                     .unwrap_or_default(),
             };
-            TypeExpr::Object(ObjectExpr {
+            TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![ObjectMember::ConstructSignature(func)],
-            })
+            }))
         }
 
         // -- Type reference --
@@ -125,7 +129,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         // -- Type operators (keyof, readonly, unique) --
         TSType::TSTypeOperatorType(op) => match op.operator {
             TSTypeOperatorOperator::Keyof => {
-                TypeExpr::KeyOf(Box::new(lower_ts_type(&op.type_annotation, source)))
+                TypeExpr::KeyOf(Arc::new(lower_ts_type(&op.type_annotation, source)))
             }
             TSTypeOperatorOperator::Readonly => {
                 let inner = lower_ts_type(&op.type_annotation, source);
@@ -146,16 +150,16 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
 
         // -- Indexed access: T[K] --
         TSType::TSIndexedAccessType(idx) => TypeExpr::IndexedAccess {
-            object: Box::new(lower_ts_type(&idx.object_type, source)),
-            index: Box::new(lower_ts_type(&idx.index_type, source)),
+            object: Arc::new(lower_ts_type(&idx.object_type, source)),
+            index: Arc::new(lower_ts_type(&idx.index_type, source)),
         },
 
         // -- Conditional type: T extends U ? A : B --
         TSType::TSConditionalType(cond) => TypeExpr::Conditional {
-            check: Box::new(lower_ts_type(&cond.check_type, source)),
-            extends: Box::new(lower_ts_type(&cond.extends_type, source)),
-            true_type: Box::new(lower_ts_type(&cond.true_type, source)),
-            false_type: Box::new(lower_ts_type(&cond.false_type, source)),
+            check: Arc::new(lower_ts_type(&cond.check_type, source)),
+            extends: Arc::new(lower_ts_type(&cond.extends_type, source)),
+            true_type: Arc::new(lower_ts_type(&cond.true_type, source)),
+            false_type: Arc::new(lower_ts_type(&cond.false_type, source)),
         },
 
         // -- Mapped type: { [K in T]: V } --
@@ -164,16 +168,17 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         // -- Template literal type: `prefix${T}suffix` --
         TSType::TSTemplateLiteralType(tpl) => {
             let quasis = tpl.quasis.iter().map(|q| q.value.raw.to_string()).collect();
-            let expressions = tpl.types.iter().map(|t| lower_ts_type(t, source)).collect();
+            let expressions: Vec<TypeExpr> =
+                tpl.types.iter().map(|t| lower_ts_type(t, source)).collect();
             TypeExpr::TemplateLiteral {
                 quasis,
-                expressions,
+                expressions: Arc::from(expressions),
             }
         }
 
         // -- Parenthesized type --
         TSType::TSParenthesizedType(paren) => {
-            TypeExpr::Parenthesized(Box::new(lower_ts_type(&paren.type_annotation, source)))
+            TypeExpr::Parenthesized(Arc::new(lower_ts_type(&paren.type_annotation, source)))
         }
 
         // -- typeof (type query) --
@@ -289,21 +294,21 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
     if type_arguments.len() == 1 {
         if name == "Array" {
             return TypeExpr::Array {
-                element: Box::new(type_arguments.into_iter().next().unwrap()),
+                element: Arc::new(type_arguments.into_iter().next().unwrap()),
                 readonly: false,
             };
         }
         if name == "ReadonlyArray" {
             return TypeExpr::Array {
-                element: Box::new(type_arguments.into_iter().next().unwrap()),
+                element: Arc::new(type_arguments.into_iter().next().unwrap()),
                 readonly: true,
             };
         }
     }
 
     TypeExpr::Ref {
-        name,
-        type_arguments,
+        name: Arc::from(name),
+        type_arguments: Arc::from(type_arguments),
     }
 }
 
@@ -354,12 +359,12 @@ fn lower_mapped_type(mapped: &TSMappedType<'_>, source: &str) -> TypeExpr {
     let name_type = mapped
         .name_type
         .as_ref()
-        .map(|n| Box::new(lower_ts_type(n, source)));
+        .map(|n| Arc::new(lower_ts_type(n, source)));
 
     TypeExpr::Mapped {
         parameter,
-        source: Box::new(source_type),
-        value: Box::new(value),
+        source: Arc::new(source_type),
+        value: Arc::new(value),
         optional,
         readonly,
         name_type,
@@ -390,7 +395,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                 return_type: method
                     .return_type
                     .as_ref()
-                    .map(|rt| Box::new(lower_ts_type(&rt.type_annotation, source))),
+                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
                 type_parameters: method
                     .type_parameters
                     .as_ref()
@@ -409,7 +414,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                 return_type: call
                     .return_type
                     .as_ref()
-                    .map(|rt| Box::new(lower_ts_type(&rt.type_annotation, source))),
+                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
                 type_parameters: call
                     .type_parameters
                     .as_ref()
@@ -444,7 +449,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                 return_type: ctor
                     .return_type
                     .as_ref()
-                    .map(|rt| Box::new(lower_ts_type(&rt.type_annotation, source))),
+                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
                 type_parameters: ctor
                     .type_parameters
                     .as_ref()
@@ -508,7 +513,7 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
 fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr {
     FunctionExpr {
         parameters: lower_formal_parameters(&func.params, source),
-        return_type: Some(Box::new(lower_ts_type(
+        return_type: Some(Arc::new(lower_ts_type(
             &func.return_type.type_annotation,
             source,
         ))),
@@ -564,11 +569,11 @@ fn lower_type_params(type_params: &TSTypeParameterDeclaration<'_>, source: &str)
             constraint: p
                 .constraint
                 .as_ref()
-                .map(|c| Box::new(lower_ts_type(c, source))),
+                .map(|c| Arc::new(lower_ts_type(c, source))),
             default: p
                 .default
                 .as_ref()
-                .map(|d| Box::new(lower_ts_type(d, source))),
+                .map(|d| Arc::new(lower_ts_type(d, source))),
         })
         .collect()
 }
