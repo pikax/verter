@@ -19,7 +19,10 @@
 //!        host_resolve.rs  (declaration graph traversal, shared cache)
 //! ```
 
-use crate::host_manage::{component_meta_debug, component_meta_debug_enabled};
+use crate::host_manage::{
+    component_meta_debug, component_meta_debug_enabled, component_meta_trace_event,
+    component_meta_trace_scope,
+};
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
 use std::sync::Arc;
@@ -30,6 +33,21 @@ use verter_resolver::{
 };
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
+
+fn trace_request_source(source: RequestSource) -> &'static str {
+    match source {
+        RequestSource::Cache => "cache",
+        RequestSource::Flight {
+            role: SingleflightRole::Leader,
+            ..
+        } => "flight:leader",
+        RequestSource::Flight {
+            role: SingleflightRole::Follower,
+            ..
+        } => "flight:follower",
+        RequestSource::Fallback => "fallback",
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CapturedComponentMetaInputs {
@@ -67,17 +85,54 @@ impl ComponentMetaRequestHost for VerterHost {
         canonical: &str,
         view: &Self::View,
     ) -> Option<Self::CapturedInputs> {
+        let _trace = component_meta_trace_scope(
+            "capture_component_meta_inputs",
+            format!("owner={} store_view=true", canonical),
+        );
         let snapshot = self.get_raw_analysis_snapshot_in_view(canonical, Some(view))?;
+        component_meta_trace_event(
+            "capture_component_meta_snapshot",
+            format!(
+                "owner={} imports={} macros={} bindings={} has_template={}",
+                canonical,
+                snapshot.imports.len(),
+                snapshot.macros.len(),
+                snapshot.bindings.len(),
+                snapshot.template.is_some(),
+            ),
+        );
         let (source, cached_parse, whole_hash) =
             self.current_eval_state_in_view(canonical, Some(view))?;
+        component_meta_trace_event(
+            "capture_component_meta_eval_state",
+            format!(
+                "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
+                canonical,
+                source.len(),
+                cached_parse.is_some(),
+            ),
+        );
         let owner_eval_source =
             VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+        let owner_env = self.base_eval_env_in_view(canonical, Some(view));
+        let dep_resolutions =
+            self.dependency_resolutions_for_eval_in_view(canonical, Some(view))?;
+        component_meta_trace_event(
+            "capture_component_meta_inputs_result",
+            format!(
+                "owner={} owner_eval_source_len={} has_owner_env={} dep_resolutions={}",
+                canonical,
+                owner_eval_source.len(),
+                owner_env.is_some(),
+                dep_resolutions.len(),
+            ),
+        );
         Some(CapturedComponentMetaInputs {
             whole_hash,
             snapshot,
             owner_eval_source: Some(owner_eval_source),
-            owner_env: self.base_eval_env_in_view(canonical, Some(view)),
-            dep_resolutions: self.dependency_resolutions_for_eval_in_view(canonical, Some(view))?,
+            owner_env,
+            dep_resolutions,
         })
     }
 
@@ -87,7 +142,16 @@ impl ComponentMetaRequestHost for VerterHost {
         mode: Self::Mode,
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        self.try_get_cached_resolved_meta(canonical, mode, store_view)
+        let _trace = component_meta_trace_scope(
+            "try_get_cached_component_meta",
+            format!("owner={} mode={mode:?}", canonical),
+        );
+        let result = self.try_get_cached_resolved_meta(canonical, mode, store_view);
+        component_meta_trace_event(
+            "try_get_cached_component_meta_result",
+            format!("owner={} mode={mode:?} hit={}", canonical, result.is_some()),
+        );
+        result
     }
 
     fn compute_component_meta(
@@ -160,6 +224,51 @@ pub struct ResolvedComponentMetaState {
 }
 
 impl VerterHost {
+    fn clone_cached_raw_analysis_snapshot(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+    ) -> Option<Arc<FileAnalysisSnapshot>> {
+        self.raw_analysis_snapshot_cache
+            .lock()
+            .get(canonical)
+            .and_then(|entry| (entry.whole_hash == whole_hash).then(|| Arc::clone(&entry.snapshot)))
+    }
+
+    fn cache_raw_analysis_snapshot(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+        snapshot: FileAnalysisSnapshot,
+    ) -> Arc<FileAnalysisSnapshot> {
+        let mut cache = self.raw_analysis_snapshot_cache.lock();
+        if let Some(entry) = cache.get(canonical) {
+            if entry.whole_hash == whole_hash {
+                return Arc::clone(&entry.snapshot);
+            }
+        }
+        let snapshot = Arc::new(snapshot);
+        cache.insert(
+            canonical.to_string(),
+            crate::RawAnalysisSnapshotCacheEntry {
+                whole_hash,
+                snapshot: Arc::clone(&snapshot),
+            },
+        );
+        snapshot
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_analysis_snapshot_cache_entry(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<FileAnalysisSnapshot>> {
+        self.raw_analysis_snapshot_cache
+            .lock()
+            .get(canonical)
+            .map(|entry| Arc::clone(&entry.snapshot))
+    }
+
     /// Single host-backed resolver API for cross-file component-meta enrichment.
     ///
     /// This is the ONLY entry point for cross-file component-meta resolution.
@@ -176,6 +285,10 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let _trace = component_meta_trace_scope(
+            "resolve_component_meta",
+            format!("owner={} mode={mode:?}", canonical),
+        );
         let result = run_component_meta_request(
             self,
             self.resolver_runtime().component_meta.singleflight(),
@@ -233,6 +346,32 @@ impl VerterHost {
             }
         }
 
+        if let Some(resolved) = result.value.as_ref() {
+            component_meta_trace_event(
+                "resolve_component_meta_result",
+                format!(
+                    "owner={} mode={mode:?} source={} attempts={} macros={} resolved_types={} has_evaluated_types={} cached_type_aliases={} fact_versions={} budget_exhausted={}",
+                    canonical,
+                    trace_request_source(result.source),
+                    result.attempts,
+                    resolved.resolved_macros.len(),
+                    resolved.resolved_type_registry.len(),
+                    resolved.evaluated_types.is_some(),
+                    resolved
+                        .cached_eval_inputs
+                        .as_ref()
+                        .map(|inputs| inputs.type_aliases.len())
+                        .unwrap_or_default(),
+                    resolved.fact_versions.len(),
+                    resolved
+                        .cached_eval_inputs
+                        .as_ref()
+                        .and_then(|inputs| inputs.overflow.as_ref())
+                        .is_some(),
+                ),
+            );
+        }
+
         result.value
     }
 
@@ -270,6 +409,15 @@ impl VerterHost {
         captured: Option<&CapturedComponentMetaInputs>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<ResolvedComponentMetaState> {
+        let _trace = component_meta_trace_scope(
+            "compute_component_meta_state",
+            format!(
+                "owner={} mode={mode:?} captured={} store_view={} whole_hash={whole_hash:?}",
+                canonical,
+                captured.is_some(),
+                store_view.is_some(),
+            ),
+        );
         self.provenance
             .component_meta_resolved_state_recomputes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -277,6 +425,18 @@ impl VerterHost {
         let snapshot = captured
             .map(|captured| captured.snapshot.clone())
             .or_else(|| self.get_raw_analysis_snapshot_in_view(canonical, store_view))?;
+        component_meta_trace_event(
+            "component_meta_snapshot",
+            format!(
+                "owner={} imports={} macros={} bindings={} has_template={} script_flags={}",
+                canonical,
+                snapshot.imports.len(),
+                snapshot.macros.len(),
+                snapshot.bindings.len(),
+                snapshot.template.is_some(),
+                snapshot.script_flags,
+            ),
+        );
         let parts = verter_resolver::resolve_component_meta_parts(
             &HostComponentMetaResolver {
                 host: self,
@@ -286,6 +446,22 @@ impl VerterHost {
             &snapshot,
             mode == ResolverMode::Expanded,
             captured,
+        );
+        component_meta_trace_event(
+            "component_meta_parts",
+            format!(
+                "owner={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} cached_type_aliases={} fact_versions={}",
+                canonical,
+                parts.resolved_macros.len(),
+                parts.resolved_type_registry.len(),
+                parts.evaluated_types.is_some(),
+                parts
+                    .cached_eval_inputs
+                    .as_ref()
+                    .map(|inputs| inputs.type_aliases.len())
+                    .unwrap_or_default(),
+                parts.fact_versions.len(),
+            ),
         );
         let state = ResolvedComponentMetaState {
             snapshot,
@@ -310,6 +486,10 @@ impl VerterHost {
         canonical: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<FileAnalysisSnapshot> {
+        let _trace = component_meta_trace_scope(
+            "get_raw_analysis_snapshot",
+            format!("owner={} store_view={}", canonical, store_view.is_some()),
+        );
         // Eviction gate (scheduler path)
         #[cfg(feature = "scheduler")]
         {
@@ -322,6 +502,7 @@ impl VerterHost {
 
         #[cfg(feature = "scheduler")]
         {
+            let mut fallback_whole_hash = None;
             let mut snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical)
             {
                 let whole_hash = store_view
@@ -331,15 +512,76 @@ impl VerterHost {
                 if !self.store_view_allows_current_whole_hash(canonical, whole_hash, store_view) {
                     return None;
                 }
+                component_meta_trace_event(
+                    "get_raw_analysis_snapshot_scheduler_hit",
+                    format!(
+                        "owner={} imports={} macros={} bindings={} has_template={}",
+                        canonical,
+                        snapshot.imports.len(),
+                        snapshot.macros.len(),
+                        snapshot.bindings.len(),
+                        snapshot.template.is_some(),
+                    ),
+                );
                 snapshot
             } else {
                 let source = self.read_analysis_source_in_view(canonical, store_view)?;
+                let whole_hash = crate::hash::hash_16(source.as_bytes());
+                fallback_whole_hash = Some(whole_hash);
+                if store_view.is_none() {
+                    if let Some(snapshot) =
+                        self.clone_cached_raw_analysis_snapshot(canonical, whole_hash)
+                    {
+                        self.provenance
+                            .raw_analysis_snapshot_cache_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        component_meta_trace_event(
+                            "get_raw_analysis_snapshot_host_cache",
+                            format!(
+                                "owner={} hit=true bytes={} whole_hash={whole_hash:?}",
+                                canonical,
+                                source.len(),
+                            ),
+                        );
+                        return Some((*snapshot).clone());
+                    }
+                    self.provenance
+                        .raw_analysis_snapshot_cache_misses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    component_meta_trace_event(
+                        "get_raw_analysis_snapshot_host_cache",
+                        format!(
+                            "owner={} hit=false bytes={} whole_hash={whole_hash:?}",
+                            canonical,
+                            source.len(),
+                        ),
+                    );
+                }
+                component_meta_trace_event(
+                    "get_raw_analysis_snapshot_build_from_source",
+                    format!("owner={} source_len={}", canonical, source.len()),
+                );
                 self.build_snapshot_from_source(canonical, &source)
             };
             self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.config.effective_scope().needs_template_analysis() {
                 self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+            }
+            component_meta_trace_event(
+                "get_raw_analysis_snapshot_result",
+                format!(
+                    "owner={} imports={} macros={} bindings={} has_template={}",
+                    canonical,
+                    snapshot.imports.len(),
+                    snapshot.macros.len(),
+                    snapshot.bindings.len(),
+                    snapshot.template.is_some(),
+                ),
+            );
+            if let Some(whole_hash) = fallback_whole_hash.filter(|_| store_view.is_none()) {
+                let cached = self.cache_raw_analysis_snapshot(canonical, whole_hash, snapshot);
+                return Some((*cached).clone());
             }
             Some(snapshot)
         }
@@ -356,12 +598,34 @@ impl VerterHost {
             // Use build_snapshot_from_entry for Arc::clone pointer bumps
             // instead of allocating new Arcs.
             let mut snapshot = Self::build_snapshot_from_entry(entry);
+            component_meta_trace_event(
+                "get_raw_analysis_snapshot_cache_hit",
+                format!(
+                    "owner={} imports={} macros={} bindings={} has_template={}",
+                    canonical,
+                    snapshot.imports.len(),
+                    snapshot.macros.len(),
+                    snapshot.bindings.len(),
+                    snapshot.template.is_some(),
+                ),
+            );
             drop(files);
             self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.config.effective_scope().needs_template_analysis() {
                 self.compute_template_analysis_if_missing(canonical, &mut snapshot);
             }
+            component_meta_trace_event(
+                "get_raw_analysis_snapshot_result",
+                format!(
+                    "owner={} imports={} macros={} bindings={} has_template={}",
+                    canonical,
+                    snapshot.imports.len(),
+                    snapshot.macros.len(),
+                    snapshot.bindings.len(),
+                    snapshot.template.is_some(),
+                ),
+            );
             Some(snapshot)
         }
     }
@@ -683,9 +947,12 @@ impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<
         requested_name: &str,
     ) -> Option<verter_resolver::ResolvedExportTarget> {
         self.host
-            .resolve_exports_in_view(dep_canonical, self.store_view)
-            .into_iter()
-            .find(|export| export.name == requested_name)
+            .resolve_named_export_in_view(
+                dep_canonical,
+                requested_name,
+                Some(true),
+                self.store_view,
+            )
             .map(|export| verter_resolver::ResolvedExportTarget {
                 source_canonical_id: export.source_canonical_id,
                 source_name: export.source_name,

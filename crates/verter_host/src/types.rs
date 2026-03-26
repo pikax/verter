@@ -1549,6 +1549,8 @@ pub struct MetaProvenance {
     pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,
     pub get_analysis_calls: std::sync::atomic::AtomicU64,
     pub evaluate_types_calls: std::sync::atomic::AtomicU64,
+    pub raw_analysis_snapshot_cache_hits: std::sync::atomic::AtomicU64,
+    pub raw_analysis_snapshot_cache_misses: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
     pub imported_eval_inputs_calls: std::sync::atomic::AtomicU64,
@@ -1568,6 +1570,8 @@ impl Default for MetaProvenance {
             component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64::new(0),
             get_analysis_calls: std::sync::atomic::AtomicU64::new(0),
             evaluate_types_calls: std::sync::atomic::AtomicU64::new(0),
+            raw_analysis_snapshot_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            raw_analysis_snapshot_cache_misses: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
             imported_eval_inputs_calls: std::sync::atomic::AtomicU64::new(0),
@@ -1598,6 +1602,14 @@ impl std::fmt::Debug for MetaProvenance {
             .field(
                 "evaluate_types_calls",
                 &self.evaluate_types_calls.load(Relaxed),
+            )
+            .field(
+                "raw_analysis_snapshot_cache_hits",
+                &self.raw_analysis_snapshot_cache_hits.load(Relaxed),
+            )
+            .field(
+                "raw_analysis_snapshot_cache_misses",
+                &self.raw_analysis_snapshot_cache_misses.load(Relaxed),
             )
             .field(
                 "resolved_external_type_cache_hits",
@@ -1654,6 +1666,10 @@ impl MetaProvenance {
                 .load(Relaxed),
             get_analysis_calls: self.get_analysis_calls.load(Relaxed),
             evaluate_types_calls: self.evaluate_types_calls.load(Relaxed),
+            raw_analysis_snapshot_cache_hits: self.raw_analysis_snapshot_cache_hits.load(Relaxed),
+            raw_analysis_snapshot_cache_misses: self
+                .raw_analysis_snapshot_cache_misses
+                .load(Relaxed),
             resolved_external_type_cache_hits: self.resolved_external_type_cache_hits.load(Relaxed),
             resolved_external_type_cache_misses: self
                 .resolved_external_type_cache_misses
@@ -1677,6 +1693,8 @@ impl MetaProvenance {
             .store(0, Relaxed);
         self.get_analysis_calls.store(0, Relaxed);
         self.evaluate_types_calls.store(0, Relaxed);
+        self.raw_analysis_snapshot_cache_hits.store(0, Relaxed);
+        self.raw_analysis_snapshot_cache_misses.store(0, Relaxed);
         self.resolved_external_type_cache_hits.store(0, Relaxed);
         self.resolved_external_type_cache_misses.store(0, Relaxed);
         self.imported_eval_inputs_calls.store(0, Relaxed);
@@ -1720,6 +1738,8 @@ pub struct MetaProvenanceSnapshot {
     pub component_meta_resolved_state_recomputes: u64,
     pub get_analysis_calls: u64,
     pub evaluate_types_calls: u64,
+    pub raw_analysis_snapshot_cache_hits: u64,
+    pub raw_analysis_snapshot_cache_misses: u64,
     pub resolved_external_type_cache_hits: u64,
     pub resolved_external_type_cache_misses: u64,
     pub imported_eval_inputs_calls: u64,

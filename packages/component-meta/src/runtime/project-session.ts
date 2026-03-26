@@ -117,6 +117,21 @@ export class ProjectSession {
   }
 
   /**
+   * Declared-surface native component-meta query for Volar-compatible callers.
+   * Falls back to the full query if the native binding does not support it.
+   */
+  getDeclaredComponentMeta(canonicalId: string): unknown | null {
+    this.ensureOpen();
+    this.engine.markActivity();
+    const json =
+      typeof this._nativeSession.getDeclaredComponentMeta === "function"
+        ? this._nativeSession.getDeclaredComponentMeta(canonicalId)
+        : this._nativeSession.getComponentMeta(canonicalId);
+    if (json === null || json === undefined) return null;
+    return JSON.parse(json);
+  }
+
+  /**
    * Provenance counters for observability. Returns parsed JSON or null.
    */
   getProvenance(): Record<string, number> | null {

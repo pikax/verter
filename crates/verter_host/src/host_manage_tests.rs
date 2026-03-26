@@ -57,6 +57,148 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
         .unwrap();
 }
 
+struct CountingWorkspace {
+    inner: Arc<verter_vfs::MemoryWorkspace>,
+    read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
+}
+
+impl CountingWorkspace {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(verter_vfs::MemoryWorkspace::new(
+                verter_vfs::MemoryOptions::default(),
+            )),
+            read_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+        }
+    }
+
+    fn inject_file(&self, path: &str, source: &str) {
+        self.inner
+            .inject_file(path.to_string(), Arc::<str>::from(source.to_string()));
+    }
+
+    fn reset_reads(&self) {
+        self.read_counts.lock().clear();
+    }
+
+    fn read_count(&self, path: &str) -> u64 {
+        self.read_counts.lock().get(path).copied().unwrap_or(0)
+    }
+}
+
+impl verter_vfs::WorkspaceAccess for CountingWorkspace {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        *self
+            .read_counts
+            .lock()
+            .entry(canonical_id.to_string())
+            .or_default() += 1;
+        self.inner.read_file(canonical_id)
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        self.inner.file_exists(canonical_id)
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.inner.realpath(canonical_id)
+    }
+
+    fn read_package_manifest(&self, canonical_id: &str) -> Option<verter_vfs::PackageManifest> {
+        self.inner.read_package_manifest(canonical_id)
+    }
+
+    fn classify_file(&self, canonical_id: &str) -> verter_vfs::FileKind {
+        self.inner.classify_file(canonical_id)
+    }
+
+    fn resolve_import(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_vfs::ResolutionContext,
+    ) -> Option<verter_vfs::ResolveResult> {
+        self.inner.resolve_import(importer_id, specifier, ctx)
+    }
+
+    fn owner_for_file(&self, canonical_id: &str) -> Option<verter_vfs::ProjectOwnership> {
+        self.inner.owner_for_file(canonical_id)
+    }
+
+    fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_vfs::ParsedEdge]) {
+        self.inner.record_parsed_edges(canonical_id, edges);
+    }
+
+    fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
+        self.inner.reverse_deps_for(canonical_id)
+    }
+
+    fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
+        self.inner.forward_deps_for(canonical_id)
+    }
+
+    fn set_exact_resolutions(
+        &self,
+        canonical_id: &str,
+        resolutions: Vec<verter_vfs::ExactResolution>,
+    ) -> verter_vfs::ExactResolutionResult {
+        self.inner.set_exact_resolutions(canonical_id, resolutions)
+    }
+
+    fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
+        self.inner.notify_upsert(canonical_id, source);
+    }
+
+    fn notify_close(&self, canonical_id: &str) {
+        self.inner.notify_close(canonical_id);
+    }
+
+    fn notify_delete(&self, canonical_id: &str) {
+        self.inner.notify_delete(canonical_id);
+    }
+
+    fn configure_resolver(&self, projects: Vec<verter_vfs::resolver::IdeProjectConfig>) {
+        self.inner.configure_resolver(projects);
+    }
+
+    fn read_dir(&self, dir: &str) -> Result<Vec<verter_vfs::DirEntry>, verter_vfs::VfsError> {
+        self.inner.read_dir(dir)
+    }
+
+    fn walk(
+        &self,
+        root: &str,
+        filter_dir: &dyn Fn(&str) -> bool,
+        filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, verter_vfs::VfsError> {
+        self.inner.walk(root, filter_dir, filter_file)
+    }
+
+    fn write_file(&self, path: &str, content: &str) -> Result<(), verter_vfs::VfsError> {
+        self.inner.write_file(path, content)
+    }
+
+    fn create_dir_all(&self, path: &str) -> Result<(), verter_vfs::VfsError> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn delete_file(&self, path: &str) -> Result<(), verter_vfs::VfsError> {
+        self.inner.delete_file(path)
+    }
+
+    fn delete_dir_all(&self, path: &str) -> Result<(), verter_vfs::VfsError> {
+        self.inner.delete_dir_all(path)
+    }
+
+    fn copy_file(&self, src: &str, dst: &str) -> Result<(), verter_vfs::VfsError> {
+        self.inner.copy_file(src, dst)
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        self.inner.is_dir(path)
+    }
+}
+
 fn object_with_props(names: &[&str]) -> verter_analysis::type_expr::TypeExpr {
     use verter_analysis::type_expr::{
         ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
@@ -85,6 +227,14 @@ fn empty_object() -> verter_analysis::type_expr::TypeExpr {
     ))
 }
 
+fn exact_dependency(specifier: &str, resolved: &str) -> DependencyResolution {
+    DependencyResolution {
+        specifier: specifier.to_string(),
+        resolved_canonical_id: Some(resolved.to_string()),
+        possible_canonical_ids: Vec::new(),
+    }
+}
+
 #[cfg(not(feature = "scheduler"))]
 fn mutate_lazy_analysis_source(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
@@ -103,6 +253,88 @@ fn clear_cached_parse(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
     let entry = files.get_mut("App.vue").expect("App.vue should exist");
     entry.cached_parse = None;
+}
+
+#[test]
+fn component_meta_trace_line_formats_start_event() {
+    let line = format_component_meta_trace_line(
+        ComponentMetaTraceEvent::Start,
+        11,
+        11,
+        None,
+        0,
+        "resolve_component_meta",
+        r#"owner=/src/App.vue mode=Expanded"#,
+        None,
+    );
+
+    assert!(
+        line.contains("[verter-meta-trace]"),
+        "trace lines should use the dedicated prefix, got: {line}"
+    );
+    assert!(
+        line.contains("event=start"),
+        "start trace lines should identify the event kind, got: {line}"
+    );
+    assert!(
+        line.contains("trace=11") && line.contains("span=11"),
+        "start trace lines should carry trace/span ids, got: {line}"
+    );
+    assert!(
+        line.contains("parent=-"),
+        "root trace lines should use a sentinel parent, got: {line}"
+    );
+    assert!(
+        line.contains("depth=0"),
+        "root trace lines should report depth zero, got: {line}"
+    );
+    assert!(
+        line.contains(r#"name="resolve_component_meta""#),
+        "trace lines should quote the scope name, got: {line}"
+    );
+    assert!(
+        line.contains(r#"detail="owner=/src/App.vue mode=Expanded""#),
+        "trace lines should quote the detail payload, got: {line}"
+    );
+    assert!(
+        !line.contains("dur_ms="),
+        "start trace lines should not include a duration before the scope ends, got: {line}"
+    );
+}
+
+#[test]
+fn component_meta_trace_line_formats_end_event_with_duration() {
+    let line = format_component_meta_trace_line(
+        ComponentMetaTraceEvent::End,
+        11,
+        12,
+        Some(11),
+        1,
+        "resolve_external_type",
+        r#"owner=/src/App.vue import=vue type=Ref"#,
+        Some(std::time::Duration::from_micros(123_456)),
+    );
+
+    assert!(
+        line.contains("event=end"),
+        "end trace lines should identify the event kind, got: {line}"
+    );
+    assert!(
+        line.contains("parent=11"),
+        "nested trace lines should keep the parent span id, got: {line}"
+    );
+    assert!(
+        line.contains("depth=1"),
+        "nested trace lines should report the nesting depth, got: {line}"
+    );
+    assert!(
+        line.contains(r#"name="resolve_external_type""#),
+        "end trace lines should quote the scope name, got: {line}"
+    );
+    assert!(
+        line.contains("dur_ms=123.456"),
+        "end trace lines should include millisecond precision, got: {line}"
+    );
 }
 
 #[test]
@@ -474,6 +706,93 @@ defineProps<Props>();
         .as_deref(),
         Some("/src/types.js"),
         "stale views must not switch owner dependency routes to newer workspace candidates",
+    );
+}
+
+#[test]
+fn raw_analysis_snapshot_cache_tracks_hit_miss_and_invalidates_on_epoch_bump() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/types.ts".to_string(),
+        Arc::from("export interface Props { foo: string }"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    host.provenance().reset();
+
+    let first = host
+        .get_raw_analysis_snapshot_in_view("/workspace/types.ts", None)
+        .expect("first workspace-only snapshot should load");
+    let after_first = host.provenance().snapshot();
+    assert_eq!(
+        after_first.raw_analysis_snapshot_cache_misses, 1,
+        "the first workspace-only lookup should miss the host snapshot cache"
+    );
+    assert_eq!(
+        after_first.raw_analysis_snapshot_cache_hits, 0,
+        "the first workspace-only lookup should not hit the host snapshot cache"
+    );
+
+    let cached_before = host
+        .raw_analysis_snapshot_cache_entry("/workspace/types.ts")
+        .expect("the first lookup should populate the host snapshot cache");
+
+    let second = host
+        .get_raw_analysis_snapshot_in_view("/workspace/types.ts", None)
+        .expect("second workspace-only snapshot should reuse the cache");
+    let after_second = host.provenance().snapshot();
+    assert_eq!(
+        after_second.raw_analysis_snapshot_cache_misses, 1,
+        "the second lookup should reuse the cached snapshot instead of missing again"
+    );
+    assert_eq!(
+        after_second.raw_analysis_snapshot_cache_hits, 1,
+        "the second lookup should register a host snapshot cache hit"
+    );
+    assert_eq!(
+        first.imports.len(),
+        second.imports.len(),
+        "cached and uncached snapshots should describe the same import surface"
+    );
+    let cached_after = host
+        .raw_analysis_snapshot_cache_entry("/workspace/types.ts")
+        .expect("cache entry should remain populated after the hit");
+    assert!(
+        Arc::ptr_eq(&cached_before, &cached_after),
+        "cache hits should reuse the same stored snapshot allocation"
+    );
+
+    ws.inject_file(
+        "/workspace/types.ts".to_string(),
+        Arc::from("export interface Props { bar: number }"),
+    );
+    host.bump_store_view_epoch();
+
+    let third = host
+        .get_raw_analysis_snapshot_in_view("/workspace/types.ts", None)
+        .expect("changed workspace-only snapshot should reload after epoch bump");
+    let after_third = host.provenance().snapshot();
+    assert_eq!(
+        after_third.raw_analysis_snapshot_cache_misses, 2,
+        "bumping the store-view epoch should invalidate the previous host snapshot cache entry"
+    );
+    assert_eq!(
+        after_third.raw_analysis_snapshot_cache_hits, 1,
+        "only the second lookup should have been a host snapshot cache hit"
+    );
+    let cached_reloaded = host
+        .raw_analysis_snapshot_cache_entry("/workspace/types.ts")
+        .expect("reloading after the epoch bump should repopulate the host snapshot cache");
+    assert!(
+        !Arc::ptr_eq(&cached_before, &cached_reloaded),
+        "reloading after invalidation should store a fresh snapshot allocation"
+    );
+    assert_eq!(
+        third.imports.len(),
+        0,
+        "the updated workspace file still has no imports after the reload"
     );
 }
 
@@ -4250,4 +4569,80 @@ fn resolved_dependency_targets_uses_effective_target() {
         "should NOT include lower-priority possible"
     );
     assert_eq!(targets.len(), 2, "missing should not contribute a target");
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn get_component_meta_named_barrel_lookup_skips_unrelated_siblings() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { IconProps } from './types'
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './icon'\nexport * from './a'\nexport * from './b'\n",
+    );
+    ws.inject_file(
+        "/src/types/icon.ts",
+        "export interface IconProps { name: string }\n",
+    );
+    ws.inject_file(
+        "/src/types/a.ts",
+        "export interface AProps { unused: boolean }\n",
+    );
+    ws.inject_file(
+        "/src/types/b.ts",
+        "export interface BProps { unused: number }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            exact_dependency("./icon", "/src/types/icon.ts"),
+            exact_dependency("./a", "/src/types/a.ts"),
+            exact_dependency("./b", "/src/types/b.ts"),
+        ],
+    );
+
+    ws.reset_reads();
+    let meta = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta should resolve for the consumer");
+
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "name"),
+        "resolved props should include IconProps.name, got {:?}",
+        meta.props,
+    );
+    assert_eq!(
+        ws.read_count("/src/types/a.ts"),
+        0,
+        "named barrel lookup should not load unrelated sibling export sources",
+    );
+    assert_eq!(
+        ws.read_count("/src/types/b.ts"),
+        0,
+        "named barrel lookup should stop after the requested export is found",
+    );
 }

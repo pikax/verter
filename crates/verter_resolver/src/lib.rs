@@ -57,8 +57,8 @@ pub use eval_env_build::{
 };
 pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
-    resolve_exports_from_graph_best_effort, ExportGraphFileKind, ExportGraphResolver,
-    ExportSurface, ResolvedGraphExport,
+    resolve_exports_from_graph_best_effort, resolve_named_export_from_graph, ExportGraphFileKind,
+    ExportGraphResolver, ExportSurface, ResolvedGraphExport,
 };
 pub use export_registry_route::{
     resolve_type_via_registry, ExportRegistryView, RegistryExportEntry, RegistryResolvedTarget,

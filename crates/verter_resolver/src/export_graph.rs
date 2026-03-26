@@ -58,6 +58,24 @@ pub fn resolve_exports_from_graph_best_effort<R: ExportGraphResolver>(
     resolve_exports_from_graph_with_mode(resolver, canonical_id, false)
 }
 
+pub fn resolve_named_export_from_graph<R: ExportGraphResolver>(
+    resolver: &R,
+    canonical_id: &str,
+    binding_name: &str,
+    is_type: Option<bool>,
+    strict_missing_reexports: bool,
+) -> Option<ResolvedGraphExport> {
+    let mut visiting = FxHashSet::default();
+    resolve_named_export_from_graph_inner(
+        resolver,
+        canonical_id,
+        binding_name,
+        is_type,
+        &mut visiting,
+        strict_missing_reexports,
+    )
+}
+
 fn resolve_exports_from_graph_with_mode<R: ExportGraphResolver>(
     resolver: &R,
     canonical_id: &str,
@@ -70,6 +88,125 @@ fn resolve_exports_from_graph_with_mode<R: ExportGraphResolver>(
         &mut visiting,
         strict_missing_reexports,
     )
+}
+
+fn resolve_named_export_from_graph_inner<R: ExportGraphResolver>(
+    resolver: &R,
+    canonical_id: &str,
+    binding_name: &str,
+    is_type: Option<bool>,
+    visiting: &mut FxHashSet<(String, String, Option<bool>)>,
+    strict_missing_reexports: bool,
+) -> Option<ResolvedGraphExport> {
+    let visit_key = (canonical_id.to_string(), binding_name.to_string(), is_type);
+    if !visiting.insert(visit_key.clone()) {
+        return None;
+    }
+
+    let surface = resolver.export_surface(canonical_id)?;
+
+    let result = if surface.file_kind == ExportGraphFileKind::VueSfc {
+        if binding_name == "default" && is_type != Some(true) {
+            Some(ResolvedGraphExport {
+                name: "default".to_string(),
+                is_type: false,
+                source_canonical_id: None,
+                source_name: "default".to_string(),
+            })
+        } else {
+            surface
+                .export_signatures
+                .iter()
+                .find(|sig| {
+                    sig.name == binding_name && is_type.is_none_or(|flag| sig.is_type == flag)
+                })
+                .map(|sig| ResolvedGraphExport {
+                    name: sig.name.clone(),
+                    is_type: sig.is_type,
+                    source_canonical_id: None,
+                    source_name: sig.name.clone(),
+                })
+        }
+    } else if let Some(sig) = surface
+        .export_signatures
+        .iter()
+        .find(|sig| sig.name == binding_name && is_type.is_none_or(|flag| sig.is_type == flag))
+    {
+        if let (Some(source), Some(local_name)) = (&sig.reexport_source, &sig.reexport_local) {
+            let target = resolver.resolve_reexport_target(canonical_id, source, sig);
+            match target {
+                Some(target_id) => resolve_named_export_from_graph_inner(
+                    resolver,
+                    &target_id,
+                    local_name,
+                    Some(sig.is_type),
+                    visiting,
+                    strict_missing_reexports,
+                )
+                .map(|mut export| {
+                    export.name = binding_name.to_string();
+                    if export.source_canonical_id.is_none() {
+                        export.source_canonical_id = Some(target_id.clone());
+                    }
+                    export
+                })
+                .or_else(|| {
+                    (!strict_missing_reexports).then(|| ResolvedGraphExport {
+                        name: binding_name.to_string(),
+                        is_type: sig.is_type,
+                        source_canonical_id: Some(target_id),
+                        source_name: local_name.clone(),
+                    })
+                }),
+                None => (!strict_missing_reexports).then(|| ResolvedGraphExport {
+                    name: binding_name.to_string(),
+                    is_type: sig.is_type,
+                    source_canonical_id: None,
+                    source_name: local_name.clone(),
+                }),
+            }
+        } else {
+            Some(ResolvedGraphExport {
+                name: sig.name.clone(),
+                is_type: sig.is_type,
+                source_canonical_id: None,
+                source_name: sig.name.clone(),
+            })
+        }
+    } else {
+        let mut found = None;
+        for sig in surface
+            .export_signatures
+            .iter()
+            .filter(|sig| sig.name == "*")
+        {
+            let Some(source) = &sig.reexport_source else {
+                continue;
+            };
+            let Some(target_id) = resolver.resolve_reexport_target(canonical_id, source, sig)
+            else {
+                continue;
+            };
+            if let Some(mut export) = resolve_named_export_from_graph_inner(
+                resolver,
+                &target_id,
+                binding_name,
+                is_type,
+                visiting,
+                strict_missing_reexports,
+            ) {
+                if export.source_canonical_id.is_none() {
+                    export.source_canonical_id = Some(target_id);
+                }
+                found = Some(export);
+                break;
+            }
+        }
+        found
+    };
+
+    visiting.remove(&visit_key);
+    result
 }
 
 fn follow_reexport_chain_from_graph<R: ExportGraphResolver>(
@@ -270,10 +407,11 @@ fn resolve_single_export_from_graph<R: ExportGraphResolver>(
 mod tests {
     use super::{
         get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
-        resolve_exports_from_graph_best_effort, ExportGraphFileKind, ExportGraphResolver,
-        ExportSurface, ResolvedGraphExport,
+        resolve_exports_from_graph_best_effort, resolve_named_export_from_graph,
+        ExportGraphFileKind, ExportGraphResolver, ExportSurface, ResolvedGraphExport,
     };
     use rustc_hash::FxHashMap;
+    use std::cell::RefCell;
     use verter_analysis::{ExportSignature, Hash16};
     use verter_span::Span;
 
@@ -282,10 +420,14 @@ mod tests {
         surfaces: FxHashMap<String, ExportSurface>,
         local_spans: FxHashMap<(String, String), Span>,
         routes: FxHashMap<(String, String, bool), String>,
+        surface_reads: RefCell<Vec<String>>,
     }
 
     impl ExportGraphResolver for TestResolver {
         fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
+            self.surface_reads
+                .borrow_mut()
+                .push(canonical_id.to_string());
             self.surfaces.get(canonical_id).cloned()
         }
 
@@ -450,6 +592,62 @@ mod tests {
                 source_canonical_id: None,
                 source_name: "Props".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn resolve_named_export_from_graph_stops_after_first_matching_wildcard_branch() {
+        let mut resolver = TestResolver::default();
+        resolver.surfaces.insert(
+            "/src/index.ts".to_string(),
+            ExportSurface {
+                file_kind: ExportGraphFileKind::NonSfc,
+                export_signatures: vec![
+                    export_sig("*", true, Span::default(), Some("./a"), None),
+                    export_sig("*", true, Span::default(), Some("./b"), None),
+                ],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/a.ts".to_string(),
+            ExportSurface {
+                file_kind: ExportGraphFileKind::NonSfc,
+                export_signatures: vec![export_sig("Props", true, Span::new(1, 2), None, None)],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/b.ts".to_string(),
+            ExportSurface {
+                file_kind: ExportGraphFileKind::NonSfc,
+                export_signatures: vec![export_sig("Other", true, Span::new(3, 4), None, None)],
+            },
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./a".to_string(), true),
+            "/src/a.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./b".to_string(), true),
+            "/src/b.ts".to_string(),
+        );
+
+        let resolved =
+            resolve_named_export_from_graph(&resolver, "/src/index.ts", "Props", Some(true), true)
+                .expect("Props should resolve through the first wildcard branch");
+
+        assert_eq!(
+            resolved,
+            ResolvedGraphExport {
+                name: "Props".to_string(),
+                is_type: true,
+                source_canonical_id: Some("/src/a.ts".to_string()),
+                source_name: "Props".to_string(),
+            }
+        );
+        assert_eq!(
+            resolver.surface_reads.borrow().as_slice(),
+            &["/src/index.ts", "/src/a.ts"],
+            "later wildcard branches should not be scanned once the requested export is found",
         );
     }
 }

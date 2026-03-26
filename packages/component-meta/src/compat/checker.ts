@@ -270,7 +270,13 @@ export class ComponentMetaChecker {
     const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
     await this.ensureFile(absPath);
     if (this._session) {
-      const nativeMeta = this._session.getComponentMeta(absPath);
+      const session = this._session as ProjectSession & {
+        getDeclaredComponentMeta?: (canonicalId: string) => unknown | null;
+      };
+      const nativeMeta =
+        typeof session.getDeclaredComponentMeta === "function"
+          ? session.getDeclaredComponentMeta(absPath)
+          : this._session.getComponentMeta(absPath);
       if (!nativeMeta) {
         return {
           type: 0,
@@ -280,15 +286,42 @@ export class ComponentMetaChecker {
           exposed: [],
         };
       }
-      return mapComponentMeta(
-        nativeComponentMetaToComponentMeta(
-          nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
-        ),
+      const mappedMeta = nativeComponentMetaToComponentMeta(
+        nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
+      );
+      const result = mapComponentMeta(
+        mappedMeta,
         this.options,
         nativeTypeRegistryToMap(
           nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
         ),
       );
+
+      if (typeof session.getDeclaredComponentMeta === "function") {
+        let fullMeta: ComponentMeta | null | undefined;
+        Object.defineProperty(result, "_verter", {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            if (fullMeta !== undefined) {
+              return fullMeta ?? mappedMeta;
+            }
+            if (this.disposed || this._session === null || this._session.closed) {
+              fullMeta = null;
+              return mappedMeta;
+            }
+            const nativeFullMeta = this._session.getComponentMeta(absPath);
+            fullMeta = nativeFullMeta
+              ? nativeComponentMetaToComponentMeta(
+                  nativeFullMeta as import("../native-component-meta.js").NativeComponentMetaResult,
+                )
+              : null;
+            return fullMeta ?? mappedMeta;
+          },
+        });
+      }
+
+      return result;
     }
     throw new Error(
       "ComponentMetaChecker requires a runtime session-backed native component-meta query. " +
@@ -524,11 +557,16 @@ export async function createChecker(
       parsed?.config ?? { tsconfigPath: runtimeNormalizePath(absPath) },
     ),
     nativeFlags: { analysisLevel: "full" },
+    typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
   const runtime = getMetaRuntime();
   const bootstrap: BootstrapFn = async () => {
     const native = loadNative();
-    const hostConfig = { devMode: false, analysisLevel: "full" };
+    const hostConfig = {
+      devMode: false,
+      analysisLevel: "full",
+      typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+    };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,
       workspace,
@@ -603,11 +641,16 @@ export async function createCheckerByJson(
     configKind: "inline",
     configHash: stableSelectiveConfigHash(config),
     nativeFlags: { analysisLevel: "full" },
+    typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
   const runtime = getMetaRuntime();
   const bootstrap: BootstrapFn = async () => {
     const native = loadNative();
-    const hostConfig = { devMode: false, analysisLevel: "full" };
+    const hostConfig = {
+      devMode: false,
+      analysisLevel: "full",
+      typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+    };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,
       workspace,

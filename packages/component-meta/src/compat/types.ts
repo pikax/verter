@@ -72,4 +72,6 @@ export interface MetaCheckerOptions {
   printer?: unknown;
   /** Force TypeScript usage (no-op in Verter — always uses TS). Kept for Volar compat. */
   forceUseTs?: boolean;
+  /** Select the type expansion backend used for component metadata queries. */
+  typeExpansionBackend?: "verter" | "tsserver" | "tsgo" | "auto";
 }

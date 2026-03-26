@@ -752,6 +752,32 @@ impl NapiMetaSession {
         }))?
     }
 
+    #[napi(js_name = "getDeclaredComponentMeta")]
+    pub fn get_declared_component_meta(
+        &self,
+        canonical_or_alias: String,
+    ) -> Result<Option<String>> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let result = session
+                .get_declared_component_meta(&canonical_or_alias)
+                .map_err(meta_err)?;
+            match result {
+                Some(analysis) => {
+                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
+                    let json = serde_json::to_string(&ffi).map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("component-meta serialization error: {e}"),
+                        )
+                    })?;
+                    Ok(Some(json))
+                }
+                None => Ok(None),
+            }
+        }))?
+    }
+
     #[napi(js_name = "getProvenance")]
     pub fn get_provenance(&self) -> Result<String> {
         let session = self.session()?;

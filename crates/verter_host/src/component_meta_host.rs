@@ -34,6 +34,7 @@ use verter_resolver::{
     component_meta_type_registry as resolver_component_meta_type_registry,
 };
 
+use crate::host_manage::{component_meta_trace_event, component_meta_trace_scope};
 use crate::VerterHost;
 
 // ---------------------------------------------------------------------------
@@ -348,16 +349,51 @@ impl ComponentMetaSession {
         Option<verter_analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
+        self.get_component_meta_with_fallthrough(canonical_or_alias, true)
+    }
+
+    /// Get declared-only component metadata in this session's overlay context.
+    ///
+    /// This skips accepted-surface and fallthrough resolution so compat callers
+    /// can match Volar-style metadata without paying the inheritance cost.
+    pub fn get_declared_component_meta(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<verter_analysis::component_meta::ComponentMetaAnalysis>,
+        ComponentMetaHostError,
+    > {
+        self.get_component_meta_with_fallthrough(canonical_or_alias, false)
+    }
+
+    fn get_component_meta_with_fallthrough(
+        &self,
+        canonical_or_alias: &str,
+        include_fallthrough: bool,
+    ) -> Result<
+        Option<verter_analysis::component_meta::ComponentMetaAnalysis>,
+        ComponentMetaHostError,
+    > {
+        let _trace = component_meta_trace_scope(
+            "component_meta_session_query",
+            format!(
+                "backend={:?} owner={} include_fallthrough={}",
+                self.owner.backend, canonical_or_alias, include_fallthrough,
+            ),
+        );
         match self.owner.backend {
+            TypeExpansionBackend::Verter if !include_fallthrough => self
+                .inner
+                .get_declared_component_meta(canonical_or_alias)
+                .map_err(ComponentMetaHostError::from),
             TypeExpansionBackend::Verter => self
                 .inner
                 .get_component_meta(canonical_or_alias)
                 .map_err(ComponentMetaHostError::from),
-            TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => {
-                self.get_component_meta_via_external_backend(canonical_or_alias)
-            }
+            TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => self
+                .get_component_meta_via_external_backend(canonical_or_alias, include_fallthrough),
             TypeExpansionBackend::Auto => {
-                self.get_component_meta_via_auto_policy(canonical_or_alias)
+                self.get_component_meta_via_auto_policy(canonical_or_alias, include_fallthrough)
             }
         }
     }
@@ -408,7 +444,15 @@ impl ComponentMetaSession {
     fn get_component_meta_via_auto_policy(
         &self,
         canonical_or_alias: &str,
+        include_fallthrough: bool,
     ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
+        let _trace = component_meta_trace_scope(
+            "component_meta_auto_policy",
+            format!(
+                "owner={} include_fallthrough={}",
+                canonical_or_alias, include_fallthrough,
+            ),
+        );
         let canonical = self
             .inner
             .resolve_alias_or_canonical(canonical_or_alias)
@@ -421,9 +465,24 @@ impl ComponentMetaSession {
             return Ok(None);
         };
 
-        if resolved_state_exceeds_verter_complexity_threshold(&resolved) {
-            return self
-                .get_component_meta_via_external_backend_from_resolved(&canonical, &resolved);
+        let exceeds_threshold = resolved_state_exceeds_verter_complexity_threshold(&resolved);
+        component_meta_trace_event(
+            "component_meta_auto_policy_decision",
+            format!(
+                "owner={} exceeds_threshold={} resolved_macros={} resolved_types={} has_evaluated_types={}",
+                canonical,
+                exceeds_threshold,
+                resolved.resolved_macros.len(),
+                resolved.resolved_type_registry.len(),
+                resolved.evaluated_types.is_some(),
+            ),
+        );
+        if exceeds_threshold {
+            return self.get_component_meta_via_external_backend_from_resolved(
+                &canonical,
+                &resolved,
+                include_fallthrough,
+            );
         }
 
         Ok(Some(extract_component_meta_from_resolved_with_evaluated(
@@ -431,13 +490,14 @@ impl ComponentMetaSession {
             &canonical,
             &resolved,
             resolved.evaluated_types.as_ref(),
-            should_include_fallthrough_surface(&resolved),
+            include_fallthrough && should_include_fallthrough_surface(&resolved),
         )))
     }
 
     fn get_component_meta_via_external_backend(
         &self,
         canonical_or_alias: &str,
+        include_fallthrough: bool,
     ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
         let canonical = self
             .inner
@@ -450,14 +510,30 @@ impl ComponentMetaSession {
         else {
             return Ok(None);
         };
-        self.get_component_meta_via_external_backend_from_resolved(&canonical, &resolved)
+        self.get_component_meta_via_external_backend_from_resolved(
+            &canonical,
+            &resolved,
+            include_fallthrough,
+        )
     }
 
     fn get_component_meta_via_external_backend_from_resolved(
         &self,
         canonical: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+        include_fallthrough: bool,
     ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
+        let _trace = component_meta_trace_scope(
+            "component_meta_external_backend",
+            format!(
+                "backend={:?} owner={} include_fallthrough={} resolved_macros={} resolved_types={}",
+                self.owner.backend,
+                canonical,
+                include_fallthrough,
+                resolved.resolved_macros.len(),
+                resolved.resolved_type_registry.len(),
+            ),
+        );
         self.backend_gate()?;
         let Some(expander) = self.owner.external_expander.read().clone() else {
             return Err(self.owner.backend_error().unwrap_or_else(|| {
@@ -488,7 +564,20 @@ impl ComponentMetaSession {
             &snapshot,
             resolved,
         )?;
-        let include_fallthrough = should_include_fallthrough_surface(resolved);
+        let include_fallthrough =
+            include_fallthrough && should_include_fallthrough_surface(resolved);
+        component_meta_trace_event(
+            "component_meta_external_backend_result",
+            format!(
+                "backend={:?} owner={} expanded_props={} expanded_events={} expanded_slots={} include_fallthrough={}",
+                self.owner.backend,
+                canonical,
+                evaluated_types.props.len(),
+                evaluated_types.emits.len(),
+                evaluated_types.slot_bindings.len(),
+                include_fallthrough,
+            ),
+        );
 
         Ok(Some(extract_component_meta_from_resolved_with_evaluated(
             self.owner.project.host(),
@@ -1278,6 +1367,63 @@ mod tests {
         let session = host.open_session().unwrap();
         let result = session.get_component_meta("/src/Button.vue").unwrap();
         assert!(result.is_some(), "should return meta for loaded SFC");
+    }
+
+    #[test]
+    fn declared_component_meta_skips_fallthrough_surface() {
+        let host = make_host();
+        host.upsert_base(
+            "/src/App.vue",
+            "<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n</script>\n<template><div>{{ msg }}</div></template>",
+        )
+        .unwrap();
+
+        let session = host.open_session().unwrap();
+        let full = session
+            .get_component_meta("/src/App.vue")
+            .unwrap()
+            .expect("full query should return component meta");
+        let declared = session
+            .get_declared_component_meta("/src/App.vue")
+            .unwrap()
+            .expect("declared query should return component meta");
+
+        assert!(
+            full.accepted_props.iter().any(|prop| prop.name == "id"),
+            "full metadata should include inherited attrs from the root element"
+        );
+        assert!(
+            full.accepted_events
+                .iter()
+                .any(|event| event.name == "click"),
+            "full metadata should include inherited listeners from the root element"
+        );
+        assert!(
+            declared.accepted_props.is_empty(),
+            "declared-only metadata should skip accepted props, got {:?}",
+            declared
+                .accepted_props
+                .iter()
+                .map(|prop| prop.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            declared.accepted_events.is_empty(),
+            "declared-only metadata should skip accepted events, got {:?}",
+            declared
+                .accepted_events
+                .iter()
+                .map(|event| event.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !matches!(
+                declared.fallthrough_surface,
+                verter_analysis::component_meta::FallthroughSurface::Branches { .. }
+            ),
+            "declared-only metadata should skip fallthrough branches, got {:?}",
+            declared.fallthrough_surface
+        );
     }
 
     #[test]

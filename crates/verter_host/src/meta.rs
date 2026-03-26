@@ -622,6 +622,39 @@ impl MetaSession {
         }
     }
 
+    /// Single native declared-surface component-meta query through this
+    /// session's overlay view.
+    ///
+    /// This skips accepted-surface and fallthrough resolution while preserving
+    /// the same budget/error behavior as `get_component_meta()`.
+    pub fn get_declared_component_meta(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<Option<verter_analysis::component_meta::ComponentMetaAnalysis>, MetaError> {
+        self.check_alive()?;
+        self.with_overlay_context(|host| {
+            let Some(resolved) = host
+                .resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)
+            else {
+                return Ok(None);
+            };
+
+            if let Some(err) = component_meta_resolution_budget_error(canonical_or_alias, &resolved)
+            {
+                return Err(err);
+            }
+
+            Ok(Some(
+                crate::host_manage::extract_component_meta_from_resolved(
+                    host,
+                    canonical_or_alias,
+                    &resolved,
+                    false,
+                ),
+            ))
+        })?
+    }
+
     /// Combined component-meta query: returns BOTH the analysis projection AND
     /// the resolved-meta sidecar in a single call. Avoids the double
     /// `resolve_component_meta(Expanded)` call that would happen if

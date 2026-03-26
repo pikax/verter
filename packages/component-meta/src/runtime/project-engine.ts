@@ -44,6 +44,8 @@ export interface NativeMetaSession {
   readonly overlayGeneration: number;
   /** Single native component-meta query. Returns JSON with complete metadata. */
   getComponentMeta(canonicalOrAlias: string): string | null;
+  /** Declared-surface native query for Volar-compatible callers. Returns JSON. */
+  getDeclaredComponentMeta?(canonicalOrAlias: string): string | null;
   /** Provenance counters for observability. Returns JSON. */
   getProvenance?(): string;
 }

@@ -216,8 +216,107 @@ describe("ComponentMetaChecker session requirement", () => {
       `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
     );
 
-    await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(
-      /step budget exceeded/i,
+    await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
+  });
+
+  it("uses declared component metadata when available and fetches full _verter lazily", async () => {
+    const declaredMeta: any = {
+      filePath: "C:/project/src/App.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          rawType: "string",
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "lowerBound",
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
+    };
+    const fullMeta: any = {
+      ...declaredMeta,
+      acceptedProps: [
+        {
+          name: "id",
+          type: { kind: "primitive", name: "string" },
+          rawType: "string",
+          required: false,
+          provenance: { kind: "inherited", sources: [{ kind: "nativeTag", tag: "div" }] },
+          availability: { kind: "always" },
+          kind: "attr",
+        },
+      ],
+      acceptedSurfaceCompleteness: "exact",
+      rootReachability: { kind: "branches", branches: [] },
+      fallthroughSurface: { kind: "branches", branches: [] },
+    };
+    const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
+    const getComponentMeta = vi.fn(() => fullMeta);
+
+    const checker = new ComponentMetaChecker(
+      {
+        upsert: vi.fn(),
+      },
+      "C:\\project",
+      {},
+      {
+        closed: false,
+        engine: { state: "active" as const },
+        upsert() {},
+        delete() {},
+        getComponentMeta,
+        getDeclaredComponentMeta,
+        getEffectiveSource() {
+          return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+        },
+        hasFile() {
+          return true;
+        },
+        trackedFileIds() {
+          return [];
+        },
+        close() {},
+      } as any,
     );
+
+    checker.updateFile(
+      "src\\App.vue",
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("src\\App.vue");
+
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getComponentMeta).not.toHaveBeenCalled();
+    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
+
+    expect(meta._verter?.acceptedProps.map((prop) => prop.name)).toEqual(["id"]);
+    expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 });

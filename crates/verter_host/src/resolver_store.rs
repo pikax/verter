@@ -227,10 +227,9 @@ impl HostStoreView {
                 continue;
             }
 
+            let existing_resolutions = self.dependency_resolutions.get(&canonical_id).cloned();
             self.snapshot_whole_hash_if_known(host, &canonical_id);
-            self.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
-
-            if let Some(resolutions) = self.dependency_resolutions.get(&canonical_id) {
+            if let Some(resolutions) = existing_resolutions.as_ref() {
                 pending.extend(resolutions.values().filter_map(|resolution| {
                     resolution
                         .resolved_canonical_id

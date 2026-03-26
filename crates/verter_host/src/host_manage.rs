@@ -3,8 +3,10 @@
 //! Contains [`VerterHost::remove`], [`VerterHost::get_analysis`],
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
 
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
@@ -23,16 +25,18 @@ use verter_resolver::{
     known_spread_keys_from_type_expr, materialize_imported_runtime_values_into_env,
     push_partial_reason, resolve_exports_from_graph as resolver_resolve_exports_from_graph,
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
-    resolve_fallthrough_surface as resolver_resolve_fallthrough_surface, resolve_usage_prop_type,
-    DeclarationMetadataResolver, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
-    ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
-    FallthroughResolverHost, ImportedDeclEvalResolver, ImportedEvalBinding,
-    ImportedEvalCollectorResolver, ImportedEvalLookup, ImportedEvalLookupResolver,
-    ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
-    ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
-    ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
-    OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource, ResolvedConsumedBindings,
-    ResolvedExportTarget, SingleflightRole, StoreView,
+    resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
+    resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
+    resolve_usage_prop_type, DeclarationMetadataResolver, DynamicRootCandidate,
+    ExportGraphFileKind, ExportGraphResolver, ExportSurface, FallthroughComputeHost,
+    FallthroughRequestHost, FallthroughResolutionView, FallthroughResolverHost,
+    ImportedDeclEvalResolver, ImportedEvalBinding, ImportedEvalCollectorResolver,
+    ImportedEvalLookup, ImportedEvalLookupResolver, ImportedEvalOwnerContextResolver,
+    ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
+    ImportedEvalTraversalBudget, ImportedRuntimeValueResolver, ImportedTypeAliasPrepareError,
+    ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver, OwnerEvalEnvAssembler,
+    PreparedImportedDeclContext, RequestSource, ResolvedConsumedBindings, ResolvedExportTarget,
+    SingleflightRole, StoreView,
 };
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -52,6 +56,225 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
         let _ = writeln!(stderr, "[verter-meta] {}", message.as_ref());
         let _ = stderr.flush();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComponentMetaTraceEvent {
+    Start,
+    End,
+    Point,
+}
+
+impl ComponentMetaTraceEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::End => "end",
+            Self::Point => "point",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ComponentMetaTraceContext {
+    trace_id: u64,
+    span_id: u64,
+}
+
+thread_local! {
+    static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
+}
+
+fn component_meta_trace_output_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn component_meta_trace_next_span_id() -> u64 {
+    static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn component_meta_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
+            || std::env::var_os("VERTER_META_TRACE").is_some()
+    })
+}
+
+fn component_meta_trace_output_path() -> Option<&'static std::path::PathBuf> {
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+
+    PATH.get_or_init(|| {
+        std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH")
+            .or_else(|| std::env::var_os("VERTER_META_TRACE_PATH"))
+            .map(std::path::PathBuf::from)
+    })
+    .as_ref()
+}
+
+pub(crate) fn format_component_meta_trace_line(
+    event: ComponentMetaTraceEvent,
+    trace_id: u64,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    depth: usize,
+    name: &str,
+    detail: &str,
+    duration: Option<Duration>,
+) -> String {
+    let parent = parent_span_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let mut line = format!(
+        "[verter-meta-trace] event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
+        event.as_str(),
+        trace_id,
+        span_id,
+        parent,
+        trace_id,
+        span_id,
+        parent,
+        depth,
+        std::thread::current().id(),
+        name,
+        detail,
+    );
+    if let Some(duration) = duration {
+        line.push_str(&format!(" dur_ms={:.3}", duration.as_secs_f64() * 1000.0));
+    }
+    line
+}
+
+fn component_meta_trace_write_line(line: &str) {
+    use std::io::Write;
+
+    let _lock = component_meta_trace_output_lock().lock();
+    if let Some(path) = component_meta_trace_output_path() {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+            return;
+        }
+    }
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{line}");
+    let _ = stderr.flush();
+}
+
+struct ComponentMetaTraceGuardState {
+    trace_id: u64,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    depth: usize,
+    name: &'static str,
+    detail: String,
+    started: Instant,
+}
+
+pub(crate) struct ComponentMetaTraceGuard {
+    state: Option<ComponentMetaTraceGuardState>,
+}
+
+impl Drop for ComponentMetaTraceGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+
+        COMPONENT_META_TRACE_STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let popped = stack.pop();
+            debug_assert_eq!(popped.map(|ctx| ctx.span_id), Some(state.span_id));
+        });
+
+        component_meta_trace_write_line(&format_component_meta_trace_line(
+            ComponentMetaTraceEvent::End,
+            state.trace_id,
+            state.span_id,
+            state.parent_span_id,
+            state.depth,
+            state.name,
+            &state.detail,
+            Some(state.started.elapsed()),
+        ));
+    }
+}
+
+pub(crate) fn component_meta_trace_scope(
+    name: &'static str,
+    detail: impl Into<String>,
+) -> ComponentMetaTraceGuard {
+    if !component_meta_trace_enabled() {
+        return ComponentMetaTraceGuard { state: None };
+    }
+
+    let detail = detail.into();
+    let span_id = component_meta_trace_next_span_id();
+    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let parent = stack.last().copied();
+        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
+        let depth = stack.len();
+        stack.push(ComponentMetaTraceContext { trace_id, span_id });
+        (trace_id, parent.map(|ctx| ctx.span_id), depth)
+    });
+
+    component_meta_trace_write_line(&format_component_meta_trace_line(
+        ComponentMetaTraceEvent::Start,
+        trace_id,
+        span_id,
+        parent_span_id,
+        depth,
+        name,
+        &detail,
+        None,
+    ));
+
+    ComponentMetaTraceGuard {
+        state: Some(ComponentMetaTraceGuardState {
+            trace_id,
+            span_id,
+            parent_span_id,
+            depth,
+            name,
+            detail,
+            started: Instant::now(),
+        }),
+    }
+}
+
+pub(crate) fn component_meta_trace_event(name: &'static str, detail: impl Into<String>) {
+    if !component_meta_trace_enabled() {
+        return;
+    }
+
+    let detail = detail.into();
+    let span_id = component_meta_trace_next_span_id();
+    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
+        let stack = stack.borrow();
+        let parent = stack.last().copied();
+        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
+        (trace_id, parent.map(|ctx| ctx.span_id), stack.len())
+    });
+
+    component_meta_trace_write_line(&format_component_meta_trace_line(
+        ComponentMetaTraceEvent::Point,
+        trace_id,
+        span_id,
+        parent_span_id,
+        depth,
+        name,
+        &detail,
+        None,
+    ));
 }
 
 const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
@@ -440,6 +663,7 @@ struct HostImportedEvalResolver<'a> {
     allow_live_dependency_fallback: bool,
     alias_env_stack: rustc_hash::FxHashSet<String>,
     budget: ImportedEvalTraversalBudget,
+    external_type_cache: verter_resolver::ExternalTypeBodyCache,
     snapshot_cache: rustc_hash::FxHashMap<String, Option<FileAnalysisSnapshot>>,
     eval_source_cache: rustc_hash::FxHashMap<String, Option<String>>,
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
@@ -477,6 +701,7 @@ impl<'a> HostImportedEvalResolver<'a> {
                 owner_canonical_id,
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
+            external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
             snapshot_cache: rustc_hash::FxHashMap::default(),
             eval_source_cache: rustc_hash::FxHashMap::default(),
             store_view,
@@ -503,6 +728,7 @@ impl<'a> HostImportedEvalResolver<'a> {
                 owner_canonical_id,
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
+            external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
             snapshot_cache: rustc_hash::FxHashMap::default(),
             eval_source_cache: rustc_hash::FxHashMap::default(),
             store_view,
@@ -510,27 +736,17 @@ impl<'a> HostImportedEvalResolver<'a> {
     }
 }
 
-impl HostExportGraphResolver<'_> {
-    fn file_kind_in_view(&self, canonical_id: &str) -> Option<ExportGraphFileKind> {
-        let (_, cached_parse, _) = self
-            .host
-            .current_eval_state_in_view(canonical_id, self.store_view)?;
-        Some(if cached_parse.is_some() {
-            ExportGraphFileKind::VueSfc
-        } else {
-            ExportGraphFileKind::NonSfc
-        })
-    }
-}
-
 impl ExportGraphResolver for HostExportGraphResolver<'_> {
     fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
-        let snapshot = self
+        let (file_kind, _, export_signatures) = self
             .host
-            .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)?;
+            .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
         Some(ExportSurface {
-            file_kind: self.file_kind_in_view(canonical_id)?,
-            export_signatures: snapshot.export_signatures.as_ref().clone(),
+            file_kind: match file_kind {
+                FileKind::VueSfc => ExportGraphFileKind::VueSfc,
+                FileKind::NonSfc => ExportGraphFileKind::NonSfc,
+            },
+            export_signatures,
         })
     }
 
@@ -539,54 +755,16 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         canonical_id: &str,
         binding_name: &str,
     ) -> Option<verter_span::Span> {
-        let snapshot = self
+        let (file_kind, script_analysis, export_signatures) = self
             .host
-            .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)?;
-        let file_kind = self.file_kind_in_view(canonical_id)?;
-
-        match file_kind {
-            ExportGraphFileKind::VueSfc => {
-                if let Some(binding) = snapshot
-                    .bindings
-                    .iter()
-                    .find(|binding| binding.name == binding_name)
-                {
-                    if binding.span.start > 0 || binding.span.end > 0 {
-                        return Some(binding.span);
-                    }
-                }
-
-                for mac in snapshot.macros.iter() {
-                    if mac.binding_name.as_deref() == Some(binding_name)
-                        && (mac.span.start > 0 || mac.span.end > 0)
-                    {
-                        return Some(mac.span);
-                    }
-                }
-
-                if binding_name == "default" {
-                    if let Some(first_binding) = snapshot.bindings.first() {
-                        if first_binding.span.start > 0 || first_binding.span.end > 0 {
-                            return Some(first_binding.span);
-                        }
-                    }
-                    if let Some(first_macro) = snapshot.macros.first() {
-                        if first_macro.span.start > 0 || first_macro.span.end > 0 {
-                            return Some(first_macro.span);
-                        }
-                    }
-                    return Some(verter_span::Span::default());
-                }
-
-                None
-            }
-            ExportGraphFileKind::NonSfc => snapshot
-                .export_signatures
-                .iter()
-                .find(|sig| sig.name == binding_name && sig.reexport_source.is_none())
-                .map(|sig| sig.span)
-                .filter(|span| span.start > 0 || span.end > 0),
-        }
+            .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
+        VerterHost::find_export_span(
+            file_kind,
+            &script_analysis,
+            &export_signatures,
+            binding_name,
+        )
+        .map(|(start, end)| verter_span::Span::new(start, end))
     }
 
     fn resolve_reexport_target(
@@ -639,9 +817,12 @@ impl DeclarationMetadataResolver for HostImportedEvalResolver<'_> {
         requested_name: &str,
     ) -> Option<ResolvedExportTarget> {
         self.host
-            .resolve_exports_in_view(dep_canonical, self.store_view)
-            .into_iter()
-            .find(|export| export.name == requested_name)
+            .resolve_named_export_in_view(
+                dep_canonical,
+                requested_name,
+                Some(true),
+                self.store_view,
+            )
             .map(|export| ResolvedExportTarget {
                 source_canonical_id: export.source_canonical_id,
                 source_name: export.source_name,
@@ -755,9 +936,12 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
         imported_name: &str,
     ) -> Option<ResolvedExportTarget> {
         self.host
-            .resolve_exports_in_view(dep_canonical_id, self.store_view)
-            .into_iter()
-            .find(|export| !export.is_type && export.name == imported_name)
+            .resolve_named_export_in_view(
+                dep_canonical_id,
+                imported_name,
+                Some(false),
+                self.store_view,
+            )
             .map(|export| ResolvedExportTarget {
                 source_canonical_id: export.source_canonical_id,
                 source_name: export.source_name,
@@ -815,15 +999,29 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
     ) -> Result<Option<verter_analysis::type_expr::TypeExpr>, ImportedTypeAliasPrepareError> {
-        let mut cache = rustc_hash::FxHashMap::default();
+        let _trace = component_meta_trace_scope(
+            "resolve_external_type_body",
+            format!(
+                "owner={} import={} name={} tracked_deps={} resolution_deps={} cache_entries={}",
+                request.owner_canonical_id,
+                request.import_source,
+                request.imported_name,
+                tracked_deps.len(),
+                resolution_deps.len(),
+                self.external_type_cache.len(),
+            ),
+        );
+        let tracked_before = tracked_deps.len();
+        let resolution_before = resolution_deps.len();
+        let cache_before = self.external_type_cache.len();
         let mut visiting = rustc_hash::FxHashSet::default();
-        match self.host.resolve_external_type_from_loaded_files_in_view(
+        let result = match self.host.resolve_external_type_from_loaded_files_in_view(
             request.owner_canonical_id.as_str(),
             request.import_source.as_str(),
             request.imported_name.as_str(),
             tracked_deps,
             resolution_deps,
-            &mut cache,
+            &mut self.external_type_cache,
             &mut visiting,
             true,
             verter_vfs::ResolveRequestKind::TypeImport,
@@ -845,7 +1043,29 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
                 last_dep,
             }),
             Err(_) => Err(ImportedTypeAliasPrepareError::Other),
-        }
+        };
+        component_meta_trace_event(
+            "resolve_external_type_body_result",
+            format!(
+                "owner={} import={} name={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={}",
+                request.owner_canonical_id,
+                request.import_source,
+                request.imported_name,
+                match &result {
+                    Ok(Some(_)) => "ok:resolved",
+                    Ok(None) => "ok:none",
+                    Err(ImportedTypeAliasPrepareError::StepLimitExceeded { .. }) => {
+                        "err:step_limit"
+                    }
+                    Err(ImportedTypeAliasPrepareError::Other) => "err:other",
+                },
+                tracked_deps.len().saturating_sub(tracked_before),
+                resolution_deps.len().saturating_sub(resolution_before),
+                self.external_type_cache.len().saturating_sub(cache_before),
+                visiting.len(),
+            ),
+        );
+        result
     }
 
     fn evaluate_imported_decl_with_owner_env(
@@ -996,11 +1216,12 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         source_canonical_id: &str,
         exported_name: &str,
     ) -> Option<PreparedImportedDeclContext> {
-        let resolved_export = self
-            .host
-            .resolve_exports_in_view(source_canonical_id, self.store_view)
-            .into_iter()
-            .find(|export| export.is_type && export.name == exported_name);
+        let resolved_export = self.host.resolve_named_export_in_view(
+            source_canonical_id,
+            exported_name,
+            Some(true),
+            self.store_view,
+        );
         let resolved_source_canonical_id = resolved_export
             .as_ref()
             .and_then(|export| export.source_canonical_id.as_deref())
@@ -1315,8 +1536,40 @@ impl VerterHost {
     }
 
     pub(crate) fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.get_source(canonical_id)
-            .or_else(|| self.ws().read_file(canonical_id))
+        let _trace =
+            component_meta_trace_scope("read_analysis_source", format!("owner={canonical_id}"));
+        if let Some(source) = self.get_source(canonical_id) {
+            component_meta_trace_event(
+                "read_analysis_source_result",
+                format!(
+                    "owner={} source=host-cache bytes={}",
+                    canonical_id,
+                    source.len(),
+                ),
+            );
+            return Some(source);
+        }
+
+        let source = self.ws().read_file(canonical_id);
+        if let Some(source) = source.as_ref() {
+            component_meta_trace_event(
+                "read_analysis_source_result",
+                format!(
+                    "owner={} source=workspace bytes={}",
+                    canonical_id,
+                    source.len(),
+                ),
+            );
+        } else {
+            component_meta_trace_event(
+                "read_analysis_source_result",
+                format!(
+                    "owner={} source=workspace bytes=0 missing=true",
+                    canonical_id
+                ),
+            );
+        }
+        source
     }
 
     pub(crate) fn read_analysis_source_in_view(
@@ -1324,11 +1577,31 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<str>> {
+        let _trace = component_meta_trace_scope(
+            "read_analysis_source_in_view",
+            format!("owner={} store_view={}", canonical_id, store_view.is_some()),
+        );
         let source = self.read_analysis_source(canonical_id)?;
         let whole_hash = crate::hash::hash_16(source.as_bytes());
         if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
+            component_meta_trace_event(
+                "read_analysis_source_in_view_result",
+                format!(
+                    "owner={} accepted=false bytes={} whole_hash={whole_hash:?}",
+                    canonical_id,
+                    source.len(),
+                ),
+            );
             return None;
         }
+        component_meta_trace_event(
+            "read_analysis_source_in_view_result",
+            format!(
+                "owner={} accepted=true bytes={} whole_hash={whole_hash:?}",
+                canonical_id,
+                source.len(),
+            ),
+        );
         Some(source)
     }
 
@@ -1380,15 +1653,34 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<verter_analysis::type_eval::EvalEnv> {
+        let _trace = component_meta_trace_scope(
+            "base_eval_env",
+            format!("owner={} store_view={}", canonical_id, store_view.is_some()),
+        );
         if let Some((source, cached_parse, whole_hash)) =
             self.current_eval_state_in_view(canonical_id, store_view)
         {
             if let Some(cached_env) = self.clone_cached_eval_env(canonical_id, whole_hash) {
+                component_meta_trace_event(
+                    "base_eval_env_cache_hit",
+                    format!("owner={} whole_hash={whole_hash:?}", canonical_id),
+                );
                 return Some(cached_env);
             }
 
             let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
             let env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
+            component_meta_trace_event(
+                "base_eval_env_built",
+                format!(
+                    "owner={} source_len={} eval_source_len={} type_symbols={} value_symbols={}",
+                    canonical_id,
+                    source.len(),
+                    eval_source.len(),
+                    env.type_symbols.len(),
+                    env.value_symbols.len(),
+                ),
+            );
             return Some(self.cache_eval_env(&[canonical_id.to_string()], whole_hash, env));
         }
 
@@ -1397,10 +1689,28 @@ impl VerterHost {
         let whole_hash = crate::hash::hash_16(eval_source.as_bytes());
 
         if let Some(cached_env) = self.clone_cached_eval_env(&resolved_canonical_id, whole_hash) {
+            component_meta_trace_event(
+                "base_eval_env_dependency_cache_hit",
+                format!(
+                    "owner={} resolved_owner={} whole_hash={whole_hash:?}",
+                    canonical_id, resolved_canonical_id
+                ),
+            );
             return Some(cached_env);
         }
 
         let env = verter_analysis::type_eval_build::parse_and_build_env(eval_source.as_ref());
+        component_meta_trace_event(
+            "base_eval_env_dependency_built",
+            format!(
+                "owner={} resolved_owner={} eval_source_len={} type_symbols={} value_symbols={}",
+                canonical_id,
+                resolved_canonical_id,
+                eval_source.len(),
+                env.type_symbols.len(),
+                env.value_symbols.len(),
+            ),
+        );
         Some(self.cache_eval_env(
             &[resolved_canonical_id, canonical_id.to_string()],
             whole_hash,
@@ -1436,12 +1746,40 @@ impl VerterHost {
         canonical: &str,
         source: &Arc<str>,
     ) -> FileAnalysisSnapshot {
+        let _trace = component_meta_trace_scope(
+            "build_snapshot_from_source",
+            format!("owner={} bytes={}", canonical, source.len()),
+        );
         if canonical.ends_with(".vue") {
+            let _parse_trace =
+                component_meta_trace_scope("parse_vue_snapshot", format!("owner={canonical}"));
             let (parse, _) =
                 crate::parse::parse_vue_snapshot(canonical, source, self.config.effective_scope());
+            component_meta_trace_event(
+                "parse_vue_snapshot_result",
+                format!(
+                    "owner={} imports={} macros={} export_signatures={}",
+                    canonical,
+                    parse.script_analysis.imports.len(),
+                    parse.script_analysis.macros.len(),
+                    parse.export_signatures.len(),
+                ),
+            );
             Self::build_snapshot_from_parse(parse)
         } else {
+            let _parse_trace =
+                component_meta_trace_scope("parse_non_sfc_snapshot", format!("owner={canonical}"));
             let parse = crate::parse::parse_non_sfc_snapshot(canonical, source);
+            component_meta_trace_event(
+                "parse_non_sfc_snapshot_result",
+                format!(
+                    "owner={} imports={} macros={} export_signatures={}",
+                    canonical,
+                    parse.script_analysis.imports.len(),
+                    parse.script_analysis.macros.len(),
+                    parse.export_signatures.len(),
+                ),
+            );
             Self::build_snapshot_from_parse(parse)
         }
     }
@@ -1491,6 +1829,10 @@ impl VerterHost {
         Option<Arc<verter_core::parser::types::ParsedSfc>>,
         Hash16,
     )> {
+        let _trace = component_meta_trace_scope(
+            "current_eval_state",
+            format!("owner={} store_view={}", canonical_id, store_view.is_some()),
+        );
         #[cfg(feature = "scheduler")]
         {
             if let Some(state) = self.effective_file_state(canonical_id, None) {
@@ -1501,6 +1843,16 @@ impl VerterHost {
                 ) {
                     return None;
                 }
+                component_meta_trace_event(
+                    "current_eval_state_scheduler_hit",
+                    format!(
+                        "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
+                        canonical_id,
+                        state.source.len(),
+                        state.cached_parse.is_some(),
+                        state.whole_hash,
+                    ),
+                );
                 Some((state.source, state.cached_parse, state.whole_hash))
             } else {
                 let source = self.read_analysis_source_in_view(canonical_id, store_view)?;
@@ -1508,6 +1860,15 @@ impl VerterHost {
                     .ends_with(".vue")
                     .then(|| Arc::new(verter_core::compile::parse_sfc(&source, None, None)));
                 let whole_hash = crate::hash::hash_16(source.as_bytes());
+                component_meta_trace_event(
+                    "current_eval_state_fallback_load",
+                    format!(
+                        "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
+                        canonical_id,
+                        source.len(),
+                        cached_parse.is_some(),
+                    ),
+                );
                 Some((source.clone(), cached_parse, whole_hash))
             }
         }
@@ -1523,6 +1884,16 @@ impl VerterHost {
                 ) {
                     return None;
                 }
+                component_meta_trace_event(
+                    "current_eval_state_cache_hit",
+                    format!(
+                        "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
+                        canonical_id,
+                        entry.source.len(),
+                        entry.cached_parse.is_some(),
+                        entry.whole_hash,
+                    ),
+                );
                 Some((
                     Arc::clone(&entry.source),
                     entry.cached_parse.clone(),
@@ -1535,6 +1906,15 @@ impl VerterHost {
                     .ends_with(".vue")
                     .then(|| Arc::new(verter_core::compile::parse_sfc(&source, None, None)));
                 let whole_hash = crate::hash::hash_16(source.as_bytes());
+                component_meta_trace_event(
+                    "current_eval_state_disk_load",
+                    format!(
+                        "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
+                        canonical_id,
+                        source.len(),
+                        cached_parse.is_some(),
+                    ),
+                );
                 Some((source.clone(), cached_parse, whole_hash))
             }
         }
@@ -1554,8 +1934,20 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<rustc_hash::FxHashMap<String, DependencyResolution>> {
+        let _trace = component_meta_trace_scope(
+            "dependency_resolutions_for_eval",
+            format!("owner={} store_view={}", canonical_id, store_view.is_some()),
+        );
         if let Some(view) = store_view {
             self.current_eval_state_in_view(canonical_id, Some(view))?;
+            let resolutions = view
+                .dependency_resolutions(canonical_id)
+                .cloned()
+                .unwrap_or_default();
+            component_meta_trace_event(
+                "dependency_resolutions_for_eval_result",
+                format!("owner={} count={}", canonical_id, resolutions.len()),
+            );
             return Some(
                 view.dependency_resolutions(canonical_id)
                     .cloned()
@@ -1567,6 +1959,15 @@ impl VerterHost {
 
         #[cfg(feature = "scheduler")]
         {
+            let resolutions = self
+                .compile_cache
+                .get(canonical_id)
+                .map(|entry| entry.dependency_resolutions.clone())
+                .unwrap_or_default();
+            component_meta_trace_event(
+                "dependency_resolutions_for_eval_result",
+                format!("owner={} count={}", canonical_id, resolutions.len()),
+            );
             Some(
                 self.compile_cache
                     .get(canonical_id)
@@ -1578,6 +1979,14 @@ impl VerterHost {
         #[cfg(not(feature = "scheduler"))]
         {
             let files = read_lock(&self.files);
+            let resolutions = files
+                .get(canonical_id)
+                .map(|entry| entry.dependency_resolutions.clone())
+                .unwrap_or_default();
+            component_meta_trace_event(
+                "dependency_resolutions_for_eval_result",
+                format!("owner={} count={}", canonical_id, resolutions.len()),
+            );
             Some(
                 files
                     .get(canonical_id)
@@ -1722,6 +2131,18 @@ impl VerterHost {
         owner_env: Option<&verter_analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> ImportedEvalInputs {
+        let _trace = component_meta_trace_scope(
+            "imported_eval_inputs",
+            format!(
+                "owner={} imports={} dep_resolutions={} owner_eval_source={} owner_env={} store_view={}",
+                owner_canonical_id,
+                snapshot.imports.len(),
+                dep_resolutions.len(),
+                owner_eval_source.is_some(),
+                owner_env.is_some(),
+                store_view.is_some(),
+            ),
+        );
         self.provenance
             .imported_eval_inputs_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1758,6 +2179,17 @@ impl VerterHost {
             owner_env,
             None,
             &mut budget,
+        );
+        component_meta_trace_event(
+            "imported_eval_inputs_result",
+            format!(
+                "owner={} type_aliases={} sources={} overflow={} canonical_dependencies={}",
+                owner_canonical_id,
+                imported_inputs.type_aliases.len(),
+                imported_inputs.sources.len(),
+                imported_inputs.overflow.is_some(),
+                imported_inputs.canonical_dependencies.len(),
+            ),
         );
 
         if component_meta_debug_enabled() {
@@ -2082,12 +2514,28 @@ impl VerterHost {
     ) -> Option<crate::types::FallthroughResolution> {
         use verter_analysis::component_meta::*;
         let started = component_meta_debug_enabled().then(Instant::now);
+        let _trace = component_meta_trace_scope(
+            "resolve_fallthrough_surface",
+            format!(
+                "owner={} overrides={} visiting={} store_view={}",
+                canonical_id,
+                prop_type_overrides
+                    .map(|overrides| overrides.len())
+                    .unwrap_or_default(),
+                visiting.len(),
+                store_view.is_some(),
+            ),
+        );
 
         // Cycle detection
         if !visiting.insert(canonical_id.to_string()) {
             self.provenance
                 .resolver_cycle_detections
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            component_meta_trace_event(
+                "resolve_fallthrough_cycle",
+                format!("owner={} visiting={}", canonical_id, visiting.len()),
+            );
             return Some(crate::types::FallthroughResolution {
                 accepted_props: Vec::new(),
                 accepted_events: Vec::new(),
@@ -2174,6 +2622,19 @@ impl VerterHost {
                     started.elapsed(),
                 )),
             }
+        }
+        if let Some(resolution) = result.value.as_ref() {
+            component_meta_trace_event(
+                "resolve_fallthrough_result",
+                format!(
+                    "owner={} accepted_props={} accepted_events={} fact_versions={} completeness={:?}",
+                    canonical_id,
+                    resolution.accepted_props.len(),
+                    resolution.accepted_events.len(),
+                    resolution.fact_versions.len(),
+                    resolution.accepted_surface_completeness,
+                ),
+            );
         }
         result.value
     }
@@ -2320,6 +2781,19 @@ impl VerterHost {
         imported_inputs: &ImportedEvalInputs,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<verter_analysis::type_eval::EvalEnv> {
+        let _trace = component_meta_trace_scope(
+            "build_fallthrough_eval_env",
+            format!(
+                "owner={} imports={} imported_sources={} overrides={} store_view={}",
+                canonical_id,
+                snapshot.imports.len(),
+                imported_inputs.sources.len(),
+                prop_type_overrides
+                    .map(|overrides| overrides.len())
+                    .unwrap_or_default(),
+                store_view.is_some(),
+            ),
+        );
         Some(
             self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
                 canonical_id,
@@ -2344,6 +2818,19 @@ impl VerterHost {
         owner_env: Option<verter_analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<OwnerEvalEnvBuild> {
+        let _trace =
+            component_meta_trace_scope(
+                "build_owner_eval_env",
+                format!(
+                "owner={} imports={} imported_sources={} overrides={} owner_env={} store_view={}",
+                canonical_id,
+                snapshot.imports.len(),
+                imported_inputs.sources.len(),
+                prop_type_overrides.map(|overrides| overrides.len()).unwrap_or_default(),
+                owner_env.is_some(),
+                store_view.is_some(),
+            ),
+            );
         let started = component_meta_debug_enabled().then(Instant::now);
         let assembler = HostOwnerEvalEnvAssembler {
             host: self,
@@ -2368,6 +2855,16 @@ impl VerterHost {
                 started.map(|start| start.elapsed()).unwrap_or_default(),
             ));
         }
+        component_meta_trace_event(
+            "build_owner_eval_env_result",
+            format!(
+                "owner={} type_symbols={} value_symbols={} imported_sources={}",
+                canonical_id,
+                built.env.type_symbols.len(),
+                built.env.value_symbols.len(),
+                imported_inputs.sources.len(),
+            ),
+        );
         Some(built)
     }
 
@@ -2378,6 +2875,16 @@ impl VerterHost {
         env: &mut verter_analysis::type_eval::EvalEnv,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
+        let _trace = component_meta_trace_scope(
+            "materialize_runtime_values",
+            format!(
+                "imports={} owner_local_values={} existing_value_symbols={} store_view={}",
+                snapshot.imports.len(),
+                owner_local_value_names.len(),
+                env.value_symbols.len(),
+                store_view.is_some(),
+            ),
+        );
         let started = component_meta_debug_enabled().then(Instant::now);
         let resolver = HostRuntimeValueResolver {
             host: self,
@@ -2397,6 +2904,15 @@ impl VerterHost {
                 started.map(|start| start.elapsed()).unwrap_or_default(),
             ));
         }
+        component_meta_trace_event(
+            "materialize_runtime_values_result",
+            format!(
+                "imports={} owner_local_values={} value_symbols={}",
+                snapshot.imports.len(),
+                owner_local_value_names.len(),
+                env.value_symbols.len(),
+            ),
+        );
     }
 
     fn build_generic_child_prop_overrides(
@@ -4648,6 +5164,67 @@ impl VerterHost {
         flow
     }
 
+    pub(crate) fn load_export_graph_analysis_in_view(
+        &self,
+        canonical_or_alias: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<(
+        FileKind,
+        verter_analysis::ScriptAnalysisSnapshot,
+        Vec<verter_analysis::ExportSignature>,
+    )> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(cc) = self.compile_cache.get(&canonical) {
+                if cc.evicted {
+                    return None;
+                }
+            }
+
+            let current_hash = self.get_whole_hash(&canonical).unwrap_or_default();
+            if self.store_view_allows_current_whole_hash(&canonical, current_hash, store_view) {
+                if let (Some(source_snap), Some(analysis_snap)) = (
+                    self.scheduler.try_get_source(&canonical),
+                    self.scheduler.try_get_analysis(&canonical),
+                ) {
+                    let file_kind = source_snap
+                        .downcast_data::<crate::host_executor::HostSourceData>()?
+                        .file_kind;
+                    let analysis =
+                        analysis_snap.downcast_data::<crate::host_executor::HostAnalysisData>()?;
+                    return Some((
+                        file_kind,
+                        analysis.script_analysis.clone(),
+                        analysis.export_signatures.clone(),
+                    ));
+                }
+            }
+        }
+
+        let source = self.read_analysis_source_in_view(&canonical, store_view)?;
+        if canonical.ends_with(".vue") {
+            let (snapshot, _) = crate::parse::parse_vue_snapshot(
+                &canonical,
+                source.as_ref(),
+                self.config.effective_scope(),
+            );
+            Some((
+                FileKind::VueSfc,
+                snapshot.script_analysis,
+                snapshot.export_signatures,
+            ))
+        } else {
+            let snapshot = crate::parse::parse_non_sfc_snapshot(&canonical, source.as_ref());
+            Some((
+                FileKind::NonSfc,
+                snapshot.script_analysis,
+                snapshot.export_signatures,
+            ))
+        }
+    }
+
     /// Look up the byte span of an exported name in a target file.
     ///
     /// For `.vue` files: searches `ScriptAnalysisSnapshot.bindings` (script-setup
@@ -4827,6 +5404,39 @@ impl VerterHost {
     /// Uses cycle detection to prevent infinite loops in circular re-exports.
     pub fn resolve_exports(&self, canonical_or_alias: &str) -> Vec<ResolvedExport> {
         self.resolve_exports_in_view(canonical_or_alias, None)
+    }
+
+    pub(crate) fn resolve_named_export_in_view(
+        &self,
+        canonical_or_alias: &str,
+        binding_name: &str,
+        is_type: Option<bool>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<ResolvedExport> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        #[cfg(feature = "scheduler")]
+        if let Some(cc) = self.compile_cache.get(&canonical) {
+            if cc.evicted {
+                return None;
+            }
+        }
+        let resolver = HostExportGraphResolver {
+            host: self,
+            store_view,
+        };
+        let resolved = resolver_resolve_named_export_from_graph(
+            &resolver,
+            &canonical,
+            binding_name,
+            is_type,
+            store_view.is_some(),
+        )?;
+        Some(ResolvedExport {
+            name: resolved.name,
+            is_type: resolved.is_type,
+            source_canonical_id: resolved.source_canonical_id,
+            source_name: resolved.source_name,
+        })
     }
 
     pub(crate) fn resolve_exports_in_view(
@@ -6378,6 +6988,18 @@ fn extract_component_meta_from_inputs(
 ) -> verter_analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    let _trace = component_meta_trace_scope(
+        "extract_component_meta",
+        format!(
+            "owner={} macros={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} include_fallthrough={}",
+            canonical,
+            snapshot.macros.len(),
+            resolved_macros.len(),
+            resolved_type_registry.len(),
+            evaluated_types.is_some(),
+            include_fallthrough,
+        ),
+    );
     let input = verter_analysis::component_meta::ComponentMetaInput {
         macros: &snapshot.macros,
         bindings: &snapshot.bindings,
@@ -6396,6 +7018,16 @@ fn extract_component_meta_from_inputs(
         file_path: &canonical,
     };
     let mut meta = verter_analysis::component_meta::extract_component_meta(input);
+    component_meta_trace_event(
+        "extract_component_meta_declared_surface",
+        format!(
+            "owner={} props={} events={} slots={}",
+            canonical,
+            meta.props.len(),
+            meta.events.len(),
+            meta.slots.len(),
+        ),
+    );
 
     if include_fallthrough {
         if let Some(resolution) = host.resolve_fallthrough_surface(&canonical) {
@@ -6403,6 +7035,16 @@ fn extract_component_meta_from_inputs(
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
             meta.fallthrough_surface = resolution.fallthrough_surface;
+            component_meta_trace_event(
+                "extract_component_meta_fallthrough_surface",
+                format!(
+                    "owner={} accepted_props={} accepted_events={} completeness={:?}",
+                    canonical,
+                    meta.accepted_props.len(),
+                    meta.accepted_events.len(),
+                    meta.accepted_surface_completeness,
+                ),
+            );
         }
     }
 

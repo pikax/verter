@@ -328,6 +328,44 @@ describe("ComponentMetaChecker", () => {
     shutdownMetaRuntime();
   });
 
+  it("createCheckerByJson uses separate pooled engines for different type expansion backends", async () => {
+    shutdownMetaRuntime();
+    const runtime = getMetaRuntime();
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `checker-pool-backend-${nextProjectRootId++}`,
+    );
+
+    const checkerA = await createCheckerByJson(
+      projectRoot,
+      {
+        include: ["src/A.vue"],
+        compilerOptions: { baseUrl: "." },
+      },
+      {
+        typeExpansionBackend: "verter",
+      },
+    );
+    const checkerB = await createCheckerByJson(
+      projectRoot,
+      {
+        include: ["src/B.vue"],
+        compilerOptions: { baseUrl: "." },
+      },
+      {
+        typeExpansionBackend: "auto",
+      },
+    );
+
+    expect(runtime.engineCount).toBe(2);
+    expect(runtime.diagnostics.enginesCreated).toBe(2);
+    expect(runtime.diagnostics.enginesReused).toBe(0);
+
+    checkerA.close();
+    checkerB.close();
+    shutdownMetaRuntime();
+  });
+
   it("createCheckerByJson uses pooled runtime leases instead of dedicated engines", async () => {
     shutdownMetaRuntime();
     const runtime = getMetaRuntime();

@@ -42,6 +42,7 @@ use verter_resolver::{
 use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
+use crate::host_manage::{component_meta_trace_event, component_meta_trace_scope};
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 #[cfg(not(feature = "scheduler"))]
 use crate::shared::{read_lock, write_lock};
@@ -1131,12 +1132,30 @@ impl VerterHost {
         Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
-        if let Some(view) = store_view {
+        let _trace = component_meta_trace_scope(
+            "resolve_external_type_from_loaded_files",
+            format!(
+                "owner={} import={} type={} depth={} required_root_dep={} kind={kind:?} store_view={} cache_entries={} visiting={} use_host_cache={}",
+                owner_canonical,
+                import_source,
+                type_name,
+                depth,
+                required_root_dep,
+                store_view.is_some(),
+                cache.len(),
+                visiting.len(),
+                use_host_cache,
+            ),
+        );
+        let tracked_before = tracked_deps.len();
+        let resolution_before = resolution_deps.len();
+        let cache_before = cache.len();
+        let result = if let Some(view) = store_view {
             let resolver = ViewExternalTypeGraphResolver {
                 host: self,
                 store_view: view,
             };
-            return verter_resolver::resolve_external_type_from_graph(
+            verter_resolver::resolve_external_type_from_graph(
                 &resolver,
                 owner_canonical,
                 import_source,
@@ -1150,25 +1169,53 @@ impl VerterHost {
                 use_host_cache,
                 profile_hash,
                 depth,
-            );
-        }
-
-        let resolver = HostLiveExternalTypeRequestResolver { host: self };
-        resolve_external_type_request(
-            &resolver,
-            owner_canonical,
-            import_source,
-            type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            required_root_dep,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-        )
+            )
+        } else {
+            let resolver = HostLiveExternalTypeRequestResolver { host: self };
+            resolve_external_type_request(
+                &resolver,
+                owner_canonical,
+                import_source,
+                type_name,
+                tracked_deps,
+                resolution_deps,
+                cache,
+                visiting,
+                required_root_dep,
+                kind,
+                use_host_cache,
+                profile_hash,
+                depth,
+            )
+        };
+        component_meta_trace_event(
+            "resolve_external_type_from_loaded_files_result",
+            format!(
+                "owner={} import={} type={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={} store_view={}",
+                owner_canonical,
+                import_source,
+                type_name,
+                match &result {
+                    Ok(Some(_)) => "ok:resolved",
+                    Ok(None) => "ok:none",
+                    Err(crate::types::ExternalTypeResolveError::MissingRootDependency) => {
+                        "err:missing_root"
+                    }
+                    Err(crate::types::ExternalTypeResolveError::DepthLimitExceeded { .. }) => {
+                        "err:depth_limit"
+                    }
+                    Err(crate::types::ExternalTypeResolveError::StepLimitExceeded { .. }) => {
+                        "err:step_limit"
+                    }
+                },
+                tracked_deps.len().saturating_sub(tracked_before),
+                resolution_deps.len().saturating_sub(resolution_before),
+                cache.len().saturating_sub(cache_before),
+                visiting.len(),
+                store_view.is_some(),
+            ),
+        );
+        result
     }
 
     #[cfg(feature = "scheduler")]

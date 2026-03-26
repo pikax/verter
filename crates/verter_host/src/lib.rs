@@ -120,6 +120,12 @@ impl HostResolverState {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct RawAnalysisSnapshotCacheEntry {
+    pub whole_hash: Hash16,
+    pub snapshot: Arc<FileAnalysisSnapshot>,
+}
+
 /// Central file store and compile cache for Vue SFC compilation.
 ///
 /// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
@@ -181,6 +187,10 @@ pub struct VerterHost {
     pub(crate) eval_env_cache: parking_lot::Mutex<
         rustc_hash::FxHashMap<String, (Hash16, Arc<verter_analysis::type_eval::EvalEnv>)>,
     >,
+    /// Cached finalized raw analysis snapshots for disk-backed fallback files.
+    /// Cleared whenever the host store-view epoch advances.
+    pub(crate) raw_analysis_snapshot_cache:
+        parking_lot::Mutex<rustc_hash::FxHashMap<String, RawAnalysisSnapshotCacheEntry>>,
     /// Optional project-local HTML intrinsic override extracted from the
     /// consumer project's installed TS/Vue JSX surface.
     pub(crate) html_intrinsics_catalog: parking_lot::RwLock<
@@ -237,6 +247,7 @@ impl VerterHost {
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
@@ -262,6 +273,7 @@ impl VerterHost {
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
@@ -325,6 +337,7 @@ impl VerterHost {
     }
 
     pub(crate) fn bump_store_view_epoch(&self) -> u64 {
+        self.raw_analysis_snapshot_cache.lock().clear();
         self.store_view_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1

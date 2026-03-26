@@ -1,9 +1,231 @@
-use std::sync::Arc;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::engine::Engine;
 use crate::project_graph::{ProjectGraph, VfsProjectConfig};
 use crate::types::{ExactResolution, ExactResolutionResult};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentMetaTraceEvent {
+    Start,
+    End,
+    Point,
+}
+
+impl ComponentMetaTraceEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::End => "end",
+            Self::Point => "point",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ComponentMetaTraceContext {
+    trace_id: u64,
+    span_id: u64,
+}
+
+thread_local! {
+    static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
+}
+
+fn component_meta_trace_output_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn component_meta_trace_next_span_id() -> u64 {
+    static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1 << 48);
+    NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn component_meta_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
+            || std::env::var_os("VERTER_META_TRACE").is_some()
+    })
+}
+
+fn component_meta_trace_output_path() -> Option<&'static std::path::PathBuf> {
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+
+    PATH.get_or_init(|| {
+        std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH")
+            .or_else(|| std::env::var_os("VERTER_META_TRACE_PATH"))
+            .map(std::path::PathBuf::from)
+    })
+    .as_ref()
+}
+
+fn format_component_meta_trace_line(
+    event: ComponentMetaTraceEvent,
+    trace_id: u64,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    depth: usize,
+    name: &str,
+    detail: &str,
+    duration: Option<Duration>,
+) -> String {
+    let parent = parent_span_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let mut line = format!(
+        "[verter-meta-trace] event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
+        event.as_str(),
+        trace_id,
+        span_id,
+        parent,
+        trace_id,
+        span_id,
+        parent,
+        depth,
+        std::thread::current().id(),
+        name,
+        detail,
+    );
+    if let Some(duration) = duration {
+        line.push_str(&format!(" dur_ms={:.3}", duration.as_secs_f64() * 1000.0));
+    }
+    line
+}
+
+fn component_meta_trace_write_line(line: &str) {
+    use std::io::Write;
+
+    let _lock = component_meta_trace_output_lock().lock();
+    if let Some(path) = component_meta_trace_output_path() {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+            return;
+        }
+    }
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{line}");
+    let _ = stderr.flush();
+}
+
+struct ComponentMetaTraceGuardState {
+    trace_id: u64,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    depth: usize,
+    name: &'static str,
+    detail: String,
+    started: Instant,
+}
+
+struct ComponentMetaTraceGuard {
+    state: Option<ComponentMetaTraceGuardState>,
+}
+
+impl Drop for ComponentMetaTraceGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+
+        COMPONENT_META_TRACE_STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let popped = stack.pop();
+            debug_assert_eq!(popped.map(|ctx| ctx.span_id), Some(state.span_id));
+        });
+
+        component_meta_trace_write_line(&format_component_meta_trace_line(
+            ComponentMetaTraceEvent::End,
+            state.trace_id,
+            state.span_id,
+            state.parent_span_id,
+            state.depth,
+            state.name,
+            &state.detail,
+            Some(state.started.elapsed()),
+        ));
+    }
+}
+
+fn component_meta_trace_scope(
+    name: &'static str,
+    detail: impl Into<String>,
+) -> ComponentMetaTraceGuard {
+    if !component_meta_trace_enabled() {
+        return ComponentMetaTraceGuard { state: None };
+    }
+
+    let detail = detail.into();
+    let span_id = component_meta_trace_next_span_id();
+    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let parent = stack.last().copied();
+        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
+        let depth = stack.len();
+        stack.push(ComponentMetaTraceContext { trace_id, span_id });
+        (trace_id, parent.map(|ctx| ctx.span_id), depth)
+    });
+
+    component_meta_trace_write_line(&format_component_meta_trace_line(
+        ComponentMetaTraceEvent::Start,
+        trace_id,
+        span_id,
+        parent_span_id,
+        depth,
+        name,
+        &detail,
+        None,
+    ));
+
+    ComponentMetaTraceGuard {
+        state: Some(ComponentMetaTraceGuardState {
+            trace_id,
+            span_id,
+            parent_span_id,
+            depth,
+            name,
+            detail,
+            started: Instant::now(),
+        }),
+    }
+}
+
+fn component_meta_trace_event(name: &'static str, detail: impl Into<String>) {
+    if !component_meta_trace_enabled() {
+        return;
+    }
+
+    let detail = detail.into();
+    let span_id = component_meta_trace_next_span_id();
+    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
+        let stack = stack.borrow();
+        let parent = stack.last().copied();
+        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
+        (trace_id, parent.map(|ctx| ctx.span_id), stack.len())
+    });
+
+    component_meta_trace_write_line(&format_component_meta_trace_line(
+        ComponentMetaTraceEvent::Point,
+        trace_id,
+        span_id,
+        parent_span_id,
+        depth,
+        name,
+        &detail,
+        None,
+    ));
+}
 
 /// Options for creating a `FilesystemWorkspace`.
 #[derive(Debug, Clone, Default)]
@@ -100,25 +322,64 @@ impl FilesystemWorkspace {
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        let _trace = component_meta_trace_scope("vfs_read_file", format!("path={canonical_id}"));
         // 1. Overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
+            component_meta_trace_event(
+                "vfs_read_file_result",
+                format!(
+                    "path={} layer=overlay cache=hit bytes={}",
+                    canonical_id,
+                    content.len(),
+                ),
+            );
             return Some(content);
         }
         // 2. Snapshot cache
         if let Some(content) = self.engine.snapshot.read().read(canonical_id) {
+            component_meta_trace_event(
+                "vfs_read_file_result",
+                format!(
+                    "path={} layer=snapshot cache=hit bytes={}",
+                    canonical_id,
+                    content.len(),
+                ),
+            );
             return Some(content);
         }
         // 3. Disk fallback — read and cache in snapshot
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let _disk_trace =
+                component_meta_trace_scope("vfs_read_file_disk", format!("path={canonical_id}"));
             if let Some(content) = self.native_fs.read_file(canonical_id) {
                 self.engine
                     .snapshot
                     .write()
                     .inject(canonical_id.to_string(), content.clone());
+                component_meta_trace_event(
+                    "vfs_read_file_disk_result",
+                    format!("path={} found=true bytes={}", canonical_id, content.len(),),
+                );
+                component_meta_trace_event(
+                    "vfs_read_file_result",
+                    format!(
+                        "path={} layer=disk cache=miss bytes={}",
+                        canonical_id,
+                        content.len(),
+                    ),
+                );
                 return Some(content);
             }
+            component_meta_trace_event(
+                "vfs_read_file_disk_result",
+                format!("path={} found=false bytes=0", canonical_id),
+            );
         }
+        component_meta_trace_event(
+            "vfs_read_file_result",
+            format!("path={} layer=missing cache=miss bytes=0", canonical_id),
+        );
         None
     }
 
