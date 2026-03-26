@@ -511,6 +511,15 @@ impl MetaSession {
         self.id
     }
 
+    /// Resolve an alias to its canonical ID inside this session's overlay view.
+    pub fn resolve_alias_or_canonical(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<String, MetaError> {
+        self.check_alive()?;
+        self.with_overlay_context(|host| host.resolve_alias_or_canonical(canonical_or_alias))
+    }
+
     /// Store a file overlay in this session.
     pub fn upsert(&self, canonical_id: &str, source: String) -> Result<(), MetaError> {
         self.check_alive()?;
@@ -566,6 +575,7 @@ impl MetaSession {
     }
 
     /// Evaluate component metadata types through this session's overlay view.
+    #[allow(dead_code)]
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
@@ -617,6 +627,7 @@ impl MetaSession {
     /// `resolve_component_meta(Expanded)` call that would happen if
     /// `get_component_meta()` and `resolve_component_meta_state()` were
     /// called separately.
+    #[allow(dead_code)]
     pub fn get_component_meta_with_resolution(
         &self,
         canonical_or_alias: &str,

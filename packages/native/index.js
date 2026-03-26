@@ -129,6 +129,9 @@ const {
   MetaSession,
 } = nativeBinding;
 
+const ComponentMetaHost = MetaProject;
+const ComponentMetaSession = MetaSession;
+
 function processStyle(css, options) {
   return _processStyle(toBuffer(css), options);
 }
@@ -172,5 +175,7 @@ module.exports.processStyle = processStyle;
 module.exports.compileBatch = compileBatch;
 module.exports.VerterHost = VerterHost;
 module.exports.Workspace = Workspace;
+module.exports.ComponentMetaHost = ComponentMetaHost;
+module.exports.ComponentMetaSession = ComponentMetaSession;
 module.exports.MetaProject = MetaProject;
 module.exports.MetaSession = MetaSession;

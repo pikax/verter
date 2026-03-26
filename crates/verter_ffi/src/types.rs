@@ -33,6 +33,8 @@ pub struct FfiHostConfig {
     pub max_profiles_per_file: Option<u32>,
     pub resolve_extensions: Option<Vec<String>>,
     pub analysis_level: Option<String>,
+    /// Type expansion backend: `"verter"` (default), `"tsserver"`, `"tsgo"`, `"auto"`.
+    pub type_expansion_backend: Option<String>,
 }
 
 /// Per-compilation variant options.

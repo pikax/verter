@@ -997,6 +997,16 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
             return Err(FfiConversionError::InvalidAnalysisLevel(level));
         };
     }
+    if let Some(backend) = input.type_expansion_backend {
+        use verter_resolver::type_expansion::TypeExpansionBackend;
+        out.type_expansion_backend = match backend.to_lowercase().as_str() {
+            "verter" => TypeExpansionBackend::Verter,
+            "tsserver" => TypeExpansionBackend::Tsserver,
+            "tsgo" => TypeExpansionBackend::Tsgo,
+            "auto" => TypeExpansionBackend::Auto,
+            _ => TypeExpansionBackend::Verter,
+        };
+    }
     Ok(out)
 }
 
@@ -1866,6 +1876,7 @@ mod tests {
             max_profiles_per_file: Some(4),
             resolve_extensions: Some(vec![".vue".to_string(), ".ts".to_string()]),
             analysis_level: Some("essential".to_string()),
+            type_expansion_backend: Some("tsgo".to_string()),
         };
         let result = ffi_config_to_host(config).unwrap();
         assert!(!result.dev_mode);

@@ -190,6 +190,8 @@ pub struct NapiHostConfig {
     pub maxProfilesPerFile: Option<u32>,
     pub resolveExtensions: Option<Vec<String>>,
     pub analysisLevel: Option<String>,
+    /// Type expansion backend: `"verter"` (default), `"tsserver"`, `"tsgo"`, `"auto"`.
+    pub typeExpansionBackend: Option<String>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -201,6 +203,7 @@ impl From<NapiHostConfig> for FfiHostConfig {
             max_profiles_per_file: n.maxProfilesPerFile,
             resolve_extensions: n.resolveExtensions,
             analysis_level: n.analysisLevel,
+            type_expansion_backend: n.typeExpansionBackend,
         }
     }
 }
@@ -1068,6 +1071,11 @@ impl NapiWorkspace {
     /// Get the underlying workspace as a trait object.
     pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_vfs::WorkspaceAccess> {
         std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_vfs::WorkspaceAccess>
+    }
+
+    /// Get the filesystem workspace roots for runtime-backed integrations.
+    pub(crate) fn roots(&self) -> Vec<String> {
+        self.inner.options().roots.clone()
     }
 }
 

@@ -1,14 +1,14 @@
 //! Resilient wrapper around `TsgoTypeProvider` with crash detection and auto-restart.
 //!
-//! The restart mechanics live in `crate::resilient_provider`; this module only
-//! supplies the TSGO-specific respawn strategy.
+//! The restart mechanics live in `verter_type_runtime::resilient`; this module only
+//! supplies the TSGO-specific respawn strategy and the LSP `Client` bridge.
 
 use std::sync::Arc;
 
 use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::Client;
 
-use crate::resilient_provider::{ResilientBackend, ResilientProvider};
+use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
 use crate::tsgo::ipc::TsgoTypeProvider;
 use crate::tsgo::protocol::TypeProviderError;
 use crate::tsgo::traits::TypeProvider;
@@ -60,11 +60,12 @@ pub fn new(
     client: Arc<OnceCell<Client>>,
     max_restarts: u32,
 ) -> impl TypeProvider {
+    let notifier = Arc::new(LspNotifier::new(client));
     ResilientProvider::new(
         provider,
         crash_notify,
         TsgoBackend { tsgo_bin, root_uri },
-        client,
+        notifier,
         max_restarts,
     )
 }

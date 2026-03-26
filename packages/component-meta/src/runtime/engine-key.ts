@@ -17,6 +17,7 @@ export interface EngineKeyInput {
   nativeFlags: {
     analysisLevel: string;
   };
+  typeExpansionBackend?: string;
 }
 
 /**
@@ -85,6 +86,7 @@ export function computeEngineKey(input: EngineKeyInput): string {
     input.tsconfigPath ? normalizePath(input.tsconfigPath) : "",
     input.configHash,
     input.nativeFlags.analysisLevel,
+    input.typeExpansionBackend ?? "verter",
   ];
   return parts.join("|");
 }

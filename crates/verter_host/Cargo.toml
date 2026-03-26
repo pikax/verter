@@ -27,6 +27,7 @@ oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { workspace = true }
+tracing = "0.1"
 serde_json = { workspace = true }
 sourcemap = "9"
 thiserror = "2"

@@ -3,11 +3,11 @@
  *
  * @example
  * ```ts
- * import { openMetaProject } from '@verter/component-meta'
+ * import { openComponentMetaSession } from '@verter/component-meta'
  *
- * const project = await openMetaProject({ root: '.', tsconfig: './tsconfig.json' })
- * const meta = await project.getComponentMeta('./src/MyComponent.vue')
- * project.close()
+ * const session = await openComponentMetaSession({ root: '.', tsconfig: './tsconfig.json' })
+ * const meta = await session.getComponentMeta('./src/MyComponent.vue')
+ * session.close()
  * ```
  */
 
@@ -158,6 +158,15 @@ export type {
   NativeResolvedRootStep,
 } from "./native-component-meta.js";
 
-// Pooled project API
-export { MetaProject, openMetaProject, evictMetaProject, shutdownMetaRuntime } from "./project.js";
-export type { MetaProjectConfig } from "./project.js";
+// Session-first project API
+export {
+  ComponentMetaSession,
+  openComponentMetaSession,
+  evictComponentMetaSession,
+  shutdownMetaRuntime,
+} from "./project.js";
+export type {
+  MetaProjectConfig,
+  ComponentMetaSessionConfig,
+  TypeExpansionBackend,
+} from "./project.js";

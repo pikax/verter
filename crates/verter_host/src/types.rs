@@ -130,6 +130,8 @@ pub struct HostConfig {
     /// When enabled, the host may specialize child root targets from
     /// statically resolvable call-site prop types.
     pub generic_root_propagation: bool,
+    /// Type expansion backend: which backend resolves macro type parameters.
+    pub type_expansion_backend: verter_resolver::type_expansion::TypeExpansionBackend,
 }
 
 impl Default for HostConfig {
@@ -155,6 +157,7 @@ impl Default for HostConfig {
             analysis_level: AnalysisLevel::Full,
             analysis_scope: None,
             generic_root_propagation: false,
+            type_expansion_backend: verter_resolver::type_expansion::TypeExpansionBackend::Verter,
         }
     }
 }
@@ -1010,6 +1013,7 @@ pub(crate) struct CompileInput {
 /// These fields are never mutated after construction, so Arc sharing is safe.
 /// On the scheduler path, `AnalysisArcs` in `HostAnalysisData` serves this role.
 #[cfg(any(not(feature = "scheduler"), test))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScriptAnalysisArcs {
     pub(crate) module_references: Arc<Vec<verter_analysis::AnalyzedModuleReference>>,
@@ -1111,6 +1115,7 @@ impl DependencyResolution {
 }
 
 #[cfg(any(not(feature = "scheduler"), test))]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
     // ── Identity ──────────────────────────────────────────────────────
@@ -1204,6 +1209,7 @@ impl FileMeta {
 
 #[cfg(any(not(feature = "scheduler"), test))]
 impl FileEntry {
+    #[allow(dead_code)]
     pub(crate) fn all_virtual_nodes(&self) -> Vec<VirtualNodeKind> {
         self.meta.virtual_nodes()
     }

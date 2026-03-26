@@ -50,6 +50,7 @@
 
 mod cache;
 mod compile;
+pub mod component_meta_host;
 pub mod cross_file;
 mod deps;
 mod hash;
@@ -59,7 +60,7 @@ mod host_manage;
 mod host_resolve;
 mod host_upsert;
 mod id;
-pub mod meta;
+mod meta;
 pub mod meta_resolve;
 mod parse;
 mod resolver_store;

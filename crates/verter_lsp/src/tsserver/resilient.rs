@@ -1,14 +1,14 @@
 //! Resilient wrapper around `TsserverTypeProvider` with crash detection and auto-restart.
 //!
-//! The restart mechanics live in `crate::resilient_provider`; this module only
-//! supplies the tsserver-specific respawn strategy.
+//! The restart mechanics live in `verter_type_runtime::resilient`; this module only
+//! supplies the tsserver-specific respawn strategy and the LSP `Client` bridge.
 
 use std::sync::Arc;
 
 use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::Client;
 
-use crate::resilient_provider::{ResilientBackend, ResilientProvider};
+use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
 use crate::tsgo::protocol::TypeProviderError;
 use crate::tsgo::traits::TypeProvider;
 use crate::tsserver::ipc::TsserverTypeProvider;
@@ -67,6 +67,7 @@ pub fn new(
     client: Arc<OnceCell<Client>>,
     max_restarts: u32,
 ) -> impl TypeProvider {
+    let notifier = Arc::new(LspNotifier::new(client));
     ResilientProvider::new(
         provider,
         crash_notify,
@@ -76,7 +77,7 @@ pub fn new(
             workspace_root,
             plugin_path,
         },
-        client,
+        notifier,
         max_restarts,
     )
 }

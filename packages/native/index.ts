@@ -413,26 +413,26 @@ export declare class VerterHost {
 }
 
 // =============================================================================
-// MetaProject / MetaSession — pooled runtime for component-meta
+// ComponentMetaHost / ComponentMetaSession — component-meta host surface
 // =============================================================================
 
 /**
- * A shared, long-lived project wrapping one native host.
+ * A shared, long-lived host wrapping one native component-meta engine.
  *
  * Multiple sessions can be opened against the same project. The project
  * owns the host, base file caches, and session management. Create one
  * per tsconfig / project root and reuse it across checkers.
  */
-export declare class MetaProject {
+export declare class ComponentMetaHost {
   constructor(config?: import("./host-types").HostConfig);
 
   /**
-   * Create a MetaProject backed by an existing Workspace.
+   * Create a ComponentMetaHost backed by an existing Workspace.
    */
   static withWorkspace(
     config: import("./host-types").HostConfig | undefined,
     workspace: Workspace,
-  ): MetaProject;
+  ): ComponentMetaHost;
 
   /** Load a file into the base project (shared across all sessions). */
   upsertBase(canonicalId: string, source: string | Buffer): void;
@@ -447,7 +447,7 @@ export declare class MetaProject {
   configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
 
   /** Open a new isolated session against this project. */
-  openSession(): MetaSession;
+  openSession(): ComponentMetaSession;
 
   /** Clear shared analysis caches without shutting down. */
   clearCaches(): void;
@@ -472,7 +472,7 @@ export declare class MetaProject {
  * in one session never affect another session's view. Queries resolve
  * through `session overlay → shared base`.
  */
-export declare class MetaSession {
+export declare class ComponentMetaSession {
   /** Store a file overlay in this session. */
   upsert(canonicalId: string, source: string | Buffer): void;
 
@@ -506,5 +506,11 @@ export declare class MetaSession {
   /** The overlay generation counter for this session. */
   readonly overlayGeneration: number;
 }
+
+/** @deprecated Use ComponentMetaHost. */
+export declare const MetaProject: typeof ComponentMetaHost;
+
+/** @deprecated Use ComponentMetaSession. */
+export declare const MetaSession: typeof ComponentMetaSession;
 
 export {};

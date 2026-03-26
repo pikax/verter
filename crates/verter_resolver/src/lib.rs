@@ -22,10 +22,19 @@ mod imported_eval_collect;
 mod imported_eval_lookup;
 mod imported_eval_types;
 mod imported_type_alias;
+pub mod query_artifact;
 pub mod resolver_runtime;
 mod runtime_values;
 mod surface_projector;
 pub mod symbol_resolver;
+pub mod type_expansion;
+pub mod type_expansion_host;
+#[cfg(feature = "type-runtime")]
+pub mod type_expansion_tsgo;
+#[cfg(feature = "type-runtime")]
+pub mod type_expansion_tsserver;
+pub mod type_expansion_verter;
+pub mod type_text_parser;
 
 pub type ResolverHash16 = verter_analysis::Hash16;
 pub use barrel_resolution::{

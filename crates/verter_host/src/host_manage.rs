@@ -6418,7 +6418,7 @@ fn extract_component_meta_from_inputs(
     meta
 }
 
-fn extract_component_meta_from_resolved(
+pub(crate) fn extract_component_meta_from_resolved(
     host: &VerterHost,
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,

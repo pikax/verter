@@ -40,14 +40,15 @@ fn get_source_returns_source_for_canonical_and_alias() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let source = "<template><div>hello</div></template>";
 
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "Comp.vue".to_string(),
-        source: Arc::from(source),
-        file_kind: FileKind::VueSfc,
-        aliases: vec!["AliasComp.vue".to_string()],
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "Comp.vue".to_string(),
+            source: Arc::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: vec!["AliasComp.vue".to_string()],
+        })
+        .unwrap();
 
     assert_eq!(host.get_source("Comp.vue").as_deref(), Some(source));
     assert_eq!(host.get_source("AliasComp.vue").as_deref(), Some(source));
@@ -2017,7 +2018,7 @@ fn style_override_remaps_preprocessed_block_preserves_css_block() {
         "</style>\n",
     );
 
-    upsert_vue(&host, "multi.vue", sfc);
+    let _ = upsert_vue(&host, "multi.vue", sfc);
 
     // Get original analysis before override
     let analysis_before = host.get_analysis("multi.vue").unwrap();
@@ -2437,7 +2438,7 @@ fn close_clears_all_caches() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // Upsert a file to populate caches
-    upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
+    let _ = upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
 
     // Verify the host has data
     #[cfg(feature = "scheduler")]
@@ -2493,11 +2494,11 @@ fn close_clears_all_caches() {
 #[test]
 fn close_allows_reuse() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
+    let _ = upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
     host.close();
 
     // Host should still be usable after close
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "test2.vue",
         "<template><span>world</span></template>",
@@ -2550,14 +2551,15 @@ fn make_project_config(
 }
 
 fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(src),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 }
 
 #[test]
@@ -2578,7 +2580,7 @@ fn configure_projects_exact_alias() {
     );
 
     // Upsert parent file that imports via the alias
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/App.vue",
         "<script setup>\nimport type { Foo } from '#imports'\n</script>\n<template><div/></template>",
@@ -2602,13 +2604,13 @@ fn configure_projects_wildcard_alias() {
         vec![("@/*", vec!["./src/*"])],
     )]);
 
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/components/Child.vue",
         "<script setup>\ndefineProps({ msg: String })\n</script>\n<template><div>{{ msg }}</div></template>",
     );
 
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/App.vue",
         "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><Child msg=\"hi\" /></template>",
@@ -2641,12 +2643,12 @@ fn configure_projects_multi_project() {
         "/workspace/lib/src/utils.ts",
         "export const bar = 2;",
     );
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/workspace/app/src/App.vue",
         "<script setup>\nimport { foo } from '@app/utils'\n</script>\n<template><div/></template>",
     );
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/workspace/lib/src/Lib.vue",
         "<script setup>\nimport { bar } from '@lib/utils'\n</script>\n<template><div/></template>",
@@ -2680,7 +2682,7 @@ fn set_import_dependencies_overrides_project_resolver() {
     upsert_non_sfc(&host, "/project/src/utils.ts", "export const a = 1;");
     upsert_non_sfc(&host, "/project/custom/utils.ts", "export const b = 2;");
 
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/App.vue",
         "<script setup>\nimport { b } from '@/utils'\n</script>\n<template><div/></template>",
@@ -2719,7 +2721,7 @@ fn configure_projects_empty_clears() {
         "/project/types/imports.d.ts",
         "export type Foo = string;",
     );
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/App.vue",
         "<script setup>\nimport type { Foo } from '#imports'\n</script>\n<template><div/></template>",
@@ -2754,7 +2756,7 @@ fn configure_projects_fallthrough_unloaded() {
     )]);
 
     // DON'T upsert the target file — it's not loaded
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/App.vue",
         "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><div/></template>",
@@ -2777,33 +2779,35 @@ fn cross_file_optimization_with_project_resolver() {
         vec![("@/*", vec!["./src/*"])],
     )]);
 
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/components/Child.vue",
         "<script setup>\ndefineProps({ msg: String })\n</script>\n<template><div>{{ msg }}</div></template>",
     );
 
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/project/src/App.vue",
         "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><Child msg=\"hello\" /></template>",
     );
 
     // Compile both to generate template analysis
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("/project/src/components/Child.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: CompileProfile::default(),
-    })
-    .unwrap();
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("/project/src/App.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: CompileProfile::default(),
-    })
-    .unwrap();
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/project/src/components/Child.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: CompileProfile::default(),
+        })
+        .unwrap();
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/project/src/App.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: CompileProfile::default(),
+        })
+        .unwrap();
 
     let result = host.compute_cross_file_optimizations();
     let child_consts = result
@@ -2844,7 +2848,7 @@ fn new_standalone_creates_host_with_memory_workspace() {
     assert!(!ws.file_exists("anything.vue"));
 
     // Positive: host can still upsert and compile normally
-    upsert_vue(&host, "App.vue", "<template><div>hi</div></template>");
+    let _ = upsert_vue(&host, "App.vue", "<template><div>hi</div></template>");
     let source = host.get_source("App.vue");
     assert!(source.is_some(), "upsert should work on standalone host");
 }
@@ -2934,12 +2938,12 @@ fn set_workspace_swaps_resolution_source() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // Upsert two files: a parent and a dependency.
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/App.vue",
         "<script setup>\nimport Btn from './Btn.vue'\n</script>\n<template><Btn/></template>",
     );
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/Btn.vue",
         "<template><button>click</button></template>",
@@ -3064,13 +3068,13 @@ fn set_import_dependencies_syncs_exact_resolutions_to_workspace() {
     let host = VerterHost::new(HostConfig::default(), ws.clone());
 
     // Upsert the parent file.
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/App.vue",
         "<script setup>\nimport Btn from '@comp/Btn.vue'\n</script>\n<template><Btn/></template>",
     );
     // Upsert the dependency.
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/components/Btn.vue",
         "<template><button/></template>",
@@ -3140,19 +3144,20 @@ fn workspace_resolution_is_phase_0_primary() {
     );
 
     // Upsert both into the host.
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/App.vue",
         "<script setup>\nimport T from './types'\n</script>\n<template><div/></template>",
     );
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/src/types.ts".to_string(),
-        source: Arc::from("export type Foo = string;"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export type Foo = string;"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 
     // Set exact resolution on workspace ONLY (not on host's dependency_resolutions).
     ws.set_exact_resolutions(
@@ -3202,15 +3207,16 @@ fn smart_invalidation_reads_workspace_reverse_deps() {
     let host = VerterHost::new(HostConfig::default(), ws.clone());
 
     // Upsert both files.
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/src/types.ts".to_string(),
-        source: Arc::from("export interface Props { name: string }"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
-    upsert_vue(
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export interface Props { name: string }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let _ = upsert_vue(
         &host,
         "/src/App.vue",
         "<script setup lang=\"ts\">\nimport type { Props } from './types'\ndefineProps<Props>()\n</script>\n<template><div/></template>",
@@ -3275,7 +3281,7 @@ const count = ref(0)
 </script>
 <template><div>{{ count }}</div></template>"#;
 
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
         sched_submit_wait(&host, "/src/App.vue", src);
 
         let snap = host.scheduler_source("/src/App.vue");
@@ -3289,7 +3295,7 @@ const count = ref(0)
     fn scheduler_source_has_parse_data() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let src = "<script setup>\nconst x = 1\n</script>\n<template><div/></template>";
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
         sched_submit_wait(&host, "/src/App.vue", src);
 
         let snap = host.scheduler_source("/src/App.vue").unwrap();
@@ -3309,7 +3315,7 @@ const count = ref(0)
     fn scheduler_analysis_populated_on_upsert() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let src = "<script setup>\nconst x = 1\n</script>\n<template><div/></template>";
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
         sched_submit_wait(&host, "/src/App.vue", src);
 
         let snap = host.scheduler_analysis("/src/App.vue");
@@ -3324,13 +3330,13 @@ const count = ref(0)
         let host = VerterHost::new_standalone(HostConfig::default());
 
         let src1 = "<template><div>v1</div></template>";
-        upsert_vue(&host, "/src/App.vue", src1);
+        let _ = upsert_vue(&host, "/src/App.vue", src1);
         sched_submit_wait(&host, "/src/App.vue", src1);
         let snap1 = host.scheduler_source("/src/App.vue").unwrap();
         assert!(snap1.source.contains("v1"));
 
         let src2 = "<template><div>v2</div></template>";
-        upsert_vue(&host, "/src/App.vue", src2);
+        let _ = upsert_vue(&host, "/src/App.vue", src2);
         sched_submit_wait(&host, "/src/App.vue", src2);
         let snap2 = host.scheduler_source("/src/App.vue").unwrap();
         assert!(snap2.source.contains("v2"));
@@ -3344,14 +3350,15 @@ const count = ref(0)
     fn scheduler_non_sfc_upsert() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let src = "export interface Props { count: number }";
-        host.upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/src/types.ts".to_string(),
-            source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/types.ts".to_string(),
+                source: Arc::from(src),
+                file_kind: FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
         sched_submit_wait(&host, "/src/types.ts", src);
 
         let snap = host.scheduler_source("/src/types.ts");
@@ -3372,7 +3379,7 @@ const count = ref(0)
     fn scheduler_analysis_has_real_data() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let src = "<script setup>\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>\n<template><div>{{ x }}</div></template>";
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
         sched_submit_wait(&host, "/src/App.vue", src);
 
         // Typed accessor should return real script analysis
@@ -3397,7 +3404,7 @@ const count = ref(0)
     fn scheduler_artifact_has_real_compile_output() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let src = "<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>";
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
         // Wait for the scheduler driver to process the upsert so the node
         // exists with the correct generation before we compile.
         sched_submit_wait(&host, "/src/App.vue", src);
@@ -3439,7 +3446,7 @@ const count = ref(0)
         // so dropping the host (which drops its Arc) allows Drop to run.
         let host = VerterHost::new_standalone(HostConfig::default());
         let src = "<template><div>hello</div></template>";
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
         sched_submit_wait(&host, "/src/App.vue", src);
         drop(host);
         // If the driver thread leaked, this test would hang or the process
@@ -3456,9 +3463,9 @@ const count = ref(0)
         let v1 = "<template><div>v1</div></template>";
         let v2 = "<template><div>v2</div></template>";
 
-        upsert_vue(&host, "/src/App.vue", v1);
+        let _ = upsert_vue(&host, "/src/App.vue", v1);
 
-        upsert_vue(&host, "/src/App.vue", v2);
+        let _ = upsert_vue(&host, "/src/App.vue", v2);
 
         let profile = profile_dev();
         let response = host
@@ -3505,7 +3512,7 @@ const count = ref(0)
             "precondition: whole hashes must differ"
         );
 
-        upsert_vue(&host, "/src/App.vue", v1);
+        let _ = upsert_vue(&host, "/src/App.vue", v1);
 
         // v2 upsert is a no-op (same semantic hash → fast path returns changed=false)
         let result = upsert_vue(&host, "/src/App.vue", v2);
@@ -3529,7 +3536,7 @@ mod phase1_structural_tests {
     #[test]
     fn test_source_data_has_cached_parse() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(
+        let _ = upsert_vue(
             &host,
             "/src/App.vue",
             "<template><div>hello</div></template>",
@@ -3553,14 +3560,15 @@ mod phase1_structural_tests {
     #[test]
     fn test_source_data_non_sfc_no_cached_parse() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        host.upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/src/types.ts".to_string(),
-            source: Arc::from("export interface Foo { bar: string }"),
-            file_kind: FileKind::NonSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/types.ts".to_string(),
+                source: Arc::from("export interface Foo { bar: string }"),
+                file_kind: FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
 
         host.scheduler().drive_all();
 
@@ -3579,15 +3587,16 @@ mod phase1_structural_tests {
     #[test]
     fn test_source_data_has_file_kind() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(&host, "/src/App.vue", "<template><div/></template>");
-        host.upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/src/types.ts".to_string(),
-            source: Arc::from("export type A = string"),
-            file_kind: FileKind::NonSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
+        let _ = upsert_vue(&host, "/src/App.vue", "<template><div/></template>");
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/types.ts".to_string(),
+                source: Arc::from("export type A = string"),
+                file_kind: FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
 
         host.scheduler().drive_all();
 
@@ -3603,7 +3612,7 @@ mod phase1_structural_tests {
     #[test]
     fn test_source_data_has_parse_duration() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(
+        let _ = upsert_vue(
             &host,
             "/src/App.vue",
             "<template><div>hello</div></template>",
@@ -3621,7 +3630,7 @@ mod phase1_structural_tests {
     #[test]
     fn test_analysis_data_has_arcs() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(
+        let _ = upsert_vue(
             &host,
             "/src/App.vue",
             "<template><div>hello</div></template>\n<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst count = ref(0)\n</script>",
@@ -3736,7 +3745,7 @@ mod phase2a_upsert_tests {
         // Verify scheduler is sole parser — scheduler has committed data after upsert
         let host = VerterHost::new_standalone(HostConfig::default());
         let src = "<template><div>hello</div></template>";
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
 
         // Scheduler must have the source
         let snap = host
@@ -3753,7 +3762,7 @@ mod phase2a_upsert_tests {
     #[test]
     fn test_upsert_populates_compile_cache() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(
+        let _ = upsert_vue(
             &host,
             "/src/App.vue",
             "<template><div>hello</div></template>",
@@ -3771,7 +3780,7 @@ mod phase2a_upsert_tests {
     #[test]
     fn test_upsert_invalidation_on_semantic_change() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(&host, "/src/App.vue", "<template><div>v1</div></template>");
+        let _ = upsert_vue(&host, "/src/App.vue", "<template><div>v1</div></template>");
 
         // Manually add a compile slot to verify it gets cleared
         {
@@ -3793,7 +3802,7 @@ mod phase2a_upsert_tests {
         }
 
         // Semantic change
-        upsert_vue(&host, "/src/App.vue", "<template><div>v2</div></template>");
+        let _ = upsert_vue(&host, "/src/App.vue", "<template><div>v2</div></template>");
 
         let cc = host.compile_cache.get("/src/App.vue").unwrap();
         assert!(
@@ -3809,7 +3818,7 @@ mod phase2a_upsert_tests {
         let v1 = "<template><div>hello</div></template>";
         let v2 = "<template><div>hello</div></template>  \n"; // trailing whitespace
 
-        upsert_vue(&host, "/src/App.vue", v1);
+        let _ = upsert_vue(&host, "/src/App.vue", v1);
 
         // Manually add content override
         {
@@ -3829,7 +3838,7 @@ mod phase2a_upsert_tests {
             );
         }
 
-        upsert_vue(&host, "/src/App.vue", v2);
+        let _ = upsert_vue(&host, "/src/App.vue", v2);
 
         // Per plan: whole_hash changed → overrides cleared (byte offsets shifted)
         let cc = host.compile_cache.get("/src/App.vue").unwrap();
@@ -3857,7 +3866,7 @@ mod phase2a_upsert_tests {
         let host = VerterHost::new_standalone(HostConfig::default());
         let src =
             "<script setup>\nimport Foo from './Foo.vue'\n</script>\n<template><Foo/></template>";
-        upsert_vue(&host, "/src/App.vue", src);
+        let _ = upsert_vue(&host, "/src/App.vue", src);
 
         let cc = host.compile_cache.get("/src/App.vue").unwrap();
         assert!(
@@ -3869,7 +3878,7 @@ mod phase2a_upsert_tests {
     #[test]
     fn test_evict_is_cheap_flag_flip() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(
+        let _ = upsert_vue(
             &host,
             "/src/App.vue",
             "<template><div>hello</div></template>",
@@ -4029,8 +4038,8 @@ mod phase2a_upsert_tests {
     #[test]
     fn test_resolve_import_returns_none_for_evicted_parent() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(&host, "/src/Child.vue", "<template><div/></template>");
-        upsert_vue(
+        let _ = upsert_vue(&host, "/src/Child.vue", "<template><div/></template>");
+        let _ = upsert_vue(
             &host,
             "/src/App.vue",
             "<script setup>\nimport Child from './Child.vue'\n</script>\n<template><Child/></template>",
@@ -4053,8 +4062,8 @@ mod phase2a_upsert_tests {
     #[test]
     fn test_close_full_cleanup() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        upsert_vue(&host, "/src/A.vue", "<template><div>a</div></template>");
-        upsert_vue(&host, "/src/B.vue", "<template><div>b</div></template>");
+        let _ = upsert_vue(&host, "/src/A.vue", "<template><div>a</div></template>");
+        let _ = upsert_vue(&host, "/src/B.vue", "<template><div>b</div></template>");
 
         assert_eq!(host.compile_cache.len(), 2);
 
@@ -4074,21 +4083,22 @@ mod phase2a_upsert_tests {
         // what get_source() returns (raw, profileless).
         let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
-        upsert_vue(&host, "/src/App.vue", sfc);
+        let _ = upsert_vue(&host, "/src/App.vue", sfc);
 
         let raw_before = host.get_source("/src/App.vue").unwrap();
 
-        host.apply_block_overrides(BlockOverrideRequest {
-            canonical_id: "/src/App.vue".to_string(),
-            compile_profile: CompileProfile::default(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div>hello</div>"),
-                source_map: None,
-            }],
-        })
-        .unwrap();
+        let _ = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: "/src/App.vue".to_string(),
+                compile_profile: CompileProfile::default(),
+                overrides: vec![BlockOverrideEntry {
+                    block_type: PreprocessorBlockType::Template,
+                    index: 0,
+                    code: Arc::from("<div>hello</div>"),
+                    source_map: None,
+                }],
+            })
+            .unwrap();
 
         let raw_after = host.get_source("/src/App.vue").unwrap();
         assert_eq!(
@@ -4108,21 +4118,22 @@ mod phase2a_upsert_tests {
         // the raw style_analyses returned by get_analysis().
         let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template><div>hi</div></template>\n<style lang=\"sass\">\n.header\n  color: red\n</style>";
-        upsert_vue(&host, "/src/App.vue", sfc);
+        let _ = upsert_vue(&host, "/src/App.vue", sfc);
 
         let analysis_before = host.get_analysis("/src/App.vue").unwrap();
         let style_count_before = analysis_before.styles.len();
 
-        host.apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "/src/App.vue".to_string(),
-            compile_profile: CompileProfile::default(),
-            overrides: vec![StyleOverrideEntry {
-                index: 0,
-                code: Arc::from(".header { color: green }"),
-                source_map: None,
-            }],
-        })
-        .unwrap();
+        let _ = host
+            .apply_style_overrides(StyleOverrideRequest {
+                canonical_id: "/src/App.vue".to_string(),
+                compile_profile: CompileProfile::default(),
+                overrides: vec![StyleOverrideEntry {
+                    index: 0,
+                    code: Arc::from(".header { color: green }"),
+                    source_map: None,
+                }],
+            })
+            .unwrap();
 
         let analysis_after = host.get_analysis("/src/App.vue").unwrap();
         assert_eq!(
@@ -4142,7 +4153,7 @@ mod phase2a_upsert_tests {
         // P1 invariant: override for profile A must not affect profile B compile.
         let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template><div>hello</div></template>\n<style>.a { color: red }</style>";
-        upsert_vue(&host, "/src/App.vue", sfc);
+        let _ = upsert_vue(&host, "/src/App.vue", sfc);
 
         let profile_a = CompileProfile {
             is_production: false,
@@ -4164,16 +4175,17 @@ mod phase2a_upsert_tests {
             .unwrap();
 
         // Apply style override for profile A only
-        host.apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "/src/App.vue".to_string(),
-            compile_profile: profile_a.clone(),
-            overrides: vec![StyleOverrideEntry {
-                index: 0,
-                code: Arc::from(".a { color: green }"),
-                source_map: None,
-            }],
-        })
-        .unwrap();
+        let _ = host
+            .apply_style_overrides(StyleOverrideRequest {
+                canonical_id: "/src/App.vue".to_string(),
+                compile_profile: profile_a.clone(),
+                overrides: vec![StyleOverrideEntry {
+                    index: 0,
+                    code: Arc::from(".a { color: green }"),
+                    source_map: None,
+                }],
+            })
+            .unwrap();
 
         // Recompile with profile B — should still have red (raw), not green
         let _ = host.invalidate_compile_slots("/src/App.vue");

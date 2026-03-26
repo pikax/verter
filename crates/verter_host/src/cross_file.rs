@@ -260,24 +260,26 @@ mod tests {
     }
 
     fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
-        host.upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: id.to_string(),
-            source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: id.to_string(),
+                source: Arc::from(src),
+                file_kind: FileKind::VueSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
     }
 
     fn compile_file(host: &VerterHost, id: &str) {
-        host.get_virtual_file(VirtualQuery {
-            raw_id: Some(format!("{}?vue&type=template", id)),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: CompileProfile::default(),
-        })
-        .unwrap();
+        let _ = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: Some(format!("{}?vue&type=template", id)),
+                canonical_id: None,
+                node_kind: None,
+                compile_profile: CompileProfile::default(),
+            })
+            .unwrap();
     }
 
     /// @ai-generated - All parents pass const prop → child gets optimization

@@ -1,6 +1,11 @@
 import { resolve } from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { MetaProject, shutdownMetaRuntime } from "./project.js";
+import {
+  ComponentMetaSession,
+  MetaProject,
+  evictComponentMetaSession,
+  shutdownMetaRuntime,
+} from "./project.js";
 import { getMetaRuntime } from "./runtime/index.js";
 import type { NativeMetaProject, NativeMetaSession } from "./runtime/index.js";
 
@@ -211,7 +216,13 @@ describe("MetaProject public API", () => {
     project.close();
     project.close(); // idempotent
 
-    expect(() => project.updateFile("A.vue", "x")).toThrow("MetaProject is closed");
+    expect(() => project.updateFile("A.vue", "x")).toThrow("ComponentMetaSession is closed");
+  });
+
+  it("keeps MetaProject as an alias of ComponentMetaSession", () => {
+    expect(MetaProject).toBe(ComponentMetaSession);
+    expect(evictComponentMetaSession).toBeTypeOf("function");
+    expect(evictComponentMetaSession).toBeDefined();
   });
 
   it("shutdownMetaRuntime invalidates all handles", async () => {

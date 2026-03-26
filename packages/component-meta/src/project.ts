@@ -2,11 +2,11 @@
  * First-class public API for component metadata extraction.
  *
  * ```ts
- * import { openMetaProject, shutdownMetaRuntime } from "@verter/component-meta"
+ * import { openComponentMetaSession, shutdownMetaRuntime } from "@verter/component-meta"
  *
- * const project = await openMetaProject({ root: "./my-app", tsconfig: "./tsconfig.json" })
- * const meta = await project.getComponentMeta("./src/Button.vue")
- * project.close() // optional, resources are pooled
+ * const session = await openComponentMetaSession({ root: "./my-app", tsconfig: "./tsconfig.json" })
+ * const meta = await session.getComponentMeta("./src/Button.vue")
+ * session.close() // optional, resources are pooled
  *
  * // In tests or app shutdown:
  * shutdownMetaRuntime()
@@ -43,11 +43,25 @@ import type {
   ProjectSession,
 } from "./runtime/index.js";
 
-export type MetaProjectConfig =
-  | { root: string; tsconfig: string; config?: never; backend?: "napi" | "wasm" }
-  | { root: string; config: Record<string, unknown>; tsconfig?: never; backend?: "napi" | "wasm" };
+export type TypeExpansionBackend = "verter" | "tsserver" | "tsgo" | "auto";
 
-export class MetaProject {
+export type MetaProjectConfig =
+  | {
+      root: string;
+      tsconfig: string;
+      config?: never;
+      backend?: "napi" | "wasm";
+      typeExpansionBackend?: TypeExpansionBackend;
+    }
+  | {
+      root: string;
+      config: Record<string, unknown>;
+      tsconfig?: never;
+      backend?: "napi" | "wasm";
+      typeExpansionBackend?: TypeExpansionBackend;
+    };
+
+export class ComponentMetaSession {
   private readonly _session: ProjectSession;
   private readonly _root: string;
   private readonly _options: MetaCheckerOptions;
@@ -74,9 +88,9 @@ export class MetaProject {
   }
 
   private ensureOpen(): void {
-    if (this._closed) throw new Error("MetaProject is closed");
+    if (this._closed) throw new Error("ComponentMetaSession is closed");
     if (this._session.closed || this._session.engine.state !== "active") {
-      throw new Error("MetaProject session was invalidated");
+      throw new Error("ComponentMetaSession session was invalidated");
     }
   }
 
@@ -185,6 +199,8 @@ export class MetaProject {
   }
 }
 
+export const MetaProject = ComponentMetaSession;
+
 function loadNative(): any {
   const _require = typeof require === "function" ? require : createRequire(import.meta.url);
   return _require("@verter/native");
@@ -213,13 +229,14 @@ function buildEngineKeyInput(options: MetaProjectConfig): EngineKeyInput {
       ? stableSelectiveConfigHash(options.config)
       : hashTsconfigConfig(resolve(options.tsconfig)),
     nativeFlags: { analysisLevel: "full" },
+    typeExpansionBackend: options.typeExpansionBackend ?? "verter",
   };
 }
 
-export async function openMetaProject(
+async function openComponentMetaSessionInternal(
   options: MetaProjectConfig,
   checkerOptions?: MetaCheckerOptions,
-): Promise<MetaProject> {
+): Promise<ComponentMetaSession> {
   const runtime = getMetaRuntime();
   const root = resolve(options.root);
   const native = loadNative();
@@ -233,6 +250,7 @@ export async function openMetaProject(
     const config = {
       devMode: false,
       analysisLevel: "full",
+      typeExpansionBackend: options.typeExpansionBackend ?? "verter",
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
 
@@ -258,13 +276,61 @@ export async function openMetaProject(
 
   const engine = await runtime.getOrCreateEngine(input, bootstrap);
   const session = runtime.openSession(engine);
-  return new MetaProject(session, root, checkerOptions, workspace, runtime);
+  return new ComponentMetaSession(session, root, checkerOptions, workspace, runtime);
+}
+
+// ---------------------------------------------------------------------------
+// New session-based API (plan target)
+// ---------------------------------------------------------------------------
+
+export interface ComponentMetaSessionConfig {
+  root: string;
+  tsconfig?: string;
+  config?: Record<string, unknown>;
+  backend?: "napi" | "wasm";
+  typeExpansionBackend?: TypeExpansionBackend;
+}
+
+/**
+ * Open a component-meta session with explicit backend selection.
+ *
+ * This is the preferred API over `openMetaProject()`. It supports
+ * `typeExpansionBackend` for choosing between Verter, tsserver, TSGO, or auto.
+ */
+export async function openComponentMetaSession(
+  config: ComponentMetaSessionConfig,
+  checkerOptions?: MetaCheckerOptions,
+): Promise<ComponentMetaSession> {
+  const metaConfig: MetaProjectConfig = config.tsconfig
+    ? {
+        root: config.root,
+        tsconfig: config.tsconfig,
+        backend: config.backend,
+        typeExpansionBackend: config.typeExpansionBackend,
+      }
+    : {
+        root: config.root,
+        config: config.config ?? {},
+        backend: config.backend,
+        typeExpansionBackend: config.typeExpansionBackend,
+      };
+  return openComponentMetaSessionInternal(metaConfig, checkerOptions);
+}
+
+/** @deprecated Use openComponentMetaSession(). */
+export async function openMetaProject(
+  options: MetaProjectConfig,
+  checkerOptions?: MetaCheckerOptions,
+): Promise<ComponentMetaSession> {
+  return openComponentMetaSessionInternal(options, checkerOptions);
 }
 
 export function evictMetaProject(options: MetaProjectConfig): void {
   const key = computeEngineKey(buildEngineKeyInput(options));
   getMetaRuntime().evictEngine(key);
 }
+
+export const evictComponentMetaSession = evictMetaProject;
 
 export function shutdownMetaRuntime(): void {
   _shutdownMetaRuntime();

@@ -253,6 +253,17 @@ defineExpose({ count })
   });
 });
 
+describe("component-meta native aliases", () => {
+  it("exposes ComponentMetaHost and ComponentMetaSession aliases", () => {
+    const native = require("./index.js");
+
+    expect(native.ComponentMetaHost).toBeTypeOf("function");
+    expect(native.ComponentMetaSession).toBeTypeOf("function");
+    expect(native.ComponentMetaHost).toBe(native.MetaProject);
+    expect(native.ComponentMetaSession).toBe(native.MetaSession);
+  });
+});
+
 describe("VerterHost type declarations in sync with native binary", () => {
   // This test ensures that the TypeScript type declarations in index.ts
   // stay in sync with the actual methods exposed by the Rust NAPI binary.

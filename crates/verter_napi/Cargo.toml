@@ -19,6 +19,8 @@ scheduler = ["verter_host/scheduler", "verter_scheduler"]
 [dependencies]
 verter_core = { path = "../verter_core", version = "0.0.1-beta.1" }
 verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
+verter_resolver = { path = "../verter_resolver", version = "0.0.1-beta.1", features = ["type-runtime"] }
+verter_type_runtime = { path = "../verter_type_runtime", version = "0.0.1-beta.1" }
 verter_vfs = { path = "../verter_vfs", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
@@ -31,6 +33,7 @@ napi-derive = "2"
 serde_json = { workspace = true }
 rayon = "1.8"
 oxc_allocator = { workspace = true }
+tokio = { version = "1", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 
 [build-dependencies]
 napi-build = "2"
