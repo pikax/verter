@@ -31,7 +31,13 @@ function compileVue(source, filename) {
     ssr: true,
     compilerOptions: { mode: "module", bindingMetadata: bm },
   });
-  if (result.errors?.length) { console.log("Vue errors:", result.errors.map(e => e.message)); return null; }
+  if (result.errors?.length) {
+    console.log(
+      "Vue errors:",
+      result.errors.map((e) => e.message),
+    );
+    return null;
+  }
   return result.code;
 }
 
@@ -40,7 +46,12 @@ function compileVerter(source, filePath) {
   const result = host.getVirtualFile({
     canonicalId: upsertResult.canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: { filename: path.basename(filePath), ssr: true, forceJs: true, sourceMap: false },
+    compileProfile: {
+      filename: path.basename(filePath),
+      ssr: true,
+      forceJs: true,
+      sourceMap: false,
+    },
   });
   return result?.code;
 }

@@ -9,6 +9,13 @@ function mockNativeSession(): NativeMetaSession {
   return {
     upsert() {},
     delete() {},
+    reset() {},
+    getDeclaredComponentMeta() {
+      return null;
+    },
+    getProvenance() {
+      return JSON.stringify({});
+    },
     getComponentMeta() {
       return null;
     },

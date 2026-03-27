@@ -30,12 +30,8 @@ const ROOT = path.resolve(__dirname, "..");
 
 // ── Load pipelines ──────────────────────────────────────────────
 
-const { parser, buildSingle } = require(
-  path.join(ROOT, "packages/core/dist/v5/index.js"),
-);
-const { VerterHost } = require(
-  path.join(ROOT, "packages/native/index.js"),
-);
+const { parser, buildSingle } = require(path.join(ROOT, "packages/core/dist/v5/index.js"));
+const { VerterHost } = require(path.join(ROOT, "packages/native/index.js"));
 
 // ── CLI args ────────────────────────────────────────────────────
 
@@ -311,9 +307,7 @@ for (const filePath of allFiles) {
       for (const d of realDiffs) {
         const tsStr = d.ts ? "YES" : " - ";
         const rustStr = d.rust ? "YES" : " - ";
-        console.log(
-          `         ${d.label.padEnd(25)} TS: ${tsStr}  Rust: ${rustStr}`,
-        );
+        console.log(`         ${d.label.padEnd(25)} TS: ${tsStr}  Rust: ${rustStr}`);
       }
     }
   }
@@ -393,10 +387,7 @@ if (writeOutput) {
     rustOnlyErrors: rustOnlyErrors.slice(0, 50),
     tsOnlyErrors: tsOnlyErrors.slice(0, 50),
   };
-  fs.writeFileSync(
-    path.join(outputDir, "report.json"),
-    JSON.stringify(report, null, 2),
-  );
+  fs.writeFileSync(path.join(outputDir, "report.json"), JSON.stringify(report, null, 2));
   console.log(`\nOutput written to: ${outputDir}`);
 }
 

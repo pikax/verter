@@ -1,23 +1,23 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const items = ref(['Apple', 'Banana', 'Cherry'])
-let counter = 0
+const items = ref(["Apple", "Banana", "Cherry"]);
+let counter = 0;
 
 function addItem() {
-  items.value.push(`Item-${++counter}`)
+  items.value.push(`Item-${++counter}`);
 }
 
 function removeItem() {
-  items.value.splice(0, 1)
+  items.value.splice(0, 1);
 }
 
 function sortItems() {
-  items.value.sort()
+  items.value.sort();
 }
 
 function reverseItems() {
-  items.value.reverse()
+  items.value.reverse();
 }
 </script>
 

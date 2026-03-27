@@ -14,8 +14,14 @@ const host = new VerterHost({ devMode: false, analysisLevel: "none" });
 
 // Use the actual VoteInput.vue file
 const VERTER_TEST_REPOS = process.env.VERTER_TEST_REPOS;
-if (!VERTER_TEST_REPOS) { console.error('Set VERTER_TEST_REPOS env var'); process.exit(1); }
-const file = path.join(VERTER_TEST_REPOS, "balancer-frontend-v2/src/components/contextual/pages/vebal/MultiVoting/VoteInput.vue");
+if (!VERTER_TEST_REPOS) {
+  console.error("Set VERTER_TEST_REPOS env var");
+  process.exit(1);
+}
+const file = path.join(
+  VERTER_TEST_REPOS,
+  "balancer-frontend-v2/src/components/contextual/pages/vebal/MultiVoting/VoteInput.vue",
+);
 const content = fs.readFileSync(file, "utf-8");
 const filename = path.basename(file);
 
@@ -58,8 +64,8 @@ function findComponentCall(body, compName) {
   let depth = 0;
   let start = idx;
   for (let i = idx; i < body.length; i++) {
-    if (body[i] === '(') depth++;
-    else if (body[i] === ')') {
+    if (body[i] === "(") depth++;
+    else if (body[i] === ")") {
       depth--;
       if (depth === 0) return body.substring(start, i + 1);
     }
@@ -68,8 +74,13 @@ function findComponentCall(body, compName) {
 }
 
 // For Vue, component may be _component_BalTextInput or _ctx["BalTextInput"]
-const vueCall = findComponentCall(vueBody, '_component_BalTextInput') || findComponentCall(vueBody, '_ctx["BalTextInput"]');
-const verterCall = findComponentCall(verterBody, '$setup["BalTextInput"]') || findComponentCall(verterBody, '_ctx["BalTextInput"]') || findComponentCall(verterBody, '_component_BalTextInput');
+const vueCall =
+  findComponentCall(vueBody, "_component_BalTextInput") ||
+  findComponentCall(vueBody, '_ctx["BalTextInput"]');
+const verterCall =
+  findComponentCall(verterBody, '$setup["BalTextInput"]') ||
+  findComponentCall(verterBody, '_ctx["BalTextInput"]') ||
+  findComponentCall(verterBody, "_component_BalTextInput");
 
 console.log("\n=== Vue BalTextInput call ===");
 console.log(vueCall?.substring(0, 400));

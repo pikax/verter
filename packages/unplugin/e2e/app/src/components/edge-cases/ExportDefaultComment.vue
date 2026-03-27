@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
 // Regression: this comment contains "export default" which previously caused
 // duplicate export default statements when combined with scoped styles.
 // Transform: export default X -> window.__modules__['moduleName'].default = X
-const count = ref(0)
-const label = 'export default in comment'
+const count = ref(0);
+const label = "export default in comment";
 </script>
 
 <template>

@@ -1,3 +1,3 @@
 export function formatCount(n: number): string {
-  return `Count: ${n}`
+  return `Count: ${n}`;
 }

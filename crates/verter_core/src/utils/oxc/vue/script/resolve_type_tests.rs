@@ -2284,6 +2284,108 @@ type Test = WithExtra<BaseProps>
 }
 
 #[test]
+fn type_resolution_context_prefers_latest_type_param_binding() {
+    let allocator = Allocator::default();
+    let source = r#"
+type Wrapper<T> = T
+type StringAlias = string
+type NumberAlias = number
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+    assert!(result.errors.is_empty(), "Source should parse cleanly");
+
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut wrapper_param_span = None;
+    let mut string_alias = None;
+    let mut number_alias = None;
+
+    for stmt in &result.program.body {
+        if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+            match alias.id.name.as_str() {
+                "Wrapper" => {
+                    wrapper_param_span = alias
+                        .type_parameters
+                        .as_ref()
+                        .and_then(|params| params.params.first())
+                        .map(|param| Span::from(param.name.span));
+                }
+                "StringAlias" => {
+                    string_alias = Some(&alias.type_annotation);
+                }
+                "NumberAlias" => {
+                    number_alias = Some(&alias.type_annotation);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let wrapper_param_span = wrapper_param_span.expect("Wrapper<T> param span should exist");
+    let string_alias = string_alias.expect("StringAlias body should exist");
+    let number_alias = number_alias.expect("NumberAlias body should exist");
+
+    ctx.type_param_bindings
+        .push((wrapper_param_span, string_alias));
+    ctx.type_param_bindings
+        .push((wrapper_param_span, number_alias));
+
+    let resolved = ctx
+        .find_type_param(b"T")
+        .expect("latest binding for T should be found");
+    assert!(
+        matches!(resolved, TSType::TSNumberKeyword(_)),
+        "latest nested binding should shadow the outer one"
+    );
+}
+
+#[test]
+fn resolve_external_type_with_companion_nested_generic_shadowing_uses_inner_binding() {
+    let alloc = Allocator::default();
+    let dep = r#"
+import type { Base } from './base'
+
+type Prettify<T> = { [K in keyof T]: T[K] } & {}
+export type Inner = Prettify<Base>
+export type Outer = Prettify<Inner>
+"#;
+    let mut companion_types = rustc_hash::FxHashMap::default();
+    let mut base = ResolvedElements::default();
+    for name in ["a", "b"] {
+        base.props.push(ResolvedProp {
+            span: Span::new(0, 0),
+            key: Span::new(0, 0),
+            key_name: Some(name.to_string()),
+            optional: true,
+            types: vec![RuntimeType::String],
+            visibility: ResolvedMemberVisibility::Public,
+            type_span: None,
+            type_text: None,
+            map_local: false,
+            span_is_absolute: false,
+        });
+    }
+    companion_types.insert("Base".to_string(), base);
+
+    let resolved = resolve_external_type_with_companion("Outer", dep, &companion_types, &alloc)
+        .expect("nested imported generic alias should resolve without recursion");
+    let names: Vec<&str> = resolved
+        .props
+        .iter()
+        .filter_map(|prop| prop.key_name.as_deref())
+        .collect();
+
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "expected only inherited Base props"
+    );
+    assert!(names.contains(&"a"), "expected prop 'a', got: {names:?}");
+    assert!(names.contains(&"b"), "expected prop 'b', got: {names:?}");
+}
+
+#[test]
 fn resolve_external_type_skips_vue_ignore_interface_extends() {
     let alloc = Allocator::default();
     let dep = r#"

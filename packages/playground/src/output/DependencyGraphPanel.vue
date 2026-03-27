@@ -74,7 +74,7 @@ const graph = computed(() => {
           const resolved = resolveImport(filename, comp.importSource);
           if (resolved && filenameSet.has(resolved)) {
             // Avoid duplicate if already an import edge
-            if (!edges.some(e => e.from === filename && e.to === resolved)) {
+            if (!edges.some((e) => e.from === filename && e.to === resolved)) {
               edges.push({ from: filename, to: resolved, kind: "component" });
             }
           }
@@ -108,8 +108,8 @@ function resolveImport(from: string, source: string): string | null {
 }
 
 function edgePath(edge: GraphEdge): string {
-  const fromNode = graph.value.nodes.find(n => n.id === edge.from);
-  const toNode = graph.value.nodes.find(n => n.id === edge.to);
+  const fromNode = graph.value.nodes.find((n) => n.id === edge.from);
+  const toNode = graph.value.nodes.find((n) => n.id === edge.to);
   if (!fromNode || !toNode) return "";
 
   const dx = toNode.x - fromNode.x;
@@ -120,10 +120,10 @@ function edgePath(edge: GraphEdge): string {
   // Start/end at node border
   const nx = dx / dist;
   const ny = dy / dist;
-  const x1 = fromNode.x + nx * NODE_WIDTH / 2;
-  const y1 = fromNode.y + ny * NODE_HEIGHT / 2;
-  const x2 = toNode.x - nx * NODE_WIDTH / 2;
-  const y2 = toNode.y - ny * NODE_HEIGHT / 2;
+  const x1 = fromNode.x + (nx * NODE_WIDTH) / 2;
+  const y1 = fromNode.y + (ny * NODE_HEIGHT) / 2;
+  const x2 = toNode.x - (nx * NODE_WIDTH) / 2;
+  const y2 = toNode.y - (ny * NODE_HEIGHT) / 2;
 
   return `M ${x1} ${y1} L ${x2} ${y2}`;
 }
@@ -131,8 +131,8 @@ function edgePath(edge: GraphEdge): string {
 function svgViewBox(): string {
   const nodes = graph.value.nodes;
   if (!nodes.length) return "0 0 600 400";
-  const maxX = Math.max(...nodes.map(n => n.x)) + NODE_WIDTH / 2 + PADDING;
-  const maxY = Math.max(...nodes.map(n => n.y)) + NODE_HEIGHT / 2 + PADDING;
+  const maxX = Math.max(...nodes.map((n) => n.x)) + NODE_WIDTH / 2 + PADDING;
+  const maxY = Math.max(...nodes.map((n) => n.y)) + NODE_HEIGHT / 2 + PADDING;
   return `0 0 ${Math.max(maxX, 200)} ${Math.max(maxY, 100)}`;
 }
 
@@ -147,7 +147,7 @@ let resizeObserver: ResizeObserver | null = null;
 
 onMounted(() => {
   if (svgContainer.value) {
-    resizeObserver = new ResizeObserver(entries => {
+    resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         containerWidth.value = entry.contentRect.width;
         containerHeight.value = entry.contentRect.height;
@@ -164,25 +164,11 @@ onUnmounted(() => {
 
 <template>
   <div ref="svgContainer" class="graph-panel">
-    <div v-if="!graph.nodes.length" class="empty-state">
-      No files to display
-    </div>
+    <div v-if="!graph.nodes.length" class="empty-state">No files to display</div>
 
-    <svg
-      v-else
-      class="graph-svg"
-      :viewBox="svgViewBox()"
-      preserveAspectRatio="xMidYMid meet"
-    >
+    <svg v-else class="graph-svg" :viewBox="svgViewBox()" preserveAspectRatio="xMidYMid meet">
       <defs>
-        <marker
-          id="arrowhead"
-          markerWidth="8"
-          markerHeight="6"
-          refX="8"
-          refY="3"
-          orient="auto"
-        >
+        <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
           <polygon points="0 0, 8 3, 0 6" fill="var(--text-secondary, #888)" />
         </marker>
         <marker
@@ -222,7 +208,11 @@ onUnmounted(() => {
           :height="NODE_HEIGHT"
           rx="6"
           :fill="node.isVue ? 'rgba(66, 184, 131, 0.15)' : 'var(--bg-secondary, #2d2d2d)'"
-          :stroke="node.id === store.activeFilename ? 'var(--accent-color, #4299e1)' : 'var(--border-color, #555)'"
+          :stroke="
+            node.id === store.activeFilename
+              ? 'var(--accent-color, #4299e1)'
+              : 'var(--border-color, #555)'
+          "
           :stroke-width="node.id === store.activeFilename ? 2 : 1"
         />
         <text
@@ -234,18 +224,30 @@ onUnmounted(() => {
           font-size="11"
           font-family="ui-monospace, monospace"
         >
-          {{ node.label.length > 18 ? node.label.slice(0, 16) + '...' : node.label }}
+          {{ node.label.length > 18 ? node.label.slice(0, 16) + "..." : node.label }}
         </text>
       </g>
     </svg>
 
     <div class="graph-legend">
       <span class="legend-item">
-        <svg width="20" height="10"><line x1="0" y1="5" x2="20" y2="5" stroke="#888" stroke-width="1.5" /></svg>
+        <svg width="20" height="10">
+          <line x1="0" y1="5" x2="20" y2="5" stroke="#888" stroke-width="1.5" />
+        </svg>
         Import
       </span>
       <span class="legend-item">
-        <svg width="20" height="10"><line x1="0" y1="5" x2="20" y2="5" stroke="#42b883" stroke-width="2" stroke-dasharray="6 3" /></svg>
+        <svg width="20" height="10">
+          <line
+            x1="0"
+            y1="5"
+            x2="20"
+            y2="5"
+            stroke="#42b883"
+            stroke-width="2"
+            stroke-dasharray="6 3"
+          />
+        </svg>
         Component
       </span>
     </div>

@@ -13,7 +13,7 @@ use napi_derive::napi;
 use verter_analysis::type_expr::{ObjectMember, TypeExpr};
 use verter_host::component_meta_host::{
     ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
-    ComponentMetaTypeExpander,
+    ComponentMetaTraceCursor, ComponentMetaTypeExpander,
 };
 use verter_resolver::query_artifact::{
     ArtifactId, ArtifactProfile as ResolverArtifactProfile, GeneratedQueryArtifact,
@@ -28,9 +28,10 @@ use verter_resolver::type_text_parser;
 use verter_type_runtime::tsgo::{find_tsgo_binary, TsgoTypeProvider};
 use verter_type_runtime::tsserver::TsserverTypeProvider;
 use verter_type_runtime::{
-    find_node, find_tsserver, path_to_file_uri_string, BackendError, BackendTypeCompleteness,
-    BackendTypeData, BackendTypeQuery, GeneratedFileId, GeneratedQueryBackend, TypeProvider,
-    TypeProviderAdapter,
+    find_node, find_tsserver, path_to_file_uri_string, type_runtime_trace_event,
+    type_runtime_trace_scope, with_type_runtime_trace_context, BackendError,
+    BackendTypeCompleteness, BackendTypeData, BackendTypeQuery, GeneratedFileId,
+    GeneratedQueryBackend, TypeProvider, TypeProviderAdapter, TypeRuntimeTraceContext,
 };
 
 use crate::{buffer_to_string, catch_panic, NapiHostConfig, NapiIdeProjectConfig};
@@ -62,18 +63,38 @@ impl RuntimeComponentMetaBackend {
 }
 
 struct RuntimeBackedComponentMetaExpander {
+    backend_label: &'static str,
     backend: Arc<dyn GeneratedQueryBackend>,
     runtime: tokio::runtime::Runtime,
     runtime_key: String,
 }
 
+struct ComponentMetaQueryArtifact {
+    artifact: GeneratedQueryArtifact,
+    hover_offset: u32,
+    members_offset: Option<u32>,
+    generic_clause: Option<String>,
+}
+
+struct ComponentMetaMembersQueryArtifact {
+    artifact: GeneratedQueryArtifact,
+    members_offset: u32,
+}
+
+struct ComponentMetaProbeOffsets {
+    hover_offset: u32,
+    members_offset: u32,
+}
+
 impl RuntimeBackedComponentMetaExpander {
     fn new(
+        backend_label: &'static str,
         runtime: tokio::runtime::Runtime,
         backend: Arc<dyn GeneratedQueryBackend>,
         runtime_key: impl Into<String>,
     ) -> Self {
         Self {
+            backend_label,
             backend,
             runtime,
             runtime_key: runtime_key.into(),
@@ -86,43 +107,501 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
         &self,
         request: &TypeExpansionRequest,
         snapshot: TypeExpansionSnapshot,
+        trace_cursor: Option<ComponentMetaTraceCursor>,
     ) -> StdResult<TypeExpansionResult, TypeExpansionError> {
-        let artifact = build_component_meta_artifact(&request.canonical_id, &snapshot, request)?;
-        let generated_offset = artifact
-            .sfc_to_generated(request.span.start)
-            .ok_or(TypeExpansionError::MappingFailed)?;
-        let file_id = GeneratedFileId {
-            canonical_id: artifact.artifact_id.canonical_id.clone(),
-            profile: runtime_artifact_profile(artifact.profile),
-            runtime_key: self.runtime_key.clone(),
-        };
-        let backend = Arc::clone(&self.backend);
-        let data = self.runtime.block_on(async move {
-            backend
-                .sync_file(
-                    &file_id,
-                    artifact.source_revision,
-                    &artifact.generated_source,
-                )
-                .await
-                .map_err(map_backend_error)?;
-            backend
-                .query_type_data(
-                    &file_id,
-                    artifact.source_revision,
-                    generated_offset,
-                    BackendTypeQuery::TypeAtOffset,
-                )
-                .await
-                .map_err(map_backend_error)
-        })?;
+        let context = trace_cursor.map(|cursor| TypeRuntimeTraceContext {
+            request_id: cursor.request_id,
+            parent_span_id: cursor.span_id,
+            base_depth: cursor.depth + 1,
+        });
+        with_type_runtime_trace_context(context, || {
+            let _trace = type_runtime_trace_scope(
+                "runtime_component_meta_expand_type",
+                format!(
+                    "backend={} owner={} span={}..{} revision={}",
+                    self.backend_label,
+                    request.canonical_id,
+                    request.span.start,
+                    request.span.end,
+                    snapshot.revision,
+                ),
+            );
+            let query_artifact =
+                build_component_meta_query_artifact(&request.canonical_id, &snapshot, request)?;
+            type_runtime_trace_event(
+                "runtime_component_meta_artifact",
+                format!(
+                    "backend={} owner={} generated_len={} mappings={} revision={} members_offset={:?}",
+                    self.backend_label,
+                    request.canonical_id,
+                    query_artifact.artifact.generated_source.len(),
+                    query_artifact.artifact.mappings.len(),
+                    query_artifact.artifact.source_revision,
+                    query_artifact.members_offset,
+                ),
+            );
+            type_runtime_trace_event(
+                "runtime_component_meta_generated_offset",
+                format!(
+                    "backend={} owner={} generated_offset={} members_offset={:?}",
+                    self.backend_label,
+                    request.canonical_id,
+                    query_artifact.hover_offset,
+                    query_artifact.members_offset,
+                ),
+            );
+            let file_id = GeneratedFileId {
+                canonical_id: query_artifact.artifact.artifact_id.canonical_id.clone(),
+                profile: runtime_artifact_profile(query_artifact.artifact.profile),
+                runtime_key: self.runtime_key.clone(),
+            };
+            let backend = Arc::clone(&self.backend);
+            let data = self.runtime.block_on(async move {
+                backend
+                    .sync_file(
+                        &file_id,
+                        query_artifact.artifact.source_revision,
+                        &query_artifact.artifact.generated_source,
+                    )
+                    .await
+                    .map_err(map_backend_error)?;
+                let member_data = if let Some(members_offset) = query_artifact.members_offset {
+                    match backend
+                        .query_type_data(
+                            &file_id,
+                            query_artifact.artifact.source_revision,
+                            members_offset,
+                            BackendTypeQuery::MembersAtOffset,
+                        )
+                        .await
+                    {
+                        Ok(data) if backend_members_are_useful(&data) => {
+                            let data = if query_artifact.generic_clause.is_none() {
+                                fill_missing_backend_member_types(
+                                    backend.as_ref(),
+                                    &file_id,
+                                    query_artifact.artifact.source_revision,
+                                    &query_artifact.artifact.generated_source,
+                                    COMPONENT_META_QUERY_TYPE_ALIAS,
+                                    COMPONENT_META_QUERY_VALUE,
+                                    "__VERTER_COMPONENT_META_MEMBER",
+                                    data,
+                                )
+                                .await?
+                            } else {
+                                data
+                            };
+                            type_runtime_trace_event(
+                                "runtime_component_meta_member_probe",
+                                format!(
+                                    "backend={} owner={} member_count={} used=true",
+                                    self.backend_label,
+                                    request.canonical_id,
+                                    data.members.len(),
+                                ),
+                            );
+                            return Ok(data);
+                        }
+                        Ok(data) => {
+                            type_runtime_trace_event(
+                                "runtime_component_meta_member_probe",
+                                format!(
+                                    "backend={} owner={} member_count={} used=false",
+                                    self.backend_label,
+                                    request.canonical_id,
+                                    data.members.len(),
+                                ),
+                            );
+                            Some(data)
+                        }
+                        Err(error) => {
+                            type_runtime_trace_event(
+                                "runtime_component_meta_member_probe",
+                                format!(
+                                    "backend={} owner={} error={error}",
+                                    self.backend_label, request.canonical_id,
+                                ),
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
 
-        type_expansion_from_backend_data(data)
+                let hover_data = backend
+                    .query_type_data(
+                        &file_id,
+                        query_artifact.artifact.source_revision,
+                        query_artifact.hover_offset,
+                        BackendTypeQuery::TypeAtOffset,
+                    )
+                    .await
+                    .map_err(map_backend_error)?;
+                Ok(merge_component_meta_backend_data(hover_data, member_data))
+            })?;
+
+            type_runtime_trace_event(
+                "runtime_component_meta_backend_result",
+                format!(
+                    "backend={} owner={} type_text_len={} members={} completeness={:?}",
+                    self.backend_label,
+                    request.canonical_id,
+                    data.type_text.as_ref().map(|text| text.len()).unwrap_or(0),
+                    data.members.len(),
+                    data.completeness,
+                ),
+            );
+
+            type_expansion_from_backend_data(data)
+        })
+    }
+
+    fn expand_slot_bindings(
+        &self,
+        request: &TypeExpansionRequest,
+        snapshot: TypeExpansionSnapshot,
+        slot_name: &str,
+        trace_cursor: Option<ComponentMetaTraceCursor>,
+    ) -> StdResult<Option<TypeExpansionResult>, TypeExpansionError> {
+        let context = trace_cursor.map(|cursor| TypeRuntimeTraceContext {
+            request_id: cursor.request_id,
+            parent_span_id: cursor.span_id,
+            base_depth: cursor.depth + 1,
+        });
+        with_type_runtime_trace_context(context, || {
+            let _trace = type_runtime_trace_scope(
+                "runtime_component_meta_expand_slot_bindings",
+                format!(
+                    "backend={} owner={} slot={} span={}..{} revision={}",
+                    self.backend_label,
+                    request.canonical_id,
+                    slot_name,
+                    request.span.start,
+                    request.span.end,
+                    snapshot.revision,
+                ),
+            );
+            let query_artifact = build_component_meta_slot_bindings_query_artifact(
+                &request.canonical_id,
+                &snapshot,
+                request,
+                slot_name,
+            )?;
+            let file_id = GeneratedFileId {
+                canonical_id: query_artifact.artifact.artifact_id.canonical_id.clone(),
+                profile: runtime_artifact_profile(query_artifact.artifact.profile),
+                runtime_key: self.runtime_key.clone(),
+            };
+            let backend = Arc::clone(&self.backend);
+            let data = self.runtime.block_on(async move {
+                backend
+                    .sync_file(
+                        &file_id,
+                        query_artifact.artifact.source_revision,
+                        &query_artifact.artifact.generated_source,
+                    )
+                    .await
+                    .map_err(map_backend_error)?;
+                let data = backend
+                    .query_type_data(
+                        &file_id,
+                        query_artifact.artifact.source_revision,
+                        query_artifact.members_offset,
+                        BackendTypeQuery::MembersAtOffset,
+                    )
+                    .await
+                    .map_err(map_backend_error)?;
+                fill_missing_backend_member_types(
+                    backend.as_ref(),
+                    &file_id,
+                    query_artifact.artifact.source_revision,
+                    &query_artifact.artifact.generated_source,
+                    COMPONENT_META_SLOT_BINDINGS_TYPE_ALIAS,
+                    COMPONENT_META_SLOT_BINDINGS_VALUE,
+                    "__VERTER_COMPONENT_META_SLOT_BINDING",
+                    data,
+                )
+                .await
+            })?;
+
+            if !backend_members_are_useful(&data) {
+                return Ok(None);
+            }
+
+            type_expansion_from_backend_data(data).map(Some)
+        })
     }
 
     fn shutdown(&self) {
         let _ = self.runtime.block_on(self.backend.shutdown());
     }
+}
+
+fn backend_members_are_useful(data: &BackendTypeData) -> bool {
+    !data.members.is_empty()
+        && data
+            .members
+            .iter()
+            .any(|member| !is_builtin_callable_member_name(&member.name))
+}
+
+fn is_builtin_callable_member_name(name: &str) -> bool {
+    matches!(
+        name,
+        "apply"
+            | "arguments"
+            | "bind"
+            | "call"
+            | "caller"
+            | "length"
+            | "name"
+            | "prototype"
+            | "toString"
+    )
+}
+
+async fn fill_missing_backend_member_types(
+    backend: &dyn GeneratedQueryBackend,
+    file_id: &GeneratedFileId,
+    revision: u64,
+    base_generated_source: &str,
+    type_probe_owner: &str,
+    value_probe_owner: &str,
+    probe_prefix: &str,
+    mut data: BackendTypeData,
+) -> StdResult<BackendTypeData, TypeExpansionError> {
+    if data.members.is_empty() {
+        return Ok(data);
+    }
+
+    let missing_names: Vec<String> = data
+        .members
+        .iter()
+        .filter(|member| member_type_text_needs_hover(member))
+        .map(|member| member.name.clone())
+        .collect();
+
+    let mut generated_source = base_generated_source.to_string();
+    let definition_offsets = append_member_definition_probes(
+        &mut generated_source,
+        &all_backend_member_names(&data),
+        type_probe_owner,
+        probe_prefix,
+    );
+    let hover_offsets = append_member_hover_probes(
+        &mut generated_source,
+        &missing_names,
+        value_probe_owner,
+        probe_prefix,
+    );
+    if definition_offsets.is_empty() && hover_offsets.is_empty() {
+        return Ok(data);
+    }
+
+    backend
+        .sync_file(file_id, revision, &generated_source)
+        .await
+        .map_err(map_backend_error)?;
+
+    let mut definition_filled = std::collections::HashMap::new();
+    for (name, offset) in definition_offsets {
+        match backend
+            .query_type_data(
+                file_id,
+                revision,
+                offset,
+                BackendTypeQuery::DefinitionTypeAtOffset,
+            )
+            .await
+        {
+            Ok(definition) => {
+                if let Some(type_text) = definition
+                    .type_text
+                    .filter(|text| definition_hover_should_replace_member(&name, &data, text))
+                {
+                    definition_filled
+                        .insert(name, strip_type_display_prefix(&type_text).to_string());
+                }
+            }
+            Err(error) => {
+                type_runtime_trace_event(
+                    "runtime_component_meta_member_definition_fill",
+                    format!("name={} error={error}", name),
+                );
+            }
+        }
+    }
+
+    for member in &mut data.members {
+        if let Some(type_text) = definition_filled.get(&member.name) {
+            member.type_text = Some(type_text.clone());
+        }
+    }
+
+    let mut filled = std::collections::HashMap::new();
+    for (name, offset) in hover_offsets {
+        if !data
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .is_some_and(member_type_text_needs_hover)
+        {
+            continue;
+        }
+        match backend
+            .query_type_data(file_id, revision, offset, BackendTypeQuery::TypeAtOffset)
+            .await
+        {
+            Ok(hover) => {
+                if let Some(type_text) = hover.type_text.filter(|text| !text.trim().is_empty()) {
+                    filled.insert(name, strip_type_display_prefix(&type_text).to_string());
+                }
+            }
+            Err(error) => {
+                type_runtime_trace_event(
+                    "runtime_component_meta_member_hover_fill",
+                    format!("name={} error={error}", name),
+                );
+            }
+        }
+    }
+
+    for member in &mut data.members {
+        if member_type_text_needs_hover(member) {
+            if let Some(type_text) = filled.get(&member.name) {
+                member.type_text = Some(type_text.clone());
+            }
+        }
+    }
+
+    Ok(data)
+}
+
+fn all_backend_member_names(data: &BackendTypeData) -> Vec<String> {
+    data.members
+        .iter()
+        .map(|member| member.name.clone())
+        .collect()
+}
+
+fn definition_hover_should_replace_member(
+    name: &str,
+    data: &BackendTypeData,
+    raw_definition: &str,
+) -> bool {
+    let trimmed = unwrap_markdown_code_fence(raw_definition.trim()).trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed.starts_with("(property)") {
+        return true;
+    }
+
+    if trimmed.starts_with("(type)") {
+        return data
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .and_then(|member| member.type_text.as_deref())
+            .is_some_and(|current| current.contains(name) || current.contains(" | undefined"));
+    }
+
+    false
+}
+
+fn member_type_text_needs_hover(member: &verter_type_runtime::BackendTypeMember) -> bool {
+    member
+        .type_text
+        .as_deref()
+        .map(|text| {
+            let normalized = strip_type_display_prefix(text).trim();
+            normalized.is_empty()
+                || normalized == "unknown"
+                || normalized == "any"
+                || normalized == "any | undefined"
+                || normalized == "undefined | any"
+        })
+        .unwrap_or(true)
+}
+
+fn append_member_hover_probes(
+    generated: &mut String,
+    member_names: &[String],
+    probe_owner: &str,
+    probe_prefix: &str,
+) -> Vec<(String, u32)> {
+    let mut offsets = Vec::with_capacity(member_names.len());
+
+    for (index, name) in member_names.iter().enumerate() {
+        let probe_name = format!("{probe_prefix}_{index}");
+        let access = format!("{probe_owner}[{}]", ts_string_literal(name));
+        let probe = format!("\nconst {probe_name} = {access};\n{probe_name}\n");
+        let marker = format!("\n{probe_name}\n");
+        let base = generated.len();
+        let relative = probe
+            .rfind(&marker)
+            .map(|offset| offset + 1)
+            .unwrap_or_else(|| probe.rfind(&probe_name).unwrap_or(0));
+        generated.push_str(&probe);
+        offsets.push((name.clone(), (base + relative) as u32));
+    }
+
+    offsets
+}
+
+fn append_member_definition_probes(
+    generated: &mut String,
+    member_names: &[String],
+    type_probe_owner: &str,
+    probe_prefix: &str,
+) -> Vec<(String, u32)> {
+    let mut offsets = Vec::with_capacity(member_names.len());
+
+    for (index, name) in member_names.iter().enumerate() {
+        let probe_name = format!("{probe_prefix}_DEF_{index}");
+        let member_literal = ts_string_literal(name);
+        let probe = format!("\ntype {probe_name} = {type_probe_owner}[{member_literal}];\n");
+        let base = generated.len();
+        let relative = probe.find(&member_literal).map(|offset| offset + 1);
+        generated.push_str(&probe);
+        if let Some(relative) = relative {
+            offsets.push((name.clone(), (base + relative) as u32));
+        }
+    }
+
+    offsets
+}
+
+fn ts_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn merge_component_meta_backend_data(
+    hover_data: BackendTypeData,
+    member_data: Option<BackendTypeData>,
+) -> BackendTypeData {
+    let Some(member_data) = member_data else {
+        return hover_data;
+    };
+    if backend_members_are_useful(&member_data) {
+        return member_data;
+    }
+    hover_data
 }
 
 fn create_component_meta_host(
@@ -214,6 +693,7 @@ fn build_runtime_component_meta_expander(
     let backend = spawn_runtime_backend(&runtime, runtime_backend, &workspace_root)?;
 
     Ok(Arc::new(RuntimeBackedComponentMetaExpander::new(
+        runtime_backend.label(),
         runtime,
         backend,
         runtime_backend.runtime_key(),
@@ -278,7 +758,10 @@ fn spawn_runtime_backend(
                     ))
                     .map_err(|error| runtime_backend_start_error(runtime_backend, error))?,
             );
-            Ok(Arc::new(TypeProviderAdapter::new(provider)) as Arc<dyn GeneratedQueryBackend>)
+            Ok(
+                Arc::new(TypeProviderAdapter::new(provider, runtime_backend.label()))
+                    as Arc<dyn GeneratedQueryBackend>,
+            )
         }
         RuntimeComponentMetaBackend::Tsgo => {
             let tsgo_binary = find_tsgo_binary().map_err(|error| {
@@ -293,7 +776,10 @@ fn spawn_runtime_backend(
                     .block_on(TsgoTypeProvider::spawn(&tsgo_binary, &root_uri))
                     .map_err(|error| runtime_backend_start_error(runtime_backend, error))?,
             );
-            Ok(Arc::new(TypeProviderAdapter::new(provider)) as Arc<dyn GeneratedQueryBackend>)
+            Ok(
+                Arc::new(TypeProviderAdapter::new(provider, runtime_backend.label()))
+                    as Arc<dyn GeneratedQueryBackend>,
+            )
         }
     }
 }
@@ -382,6 +868,170 @@ fn build_component_meta_artifact(
     })
 }
 
+fn build_component_meta_query_artifact(
+    canonical_id: &str,
+    snapshot: &TypeExpansionSnapshot,
+    request: &TypeExpansionRequest,
+) -> StdResult<ComponentMetaQueryArtifact, TypeExpansionError> {
+    let mut artifact = build_component_meta_artifact(canonical_id, snapshot, request)?;
+    let generic_clause = extract_script_setup_generic_clause(snapshot);
+    let probe_offsets = append_component_meta_member_probe(
+        &mut artifact.generated_source,
+        &snapshot.source.text,
+        request.span,
+        generic_clause.as_deref(),
+    );
+    let hover_offset = probe_offsets
+        .as_ref()
+        .map(|offsets| offsets.hover_offset)
+        .or_else(|| artifact.sfc_to_generated(request.span.start))
+        .ok_or(TypeExpansionError::MappingFailed)?;
+    Ok(ComponentMetaQueryArtifact {
+        artifact,
+        hover_offset,
+        members_offset: probe_offsets.map(|offsets| offsets.members_offset),
+        generic_clause,
+    })
+}
+
+fn build_component_meta_slot_bindings_query_artifact(
+    canonical_id: &str,
+    snapshot: &TypeExpansionSnapshot,
+    request: &TypeExpansionRequest,
+    slot_name: &str,
+) -> StdResult<ComponentMetaMembersQueryArtifact, TypeExpansionError> {
+    let mut artifact = build_component_meta_artifact(canonical_id, snapshot, request)?;
+    let generic_clause = extract_script_setup_generic_clause(snapshot);
+    let members_offset = append_component_meta_slot_binding_probe(
+        &mut artifact.generated_source,
+        &snapshot.source.text,
+        request.span,
+        slot_name,
+        generic_clause.as_deref(),
+    )
+    .ok_or(TypeExpansionError::NoExpansionResult)?;
+    Ok(ComponentMetaMembersQueryArtifact {
+        artifact,
+        members_offset,
+    })
+}
+
+fn append_component_meta_member_probe(
+    generated: &mut String,
+    source: &str,
+    type_span: verter_span::Span,
+    generic_clause: Option<&str>,
+) -> Option<ComponentMetaProbeOffsets> {
+    let type_text = source
+        .get(type_span.start as usize..type_span.end as usize)?
+        .trim();
+    if type_text.is_empty() {
+        return None;
+    }
+
+    let wrapper_open =
+        component_meta_probe_wrapper_open(COMPONENT_META_QUERY_WRAPPER, generic_clause);
+    let probe = format!(
+        "\n{wrapper_open}  type {COMPONENT_META_QUERY_TYPE_ALIAS} = {type_text};\n  const {COMPONENT_META_QUERY_VALUE} = null as unknown as {COMPONENT_META_QUERY_TYPE_ALIAS};\n  {COMPONENT_META_QUERY_VALUE};\n  {COMPONENT_META_QUERY_VALUE}.\n}}\n"
+    );
+    let hover_marker = format!("\n  {COMPONENT_META_QUERY_VALUE};\n");
+    let marker = format!("{COMPONENT_META_QUERY_VALUE}.");
+    let base = generated.len();
+    let hover_relative = probe
+        .find(&hover_marker)
+        .map(|offset| offset + 3)
+        .unwrap_or_else(|| probe.find(COMPONENT_META_QUERY_VALUE).unwrap_or(0));
+    let relative = probe.find(&marker)? + marker.len();
+    generated.push_str(&probe);
+    Some(ComponentMetaProbeOffsets {
+        hover_offset: (base + hover_relative) as u32,
+        members_offset: (base + relative) as u32,
+    })
+}
+
+const COMPONENT_META_QUERY_TYPE_ALIAS: &str = "__VERTER_COMPONENT_META_QUERY";
+const COMPONENT_META_QUERY_VALUE: &str = "__verter_component_meta_query";
+const COMPONENT_META_QUERY_WRAPPER: &str = "__verter_component_meta_query_wrapper";
+const COMPONENT_META_SLOT_BINDINGS_TYPE_ALIAS: &str = "__VERTER_COMPONENT_META_SLOT_BINDINGS";
+const COMPONENT_META_SLOT_BINDINGS_VALUE: &str = "__verter_component_meta_slot_bindings";
+const COMPONENT_META_SLOT_BINDINGS_WRAPPER: &str = "__verter_component_meta_slot_bindings_wrapper";
+
+fn append_component_meta_slot_binding_probe(
+    generated: &mut String,
+    source: &str,
+    type_span: verter_span::Span,
+    slot_name: &str,
+    generic_clause: Option<&str>,
+) -> Option<u32> {
+    let type_text = source
+        .get(type_span.start as usize..type_span.end as usize)?
+        .trim();
+    if type_text.is_empty() {
+        return None;
+    }
+
+    let wrapper_open =
+        component_meta_probe_wrapper_open(COMPONENT_META_SLOT_BINDINGS_WRAPPER, generic_clause);
+    let probe = format!(
+        "\n{wrapper_open}  type {COMPONENT_META_QUERY_TYPE_ALIAS} = {type_text};\n  type {COMPONENT_META_SLOT_BINDINGS_TYPE_ALIAS} = Parameters<NonNullable<{COMPONENT_META_QUERY_TYPE_ALIAS}[{}]>>[0];\n  const {COMPONENT_META_SLOT_BINDINGS_VALUE} = null as unknown as {COMPONENT_META_SLOT_BINDINGS_TYPE_ALIAS};\n  {COMPONENT_META_SLOT_BINDINGS_VALUE}.\n}}\n",
+        ts_string_literal(slot_name)
+    );
+    let marker = format!("{COMPONENT_META_SLOT_BINDINGS_VALUE}.");
+    let base = generated.len();
+    let relative = probe.find(&marker)? + marker.len();
+    generated.push_str(&probe);
+    Some((base + relative) as u32)
+}
+
+fn component_meta_probe_wrapper_open(wrapper_name: &str, generic_clause: Option<&str>) -> String {
+    match generic_clause
+        .map(str::trim)
+        .filter(|clause| !clause.is_empty())
+    {
+        Some(clause) => format!("function {wrapper_name}<{clause}>() {{\n"),
+        None => format!("function {wrapper_name}() {{\n"),
+    }
+}
+
+fn extract_script_setup_generic_clause(snapshot: &TypeExpansionSnapshot) -> Option<String> {
+    let script_setup = snapshot.sfc_structure.script_setup?;
+    let content_start = script_setup.content.start as usize;
+    let prefix = snapshot.source.text.get(..content_start)?;
+    let open_start = prefix.rfind("<script")?;
+    let open_tag = snapshot.source.text.get(open_start..content_start)?;
+    extract_tag_attribute_value(open_tag, "generic")
+}
+
+fn extract_tag_attribute_value(tag_source: &str, attribute: &str) -> Option<String> {
+    let mut search_from = 0usize;
+    while let Some(relative) = tag_source[search_from..].find(attribute) {
+        let start = search_from + relative;
+        if start > 0 {
+            let prev = tag_source[..start].chars().next_back()?;
+            if prev.is_ascii_alphanumeric() || prev == '_' || prev == '-' {
+                search_from = start + attribute.len();
+                continue;
+            }
+        }
+        let mut rest = &tag_source[start + attribute.len()..];
+        rest = rest.trim_start();
+        let Some(rest_after_eq) = rest.strip_prefix('=') else {
+            search_from = start + attribute.len();
+            continue;
+        };
+        let rest_after_eq = rest_after_eq.trim_start();
+        let quote = rest_after_eq.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            search_from = start + attribute.len();
+            continue;
+        }
+        let value_rest = &rest_after_eq[quote.len_utf8()..];
+        let end = value_rest.find(quote)?;
+        return Some(value_rest[..end].to_string());
+    }
+    None
+}
+
 fn strip_export_default(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let mut skip_until_close = false;
@@ -460,16 +1110,24 @@ fn type_expansion_from_backend_data(
     } else {
         data.members
             .into_iter()
-            .map(|member| ExpandedMember {
-                name: member.name,
-                type_expr: member
+            .map(|member| {
+                let normalized_raw_type = member
                     .type_text
                     .as_deref()
                     .map(strip_type_display_prefix)
-                    .map(type_text_parser::parse_type_text)
-                    .unwrap_or_else(|| type_text_parser::parse_type_text("unknown")),
-                optional: member.optional,
-                description: member.documentation,
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string);
+                ExpandedMember {
+                    name: member.name,
+                    raw_type: normalized_raw_type.clone(),
+                    type_expr: normalized_raw_type
+                        .as_deref()
+                        .map(type_text_parser::parse_type_text)
+                        .unwrap_or_else(|| type_text_parser::parse_type_text("unknown")),
+                    optional: member.optional,
+                    description: member.documentation,
+                }
             })
             .collect()
     };
@@ -506,30 +1164,125 @@ fn synthesize_type_text_from_members(data: &BackendTypeData) -> Option<String> {
             text.push('?');
         }
         text.push_str(": ");
-        text.push_str(member.type_text.as_deref().unwrap_or("unknown"));
+        text.push_str(
+            member
+                .type_text
+                .as_deref()
+                .map(strip_type_display_prefix)
+                .unwrap_or("unknown"),
+        );
     }
     text.push_str(" }");
     Some(text)
 }
 
 fn strip_type_display_prefix(contents: &str) -> &str {
-    if let Some(eq_pos) = contents.find(" = ") {
-        let after = contents[eq_pos + 3..].trim();
+    let trimmed = unwrap_markdown_code_fence(contents.trim()).trim();
+
+    if let Some(eq_pos) = trimmed.find(" = ") {
+        let after = trimmed[eq_pos + 3..].trim();
         if !after.is_empty() {
             return after;
         }
     }
 
-    if contents.starts_with('(') {
-        if let Some(colon) = contents.find(':') {
-            let after = contents[colon + 1..].trim();
+    for keyword in ["const ", "let ", "var "] {
+        if let Some(rest) = trimmed.strip_prefix(keyword) {
+            if let Some(colon) = rest.find(':') {
+                let after = rest[colon + 1..].trim();
+                if !after.is_empty() {
+                    return after;
+                }
+            }
+        }
+    }
+
+    if let Some(after) = strip_quoted_member_display_prefix(trimmed) {
+        return after;
+    }
+
+    if trimmed.starts_with('(') {
+        if let Some(colon) = trimmed.find(':') {
+            let after = trimmed[colon + 1..].trim();
             if !after.is_empty() {
                 return after;
             }
         }
     }
 
-    contents
+    if let Some(optional_idx) = trimmed.find("?:") {
+        let prefix = trimmed[..optional_idx].trim();
+        if looks_like_member_display_prefix(prefix) {
+            let after = trimmed[optional_idx + 2..].trim();
+            if !after.is_empty() {
+                return after;
+            }
+        }
+    }
+
+    if let Some(colon_idx) = trimmed.find(':') {
+        let prefix = trimmed[..colon_idx].trim();
+        if looks_like_member_display_prefix(prefix) {
+            let after = trimmed[colon_idx + 1..].trim();
+            if !after.is_empty() {
+                return after;
+            }
+        }
+    }
+
+    trimmed
+}
+
+fn strip_quoted_member_display_prefix(trimmed: &str) -> Option<&str> {
+    let candidate = trimmed
+        .strip_prefix("(property) ")
+        .unwrap_or(trimmed)
+        .trim_start();
+    let mut chars = candidate.char_indices();
+    let (_, quote) = chars.next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let end = chars.find_map(|(index, ch)| (ch == quote).then_some(index))?;
+    let rest = candidate[end + quote.len_utf8()..].trim_start();
+    let after = rest
+        .strip_prefix("?:")
+        .or_else(|| rest.strip_prefix(':'))?
+        .trim();
+    (!after.is_empty()).then_some(after)
+}
+
+fn unwrap_markdown_code_fence(contents: &str) -> &str {
+    let Some(rest) = contents.strip_prefix("```") else {
+        return contents;
+    };
+    let Some(first_newline) = rest.find('\n') else {
+        return contents;
+    };
+    let body = &rest[first_newline + 1..];
+    let Some(closing) = body.rfind("\n```") else {
+        return contents;
+    };
+    &body[..closing]
+}
+
+fn looks_like_member_display_prefix(prefix: &str) -> bool {
+    if prefix.is_empty()
+        || prefix.starts_with('{')
+        || prefix.starts_with('[')
+        || prefix.contains("=>")
+        || prefix.contains(';')
+    {
+        return false;
+    }
+
+    prefix.chars().all(|ch| {
+        ch.is_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '$' | '.' | '<' | '>' | ',' | ' ' | '?' | '[' | ']' | '\'' | '"'
+            )
+    })
 }
 
 fn extract_members_from_type_expr(type_expr: &TypeExpr) -> Vec<ExpandedMember> {
@@ -541,6 +1294,7 @@ fn extract_members_from_type_expr(type_expr: &TypeExpr) -> Vec<ExpandedMember> {
                 ObjectMember::Property(prop) => Some(ExpandedMember {
                     name: prop.name.clone(),
                     type_expr: prop.ty.clone(),
+                    raw_type: None,
                     optional: prop.optional,
                     description: None,
                 }),
@@ -711,6 +1465,14 @@ impl NapiMetaSession {
         }))?
     }
 
+    #[napi(js_name = "reset")]
+    pub fn reset(&self, canonical_id: String) -> Result<()> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            session.reset(&canonical_id).map_err(meta_err)
+        }))?
+    }
+
     #[napi(js_name = "getEffectiveSource")]
     pub fn get_effective_source(&self, canonical_id: String) -> Result<Option<String>> {
         let session = self.session()?;
@@ -826,7 +1588,9 @@ impl NapiMetaSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex as StdMutex;
 
     struct FakeComponentMetaTypeExpander;
 
@@ -835,8 +1599,75 @@ mod tests {
             &self,
             _request: &TypeExpansionRequest,
             _snapshot: TypeExpansionSnapshot,
+            _trace_cursor: Option<ComponentMetaTraceCursor>,
         ) -> StdResult<TypeExpansionResult, TypeExpansionError> {
             Err(TypeExpansionError::NoExpansionResult)
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeGeneratedQueryBackend {
+        synced_sources: StdMutex<Vec<String>>,
+        definition_results: StdMutex<VecDeque<StdResult<BackendTypeData, BackendError>>>,
+        hover_results: StdMutex<VecDeque<StdResult<BackendTypeData, BackendError>>>,
+    }
+
+    impl GeneratedQueryBackend for FakeGeneratedQueryBackend {
+        fn sync_file<'a>(
+            &'a self,
+            _file_id: &'a GeneratedFileId,
+            _revision: u64,
+            content: &'a str,
+        ) -> verter_type_runtime::BackendFuture<'a, ()> {
+            self.synced_sources
+                .lock()
+                .unwrap()
+                .push(content.to_string());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close_file<'a>(
+            &'a self,
+            _file_id: &'a GeneratedFileId,
+        ) -> verter_type_runtime::BackendFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn evict_file<'a>(
+            &'a self,
+            _file_id: &'a GeneratedFileId,
+        ) -> verter_type_runtime::BackendFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn query_type_data<'a>(
+            &'a self,
+            _file_id: &'a GeneratedFileId,
+            _expected_revision: u64,
+            _generated_offset: u32,
+            query: BackendTypeQuery,
+        ) -> verter_type_runtime::BackendFuture<'a, BackendTypeData> {
+            Box::pin(async move {
+                match query {
+                    BackendTypeQuery::DefinitionTypeAtOffset => self
+                        .definition_results
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or_else(|| Ok(BackendTypeData::default())),
+                    BackendTypeQuery::TypeAtOffset => self
+                        .hover_results
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or_else(|| Ok(BackendTypeData::default())),
+                    _ => Ok(BackendTypeData::default()),
+                }
+            })
+        }
+
+        fn shutdown(&self) -> verter_type_runtime::BackendFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -881,6 +1712,81 @@ mod tests {
 
         assert!(!invoked.load(Ordering::Acquire));
         assert!(!host.has_external_expander());
+    }
+
+    fn setup_only_snapshot(source: &str) -> TypeExpansionSnapshot {
+        let script_open_end = source.find('>').expect("script setup open tag") + 1;
+        let script_close = source.find("</script>").expect("script setup close tag");
+        TypeExpansionSnapshot {
+            source: verter_resolver::type_expansion_host::SourceSnapshot {
+                text: source.to_string(),
+                lang: verter_resolver::type_expansion_host::ScriptLang::Ts,
+            },
+            sfc_structure: verter_resolver::type_expansion_host::SfcStructure {
+                script: None,
+                script_setup: Some(verter_resolver::type_expansion_host::SfcBlockSpan {
+                    content: verter_span::Span::new(script_open_end as u32, script_close as u32),
+                }),
+                template: None,
+            },
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn extract_script_setup_generic_clause_reads_generic_attribute() {
+        let snapshot = setup_only_snapshot(
+            r#"<script setup lang="ts" generic="T extends Item = Item">
+defineProps<Props<T>>()
+</script>"#,
+        );
+
+        assert_eq!(
+            extract_script_setup_generic_clause(&snapshot).as_deref(),
+            Some("T extends Item = Item")
+        );
+    }
+
+    #[test]
+    fn component_meta_query_artifact_wraps_script_setup_generics() {
+        let source = r#"<script setup lang="ts" generic="T extends Item = Item">
+defineProps<Props<T>>()
+</script>"#;
+        let snapshot = setup_only_snapshot(source);
+        let type_start = source.find("Props<T>").expect("type reference");
+        let script_open_end = source.find('>').expect("script setup open tag") + 1;
+        let script_close = source.find("</script>").expect("script setup close tag");
+        let base_generated_len = (script_close - script_open_end) + 1;
+        let request = TypeExpansionRequest {
+            canonical_id: "/src/Generic.vue".to_string(),
+            span: verter_span::Span::new(type_start as u32, (type_start + "Props<T>".len()) as u32),
+            profile: ExpansionProfile::ComponentMeta,
+        };
+
+        let artifact =
+            build_component_meta_query_artifact("/src/Generic.vue", &snapshot, &request).unwrap();
+
+        assert_eq!(
+            artifact.generic_clause.as_deref(),
+            Some("T extends Item = Item")
+        );
+        assert!(
+            artifact.artifact.generated_source.contains(
+                "function __verter_component_meta_query_wrapper<T extends Item = Item>()"
+            ),
+            "query artifact should wrap the probe in a generic function: {}",
+            artifact.artifact.generated_source
+        );
+        assert!(
+            artifact.hover_offset as usize >= base_generated_len,
+            "hover query should point at the appended probe so generic params are in scope"
+        );
+        assert!(
+            artifact
+                .members_offset
+                .is_some_and(|offset| offset as usize >= base_generated_len),
+            "member query should point at the appended probe so generic params are in scope"
+        );
     }
 
     #[test]
@@ -943,5 +1849,219 @@ defineProps<Props>()
         session.close();
         host.shutdown();
         let _ = std::fs::remove_dir_all(&test_root);
+    }
+
+    #[test]
+    fn strip_type_display_prefix_handles_member_display_forms() {
+        assert_eq!(
+            strip_type_display_prefix("(property) collapsible?: boolean | undefined"),
+            "boolean | undefined"
+        );
+        assert_eq!(
+            strip_type_display_prefix("AccordionProps<T>.items?: T[] | undefined"),
+            "T[] | undefined"
+        );
+        assert_eq!(
+            strip_type_display_prefix(
+                "const __verter_component_meta_member_0: SingleOrMultipleType | undefined"
+            ),
+            "SingleOrMultipleType | undefined"
+        );
+        assert_eq!(
+            strip_type_display_prefix(
+                "```typescript\n(const) const __VERTER_COMPONENT_META_MEMBER_2: any\n```"
+            ),
+            "any"
+        );
+        assert_eq!(
+            strip_type_display_prefix(
+                "(property) 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined]"
+            ),
+            "[value: (T extends 'single' ? string : string[]) | undefined]"
+        );
+    }
+
+    #[test]
+    fn member_type_text_needs_hover_for_any_members() {
+        assert!(member_type_text_needs_hover(
+            &verter_type_runtime::BackendTypeMember {
+                name: "labelKey".to_string(),
+                type_text: Some("labelKey?: any".to_string()),
+                optional: true,
+                documentation: None,
+            }
+        ));
+        assert!(!member_type_text_needs_hover(
+            &verter_type_runtime::BackendTypeMember {
+                name: "items".to_string(),
+                type_text: Some("items?: T[] | undefined".to_string()),
+                optional: true,
+                documentation: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn definition_hover_should_replace_member_rejects_non_member_displays() {
+        let data = BackendTypeData {
+            type_text: None,
+            members: vec![verter_type_runtime::BackendTypeMember {
+                name: "collapsible".to_string(),
+                type_text: Some("collapsible?: boolean | undefined".to_string()),
+                optional: true,
+                documentation: None,
+            }],
+            documentation: None,
+            completeness: BackendTypeCompleteness::Exact,
+        };
+
+        assert!(definition_hover_should_replace_member(
+            "collapsible",
+            &data,
+            "(property) collapsible?: boolean | undefined"
+        ));
+        assert!(!definition_hover_should_replace_member(
+            "collapsible",
+            &data,
+            "(function) function createContext<ContextValue>(providerComponentName: string | string[])"
+        ));
+        assert!(!definition_hover_should_replace_member(
+            "collapsible",
+            &data,
+            "(type parameter) T in <T extends ContextValue | null | undefined = ContextValue>(fallback?: T)"
+        ));
+    }
+
+    #[test]
+    fn type_expansion_from_backend_data_normalizes_member_raw_types() {
+        let result = type_expansion_from_backend_data(BackendTypeData {
+            type_text: None,
+            members: vec![
+                verter_type_runtime::BackendTypeMember {
+                    name: "items".to_string(),
+                    type_text: Some("AccordionProps<T>.items?: T[] | undefined".to_string()),
+                    optional: true,
+                    documentation: None,
+                },
+                verter_type_runtime::BackendTypeMember {
+                    name: "type".to_string(),
+                    type_text: Some(
+                        "const __verter_component_meta_member_0: SingleOrMultipleType | undefined"
+                            .to_string(),
+                    ),
+                    optional: true,
+                    documentation: None,
+                },
+            ],
+            documentation: None,
+            completeness: BackendTypeCompleteness::Exact,
+        })
+        .expect("member-only backend expansion should succeed");
+
+        let raw_types: Vec<_> = result
+            .members
+            .iter()
+            .map(|member| (member.name.as_str(), member.raw_type.as_deref()))
+            .collect();
+
+        assert_eq!(
+            raw_types,
+            vec![
+                ("items", Some("T[] | undefined")),
+                ("type", Some("SingleOrMultipleType | undefined")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fill_missing_backend_member_types_prefers_definition_site_text() {
+        let backend = FakeGeneratedQueryBackend {
+            synced_sources: StdMutex::new(Vec::new()),
+            definition_results: StdMutex::new(VecDeque::from([
+                Ok(BackendTypeData {
+                    type_text: Some("(property) type?: SingleOrMultipleType | undefined".to_string()),
+                    members: vec![],
+                    documentation: None,
+                    completeness: BackendTypeCompleteness::Exact,
+                }),
+                Ok(BackendTypeData {
+                    type_text: Some(
+                        "(property) 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined]"
+                            .to_string(),
+                    ),
+                    members: vec![],
+                    documentation: None,
+                    completeness: BackendTypeCompleteness::Exact,
+                }),
+            ])),
+            hover_results: StdMutex::new(VecDeque::from([Ok(BackendTypeData {
+                type_text: Some("const __VERTER_COMPONENT_META_MEMBER_0: any".to_string()),
+                members: vec![],
+                documentation: None,
+                completeness: BackendTypeCompleteness::Exact,
+            })])),
+        };
+        let file_id = GeneratedFileId {
+            canonical_id: "/src/Foo.vue".into(),
+            profile: verter_type_runtime::ArtifactProfile::ComponentMeta,
+            runtime_key: "test".into(),
+        };
+        let data = BackendTypeData {
+            type_text: None,
+            members: vec![
+                verter_type_runtime::BackendTypeMember {
+                    name: "type".to_string(),
+                    type_text: Some(
+                        "const __verter_component_meta_member_0: SingleOrMultipleType | undefined"
+                            .to_string(),
+                    ),
+                    optional: true,
+                    documentation: None,
+                },
+                verter_type_runtime::BackendTypeMember {
+                    name: "update:modelValue".to_string(),
+                    type_text: Some("unknown".to_string()),
+                    optional: false,
+                    documentation: None,
+                },
+            ],
+            documentation: None,
+            completeness: BackendTypeCompleteness::Exact,
+        };
+
+        let filled = fill_missing_backend_member_types(
+            &backend,
+            &file_id,
+            1,
+            "type Query = {}",
+            COMPONENT_META_QUERY_TYPE_ALIAS,
+            COMPONENT_META_QUERY_VALUE,
+            "__VERTER_COMPONENT_META_MEMBER",
+            data,
+        )
+        .await
+        .expect("member fill should succeed");
+
+        let filled_types: Vec<_> = filled
+            .members
+            .iter()
+            .map(|member| (member.name.as_str(), member.type_text.as_deref()))
+            .collect();
+        assert_eq!(
+            filled_types,
+            vec![
+                ("type", Some("SingleOrMultipleType | undefined")),
+                (
+                    "update:modelValue",
+                    Some("[value: (T extends 'single' ? string : string[]) | undefined]")
+                ),
+            ]
+        );
+        let synced_sources = backend.synced_sources.lock().unwrap();
+        assert_eq!(synced_sources.len(), 1);
+        assert!(
+            synced_sources[0].contains("__VERTER_COMPONENT_META_QUERY[\"update:modelValue\"]"),
+            "definition probe should query the raw indexed-access member"
+        );
     }
 }

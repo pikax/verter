@@ -106,9 +106,7 @@ function fail(errors) {
 }
 
 function main() {
-  const manifestPath = process.argv[2]
-    ? resolve(REPO_ROOT, process.argv[2])
-    : DEFAULT_MANIFEST;
+  const manifestPath = process.argv[2] ? resolve(REPO_ROOT, process.argv[2]) : DEFAULT_MANIFEST;
 
   const { schema, entries } = parseManifestToml(readFileSync(manifestPath, "utf8"));
   if (schema !== "v5_process_manifest.v1") {
@@ -166,9 +164,7 @@ function main() {
     if (!entry.id || !entry.rust_test) continue;
     const fn = finalRustFn(entry.rust_test);
     if (!fn || !rustFnNames.has(fn)) {
-      errors.push(
-        `entry '${entry.id}' references missing rust test function '${entry.rust_test}'`,
-      );
+      errors.push(`entry '${entry.id}' references missing rust test function '${entry.rust_test}'`);
     }
   }
 

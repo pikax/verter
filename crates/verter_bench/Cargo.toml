@@ -10,7 +10,13 @@ publish = false
 description = "Benchmarks and examples for verter_core"
 
 [features]
-hotpath = ["verter_core/hotpath", "verter_host/hotpath", "verter_diagnostics/hotpath", "dep:hotpath", "hotpath/hotpath"]
+hotpath = [
+  "verter_core/hotpath",
+  "verter_host/hotpath",
+  "verter_diagnostics/hotpath",
+  "dep:hotpath",
+  "hotpath/hotpath",
+]
 hotpath-alloc = ["verter_core/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]

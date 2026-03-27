@@ -66,7 +66,11 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
+        getDeclaredComponentMeta: getComponentMeta,
         getComponentMeta,
+        getProvenance() {
+          return "{}";
+        },
         getEffectiveSource() {
           return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
         },
@@ -89,98 +93,6 @@ describe("ComponentMetaChecker session requirement", () => {
     expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 
-  it("falls back to a session overlay when ensureBaseFile declines a readable workspace file", async () => {
-    const store = new Map<string, string>();
-    const checker = new ComponentMetaChecker(
-      {
-        upsert: vi.fn(),
-      },
-      "/project",
-      {},
-      {
-        closed: false,
-        engine: { state: "active" as const, markActivity() {} },
-        upsert(canonicalId: string, source: string) {
-          store.set(canonicalId, source);
-        },
-        delete() {},
-        getComponentMeta(canonicalId: string) {
-          if (!store.has(canonicalId)) {
-            return null;
-          }
-          return {
-            filePath: canonicalId,
-            optionsApi: false,
-            props: [
-              {
-                name: "label",
-                required: false,
-                type: { kind: "string" },
-              },
-            ],
-            events: [],
-            slots: [],
-            models: [],
-            exposed: [],
-            components: [],
-            templateRefs: [],
-            imports: [],
-            bindings: [],
-            vueApiCalls: [],
-            styles: [],
-            flags: {
-              asyncSetup: false,
-              hasReactiveState: false,
-              hasComputed: false,
-              hasWatchers: false,
-              hasLifecycleHooks: false,
-              hasProvide: false,
-              hasInject: false,
-              hasInheritAttrsFalse: false,
-              hasStoreUsage: false,
-            },
-            acceptedProps: [],
-            acceptedEvents: [],
-            acceptedSurfaceCompleteness: "exact",
-            rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
-            fallthroughSurface: { kind: "none", reason: "noTemplate" },
-          };
-        },
-        getEffectiveSource(canonicalId: string) {
-          return store.get(canonicalId);
-        },
-        hasFile(canonicalId: string) {
-          return store.has(canonicalId);
-        },
-        trackedFileIds() {
-          return Array.from(store.keys());
-        },
-        ensureBaseFile() {
-          return false;
-        },
-        close() {},
-      } as any,
-      {
-        readFile: vi
-          .fn()
-          .mockResolvedValue(
-            `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
-          ),
-        fileExists: vi.fn().mockResolvedValue(true),
-        isDir: vi.fn().mockResolvedValue(false),
-        readDir: vi.fn().mockResolvedValue([]),
-        walk: vi.fn().mockResolvedValue([]),
-        configureProjects: vi.fn(),
-      },
-    );
-
-    const meta = await checker.getComponentMeta("src/App.vue");
-
-    expect(meta.props.map((prop) => prop.name)).toContain("label");
-    expect(store.size).toBe(1);
-    expect(Array.from(store.keys())[0]).toContain("/project/src/App.vue");
-  });
-
   it("propagates native component-meta budget errors to callers", async () => {
     const checker = new ComponentMetaChecker(
       {
@@ -193,10 +105,18 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
+        getDeclaredComponentMeta() {
+          throw new Error(
+            "component-meta external type resolution step budget exceeded (maxSteps=2000)",
+          );
+        },
         getComponentMeta() {
           throw new Error(
             "component-meta external type resolution step budget exceeded (maxSteps=2000)",
           );
+        },
+        getProvenance() {
+          return "{}";
         },
         getEffectiveSource() {
           return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
@@ -292,6 +212,9 @@ describe("ComponentMetaChecker session requirement", () => {
         delete() {},
         getComponentMeta,
         getDeclaredComponentMeta,
+        getProvenance() {
+          return "{}";
+        },
         getEffectiveSource() {
           return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
         },
@@ -318,5 +241,217 @@ describe("ComponentMetaChecker session requirement", () => {
 
     expect(meta._verter?.acceptedProps.map((prop) => prop.name)).toEqual(["id"]);
     expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+  });
+
+  it("uses the full native query immediately for non-Verter backends even if declared metadata exists", async () => {
+    const declaredMeta: any = {
+      filePath: "C:/project/src/App.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          rawType: "string",
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "lowerBound",
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
+    };
+    const fullMeta: any = {
+      ...declaredMeta,
+      props: [
+        ...declaredMeta.props,
+        {
+          name: "collapsible",
+          type: { kind: "primitive", name: "boolean" },
+          rawType: "boolean | undefined",
+          required: false,
+          hasDefault: true,
+          defaultValue: "true",
+        },
+      ],
+    };
+    const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
+    const getComponentMeta = vi.fn(() => fullMeta);
+
+    const checker = new ComponentMetaChecker(
+      {
+        upsert: vi.fn(),
+      },
+      "C:\\project",
+      {
+        typeExpansionBackend: "tsserver",
+      },
+      {
+        closed: false,
+        engine: { state: "active" as const },
+        upsert() {},
+        delete() {},
+        getComponentMeta,
+        getDeclaredComponentMeta,
+        getProvenance() {
+          return "{}";
+        },
+        getEffectiveSource() {
+          return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+        },
+        hasFile() {
+          return true;
+        },
+        trackedFileIds() {
+          return [];
+        },
+        close() {},
+      } as any,
+    );
+
+    checker.updateFile(
+      "src\\App.vue",
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("src\\App.vue");
+
+    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
+    expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(meta.props.map((prop) => prop.name)).toEqual(["label", "collapsible"]);
+  });
+
+  it("retries one full native query on non-Verter backends and keeps the richer result", async () => {
+    const partialMeta: any = {
+      filePath: "C:/project/src/App.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          rawType: "string",
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "lowerBound",
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
+    };
+    const richerMeta: any = {
+      ...partialMeta,
+      props: [
+        ...partialMeta.props,
+        {
+          name: "collapsible",
+          type: { kind: "primitive", name: "boolean" },
+          rawType: "boolean | undefined",
+          required: false,
+          hasDefault: true,
+          defaultValue: "true",
+        },
+      ],
+      slots: [
+        {
+          name: "default",
+          isScoped: false,
+          bindings: [],
+          isRequired: false,
+        },
+      ],
+    };
+    const getComponentMeta = vi
+      .fn()
+      .mockReturnValueOnce(partialMeta)
+      .mockReturnValueOnce(richerMeta);
+
+    const checker = new ComponentMetaChecker(
+      {
+        upsert: vi.fn(),
+      },
+      "C:\\project",
+      {
+        typeExpansionBackend: "tsserver",
+      },
+      {
+        closed: false,
+        engine: { state: "active" as const },
+        upsert() {},
+        delete() {},
+        getDeclaredComponentMeta() {
+          return partialMeta;
+        },
+        getComponentMeta,
+        getProvenance() {
+          return "{}";
+        },
+        getEffectiveSource() {
+          return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+        },
+        hasFile() {
+          return true;
+        },
+        trackedFileIds() {
+          return [];
+        },
+        close() {},
+      } as any,
+    );
+
+    checker.updateFile(
+      "src\\App.vue",
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("src\\App.vue");
+
+    expect(getComponentMeta).toHaveBeenCalledTimes(2);
+    expect(meta.props.map((prop) => prop.name)).toEqual(["label", "collapsible"]);
+    expect(meta.slots.map((slot) => slot.name)).toEqual(["default"]);
   });
 });

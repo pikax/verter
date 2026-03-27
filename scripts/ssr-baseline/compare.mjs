@@ -22,11 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  extractSsrRenderBody,
-  normalizeForComparison,
-  extractImports,
-} from "./normalize.mjs";
+import { extractSsrRenderBody, normalizeForComparison, extractImports } from "./normalize.mjs";
 import { detectPattern, printSummary, writeJsonReport } from "./report.mjs";
 
 const require = createRequire(import.meta.url);
@@ -35,9 +31,7 @@ const ROOT = path.resolve(__dirname, "../..");
 
 // ── Load compilers ──────────────────────────────────────────────
 
-const { parse, compileScript, compileTemplate } = require(
-  "@vue/compiler-sfc",
-);
+const { parse, compileScript, compileTemplate } = require("@vue/compiler-sfc");
 const { VerterHost } = require(path.join(ROOT, "packages/native/index.js"));
 
 // ── CLI args ────────────────────────────────────────────────────
@@ -204,9 +198,7 @@ function compileWithVue(source, filename) {
     });
 
     if (result.errors && result.errors.length > 0) {
-      const msg = result.errors
-        .map((e) => (typeof e === "string" ? e : e.message))
-        .join("; ");
+      const msg = result.errors.map((e) => (typeof e === "string" ? e : e.message)).join("; ");
       return { error: msg };
     }
 
@@ -267,12 +259,8 @@ let allFiles = discoverVueFiles();
 console.log(`Found ${allFiles.length} .vue files`);
 
 if (focusPattern) {
-  allFiles = allFiles.filter((f) =>
-    f.replace(/\\/g, "/").includes(focusPattern),
-  );
-  console.log(
-    `Filtered to ${allFiles.length} files matching "${focusPattern}"`,
-  );
+  allFiles = allFiles.filter((f) => f.replace(/\\/g, "/").includes(focusPattern));
+  console.log(`Filtered to ${allFiles.length} files matching "${focusPattern}"`);
 }
 
 if (limit > 0 && allFiles.length > limit) {
@@ -303,9 +291,7 @@ for (const filePath of allFiles) {
 
   // Progress indicator every 500 files
   if (processed % 500 === 0) {
-    process.stdout.write(
-      `\r  Processing: ${processed}/${allFiles.length} ...`,
-    );
+    process.stdout.write(`\r  Processing: ${processed}/${allFiles.length} ...`);
   }
 
   const rel = path.relative(rootDir, filePath).replace(/\\/g, "/");
@@ -349,9 +335,7 @@ for (const filePath of allFiles) {
     stats.verterErrors++;
     errors.verter.push({ file: rel, error: verterResult.error });
     if (errorsOnly || verbose)
-      console.log(
-        `  [VERTER ERR] ${rel}: ${verterResult.error.slice(0, 100)}`,
-      );
+      console.log(`  [VERTER ERR] ${rel}: ${verterResult.error.slice(0, 100)}`);
     continue;
   }
 

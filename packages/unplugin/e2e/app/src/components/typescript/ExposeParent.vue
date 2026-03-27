@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import ExposeDemo from './ExposeDemo.vue'
+import { ref } from "vue";
+import ExposeDemo from "./ExposeDemo.vue";
 
-const childRef = ref<InstanceType<typeof ExposeDemo> | null>(null)
-const result = ref('')
+const childRef = ref<InstanceType<typeof ExposeDemo> | null>(null);
+const result = ref("");
 
 function callExposed() {
   if (childRef.value) {
-    childRef.value.increment()
-    result.value = `count: ${childRef.value.getCount()}`
+    childRef.value.increment();
+    result.value = `count: ${childRef.value.getCount()}`;
   }
 }
 </script>

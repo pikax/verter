@@ -75,9 +75,7 @@ test.describe("Playground default template", () => {
     expect(filterCriticalErrors(errors)).toEqual([]);
   });
 
-  test("should render the preview with the default component", async ({
-    page,
-  }) => {
+  test("should render the preview with the default component", async ({ page }) => {
     await page.goto("/");
     await page.waitForTimeout(4000);
 
@@ -92,9 +90,7 @@ test.describe("Playground default template", () => {
     await expect(button).toHaveText("Count: 0");
   });
 
-  test("should support reactivity - clicking button increments count", async ({
-    page,
-  }) => {
+  test("should support reactivity - clicking button increments count", async ({ page }) => {
     const errors: string[] = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") {
@@ -122,9 +118,7 @@ test.describe("Playground default template", () => {
     expect(filterCriticalErrors(errors)).toEqual([]);
   });
 
-  test("should not have nextSibling errors during re-render", async ({
-    page,
-  }) => {
+  test("should not have nextSibling errors during re-render", async ({ page }) => {
     const errors: string[] = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") {
@@ -145,9 +139,7 @@ test.describe("Playground default template", () => {
     await button.click();
     await page.waitForTimeout(1000);
 
-    const nextSiblingErrors = errors.filter((e) =>
-      e.includes("nextSibling"),
-    );
+    const nextSiblingErrors = errors.filter((e) => e.includes("nextSibling"));
     expect(nextSiblingErrors).toEqual([]);
   });
 });
@@ -199,9 +191,7 @@ test.describe("Playground edge cases", () => {
   // @ai-generated - Regression: adding text after root element (creating multi-root)
   // must not cause "nextSibling" runtime error. The preview must properly unmount
   // the previous Vue app before mounting the new one.
-  test("multi-root template does not cause nextSibling error", async ({
-    page,
-  }) => {
+  test("multi-root template does not cause nextSibling error", async ({ page }) => {
     // Only capture errors after the final content is set
     const errors: string[] = [];
     let capturing = false;

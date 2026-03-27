@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import DeepLeaf from './DeepLeaf.vue'
+import DeepLeaf from "./DeepLeaf.vue";
 </script>
 
 <template>

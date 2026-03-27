@@ -31,6 +31,7 @@ Triggered via `/lsp-benchmark` PR comment or manual dispatch. Runs the Verter-vs
 Tests Verter against real-world open-source Vue projects to validate compatibility.
 
 **Trigger methods:**
+
 - **Manual** (`workflow_dispatch`) -- select source (artifact/npm) and projects via the Actions tab
 - **After Release** (`workflow_call`) -- automatically triggered after successful npm publish
 - **PR Comment** -- comment `/integration` on any PR (requires write permission)
@@ -39,6 +40,7 @@ Tests Verter against real-world open-source Vue projects to validate compatibili
 Vuetify, PrimeVue, Element Plus, Shadcn-vue, and other popular Vue projects.
 
 **Test process for each project:**
+
 1. **Baseline** -- build and test with the standard Vue compiler, record timing
 2. **Verter** -- replace `vue()` with `verter()` in Vite config, rebuild and retest
 3. **Compare** -- generate performance and compatibility comparison report
@@ -66,17 +68,18 @@ validate
 
 **Native build matrix:**
 
-| Target | Runner | Method |
-|--------|--------|--------|
-| `x86_64-unknown-linux-gnu` | ubuntu-latest | Direct |
-| `x86_64-unknown-linux-musl` | ubuntu-latest | Cross-compile |
-| `aarch64-unknown-linux-gnu` | ubuntu-latest | Cross-compile |
-| `aarch64-unknown-linux-musl` | ubuntu-latest | Cross-compile |
-| `x86_64-apple-darwin` | macos-13 | Direct |
-| `aarch64-apple-darwin` | macos-latest | Direct |
-| `x86_64-pc-windows-msvc` | windows-latest | Direct |
+| Target                       | Runner         | Method        |
+| ---------------------------- | -------------- | ------------- |
+| `x86_64-unknown-linux-gnu`   | ubuntu-latest  | Direct        |
+| `x86_64-unknown-linux-musl`  | ubuntu-latest  | Cross-compile |
+| `aarch64-unknown-linux-gnu`  | ubuntu-latest  | Cross-compile |
+| `aarch64-unknown-linux-musl` | ubuntu-latest  | Cross-compile |
+| `x86_64-apple-darwin`        | macos-13       | Direct        |
+| `aarch64-apple-darwin`       | macos-latest   | Direct        |
+| `x86_64-pc-windows-msvc`     | windows-latest | Direct        |
 
 **Publishing process:**
+
 1. **Rust crates** -- only `verter_core` is published to crates.io (binding crates are consumed via npm)
 2. **npm platform packages** -- published first (e.g., `@verter/native-darwin-arm64`)
 3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`
@@ -101,12 +104,12 @@ Triggered on push to `main` when `crates/**`, `packages/wasm/**`, or `packages/p
 alpha -> beta -> rc -> stable
 ```
 
-| Version Pattern | npm dist-tag | GitHub Release | Example |
-|----------------|-------------|----------------|---------|
-| `X.Y.Z-alpha.N` | `alpha` | prerelease | `0.0.1-alpha.1` |
-| `X.Y.Z-beta.N` | `beta` | prerelease | `0.0.1-beta.1` |
-| `X.Y.Z-rc.N` | `rc` | prerelease | `0.0.1-rc.1` |
-| `X.Y.Z` | `latest` | release | `1.0.0` |
+| Version Pattern | npm dist-tag | GitHub Release | Example         |
+| --------------- | ------------ | -------------- | --------------- |
+| `X.Y.Z-alpha.N` | `alpha`      | prerelease     | `0.0.1-alpha.1` |
+| `X.Y.Z-beta.N`  | `beta`       | prerelease     | `0.0.1-beta.1`  |
+| `X.Y.Z-rc.N`    | `rc`         | prerelease     | `0.0.1-rc.1`    |
+| `X.Y.Z`         | `latest`     | release        | `1.0.0`         |
 
 Pre-releases are published with `--tag <channel>` to avoid polluting the `latest` dist-tag.
 
@@ -137,21 +140,21 @@ native -> lsp -> wasm -> ts packages
 
 **Common rebuild sequences:**
 
-| What changed | Rebuild commands |
-|---|---|
-| Rust crate (`verter_core`) | `pnpm run build:native` then rebuild downstream consumers |
-| Rust LSP (`verter_lsp`) | `pnpm run build:lsp` then restart VS Code extension host |
-| Unplugin (`packages/unplugin`) | `pnpm run build:ts` |
-| WASM (for playground) | `pnpm run build:wasm` |
-| Everything | `pnpm build` (runs all in correct order) |
+| What changed                   | Rebuild commands                                          |
+| ------------------------------ | --------------------------------------------------------- |
+| Rust crate (`verter_core`)     | `pnpm run build:native` then rebuild downstream consumers |
+| Rust LSP (`verter_lsp`)        | `pnpm run build:lsp` then restart VS Code extension host  |
+| Unplugin (`packages/unplugin`) | `pnpm run build:ts`                                       |
+| WASM (for playground)          | `pnpm run build:wasm`                                     |
+| Everything                     | `pnpm build` (runs all in correct order)                  |
 
 ## Required GitHub Secrets
 
-| Secret | Purpose |
-|--------|---------|
-| `NETLIFY_AUTH_TOKEN` | Netlify playground deployment |
-| `NETLIFY_SITE_ID` | Netlify site identification |
-| `CARGO_REGISTRY_TOKEN` | crates.io publishing |
-| `NPM_TOKEN` | npm publishing (with `--provenance`) |
+| Secret                 | Purpose                              |
+| ---------------------- | ------------------------------------ |
+| `NETLIFY_AUTH_TOKEN`   | Netlify playground deployment        |
+| `NETLIFY_SITE_ID`      | Netlify site identification          |
+| `CARGO_REGISTRY_TOKEN` | crates.io publishing                 |
+| `NPM_TOKEN`            | npm publishing (with `--provenance`) |
 
 The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightly asset management, and PR comments.

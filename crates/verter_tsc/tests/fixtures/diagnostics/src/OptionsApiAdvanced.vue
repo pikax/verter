@@ -1,33 +1,37 @@
 <script lang="ts">
-import { defineComponent } from 'vue'
+import { defineComponent } from "vue";
 
 export default defineComponent({
   props: {
-    initialCount: { type: Number, required: true }
+    initialCount: { type: Number, required: true },
   },
   data() {
-    return { rawCount: 0 }
+    return { rawCount: 0 };
   },
   computed: {
     doubled: {
-      get(): number { return this.rawCount * 2 },
-      set(v: number) { this.rawCount = v / 2 }
-    }
+      get(): number {
+        return this.rawCount * 2;
+      },
+      set(v: number) {
+        this.rawCount = v / 2;
+      },
+    },
   },
   methods: {
     increment() {
-      this.rawCount += this.initialCount
+      this.rawCount += this.initialCount;
     },
     badAssign() {
-      const x: string = this.doubled  // TS2322: number not assignable to string
-      return x
-    }
+      const x: string = this.doubled; // TS2322: number not assignable to string
+      return x;
+    },
   },
   mounted() {
-    this.increment()
-    this.doubled = 10
-  }
-})
+    this.increment();
+    this.doubled = 10;
+  },
+});
 </script>
 <template>
   <div>{{ doubled }}</div>

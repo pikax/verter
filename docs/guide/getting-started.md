@@ -38,12 +38,12 @@ Replace `@vitejs/plugin-vue` with Verter in your Vite config:
 
 ```ts
 // vite.config.ts
-import { defineConfig } from 'vite'
-import VerterVite from '@verter/unplugin/vite'
+import { defineConfig } from "vite";
+import VerterVite from "@verter/unplugin/vite";
 
 export default defineConfig({
   plugins: [VerterVite()],
-})
+});
 ```
 
 You can remove `@vitejs/plugin-vue` from your dependencies if you no longer need it:

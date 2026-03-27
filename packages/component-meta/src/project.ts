@@ -45,7 +45,7 @@ import type {
 
 export type TypeExpansionBackend = "verter" | "tsserver" | "tsgo" | "auto";
 
-export type MetaProjectConfig =
+export type ComponentMetaSessionConfig =
   | {
       root: string;
       tsconfig: string;
@@ -199,8 +199,6 @@ export class ComponentMetaSession {
   }
 }
 
-export const MetaProject = ComponentMetaSession;
-
 function loadNative(): any {
   const _require = typeof require === "function" ? require : createRequire(import.meta.url);
   return _require("@verter/native");
@@ -216,7 +214,7 @@ function hashTsconfigConfig(tsconfigPath: string): string {
   }
 }
 
-function buildEngineKeyInput(options: MetaProjectConfig): EngineKeyInput {
+function buildEngineKeyInput(options: ComponentMetaSessionConfig): EngineKeyInput {
   const root = normalizePath(resolve(options.root));
   const tsconfigPath = options.tsconfig ? normalizePath(resolve(options.tsconfig)) : undefined;
 
@@ -234,7 +232,7 @@ function buildEngineKeyInput(options: MetaProjectConfig): EngineKeyInput {
 }
 
 async function openComponentMetaSessionInternal(
-  options: MetaProjectConfig,
+  options: ComponentMetaSessionConfig,
   checkerOptions?: MetaCheckerOptions,
 ): Promise<ComponentMetaSession> {
   const runtime = getMetaRuntime();
@@ -279,18 +277,6 @@ async function openComponentMetaSessionInternal(
   return new ComponentMetaSession(session, root, checkerOptions, workspace, runtime);
 }
 
-// ---------------------------------------------------------------------------
-// New session-based API (plan target)
-// ---------------------------------------------------------------------------
-
-export interface ComponentMetaSessionConfig {
-  root: string;
-  tsconfig?: string;
-  config?: Record<string, unknown>;
-  backend?: "napi" | "wasm";
-  typeExpansionBackend?: TypeExpansionBackend;
-}
-
 /**
  * Open a component-meta session with explicit backend selection.
  *
@@ -301,7 +287,7 @@ export async function openComponentMetaSession(
   config: ComponentMetaSessionConfig,
   checkerOptions?: MetaCheckerOptions,
 ): Promise<ComponentMetaSession> {
-  const metaConfig: MetaProjectConfig = config.tsconfig
+  const normalizedConfig: ComponentMetaSessionConfig = config.tsconfig
     ? {
         root: config.root,
         tsconfig: config.tsconfig,
@@ -314,23 +300,13 @@ export async function openComponentMetaSession(
         backend: config.backend,
         typeExpansionBackend: config.typeExpansionBackend,
       };
-  return openComponentMetaSessionInternal(metaConfig, checkerOptions);
+  return openComponentMetaSessionInternal(normalizedConfig, checkerOptions);
 }
 
-/** @deprecated Use openComponentMetaSession(). */
-export async function openMetaProject(
-  options: MetaProjectConfig,
-  checkerOptions?: MetaCheckerOptions,
-): Promise<ComponentMetaSession> {
-  return openComponentMetaSessionInternal(options, checkerOptions);
-}
-
-export function evictMetaProject(options: MetaProjectConfig): void {
+export function evictComponentMetaSession(options: ComponentMetaSessionConfig): void {
   const key = computeEngineKey(buildEngineKeyInput(options));
   getMetaRuntime().evictEngine(key);
 }
-
-export const evictComponentMetaSession = evictMetaProject;
 
 export function shutdownMetaRuntime(): void {
   _shutdownMetaRuntime();

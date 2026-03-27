@@ -68,8 +68,12 @@ const allDiagnostics = computed<DiagnosticItem[]>(() => {
   return items;
 });
 
-const errorCount = computed(() => allDiagnostics.value.filter((d) => d.severity === "error").length);
-const warningCount = computed(() => allDiagnostics.value.filter((d) => d.severity === "warning").length);
+const errorCount = computed(
+  () => allDiagnostics.value.filter((d) => d.severity === "error").length,
+);
+const warningCount = computed(
+  () => allDiagnostics.value.filter((d) => d.severity === "warning").length,
+);
 const infoCount = computed(() => allDiagnostics.value.filter((d) => d.severity === "info").length);
 
 const groupedBySource = computed(() => {
@@ -135,8 +139,12 @@ function formatLocation(d: DiagnosticItem): string {
   <div class="diagnostics-panel">
     <div class="diag-toolbar">
       <span class="diag-summary">
-        <span v-if="errorCount > 0" class="count-error">{{ errorCount }} error{{ errorCount !== 1 ? "s" : "" }}</span>
-        <span v-if="warningCount > 0" class="count-warning">{{ warningCount }} warning{{ warningCount !== 1 ? "s" : "" }}</span>
+        <span v-if="errorCount > 0" class="count-error"
+          >{{ errorCount }} error{{ errorCount !== 1 ? "s" : "" }}</span
+        >
+        <span v-if="warningCount > 0" class="count-warning"
+          >{{ warningCount }} warning{{ warningCount !== 1 ? "s" : "" }}</span
+        >
         <span v-if="infoCount > 0" class="count-info">{{ infoCount }} info</span>
         <span v-if="allDiagnostics.length === 0" class="count-ok">No issues</span>
       </span>
@@ -146,11 +154,7 @@ function formatLocation(d: DiagnosticItem): string {
         <div class="empty-state">No diagnostics to display.</div>
       </template>
       <template v-else>
-        <div
-          v-for="(items, source) in groupedBySource"
-          :key="source"
-          class="diag-section"
-        >
+        <div v-for="(items, source) in groupedBySource" :key="source" class="diag-section">
           <div class="section-header">
             {{ sourceLabel(source as string) }}
             <span class="section-count">{{ items.length }}</span>
@@ -161,7 +165,9 @@ function formatLocation(d: DiagnosticItem): string {
             class="diag-item"
             :class="severityClass(d.severity)"
           >
-            <span class="diag-icon" :class="severityClass(d.severity)">{{ severityIcon(d.severity) }}</span>
+            <span class="diag-icon" :class="severityClass(d.severity)">{{
+              severityIcon(d.severity)
+            }}</span>
             <span class="diag-code">{{ d.code }}</span>
             <span class="diag-message">{{ d.message }}</span>
             <span v-if="d.spanStart != null" class="diag-location">{{ formatLocation(d) }}</span>

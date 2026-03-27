@@ -336,10 +336,7 @@ describe("store", () => {
       store.activeFilename = "App.vue";
       store.toggleLintRule("no-bare-strings-in-template");
       store.relint();
-      expect(relintFile).toHaveBeenCalledWith(
-        store.activeFile,
-        store.disabledRules,
-      );
+      expect(relintFile).toHaveBeenCalledWith(store.activeFile, store.disabledRules);
     });
 
     it("relint does not crash when no active file", () => {

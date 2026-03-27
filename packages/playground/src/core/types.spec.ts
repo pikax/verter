@@ -72,7 +72,7 @@ describe("File", () => {
       expect(new File("Component.tsx").isTS).toBe(true);
     });
 
-    it("returns true for .vue with lang=\"ts\" (double quotes)", () => {
+    it('returns true for .vue with lang="ts" (double quotes)', () => {
       const file = new File("App.vue", '<script setup lang="ts">\n</script>');
       expect(file.isTS).toBe(true);
     });
@@ -82,7 +82,7 @@ describe("File", () => {
       expect(file.isTS).toBe(true);
     });
 
-    it("returns true for .vue with lang=\"tsx\"", () => {
+    it('returns true for .vue with lang="tsx"', () => {
       const file = new File("App.vue", '<script setup lang="tsx">\n</script>');
       expect(file.isTS).toBe(true);
     });
@@ -92,7 +92,7 @@ describe("File", () => {
       expect(file.isTS).toBe(false);
     });
 
-    it("returns false for .vue with lang=\"js\"", () => {
+    it('returns false for .vue with lang="js"', () => {
       const file = new File("App.vue", '<script setup lang="js">\n</script>');
       expect(file.isTS).toBe(false);
     });
@@ -102,7 +102,7 @@ describe("File", () => {
       expect(file.isTS).toBe(false);
     });
 
-    it("returns true for .vue with script (no setup) and lang=\"ts\"", () => {
+    it('returns true for .vue with script (no setup) and lang="ts"', () => {
       const file = new File("App.vue", '<script lang="ts">\nexport default {}\n</script>');
       expect(file.isTS).toBe(true);
     });

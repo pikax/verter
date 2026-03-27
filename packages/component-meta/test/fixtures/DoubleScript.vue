@@ -1,7 +1,10 @@
 <script lang="ts">
-export interface SharedProps { shared: boolean; count: number }
+export interface SharedProps {
+  shared: boolean;
+  count: number;
+}
 </script>
 <script setup lang="ts">
-defineProps<SharedProps>()
+defineProps<SharedProps>();
 </script>
 <template><div /></template>

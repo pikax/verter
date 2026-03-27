@@ -1,10 +1,10 @@
 {
   "name": "@verter/playground",
   "version": "0.0.1-beta.1",
+  "private": true,
   "description": "Online playground for Verter Vue compiler",
   "license": "MIT",
   "author": "pikax",
-  "private": true,
   "type": "module",
   "scripts": {
     "dev": "node scripts/fetch-tsgo.mjs && vite",

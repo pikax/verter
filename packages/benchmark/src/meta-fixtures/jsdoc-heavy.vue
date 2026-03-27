@@ -11,17 +11,17 @@
 /** Column definition for the data table. */
 interface Column {
   /** Unique key for the column */
-  key: string
+  key: string;
   /** Display label */
-  label: string
+  label: string;
   /** Whether the column is sortable */
-  sortable?: boolean
+  sortable?: boolean;
   /** Column width in pixels */
-  width?: number
+  width?: number;
 }
 
 /** Sort direction */
-type SortDir = 'asc' | 'desc' | 'none'
+type SortDir = "asc" | "desc" | "none";
 
 /**
  * @property columns - Column definitions
@@ -33,18 +33,18 @@ type SortDir = 'asc' | 'desc' | 'none'
  */
 const props = defineProps<{
   /** Table column definitions. */
-  columns: Column[]
+  columns: Column[];
   /** Table row data. */
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[];
   /** Number of rows per page. @default 10 */
-  pageSize?: number
+  pageSize?: number;
   /** Current page number (1-based). */
-  currentPage?: number
+  currentPage?: number;
   /** Column key to sort by. */
-  sortBy?: string
+  sortBy?: string;
   /** Whether the table is in loading state. */
-  loading?: boolean
-}>()
+  loading?: boolean;
+}>();
 
 /**
  * @event sort - Fired when a column header is clicked for sorting.
@@ -54,14 +54,14 @@ const props = defineProps<{
  */
 const emit = defineEmits<{
   /** Emitted when sorting changes. */
-  sort: [column: string, direction: SortDir]
+  sort: [column: string, direction: SortDir];
   /** Emitted when page changes. */
-  'page-change': [page: number]
+  "page-change": [page: number];
   /** Emitted when a row is clicked. */
-  'row-click': [row: Record<string, unknown>, index: number]
+  "row-click": [row: Record<string, unknown>, index: number];
   /** Emitted when selection changes. */
-  select: [selectedRows: Record<string, unknown>[]]
-}>()
+  select: [selectedRows: Record<string, unknown>[]];
+}>();
 
 /**
  * @slot header - Custom header content above the table.
@@ -69,21 +69,21 @@ const emit = defineEmits<{
  */
 defineSlots<{
   /** Custom header content. */
-  header(props: { totalRows: number; currentPage: number }): any
+  header(props: { totalRows: number; currentPage: number }): any;
   /** Custom cell content. */
-  cell(props: { column: Column; row: Record<string, unknown>; value: unknown }): any
-}>()
+  cell(props: { column: Column; row: Record<string, unknown>; value: unknown }): any;
+}>();
 
-const page = defineModel<number>('currentPage', { default: 1 })
+const page = defineModel<number>("currentPage", { default: 1 });
 
 /** Refresh the table data. */
 function refresh() {
-  emit('page-change', page.value)
+  emit("page-change", page.value);
 }
 
 /** Select all visible rows. */
 function selectAll() {
-  emit('select', props.rows)
+  emit("select", props.rows);
 }
 
 defineExpose({
@@ -91,7 +91,7 @@ defineExpose({
   refresh,
   /** Select all currently visible rows. */
   selectAll,
-})
+});
 </script>
 
 <template>
@@ -111,11 +111,7 @@ defineExpose({
         </tr>
       </thead>
       <tbody>
-        <tr
-          v-for="(row, i) in rows"
-          :key="i"
-          @click="emit('row-click', row, i)"
-        >
+        <tr v-for="(row, i) in rows" :key="i" @click="emit('row-click', row, i)">
           <td v-for="col in columns" :key="col.key">
             <slot name="cell" :column="col" :row="row" :value="row[col.key]">
               {{ row[col.key] }}

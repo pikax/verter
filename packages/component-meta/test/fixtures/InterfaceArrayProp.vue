@@ -1,13 +1,13 @@
 <script setup lang="ts">
 interface Book {
-  title: string
-  isbn: string
-  publishedYear: number
+  title: string;
+  isbn: string;
+  publishedYear: number;
 }
 
 defineProps<{
-  books: Book[]
-}>()
+  books: Book[];
+}>();
 </script>
 
 <template><div /></template>

@@ -25,14 +25,14 @@ playground E2E tests
 
 ## Common Rebuild Sequences
 
-| What changed | Rebuild commands (in order) |
-|---|---|
-| Rust crate (`verter_core`) | `pnpm run build:native` → rebuild any downstream consumer |
-| Rust LSP (`verter_lsp`) | `pnpm run build:lsp` (or `build:lsp:release` for optimized) → restart VS Code extension host |
-| Unplugin (`packages/unplugin`) | `pnpm run build:ts` (or just rebuild unplugin) |
+| What changed                          | Rebuild commands (in order)                                                                            |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Rust crate (`verter_core`)            | `pnpm run build:native` → rebuild any downstream consumer                                              |
+| Rust LSP (`verter_lsp`)               | `pnpm run build:lsp` (or `build:lsp:release` for optimized) → restart VS Code extension host           |
+| Unplugin (`packages/unplugin`)        | `pnpm run build:ts` (or just rebuild unplugin)                                                         |
 | Playground after Rust/unplugin change | `pnpm run build:native` → `cd packages/playground && rm -rf dist node_modules/.vite && npx vite build` |
-| WASM (for playground browser editor) | `pnpm run build:wasm` |
-| Everything | `pnpm build` (runs native → lsp → wasm → ts in correct order) |
+| WASM (for playground browser editor)  | `pnpm run build:wasm`                                                                                  |
+| Everything                            | `pnpm build` (runs native → lsp → wasm → ts in correct order)                                          |
 
 ## Key Details
 
@@ -109,6 +109,7 @@ verter-mcp --transport http --project-root /path/to/vue-project
 ```
 
 MCP config files are checked in at:
+
 - `mcp/verter.mcp.json` (stdio)
 - `mcp/verter-http.mcp.json` (HTTP)
 

@@ -4,7 +4,7 @@
 // Single line comment before import
 import { ref } from "vue"; // trailing comment
 
-/* 
+/*
   Multi-line comment
   before code
 */

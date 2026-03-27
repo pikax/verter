@@ -30,8 +30,8 @@ Add the plugin to your `tsconfig.json` or `jsconfig.json`:
 ```jsonc
 {
   "compilerOptions": {
-    "plugins": [{ "name": "@verter/typescript-plugin" }]
-  }
+    "plugins": [{ "name": "@verter/typescript-plugin" }],
+  },
 }
 ```
 
@@ -43,10 +43,10 @@ Enable the test-aware surface explicitly when you want `.vue` imports in test fi
     "plugins": [
       {
         "name": "@verter/typescript-plugin",
-        "exposeBindingsTesting": true
-      }
-    ]
-  }
+        "exposeBindingsTesting": true,
+      },
+    ],
+  },
 }
 ```
 
@@ -74,7 +74,7 @@ Use this setting to opt into the testing surface from the editor:
 
 ```jsonc
 {
-  "verter.experimental.exposeBindingsTesting": true
+  "verter.experimental.exposeBindingsTesting": true,
 }
 ```
 

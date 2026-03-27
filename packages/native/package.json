@@ -2,14 +2,20 @@
   "name": "@verter/native",
   "version": "0.0.1-beta.1",
   "description": "Native Node.js bindings for Verter Vue compiler",
-  "keywords": ["vue", "compiler", "native", "napi", "bindings"],
+  "keywords": [
+    "bindings",
+    "compiler",
+    "napi",
+    "native",
+    "vue"
+  ],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
+  "author": "pikax",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "pikax",
-  "homepage": "https://verterjs.dev/",
   "files": [
     "index.js",
     "host-types.ts",

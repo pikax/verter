@@ -1,34 +1,32 @@
 <script setup lang="ts">
-import { ref, computed, reactive } from 'vue'
-import MyComponent from './MyComponent.vue'
+import { ref, computed, reactive } from "vue";
+import MyComponent from "./MyComponent.vue";
 
-const title = ref('Dashboard')
+const title = ref("Dashboard");
 const items = ref([
-  { id: 1, name: 'Item 1', active: true },
-  { id: 2, name: 'Item 2', active: false },
-  { id: 3, name: 'Item 3', active: true },
-])
-const filter = ref('')
-const count = computed(() => items.value.length)
-const state = reactive({ loading: false, error: null })
+  { id: 1, name: "Item 1", active: true },
+  { id: 2, name: "Item 2", active: false },
+  { id: 3, name: "Item 3", active: true },
+]);
+const filter = ref("");
+const count = computed(() => items.value.length);
+const state = reactive({ loading: false, error: null });
 
 const filteredItems = computed(() =>
-  items.value.filter(item =>
-    item.name.toLowerCase().includes(filter.value.toLowerCase())
-  )
-)
+  items.value.filter((item) => item.name.toLowerCase().includes(filter.value.toLowerCase())),
+);
 
 function addItem() {
-  items.value.push({ id: Date.now(), name: `Item ${count.value + 1}`, active: true })
+  items.value.push({ id: Date.now(), name: `Item ${count.value + 1}`, active: true });
 }
 
 function removeItem(id: number) {
-  items.value = items.value.filter(item => item.id !== id)
+  items.value = items.value.filter((item) => item.id !== id);
 }
 
 function toggleItem(id: number) {
-  const item = items.value.find(i => i.id === id)
-  if (item) item.active = !item.active
+  const item = items.value.find((i) => i.id === id);
+  if (item) item.active = !item.active;
 }
 </script>
 
@@ -42,12 +40,7 @@ function toggleItem(id: number) {
     <div v-if="state.loading" class="loading">Loading...</div>
     <div v-else-if="state.error" class="error">{{ state.error }}</div>
     <div v-else class="content">
-      <input
-        v-model="filter"
-        type="text"
-        placeholder="Filter items..."
-        class="filter-input"
-      />
+      <input v-model="filter" type="text" placeholder="Filter items..." class="filter-input" />
 
       <ul class="item-list">
         <li
@@ -59,7 +52,7 @@ function toggleItem(id: number) {
           <span class="item-name">{{ item.name }}</span>
           <div class="item-actions">
             <button @click="toggleItem(item.id)" :disabled="state.loading">
-              {{ item.active ? 'Deactivate' : 'Activate' }}
+              {{ item.active ? "Deactivate" : "Activate" }}
             </button>
             <button @click="removeItem(item.id)" class="danger">Remove</button>
           </div>
@@ -100,8 +93,16 @@ function toggleItem(id: number) {
   padding: 10px;
   border-bottom: 1px solid #eee;
 }
-.item.active { background: #e8f5e9; }
-.item.inactive { opacity: 0.5; }
-.danger { color: red; }
-.primary { color: blue; }
+.item.active {
+  background: #e8f5e9;
+}
+.item.inactive {
+  opacity: 0.5;
+}
+.danger {
+  color: red;
+}
+.primary {
+  color: blue;
+}
 </style>

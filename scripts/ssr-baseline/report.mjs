@@ -13,13 +13,11 @@ import fs from "node:fs";
 const PATTERN_RULES = [
   {
     name: "v-for rendering",
-    test: (vue, verter) =>
-      has(vue, "_ssrRenderList") !== has(verter, "_ssrRenderList"),
+    test: (vue, verter) => has(vue, "_ssrRenderList") !== has(verter, "_ssrRenderList"),
   },
   {
     name: "Component rendering",
-    test: (vue, verter) =>
-      has(vue, "_ssrRenderComponent") !== has(verter, "_ssrRenderComponent"),
+    test: (vue, verter) => has(vue, "_ssrRenderComponent") !== has(verter, "_ssrRenderComponent"),
   },
   {
     name: "Slot rendering",
@@ -30,24 +28,21 @@ const PATTERN_RULES = [
   {
     name: "v-show handling",
     test: (vue, verter) =>
-      (has(vue, 'display') || has(vue, "v-show")) !==
-      (has(verter, 'display') || has(verter, "v-show")),
+      (has(vue, "display") || has(vue, "v-show")) !==
+      (has(verter, "display") || has(verter, "v-show")),
   },
   {
     name: "Teleport SSR",
-    test: (vue, verter) =>
-      has(vue, "_ssrRenderTeleport") !== has(verter, "_ssrRenderTeleport"),
+    test: (vue, verter) => has(vue, "_ssrRenderTeleport") !== has(verter, "_ssrRenderTeleport"),
   },
   {
     name: "v-model SSR",
     test: (vue, verter) =>
-      has(vue, "_ssrGetDynamicModelProps") !==
-      has(verter, "_ssrGetDynamicModelProps"),
+      has(vue, "_ssrGetDynamicModelProps") !== has(verter, "_ssrGetDynamicModelProps"),
   },
   {
     name: "Suspense SSR",
-    test: (vue, verter) =>
-      has(vue, "_ssrRenderSuspense") !== has(verter, "_ssrRenderSuspense"),
+    test: (vue, verter) => has(vue, "_ssrRenderSuspense") !== has(verter, "_ssrRenderSuspense"),
   },
   {
     name: "Attribute rendering",
@@ -87,30 +82,19 @@ export function detectPattern(vue, verter) {
  * @param {number} elapsed - Elapsed time in seconds
  */
 export function printSummary(stats, mismatches, errors, elapsed) {
-  const pct = (n) =>
-    stats.total > 0 ? ((n / stats.total) * 100).toFixed(1) : "0.0";
+  const pct = (n) => (stats.total > 0 ? ((n / stats.total) * 100).toFixed(1) : "0.0");
 
   console.log(`\nSSR Baseline Comparison`);
   console.log("=".repeat(50));
   console.log(`Total files:       ${fmt(stats.total)}`);
-  console.log(
-    `Matches:           ${fmt(stats.matches).padEnd(8)} (${pct(stats.matches)}%)`,
-  );
-  console.log(
-    `Mismatches:        ${fmt(stats.mismatches).padEnd(8)} (${pct(stats.mismatches)}%)`,
-  );
-  console.log(
-    `Vue errors:        ${fmt(stats.vueErrors).padEnd(8)} (${pct(stats.vueErrors)}%)`,
-  );
+  console.log(`Matches:           ${fmt(stats.matches).padEnd(8)} (${pct(stats.matches)}%)`);
+  console.log(`Mismatches:        ${fmt(stats.mismatches).padEnd(8)} (${pct(stats.mismatches)}%)`);
+  console.log(`Vue errors:        ${fmt(stats.vueErrors).padEnd(8)} (${pct(stats.vueErrors)}%)`);
   console.log(
     `Verter errors:     ${fmt(stats.verterErrors).padEnd(8)} (${pct(stats.verterErrors)}%)`,
   );
-  console.log(
-    `Both errors:       ${fmt(stats.bothErrors).padEnd(8)} (${pct(stats.bothErrors)}%)`,
-  );
-  console.log(
-    `No template:       ${fmt(stats.noTemplate).padEnd(8)} (${pct(stats.noTemplate)}%)`,
-  );
+  console.log(`Both errors:       ${fmt(stats.bothErrors).padEnd(8)} (${pct(stats.bothErrors)}%)`);
+  console.log(`No template:       ${fmt(stats.noTemplate).padEnd(8)} (${pct(stats.noTemplate)}%)`);
   console.log(`Time:              ${elapsed}s`);
 
   // Pattern breakdown
@@ -146,8 +130,7 @@ function printErrorGroups(label, errorList) {
   for (const [msg, count] of sorted.slice(0, 15)) {
     console.log(`  (${count}x) ${msg}`);
   }
-  if (sorted.length > 15)
-    console.log(`  ... and ${sorted.length - 15} more groups`);
+  if (sorted.length > 15) console.log(`  ... and ${sorted.length - 15} more groups`);
 }
 
 function fmt(n) {

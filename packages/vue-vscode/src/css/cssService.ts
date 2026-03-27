@@ -108,13 +108,8 @@ export class CssService {
     line: number,
     character: number,
   ): Promise<CompletionList | null> {
-    const { block, service, cssDoc } = await this.prepareAt(
-      uri,
-      source,
-      version,
-      line,
-      character,
-    ) ?? {};
+    const { block, service, cssDoc } =
+      (await this.prepareAt(uri, source, version, line, character)) ?? {};
     if (!block || !service || !cssDoc) return null;
 
     const cssPos = this.toCssPosition(block, line, character);
@@ -152,13 +147,8 @@ export class CssService {
     line: number,
     character: number,
   ): Promise<Hover | null> {
-    const { block, service, cssDoc } = await this.prepareAt(
-      uri,
-      source,
-      version,
-      line,
-      character,
-    ) ?? {};
+    const { block, service, cssDoc } =
+      (await this.prepareAt(uri, source, version, line, character)) ?? {};
     if (!block || !service || !cssDoc) return null;
 
     const cssPos = this.toCssPosition(block, line, character);
@@ -243,13 +233,8 @@ export class CssService {
     line: number,
     character: number,
   ): Promise<ColorPresentation[]> {
-    const { block, service, cssDoc } = await this.prepareAt(
-      uri,
-      source,
-      version,
-      line,
-      character,
-    ) ?? {};
+    const { block, service, cssDoc } =
+      (await this.prepareAt(uri, source, version, line, character)) ?? {};
     if (!block || !service || !cssDoc) return [];
 
     const stylesheet = service.parseStylesheet(cssDoc);
@@ -269,13 +254,8 @@ export class CssService {
     line: number,
     character: number,
   ): Promise<DocumentHighlight[]> {
-    const { block, service, cssDoc } = await this.prepareAt(
-      uri,
-      source,
-      version,
-      line,
-      character,
-    ) ?? {};
+    const { block, service, cssDoc } =
+      (await this.prepareAt(uri, source, version, line, character)) ?? {};
     if (!block || !service || !cssDoc) return [];
 
     const cssPos = this.toCssPosition(block, line, character);
@@ -346,12 +326,7 @@ export class CssService {
     if (block.lang === "sass" || block.lang === "stylus") {
       const transpiled = entry.transpiled.get(block.index);
       if (!transpiled) return null;
-      return TextDocument.create(
-        `${sfcUri}.style.${block.index}.css`,
-        "css",
-        1,
-        transpiled.css,
-      );
+      return TextDocument.create(`${sfcUri}.style.${block.index}.css`, "css", 1, transpiled.css);
     }
 
     // For direct languages (css, scss, less, postcss), use virtual file content.
@@ -361,17 +336,12 @@ export class CssService {
     const vf = entry.virtualFiles.get(block.index);
     // Use virtual file content only if it's non-empty and has the correct language.
     // Empty code with lang "js" indicates a failed compilation (MissingVirtualNode).
-    const code = (vf?.code)
+    const code = vf?.code
       ? vf.code
       : entry.source.slice(block.contentStartOffset, block.contentEndOffset);
 
     const langId = block.lang === "postcss" ? "css" : block.lang;
-    return TextDocument.create(
-      `${sfcUri}.style.${block.index}.${langId}`,
-      langId,
-      1,
-      code,
-    );
+    return TextDocument.create(`${sfcUri}.style.${block.index}.${langId}`, langId, 1, code);
   }
 
   /**
@@ -383,8 +353,7 @@ export class CssService {
     sfcChar: number,
   ): { line: number; character: number } {
     const cssLine = sfcLine - block.contentStartLine;
-    const cssChar =
-      cssLine === 0 ? sfcChar - block.contentStartColumn : sfcChar;
+    const cssChar = cssLine === 0 ? sfcChar - block.contentStartColumn : sfcChar;
     return { line: cssLine, character: cssChar };
   }
 
@@ -406,8 +375,7 @@ export class CssService {
     pos: { line: number; character: number },
   ): { line: number; character: number } {
     const sfcLine = pos.line + block.contentStartLine;
-    const sfcChar =
-      pos.line === 0 ? pos.character + block.contentStartColumn : pos.character;
+    const sfcChar = pos.line === 0 ? pos.character + block.contentStartColumn : pos.character;
     return { line: sfcLine, character: sfcChar };
   }
 
@@ -415,11 +383,7 @@ export class CssService {
    * Ensure cache is up to date for the given document.
    * Fetches virtual files from the LSP and transpiles preprocessors as needed.
    */
-  private async ensureCache(
-    uri: string,
-    source: string,
-    version: number,
-  ): Promise<DocumentCache> {
+  private async ensureCache(uri: string, source: string, version: number): Promise<DocumentCache> {
     const existing = this.cache.get(uri);
     if (existing && existing.version === version) {
       return existing;
@@ -465,12 +429,7 @@ export class CssService {
       const vf = virtualFiles.get(block.index);
       if (!vf) continue;
 
-      const result = await transpile(
-        vf.code,
-        block.lang,
-        uri,
-        this.preprocessors,
-      );
+      const result = await transpile(vf.code, block.lang, uri, this.preprocessors);
       if (result) {
         transpiled.set(block.index, result);
 
@@ -480,13 +439,16 @@ export class CssService {
         // Emit an inline diagnostic on the lang="..." attribute
         if (block.langAttributeRange) {
           const range = new vscode.Range(
-            new vscode.Position(block.langAttributeRange.startLine, block.langAttributeRange.startCol),
+            new vscode.Position(
+              block.langAttributeRange.startLine,
+              block.langAttributeRange.startCol,
+            ),
             new vscode.Position(block.langAttributeRange.endLine, block.langAttributeRange.endCol),
           );
           const diag = new vscode.Diagnostic(
             range,
             `"${block.lang}" is not installed. CSS intellisense for <style lang="${block.lang}"> ` +
-            `requires "${block.lang}" as a project dependency.`,
+              `requires "${block.lang}" as a project dependency.`,
             vscode.DiagnosticSeverity.Error,
           );
           diag.source = "verter";
@@ -498,8 +460,8 @@ export class CssService {
           this.warnedMissing.add(block.lang);
           vscode.window.showWarningMessage(
             `Verter: "${block.lang}" is not installed in the workspace. ` +
-            `CSS intellisense for <style lang="${block.lang}"> blocks requires ` +
-            `"${block.lang}" to be installed as a project dependency.`,
+              `CSS intellisense for <style lang="${block.lang}"> blocks requires ` +
+              `"${block.lang}" to be installed as a project dependency.`,
           );
         }
       }
@@ -541,9 +503,7 @@ export class CssService {
           {
             index,
             code: result.css,
-            sourceMap: result.sourceMap
-              ? JSON.stringify(result.sourceMap)
-              : undefined,
+            sourceMap: result.sourceMap ? JSON.stringify(result.sourceMap) : undefined,
           },
         ],
       });

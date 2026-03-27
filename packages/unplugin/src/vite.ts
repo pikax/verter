@@ -19,9 +19,7 @@ export { parseVueRequest } from "./core/utils";
  * plugin (e.g., `unplugin-vue-macros`) work correctly. Previous versions
  * returned `[mainPlugin, compatPlugin]` which broke VueMacros.
  */
-export default function verterVitePlugin(
-  options?: VerterPluginOptions,
-): Plugin {
+export default function verterVitePlugin(options?: VerterPluginOptions): Plugin {
   const mainPlugin = unplugin.vite(options) as Plugin;
 
   // Rename to match @vitejs/plugin-vue — we are the drop-in replacement

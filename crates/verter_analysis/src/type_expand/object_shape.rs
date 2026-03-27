@@ -458,15 +458,91 @@ fn normalize_member_type(
 fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
     match expr {
         TypeExpr::Parenthesized(inner) => should_normalize_member_type(inner, env),
+        TypeExpr::Array { element, .. } | TypeExpr::Rest(element) | TypeExpr::KeyOf(element) => {
+            should_normalize_member_type(element, env)
+        }
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| should_normalize_member_type(&element.ty, env)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types.iter().any(|ty| should_normalize_member_type(ty, env))
+        }
         TypeExpr::Ref {
             name,
             type_arguments,
         } => {
-            (type_arguments.is_empty() && env.type_bindings.contains_key(name.as_ref()))
+            (type_arguments.is_empty()
+                && (env.type_bindings.contains_key(name.as_ref())
+                    || env.type_symbols.contains_key(name.as_ref())))
                 || is_builtin_member_utility(name)
+                || type_arguments
+                    .iter()
+                    .any(|arg| should_normalize_member_type(arg, env))
         }
+        TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
+            ObjectMember::Property(prop) => should_normalize_member_type(&prop.ty, env),
+            ObjectMember::IndexSignature(sig) => {
+                should_normalize_member_type(&sig.key_type, env)
+                    || should_normalize_member_type(&sig.value_type, env)
+            }
+            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                should_normalize_function_member(func, env)
+            }
+            ObjectMember::Method(method) => should_normalize_function_member(&method.function, env),
+        }),
+        TypeExpr::Function(func) => should_normalize_function_member(func, env),
+        TypeExpr::IndexedAccess { object, index } => {
+            should_normalize_member_type(object, env) || should_normalize_member_type(index, env)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            should_normalize_member_type(check, env)
+                || should_normalize_member_type(extends, env)
+                || should_normalize_member_type(true_type, env)
+                || should_normalize_member_type(false_type, env)
+                || matches!(extends.as_ref(), TypeExpr::Infer { .. })
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            should_normalize_member_type(source, env)
+                || should_normalize_member_type(value, env)
+                || name_type
+                    .as_deref()
+                    .is_some_and(|ty| should_normalize_member_type(ty, env))
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|expr| should_normalize_member_type(expr, env)),
         _ => false,
     }
+}
+
+fn should_normalize_function_member(func: &crate::type_expr::FunctionExpr, env: &EvalEnv) -> bool {
+    func.parameters
+        .iter()
+        .any(|param| should_normalize_member_type(&param.ty, env))
+        || func
+            .return_type
+            .as_deref()
+            .is_some_and(|ty| should_normalize_member_type(ty, env))
+        || func.type_parameters.iter().any(|param| {
+            param
+                .constraint
+                .as_deref()
+                .is_some_and(|ty| should_normalize_member_type(ty, env))
+                || param
+                    .default
+                    .as_deref()
+                    .is_some_and(|ty| should_normalize_member_type(ty, env))
+        })
 }
 
 fn is_builtin_member_utility(name: &str) -> bool {

@@ -63,7 +63,9 @@ const KIND_MAP: Record<string, monaco.languages.CompletionItemKind> = {
   TypeParameter: monaco.languages.CompletionItemKind.TypeParameter,
 };
 
-function templateCompletionKind(kind: TemplateCompletion["kind"]): monaco.languages.CompletionItemKind {
+function templateCompletionKind(
+  kind: TemplateCompletion["kind"],
+): monaco.languages.CompletionItemKind {
   switch (kind) {
     case "tag":
       return monaco.languages.CompletionItemKind.Class;
@@ -133,7 +135,13 @@ export function registerLspProviders(
     const tsxCode = file.compiled.types;
     if (!tsxCode) return;
     const sourceMap = file.compiled.typesSourceMap || null;
-    await tsBridge.ensureTsxCurrent(file.filename, tsxCode, file.code, sourceMap, file.compiled.destructuredBlock);
+    await tsBridge.ensureTsxCurrent(
+      file.filename,
+      tsxCode,
+      file.code,
+      sourceMap,
+      file.compiled.destructuredBlock,
+    );
   }
 
   // Hover provider
@@ -402,7 +410,12 @@ export function registerLspProviders(
 
         const monacoActions: monaco.languages.CodeAction[] = actions.map((action) => ({
           title: action.title,
-          kind: action.kind === "quickfix" ? "quickfix" : action.kind === "refactor" ? "refactor" : "source",
+          kind:
+            action.kind === "quickfix"
+              ? "quickfix"
+              : action.kind === "refactor"
+                ? "refactor"
+                : "source",
           isPreferred: action.isPreferred,
           diagnostics: action.diagnosticRule
             ? [
@@ -512,9 +525,10 @@ export function registerLspProviders(
         const monacoHints: monaco.languages.InlayHint[] = hints.map((hint) => ({
           position: model.getPositionAt(hint.position),
           label: hint.label,
-          kind: hint.kind === "type"
-            ? monaco.languages.InlayHintKind.Type
-            : monaco.languages.InlayHintKind.Parameter,
+          kind:
+            hint.kind === "type"
+              ? monaco.languages.InlayHintKind.Type
+              : monaco.languages.InlayHintKind.Parameter,
         }));
 
         return { hints: monacoHints, dispose() {} };

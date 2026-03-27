@@ -81,8 +81,7 @@ describe("hydrateMacroTypeDependencies", () => {
     "loads extensionless imported defineProps dependencies before compilation",
     () => {
       const host = createHost();
-      const entryFile =
-        "/test/src/components/Popover/components/PopoverItem/PopoverItem.vue";
+      const entryFile = "/test/src/components/Popover/components/PopoverItem/PopoverItem.vue";
       const source = `
 <script setup lang="ts">
 import type { PopoverAction } from '../../types'
@@ -177,11 +176,7 @@ export interface Props {
       };
 
       host.upsert({ inputId: entryFile, source });
-      hydrateMacroTypeDependencies(
-        host,
-        entryFile,
-        createLayeredAccess(unsavedFiles, diskFiles),
-      );
+      hydrateMacroTypeDependencies(host, entryFile, createLayeredAccess(unsavedFiles, diskFiles));
 
       expect(() => compileMain(host, entryFile)).toThrow(/object-like props type/);
     },

@@ -12,8 +12,7 @@ import { execSync } from "child_process";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = resolve(__dirname, "../public").replace(/\\/g, "/");
 
-const WASM_EXEC_URL =
-  "https://raw.githubusercontent.com/golang/go/master/lib/wasm/wasm_exec.js";
+const WASM_EXEC_URL = "https://raw.githubusercontent.com/golang/go/master/lib/wasm/wasm_exec.js";
 
 if (!existsSync(publicDir)) {
   mkdirSync(publicDir, { recursive: true });

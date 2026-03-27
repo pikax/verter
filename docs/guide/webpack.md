@@ -28,22 +28,22 @@ yarn add -D @verter/unplugin
 
 ```js
 // webpack.config.js
-const VerterWebpack = require('@verter/unplugin/webpack').default
+const VerterWebpack = require("@verter/unplugin/webpack").default;
 
 module.exports = {
   plugins: [VerterWebpack()],
-}
+};
 ```
 
 Or with ES module syntax:
 
 ```ts
 // webpack.config.ts
-import VerterWebpack from '@verter/unplugin/webpack'
+import VerterWebpack from "@verter/unplugin/webpack";
 
 export default {
   plugins: [VerterWebpack()],
-}
+};
 ```
 
 ## Style Loaders
@@ -52,7 +52,7 @@ Verter handles Vue SFC compilation, but you still need standard webpack loaders 
 
 ```js
 // webpack.config.js
-const VerterWebpack = require('@verter/unplugin/webpack').default
+const VerterWebpack = require("@verter/unplugin/webpack").default;
 
 module.exports = {
   plugins: [VerterWebpack()],
@@ -60,20 +60,20 @@ module.exports = {
     rules: [
       {
         test: /\.css$/,
-        use: ['style-loader', 'css-loader'],
+        use: ["style-loader", "css-loader"],
       },
       // Add loaders for preprocessors as needed:
       {
         test: /\.scss$/,
-        use: ['style-loader', 'css-loader', 'sass-loader'],
+        use: ["style-loader", "css-loader", "sass-loader"],
       },
       {
         test: /\.less$/,
-        use: ['style-loader', 'css-loader', 'less-loader'],
+        use: ["style-loader", "css-loader", "less-loader"],
       },
     ],
   },
-}
+};
 ```
 
 ## HMR Behavior
@@ -91,7 +91,7 @@ All options from the [Vite integration guide](./vite#options) are available:
 - [`template`](./vite#template) -- Template compiler options
 
 ```js
-const VerterWebpack = require('@verter/unplugin/webpack').default
+const VerterWebpack = require("@verter/unplugin/webpack").default;
 
 module.exports = {
   plugins: [
@@ -99,10 +99,10 @@ module.exports = {
       preCompile: true,
       template: {
         compilerOptions: {
-          isCustomElement: (tag) => tag.startsWith('my-'),
+          isCustomElement: (tag) => tag.startsWith("my-"),
         },
       },
     }),
   ],
-}
+};
 ```

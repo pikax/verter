@@ -234,9 +234,7 @@ async function main() {
   const buildResult = await buildLinkedUnplugin();
   printResult(buildResult);
   if (!buildResult.ok) {
-    throw new Error(
-      "Could not rebuild @verter/unplugin before running the exit regression.",
-    );
+    throw new Error("Could not rebuild @verter/unplugin before running the exit regression.");
   }
 
   console.log("[exit-regression] running direct SCSS virtual-style repro");
@@ -253,9 +251,7 @@ async function main() {
   printResult(localResult);
 
   if (!localResult.ok) {
-    throw new Error(
-      "Local Vite lib-build smoke test failed after the direct regression passed.",
-    );
+    throw new Error("Local Vite lib-build smoke test failed after the direct regression passed.");
   }
 
   if (!runNexusUiCheck) {
@@ -266,15 +262,11 @@ async function main() {
   }
 
   if (!existsSync(nexusUiPackageDir)) {
-    console.log(
-      `[exit-regression] nexus-ui validation skipped: ${nexusUiPackageDir} not found`,
-    );
+    console.log(`[exit-regression] nexus-ui validation skipped: ${nexusUiPackageDir} not found`);
     return;
   }
 
-  console.log(
-    `[exit-regression] validating the original consumer repro at ${nexusUiPackageDir}`,
-  );
+  console.log(`[exit-regression] validating the original consumer repro at ${nexusUiPackageDir}`);
 
   const nexusResult = await runNexusUiFallback();
   printResult(nexusResult);

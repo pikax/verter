@@ -2,8 +2,8 @@
 
 Verter exposes an MCP (Model Context Protocol) server for AI agents:
 
-| Server | Purpose | Transport | Port |
-|--------|---------|-----------|------|
+| Server         | Purpose                                     | Transport     | Port |
+| -------------- | ------------------------------------------- | ------------- | ---- |
 | **verter-mcp** | Analysis, diagnostics, compilation, scoring | stdio or HTTP | 6772 |
 
 ---
@@ -42,6 +42,7 @@ Options:
 ### MCP Config Files
 
 **stdio** (`mcp/verter.mcp.json`):
+
 ```json
 {
   "mcpServers": {
@@ -54,6 +55,7 @@ Options:
 ```
 
 **HTTP** (`mcp/verter-http.mcp.json`):
+
 ```json
 {
   "mcpServers": {
@@ -68,92 +70,92 @@ Options:
 
 #### Agent-First Summary Tools (start here)
 
-| Tool | Description |
-|------|-------------|
-| `get_component_summary` | Everything about a component: API, scores, metrics, diagnostics, CSS, deps |
-| `get_project_stats` | Aggregate project stats: scores, Vue API usage, diagnostics health, rankings |
-| `get_component_quality` | Quality score (0-100) with per-dimension breakdown |
+| Tool                    | Description                                                                  |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| `get_component_summary` | Everything about a component: API, scores, metrics, diagnostics, CSS, deps   |
+| `get_project_stats`     | Aggregate project stats: scores, Vue API usage, diagnostics health, rankings |
+| `get_component_quality` | Quality score (0-100) with per-dimension breakdown                           |
 
 #### File Management
 
-| Tool | Description |
-|------|-------------|
-| `scan_project` | Scan directory, load all `.vue` files into host |
-| `upsert_file` | Load or update a single file (reads from disk or accepts source) |
-| `list_files` | List all loaded files |
+| Tool           | Description                                                      |
+| -------------- | ---------------------------------------------------------------- |
+| `scan_project` | Scan directory, load all `.vue` files into host                  |
+| `upsert_file`  | Load or update a single file (reads from disk or accepts source) |
+| `list_files`   | List all loaded files                                            |
 
 #### Deep Analysis
 
-| Tool | Description |
-|------|-------------|
-| `analyze_file` | Full analysis snapshot (script, template, styles sections) |
-| `get_component_api` | Props, emits, slots, models, expose, inheritsAttrs |
-| `get_imports` | Imports with Vue API classification |
-| `get_bindings` | Bindings with ReactivityKind (Ref/Computed/Reactive/etc.) |
+| Tool                 | Description                                                    |
+| -------------------- | -------------------------------------------------------------- |
+| `analyze_file`       | Full analysis snapshot (script, template, styles sections)     |
+| `get_component_api`  | Props, emits, slots, models, expose, inheritsAttrs             |
+| `get_imports`        | Imports with Vue API classification                            |
+| `get_bindings`       | Bindings with ReactivityKind (Ref/Computed/Reactive/etc.)      |
 | `get_template_usage` | Components, binding refs, slots, template refs, event handlers |
 
 #### CSS
 
-| Tool | Description |
-|------|-------------|
-| `analyze_css` | Style blocks with selectors, classes, IDs, custom props, v-bind |
-| `match_css_selector` | Per-element match results (Matches/MaybeMatches/NoMatch) |
-| `detect_css_bleed` | Unintended cross-component CSS class bleed detection |
+| Tool                 | Description                                                     |
+| -------------------- | --------------------------------------------------------------- |
+| `analyze_css`        | Style blocks with selectors, classes, IDs, custom props, v-bind |
+| `match_css_selector` | Per-element match results (Matches/MaybeMatches/NoMatch)        |
+| `detect_css_bleed`   | Unintended cross-component CSS class bleed detection            |
 
 #### Diagnostics
 
-| Tool | Description |
-|------|-------------|
-| `lint_file` | Lint a single file with configurable preset |
-| `lint_project` | Lint all loaded files with summary |
-| `get_quick_fixes` | Code actions available at a given offset |
+| Tool              | Description                                 |
+| ----------------- | ------------------------------------------- |
+| `lint_file`       | Lint a single file with configurable preset |
+| `lint_project`    | Lint all loaded files with summary          |
+| `get_quick_fixes` | Code actions available at a given offset    |
 
 #### Compilation
 
-| Tool | Description |
-|------|-------------|
+| Tool           | Description                                        |
+| -------------- | -------------------------------------------------- |
 | `compile_file` | Compile to JS/CSS (production, vapor, source maps) |
-| `generate_tsx` | Generate TSX output (type-checking path) |
+| `generate_tsx` | Generate TSX output (type-checking path)           |
 
 #### Cross-File Intelligence
 
-| Tool | Description |
-|------|-------------|
-| `get_component_graph` | Component dependency graph (BFS traversal) |
+| Tool                      | Description                                       |
+| ------------------------- | ------------------------------------------------- |
+| `get_component_graph`     | Component dependency graph (BFS traversal)        |
 | `validate_provide_inject` | Missing providers, unused provides across project |
-| `check_component_props` | Unknown props/models passed to child components |
-| `find_orphan_components` | Components unreachable from entry points |
+| `check_component_props`   | Unknown props/models passed to child components   |
+| `find_orphan_components`  | Components unreachable from entry points          |
 
 #### Runtime Behavior Hints
 
-| Tool | Description |
-|------|-------------|
-| `get_lifecycle_order` | Lifecycle hooks in execution order with side effects flagged |
-| `get_rerender_triggers` | Which reactive bindings cause which template regions to update |
-| `get_side_effects` | All side effects: lifecycle hooks, watchers, provide/inject, DOM queries |
+| Tool                    | Description                                                              |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `get_lifecycle_order`   | Lifecycle hooks in execution order with side effects flagged             |
+| `get_rerender_triggers` | Which reactive bindings cause which template regions to update           |
+| `get_side_effects`      | All side effects: lifecycle hooks, watchers, provide/inject, DOM queries |
 
 #### Refactoring Suggestions
 
-| Tool | Description |
-|------|-------------|
-| `suggest_refactorings` | Auto-detected opportunities: extract component, simplify bindings |
-| `detect_prop_drilling` | Props passed through 2+ levels — suggests provide/inject |
+| Tool                       | Description                                                       |
+| -------------------------- | ----------------------------------------------------------------- |
+| `suggest_refactorings`     | Auto-detected opportunities: extract component, simplify bindings |
+| `detect_prop_drilling`     | Props passed through 2+ levels — suggests provide/inject          |
 | `detect_migration_targets` | Options API → Composition API candidates with difficulty estimate |
 
 #### Type System
 
-| Tool | Description |
-|------|-------------|
-| `get_component_types` | Inferred/declared types for props, emits, slots, bindings |
-| `check_prop_types` | Type compatibility between parent prop values and child declarations |
-| `get_type_errors` | Type-level diagnostics from TSX codegen path |
+| Tool                  | Description                                                          |
+| --------------------- | -------------------------------------------------------------------- |
+| `get_component_types` | Inferred/declared types for props, emits, slots, bindings            |
+| `check_prop_types`    | Type compatibility between parent prop values and child declarations |
+| `get_type_errors`     | Type-level diagnostics from TSX codegen path                         |
 
 #### Documentation & Utility
 
-| Tool | Description |
-|------|-------------|
+| Tool                      | Description                                                      |
+| ------------------------- | ---------------------------------------------------------------- |
 | `generate_component_docs` | Auto-generated Markdown docs (props table, events, slots, usage) |
-| `explain_vue_api` | Explain any Vue Composition API function |
+| `explain_vue_api`         | Explain any Vue Composition API function                         |
 
 ### Recommended Agent Workflow
 

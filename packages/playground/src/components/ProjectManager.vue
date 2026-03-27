@@ -104,16 +104,44 @@ onUnmounted(() => {
 <template>
   <div class="project-manager" ref="dropdownEl">
     <button class="project-btn" @click="toggle" :title="'Project: ' + displayName">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      </svg>
       <span class="project-name">{{ displayName }}</span>
-      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
+        <polyline points="6 9 12 15 18 9" />
+      </svg>
     </button>
 
     <div v-if="open" class="dropdown">
       <!-- Actions -->
       <div class="section actions-section">
         <button class="action-btn" @click="handleSave">Save</button>
-        <button class="action-btn" @click="showSaveAs = true; saveAsName = ''">Save As</button>
+        <button
+          class="action-btn"
+          @click="
+            showSaveAs = true;
+            saveAsName = '';
+          "
+        >
+          Save As
+        </button>
         <button class="action-btn" @click="handleNew">New</button>
       </div>
 
@@ -127,7 +155,9 @@ onUnmounted(() => {
           @keydown.escape.stop="showSaveAs = false"
           autofocus
         />
-        <button class="save-as-confirm" @click="handleSaveAs" :disabled="!saveAsName.trim()">OK</button>
+        <button class="save-as-confirm" @click="handleSaveAs" :disabled="!saveAsName.trim()">
+          OK
+        </button>
       </div>
 
       <!-- Presets -->
@@ -160,7 +190,17 @@ onUnmounted(() => {
             @click="handleDeleteProject(project, $event)"
             title="Delete project"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
           </button>
         </button>
       </div>

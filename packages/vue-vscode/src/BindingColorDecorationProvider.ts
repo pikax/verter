@@ -10,11 +10,7 @@ import {
 import { debounce } from "lodash";
 import { LanguageClient } from "vscode-languageclient/node";
 import { RequestType, type PatchClient } from "@verter/language-shared";
-import type {
-  AnalyzedBinding,
-  AnalyzedMacro,
-  FileAnalysisSnapshot,
-} from "@verter/language-shared";
+import type { AnalyzedBinding, AnalyzedMacro, FileAnalysisSnapshot } from "@verter/language-shared";
 import { utf16OffsetToPosition } from "./utils";
 
 /** Binding category for decoration coloring. */
@@ -108,14 +104,10 @@ function classifyBinding(
  * Heuristic: if a DefineProps macro exists and a binding is a Const with no
  * initializer and isn't from an import, it's likely a destructured prop.
  */
-function buildPropBindingNames(
-  analysis: FileAnalysisSnapshot,
-): Set<string> {
+function buildPropBindingNames(analysis: FileAnalysisSnapshot): Set<string> {
   const names = new Set<string>();
 
-  const hasDefineProps = analysis.macros.some(
-    (m: AnalyzedMacro) => m.kind === "DefineProps",
-  );
+  const hasDefineProps = analysis.macros.some((m: AnalyzedMacro) => m.kind === "DefineProps");
   if (!hasDefineProps) return names;
 
   // Collect all imported binding names for exclusion
@@ -162,7 +154,10 @@ export class BindingColorDecorationProvider implements Disposable {
   private enabled = false;
   private scope: DecorationScope = "template";
   private style: DecorationStyle = "background";
-  private _lastState: Map<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = new Map();
+  private _lastState: Map<
+    string,
+    Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+  > = new Map();
 
   constructor(private getClient: () => PatchClient<LanguageClient>) {
     this.readConfig();
@@ -229,9 +224,7 @@ export class BindingColorDecorationProvider implements Disposable {
     }
   }
 
-  private createBackgroundDecorationType(
-    category: BindingCategory,
-  ): TextEditorDecorationType {
+  private createBackgroundDecorationType(category: BindingCategory): TextEditorDecorationType {
     return window.createTextEditorDecorationType({
       rangeBehavior: DecorationRangeBehavior.ClosedClosed,
       backgroundColor: { id: CATEGORY_THEME_COLORS[category] },
@@ -239,9 +232,7 @@ export class BindingColorDecorationProvider implements Disposable {
     });
   }
 
-  private createUnderlineDecorationType(
-    category: BindingCategory,
-  ): TextEditorDecorationType {
+  private createUnderlineDecorationType(category: BindingCategory): TextEditorDecorationType {
     const colors = CATEGORY_UNDERLINE_COLORS[category];
     return window.createTextEditorDecorationType({
       rangeBehavior: DecorationRangeBehavior.ClosedClosed,
@@ -358,8 +349,14 @@ export class BindingColorDecorationProvider implements Disposable {
   }
 
   /** Returns the last-applied decoration ranges by category (for E2E testing). */
-  getState(): Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> {
-    const result: Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = {};
+  getState(): Record<
+    string,
+    Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+  > {
+    const result: Record<
+      string,
+      Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+    > = {};
     for (const [category, ranges] of this._lastState) {
       result[category] = ranges;
     }

@@ -38,21 +38,21 @@ Place a `.verterrc.json` file in your project root (next to `package.json`). The
 
 ### Fields
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `lint.enabled` | `boolean` | `true` | Enable or disable linting entirely |
-| `lint.preset` | `string` | `"essential"` | Base preset to apply (see [Presets](#presets)) |
-| `lint.rules` | `object` | `{}` | Per-rule overrides that extend or modify the preset |
+| Field          | Type      | Default       | Description                                         |
+| -------------- | --------- | ------------- | --------------------------------------------------- |
+| `lint.enabled` | `boolean` | `true`        | Enable or disable linting entirely                  |
+| `lint.preset`  | `string`  | `"essential"` | Base preset to apply (see [Presets](#presets))      |
+| `lint.rules`   | `object`  | `{}`          | Per-rule overrides that extend or modify the preset |
 
 ### Rule Severity Values
 
 Each rule can be set to one of these severity values:
 
-| Value | Alias | Meaning |
-|-------|-------|---------|
-| `"off"` | `0` | Disable the rule |
-| `"warn"` | `1` | Report as a warning (yellow squiggle, does not block CI) |
-| `"error"` | `2` | Report as an error (red squiggle, blocks CI if checked) |
+| Value     | Alias | Meaning                                                  |
+| --------- | ----- | -------------------------------------------------------- |
+| `"off"`   | `0`   | Disable the rule                                         |
+| `"warn"`  | `1`   | Report as a warning (yellow squiggle, does not block CI) |
+| `"error"` | `2`   | Report as an error (red squiggle, blocks CI if checked)  |
 
 Rules can also use the **array form** to pass options:
 
@@ -73,10 +73,10 @@ The first element is the severity, and the second is a rule-specific options obj
 
 These settings are available in VS Code's `settings.json` (user or workspace level):
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `verter.lint.enabled` | `boolean` | `false` | Enable Verter's built-in linting |
-| `verter.lint.preset` | `enum` | `"essential"` | Preset to use: `"essential"`, `"recommended"`, `"all"`, `"performance"`, `"a11y"`, `"strict"` |
+| Setting               | Type      | Default       | Description                                                                                   |
+| --------------------- | --------- | ------------- | --------------------------------------------------------------------------------------------- |
+| `verter.lint.enabled` | `boolean` | `false`       | Enable Verter's built-in linting                                                              |
+| `verter.lint.preset`  | `enum`    | `"essential"` | Preset to use: `"essential"`, `"recommended"`, `"all"`, `"performance"`, `"a11y"`, `"strict"` |
 
 VS Code settings are overridden by `.verterrc.json` if both exist. This lets teams enforce project-level config while individual developers can use VS Code settings for personal projects.
 
@@ -84,14 +84,14 @@ VS Code settings are overridden by `.verterrc.json` if both exist. This lets tea
 
 Presets are curated collections of rules grouped by purpose:
 
-| Preset | Description | Includes |
-|--------|-------------|----------|
-| **Essential** | Prevents common errors and invalid syntax | `valid-v-*`, `no-reserved-*`, `require-component-is`, and other error-preventing rules |
-| **Recommended** | Default preset; Essential + strongly recommended rules | Essential + `attribute-order`, `html-self-closing`, `v-bind-style`, `component-*`, and more |
-| **All** | Every available rule at its default severity | All ~163 rules |
-| **Performance** | Performance-focused rules | Rules that detect patterns causing unnecessary re-renders or expensive operations |
-| **A11y** | Accessibility rules | `aria-props`, `role-has-required-aria-props`, `media-has-caption`, `interactive-supports-focus`, and more |
-| **Strict** | Recommended + all deprecation + all style rules | Recommended + `no-deprecated-*`, strict style enforcement |
+| Preset          | Description                                            | Includes                                                                                                  |
+| --------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| **Essential**   | Prevents common errors and invalid syntax              | `valid-v-*`, `no-reserved-*`, `require-component-is`, and other error-preventing rules                    |
+| **Recommended** | Default preset; Essential + strongly recommended rules | Essential + `attribute-order`, `html-self-closing`, `v-bind-style`, `component-*`, and more               |
+| **All**         | Every available rule at its default severity           | All ~163 rules                                                                                            |
+| **Performance** | Performance-focused rules                              | Rules that detect patterns causing unnecessary re-renders or expensive operations                         |
+| **A11y**        | Accessibility rules                                    | `aria-props`, `role-has-required-aria-props`, `media-has-caption`, `interactive-supports-focus`, and more |
+| **Strict**      | Recommended + all deprecation + all style rules        | Recommended + `no-deprecated-*`, strict style enforcement                                                 |
 
 ### Preset + Rule Overrides
 

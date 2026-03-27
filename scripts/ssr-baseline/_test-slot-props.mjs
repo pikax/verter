@@ -21,7 +21,10 @@ function compileVue(source, filename) {
     } catch {}
   }
   const result = compileTemplate({
-    source: descriptor.template.content, filename, id: filename, ssr: true,
+    source: descriptor.template.content,
+    filename,
+    id: filename,
+    ssr: true,
     compilerOptions: { mode: "module", bindingMetadata: bm },
   });
   if (result.errors?.length) return null;
@@ -33,7 +36,12 @@ function compileVerter(source, filePath) {
   const result = host.getVirtualFile({
     canonicalId: upsertResult.canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: { filename: path.basename(filePath), ssr: true, forceJs: true, sourceMap: false },
+    compileProfile: {
+      filename: path.basename(filePath),
+      ssr: true,
+      forceJs: true,
+      sourceMap: false,
+    },
   });
   return result?.code;
 }
@@ -49,22 +57,31 @@ function showDiff(label, source) {
 }
 
 // Test: slot with kebab-case prop
-showDiff("slot with kebab-case prop", `<template>
+showDiff(
+  "slot with kebab-case prop",
+  `<template>
   <div>
     <slot mdc-unwrap="p" />
   </div>
-</template>`);
+</template>`,
+);
 
 // Test: slot with data-attr (should NOT be camelized)
-showDiff("slot with data-attr", `<template>
+showDiff(
+  "slot with data-attr",
+  `<template>
   <div>
     <slot data-testid="foo" />
   </div>
-</template>`);
+</template>`,
+);
 
 // Test: dynamic :slot-prop
-showDiff("dynamic slot prop", `<template>
+showDiff(
+  "dynamic slot prop",
+  `<template>
   <div>
     <slot :my-data="someValue" />
   </div>
-</template>`);
+</template>`,
+);

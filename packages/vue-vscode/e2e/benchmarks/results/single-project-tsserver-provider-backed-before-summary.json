@@ -4,49 +4,25 @@
       "min": 3020,
       "median": 3107,
       "max": 3377,
-      "values": [
-        3020,
-        3095,
-        3107,
-        3111,
-        3377
-      ]
+      "values": [3020, 3095, 3107, 3111, 3377]
     },
     "activationToTypeProviderStartedMs": {
       "min": 456,
       "median": 478,
       "max": 842,
-      "values": [
-        456,
-        477,
-        478,
-        509,
-        842
-      ]
+      "values": [456, 477, 478, 509, 842]
     },
     "typeProviderStartedToFirstTypedCompletionMs": {
       "min": 2511,
       "median": 2617,
       "max": 2655,
-      "values": [
-        2511,
-        2535,
-        2617,
-        2630,
-        2655
-      ]
+      "values": [2511, 2535, 2617, 2630, 2655]
     },
     "activationToReadyMs": {
       "min": 3017,
       "median": 3100,
       "max": 3369,
-      "values": [
-        3017,
-        3087,
-        3100,
-        3107,
-        3369
-      ]
+      "values": [3017, 3087, 3100, 3107, 3369]
     }
   },
   "reports": [

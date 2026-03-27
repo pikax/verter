@@ -588,7 +588,9 @@ async function main(inputGlob, outputDir) {
 const args = process.argv.slice(2);
 if (args.length < 1) {
   console.log("Usage: node extract_expressions.js <input-glob> [output-dir]");
-  console.log('Example: node extract_expressions.js "/path/to/project/**/*.vue" ./expressions/source');
+  console.log(
+    'Example: node extract_expressions.js "/path/to/project/**/*.vue" ./expressions/source',
+  );
   process.exit(1);
 }
 

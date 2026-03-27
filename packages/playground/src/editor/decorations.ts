@@ -118,9 +118,7 @@ export function computeBindingDecorations(
  * Compute CSS class usage decorations.
  * Marks classes defined in <style> blocks as used/unused based on template analysis.
  */
-export function computeCssClassDecorations(
-  analysis: FileAnalysis,
-): CssClassDecoration[] {
+export function computeCssClassDecorations(analysis: FileAnalysis): CssClassDecoration[] {
   const decorations: CssClassDecoration[] = [];
 
   // Collect all template class names (from static classes on elements)
@@ -150,10 +148,7 @@ export function computeCssClassDecorations(
  * Compute CodeLens summaries for SFC blocks.
  * Returns one code lens per block with a summary of its contents.
  */
-export function computeCodeLenses(
-  source: string,
-  analysis: FileAnalysis,
-): BlockCodeLens[] {
+export function computeCodeLenses(source: string, analysis: FileAnalysis): BlockCodeLens[] {
   const lenses: BlockCodeLens[] = [];
 
   // Script setup block summary
@@ -162,9 +157,7 @@ export function computeCodeLenses(
     const line = countLines(source, scriptMatch.index);
     const parts: string[] = [];
 
-    const bindingCount = analysis.bindings.filter(
-      (b) => !b.name.startsWith("___VERTER___"),
-    ).length;
+    const bindingCount = analysis.bindings.filter((b) => !b.name.startsWith("___VERTER___")).length;
     if (bindingCount > 0) parts.push(`${bindingCount} binding${bindingCount !== 1 ? "s" : ""}`);
 
     const importCount = analysis.imports.length;
@@ -240,9 +233,7 @@ export interface BindingInlayHint {
  * Compute per-binding type inlay hints from analysis data.
  * Returns hints for reactive bindings without explicit type annotations.
  */
-export function computeBindingInlayHints(
-  analysis: FileAnalysis,
-): BindingInlayHint[] {
+export function computeBindingInlayHints(analysis: FileAnalysis): BindingInlayHint[] {
   const hints: BindingInlayHint[] = [];
 
   for (const binding of analysis.bindings) {

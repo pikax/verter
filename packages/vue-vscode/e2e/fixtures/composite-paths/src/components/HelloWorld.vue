@@ -1,4 +1,6 @@
 <script setup lang="ts">
-defineProps<{ msg: string }>()
+defineProps<{ msg: string }>();
 </script>
-<template><p>{{ msg }}</p></template>
+<template>
+  <p>{{ msg }}</p>
+</template>

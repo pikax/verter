@@ -582,6 +582,33 @@ fn function_with_type_params() {
     }
 }
 
+#[test]
+fn function_type_json_roundtrip_preserves_generic_parameter_metadata() {
+    let generic = TypeParam {
+        name: "T".to_string(),
+        constraint: Some(Arc::new(TypeExpr::named("Base"))),
+        default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+    };
+    let expr = TypeExpr::Function(Arc::new(FunctionExpr {
+        parameters: vec![FunctionParam {
+            name: Some("value".to_string()),
+            ty: TypeExpr::TypeParameter(generic.clone()),
+            optional: false,
+            rest: false,
+        }],
+        return_type: Some(Arc::new(TypeExpr::TypeParameter(generic.clone()))),
+        type_parameters: vec![generic.clone()],
+    }));
+
+    let json = serde_json::to_value(&expr).expect("serialize function");
+    assert_eq!(json["typeParameters"][0]["name"], "T");
+    assert_eq!(json["returnType"]["kind"], "typeParameter");
+    assert_eq!(json["returnType"]["constraint"]["kind"], "ref");
+
+    let roundtrip: TypeExpr = serde_json::from_value(json).expect("deserialize function");
+    assert_eq!(roundtrip, expr);
+}
+
 // =============================================================================
 // Type references
 // =============================================================================

@@ -1,15 +1,15 @@
 <script setup lang="ts">
 const props = defineProps<{
-  items: { id: number }[]
-  label?: string
-}>()
+  items: { id: number }[];
+  label?: string;
+}>();
 
 const emit = defineEmits<{
-  select: [item: { id: number }]
-}>()
+  select: [item: { id: number }];
+}>();
 
 function onSelect(item: { id: number }) {
-  emit('select', item)
+  emit("select", item);
 }
 </script>
 <template>

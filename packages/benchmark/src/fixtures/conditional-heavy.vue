@@ -1,22 +1,24 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed } from "vue";
 
-const isLoading = ref(false)
-const isAuthenticated = ref(false)
-const userRole = ref<'admin' | 'user' | 'guest'>('guest')
-const hasPermission = ref(false)
-const isOnline = ref(true)
-const showDetails = ref(false)
-const theme = ref<'light' | 'dark'>('light')
-const error = ref<string | null>(null)
+const isLoading = ref(false);
+const isAuthenticated = ref(false);
+const userRole = ref<"admin" | "user" | "guest">("guest");
+const hasPermission = ref(false);
+const isOnline = ref(true);
+const showDetails = ref(false);
+const theme = ref<"light" | "dark">("light");
+const error = ref<string | null>(null);
 
-const canEdit = computed(() => isAuthenticated.value && (userRole.value === 'admin' || hasPermission.value))
+const canEdit = computed(
+  () => isAuthenticated.value && (userRole.value === "admin" || hasPermission.value),
+);
 const statusMessage = computed(() => {
-  if (!isOnline.value) return 'Offline'
-  if (isLoading.value) return 'Loading...'
-  if (error.value) return `Error: ${error.value}`
-  return 'Ready'
-})
+  if (!isOnline.value) return "Offline";
+  if (isLoading.value) return "Loading...";
+  if (error.value) return `Error: ${error.value}`;
+  return "Ready";
+});
 </script>
 
 <template>

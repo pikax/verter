@@ -3,16 +3,18 @@
   "displayName": "Verter OXC bindings",
   "version": "0.0.1-beta.1",
   "description": "Resolves and downloads OXC bindings",
-  "keywords": ["vue", "oxc", "parser", "bindings"],
+  "keywords": [
+    "bindings",
+    "oxc",
+    "parser",
+    "vue"
+  ],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
+  "author": "pikax",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
-  },
-  "author": "pikax",
-  "homepage": "https://verterjs.dev/",
-  "engines": {
-    "node": ">=18"
   },
   "files": [
     "dist"
@@ -31,5 +33,8 @@
   "devDependencies": {
     "@types/node": "^25.4.0",
     "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

@@ -19,9 +19,9 @@ pnpm add @verter/core
 Parse a Vue SFC into typed blocks. Returns a `ParserResult` containing the `MagicString` instance, parsed blocks, and metadata.
 
 ```ts
-import { parser } from '@verter/core'
+import { parser } from "@verter/core";
 
-const result = parser(sfcSource, 'App.vue')
+const result = parser(sfcSource, "App.vue");
 // result.s — MagicString instance for source manipulation
 // result.blocks — array of parsed SFC blocks
 // result.isTS — whether the script uses TypeScript
@@ -32,6 +32,7 @@ const result = parser(sfcSource, 'App.vue')
 ```
 
 **Parameters:**
+
 - `source` (`string`) -- Raw SFC source code
 - `filename` (`string`, default: `"temp.vue"`) -- Filename for source map generation
 - `options` (`Partial<VerterParserOptions>`) -- Parser options (extends `@vue/compiler-sfc` `SFCParseOptions`)
@@ -43,23 +44,19 @@ const result = parser(sfcSource, 'App.vue')
 Run the plugin-based script transformation pipeline. Executes plugins in order against parsed script items.
 
 ```ts
-import { parser, processScript, definePlugin } from '@verter/core'
+import { parser, processScript, definePlugin } from "@verter/core";
 
-const parsed = parser(sfcSource, 'App.vue')
-const scriptBlock = parsed.blocks.find(b => b.type === 'script' && b.isMain)
+const parsed = parser(sfcSource, "App.vue");
+const scriptBlock = parsed.blocks.find((b) => b.type === "script" && b.isMain);
 
 // Auto-run mode (default): runs all phases immediately
-const { context, s, result } = processScript(
-  scriptBlock.result.items,
-  plugins,
-  {
-    filename: 'App.vue',
-    s: parsed.s,
-    blocks: parsed.blocks,
-    block: scriptBlock,
-    blockNameResolver: (name) => name,
-  },
-)
+const { context, s, result } = processScript(scriptBlock.result.items, plugins, {
+  filename: "App.vue",
+  s: parsed.s,
+  blocks: parsed.blocks,
+  block: scriptBlock,
+  blockNameResolver: (name) => name,
+});
 ```
 
 **Overloads:**
@@ -74,14 +71,14 @@ The deferred mode (`autorun: false`) lets you run pre/main/post phases separatel
 High-level builder that processes an SFC through both the script and template plugin pipelines in one call. Automatically selects the main script block and wires up template bindings.
 
 ```ts
-import { parser, buildSingle } from '@verter/core'
+import { parser, buildSingle } from "@verter/core";
 
-const parsed = parser(sfcSource, 'App.vue')
+const parsed = parser(sfcSource, "App.vue");
 const { s } = buildSingle({
   ...parsed,
   override: true,
-})
-const output = s.toString()
+});
+const output = s.toString();
 ```
 
 ## Plugin System
@@ -93,11 +90,11 @@ Plugins transform parsed SFC script items into TSX output. Each plugin can hook 
 Type-safe plugin factory function.
 
 ```ts
-import { definePlugin } from '@verter/core'
+import { definePlugin } from "@verter/core";
 
 const myPlugin = definePlugin({
-  name: 'my-plugin',
-  enforce: 'pre', // or 'post', or omit for main phase
+  name: "my-plugin",
+  enforce: "pre", // or 'post', or omit for main phase
 
   pre(s, ctx) {
     // Runs before any transform hooks
@@ -118,7 +115,7 @@ const myPlugin = definePlugin({
   post(s, context) {
     // Runs after all transform hooks
   },
-})
+});
 ```
 
 ### Plugin Execution Order
@@ -135,17 +132,17 @@ Within each phase, plugins execute in array order.
 
 Each plugin can define typed transform hooks for specific `ScriptTypes`:
 
-| Hook | Receives | Description |
-|------|----------|-------------|
-| `transformImport` | `ScriptImport` | Import declarations |
-| `transformExport` | `ScriptExport` | Named/all export declarations |
-| `transformDefaultExport` | `ScriptDefaultExport` | Default export declarations |
-| `transformDeclaration` | `ScriptDeclaration` | Variable and function declarations |
-| `transformFunctionCall` | `ScriptFunctionCall` | Top-level function calls |
-| `transformBinding` | `ScriptBinding` | Variable bindings |
-| `transformAsync` | `ScriptAsync` | Async/await expressions |
-| `transformTypeAssertion` | `ScriptTypeAssertion` | TypeScript type assertions |
-| `transform` | `ScriptItem` | Catch-all for any item type |
+| Hook                     | Receives              | Description                        |
+| ------------------------ | --------------------- | ---------------------------------- |
+| `transformImport`        | `ScriptImport`        | Import declarations                |
+| `transformExport`        | `ScriptExport`        | Named/all export declarations      |
+| `transformDefaultExport` | `ScriptDefaultExport` | Default export declarations        |
+| `transformDeclaration`   | `ScriptDeclaration`   | Variable and function declarations |
+| `transformFunctionCall`  | `ScriptFunctionCall`  | Top-level function calls           |
+| `transformBinding`       | `ScriptBinding`       | Variable bindings                  |
+| `transformAsync`         | `ScriptAsync`         | Async/await expressions            |
+| `transformTypeAssertion` | `ScriptTypeAssertion` | TypeScript type assertions         |
+| `transform`              | `ScriptItem`          | Catch-all for any item type        |
 
 Each hook receives `(item, s, context)` where `s` is the `MagicString` instance and `context` is the `ScriptContext`.
 
@@ -188,13 +185,13 @@ The following plugins are included and used by `buildSingle()`:
 
 ```ts
 interface ParserResult {
-  filename: string
-  s: MagicString
-  isAsync: boolean
-  generic: GenericInfo | null
-  blocks: ParsedBlock[]
-  isTS: boolean
-  isSetup: boolean
+  filename: string;
+  s: MagicString;
+  isAsync: boolean;
+  generic: GenericInfo | null;
+  blocks: ParsedBlock[];
+  isTS: boolean;
+  isSetup: boolean;
 }
 ```
 
@@ -203,29 +200,29 @@ interface ParserResult {
 A discriminated union of block types:
 
 ```ts
-type ParsedBlock = ParsedBlockTemplate | ParsedBlockScript | ParsedBlockUnknown
+type ParsedBlock = ParsedBlockTemplate | ParsedBlockScript | ParsedBlockUnknown;
 
 interface ParsedBlockTemplate {
-  type: 'template'
-  lang: 'vue'
-  block: VerterSFCBlock<SFCTemplateBlock>
-  result: ParsedTemplateResult
+  type: "template";
+  lang: "vue";
+  block: VerterSFCBlock<SFCTemplateBlock>;
+  result: ParsedTemplateResult;
 }
 
 interface ParsedBlockScript {
-  type: 'script'
-  lang: 'js' | 'jsx' | 'ts' | 'tsx'
-  isMain: boolean
-  isSetup: boolean
-  block: VerterSFCBlock<SFCScriptBlock>
-  result: ParsedScriptResult
+  type: "script";
+  lang: "js" | "jsx" | "ts" | "tsx";
+  isMain: boolean;
+  isSetup: boolean;
+  block: VerterSFCBlock<SFCScriptBlock>;
+  result: ParsedScriptResult;
 }
 
 interface ParsedBlockUnknown {
-  type: string
-  lang: string
-  block: VerterSFCBlock<SFCBlock>
-  result: null
+  type: string;
+  lang: string;
+  block: VerterSFCBlock<SFCBlock>;
+  result: null;
 }
 ```
 
@@ -235,32 +232,32 @@ Discriminated union of parsed script AST items:
 
 ```ts
 type ScriptItem =
-  | ScriptImport       // import declarations
-  | ScriptExport       // named/all exports
+  | ScriptImport // import declarations
+  | ScriptExport // named/all exports
   | ScriptDefaultExport // default export
-  | ScriptDeclaration  // variable/function declarations
+  | ScriptDeclaration // variable/function declarations
   | ScriptFunctionCall // top-level function calls
-  | ScriptBinding      // variable bindings
-  | ScriptAsync        // async/await
+  | ScriptBinding // variable bindings
+  | ScriptAsync // async/await
   | ScriptTypeAssertion // TS type assertions
-  | ScriptError        // parse errors
-  | ScriptWarning      // parse warnings
+  | ScriptError // parse errors
+  | ScriptWarning; // parse warnings
 ```
 
 Each variant has a `type` field matching the `ScriptTypes` enum:
 
 ```ts
 const enum ScriptTypes {
-  Binding = 'Binding',
-  Import = 'Import',
-  FunctionCall = 'FunctionCall',
-  Declaration = 'Declaration',
-  Async = 'Async',
-  Export = 'Export',
-  DefaultExport = 'DefaultExport',
-  TypeAssertion = 'TypeAssertion',
-  Error = 'Error',
-  Warning = 'Warning',
+  Binding = "Binding",
+  Import = "Import",
+  FunctionCall = "FunctionCall",
+  Declaration = "Declaration",
+  Async = "Async",
+  Export = "Export",
+  DefaultExport = "DefaultExport",
+  TypeAssertion = "TypeAssertion",
+  Error = "Error",
+  Warning = "Warning",
 }
 ```
 
@@ -270,11 +267,11 @@ The context object passed to plugin transform hooks:
 
 ```ts
 interface ScriptContext extends ProcessContext {
-  prefix(name: string): string
-  isSetup: boolean
-  templateBindings: TemplateBinding[]
-  handledAttributes?: Set<string>
-  isSingleFile?: boolean
+  prefix(name: string): string;
+  isSetup: boolean;
+  templateBindings: TemplateBinding[];
+  handledAttributes?: Set<string>;
+  isSingleFile?: boolean;
 }
 ```
 
@@ -284,16 +281,16 @@ Base context for all processing pipelines:
 
 ```ts
 interface ProcessContext {
-  filename: string
-  s: MagicString
-  override?: boolean
-  blockNameResolver: (name: string) => string
-  isAsync: boolean
-  generic: GenericInfo | null
-  isTS: boolean
-  block: ParsedBlock
-  blocks: ParsedBlock[]
-  items: ProcessItem[]
+  filename: string;
+  s: MagicString;
+  override?: boolean;
+  blockNameResolver: (name: string) => string;
+  isAsync: boolean;
+  generic: GenericInfo | null;
+  isTS: boolean;
+  block: ParsedBlock;
+  blocks: ParsedBlock[];
+  items: ProcessItem[];
 }
 ```
 
@@ -303,10 +300,10 @@ Generic plugin interface:
 
 ```ts
 interface ProcessPlugin<T, C extends ProcessContext> {
-  name?: string
-  enforce?: 'pre' | 'post'
-  transform?: (item: T, s: MagicString, context: C) => void
-  pre?: (s: MagicString, context: C) => void
-  post?: (s: MagicString, context: C) => void
+  name?: string;
+  enforce?: "pre" | "post";
+  transform?: (item: T, s: MagicString, context: C) => void;
+  pre?: (s: MagicString, context: C) => void;
+  post?: (s: MagicString, context: C) => void;
 }
 ```

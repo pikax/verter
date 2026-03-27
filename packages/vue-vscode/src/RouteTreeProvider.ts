@@ -83,12 +83,9 @@ const FRAMEWORK_LABELS: Record<string, string> = {
   unknown: "Unknown",
 };
 
-export class RouteTreeProvider
-  implements TreeDataProvider<RouteTreeItem>, Disposable
-{
+export class RouteTreeProvider implements TreeDataProvider<RouteTreeItem>, Disposable {
   private _onDidChangeTreeData = new EventEmitter<RouteTreeItem | undefined>();
-  readonly onDidChangeTreeData: Event<RouteTreeItem | undefined> =
-    this._onDidChangeTreeData.event;
+  readonly onDidChangeTreeData: Event<RouteTreeItem | undefined> = this._onDidChangeTreeData.event;
 
   private cachedSnapshot: RouteAnalysisSnapshot | null = null;
   private subscriptions: Disposable[] = [];
@@ -172,9 +169,7 @@ export class RouteTreeProvider
         const count = snapshot?.routes.length ?? 0;
         const item = new TreeItem(
           "Routes",
-          count > 0
-            ? TreeItemCollapsibleState.Expanded
-            : TreeItemCollapsibleState.None,
+          count > 0 ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.None,
         );
         item.description = `${count} top-level`;
         item.iconPath = new ThemeIcon("symbol-event");
@@ -184,9 +179,7 @@ export class RouteTreeProvider
         const count = snapshot?.layouts.length ?? 0;
         const item = new TreeItem(
           "Layouts",
-          count > 0
-            ? TreeItemCollapsibleState.Collapsed
-            : TreeItemCollapsibleState.None,
+          count > 0 ? TreeItemCollapsibleState.Collapsed : TreeItemCollapsibleState.None,
         );
         item.description = `${count}`;
         item.iconPath = new ThemeIcon("layout");
@@ -196,9 +189,7 @@ export class RouteTreeProvider
         const count = snapshot?.routerViewLocations.length ?? 0;
         const item = new TreeItem(
           "Router Views",
-          count > 0
-            ? TreeItemCollapsibleState.Collapsed
-            : TreeItemCollapsibleState.None,
+          count > 0 ? TreeItemCollapsibleState.Collapsed : TreeItemCollapsibleState.None,
         );
         item.description = `${count}`;
         item.iconPath = new ThemeIcon("window");
@@ -208,9 +199,7 @@ export class RouteTreeProvider
         const count = snapshot?.navigationLinks.length ?? 0;
         const item = new TreeItem(
           "Navigation Links",
-          count > 0
-            ? TreeItemCollapsibleState.Collapsed
-            : TreeItemCollapsibleState.None,
+          count > 0 ? TreeItemCollapsibleState.Collapsed : TreeItemCollapsibleState.None,
         );
         item.description = `${count}`;
         item.iconPath = new ThemeIcon("link");
@@ -224,9 +213,7 @@ export class RouteTreeProvider
     const hasChildren = route.children.length > 0 || route.guards.length > 0;
     const item = new TreeItem(
       route.path || "/",
-      hasChildren
-        ? TreeItemCollapsibleState.Collapsed
-        : TreeItemCollapsibleState.None,
+      hasChildren ? TreeItemCollapsibleState.Collapsed : TreeItemCollapsibleState.None,
     );
 
     const descParts: string[] = [];
@@ -261,10 +248,7 @@ export class RouteTreeProvider
   }
 
   private getComponentTreeItem(element: ComponentNode): TreeItem {
-    const item = new TreeItem(
-      extractFileName(element.filePath),
-      TreeItemCollapsibleState.None,
-    );
+    const item = new TreeItem(extractFileName(element.filePath), TreeItemCollapsibleState.None);
     item.description = element.filePath;
     item.iconPath = new ThemeIcon("file-code");
     item.command = {
@@ -335,8 +319,7 @@ export class RouteTreeProvider
       if (!snapshot) return [];
       this.cachedSnapshot = snapshot;
 
-      const frameworkLabel =
-        FRAMEWORK_LABELS[snapshot.framework] ?? snapshot.framework;
+      const frameworkLabel = FRAMEWORK_LABELS[snapshot.framework] ?? snapshot.framework;
 
       return [{ type: "framework", label: frameworkLabel }];
     } catch {
@@ -348,9 +331,7 @@ export class RouteTreeProvider
     const snapshot = this.cachedSnapshot;
     if (!snapshot) return [];
 
-    const sections: RouteTreeItem[] = [
-      { type: "section", section: "routes" },
-    ];
+    const sections: RouteTreeItem[] = [{ type: "section", section: "routes" }];
 
     if (snapshot.layouts.length > 0) {
       sections.push({ type: "section", section: "layouts" });
@@ -371,21 +352,15 @@ export class RouteTreeProvider
 
     switch (element.section) {
       case "routes":
-        return snapshot.routes.map(
-          (route): RouteNode => ({ type: "route", route }),
-        );
+        return snapshot.routes.map((route): RouteNode => ({ type: "route", route }));
       case "layouts":
-        return snapshot.layouts.map(
-          (layout): LayoutNode => ({ type: "layout", layout }),
-        );
+        return snapshot.layouts.map((layout): LayoutNode => ({ type: "layout", layout }));
       case "routerViews":
         return snapshot.routerViewLocations.map(
           (view): RouterViewNode => ({ type: "routerView", view }),
         );
       case "navLinks":
-        return snapshot.navigationLinks.map(
-          (link): NavLinkNode => ({ type: "navLink", link }),
-        );
+        return snapshot.navigationLinks.map((link): NavLinkNode => ({ type: "navLink", link }));
     }
   }
 

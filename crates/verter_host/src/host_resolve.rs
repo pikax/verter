@@ -1051,7 +1051,9 @@ impl VerterHost {
     ) -> Option<String> {
         if let Some(view) = store_view {
             self.current_eval_state_in_view(owner_canonical, Some(view))?;
-            if let Some(resolved) = self.resolve_type_dependency_canonical(owner_canonical, import_source) {
+            if let Some(resolved) =
+                self.resolve_type_dependency_canonical(owner_canonical, import_source)
+            {
                 return Some(resolved);
             }
             if let Some(resolved) = view

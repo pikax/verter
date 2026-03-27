@@ -69,6 +69,9 @@ pub enum TypeExpr {
         type_arguments: Arc<[TypeExpr]>,
     },
 
+    /// A first-class generic type parameter reference carrying declaration metadata.
+    TypeParameter(TypeParam),
+
     // -- Operators --
     /// `keyof T`
     KeyOf(Arc<TypeExpr>),
@@ -198,7 +201,7 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
             Some(TypeExpr::Function(Arc::new(FunctionExpr {
                 parameters: params,
                 return_type: ret.map(Arc::new),
-                type_parameters: vec![],
+                type_parameters: json_to_type_params(v.get("typeParameters"))?,
             })))
         }
         "ref" => {
@@ -212,6 +215,7 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 type_arguments: Arc::from(args),
             })
         }
+        "typeParameter" => Some(TypeExpr::TypeParameter(json_to_type_param(v)?)),
         "keyOf" => {
             let operand = type_expr_from_json(v.get("operand")?)?;
             Some(TypeExpr::KeyOf(Arc::new(operand)))
@@ -374,7 +378,44 @@ fn json_to_function_expr(v: &serde_json::Value) -> Option<FunctionExpr> {
                 }
             })
             .map(Arc::new),
-        type_parameters: vec![],
+        type_parameters: json_to_type_params(v.get("typeParameters"))?,
+    })
+}
+
+fn json_to_type_params(v: Option<&serde_json::Value>) -> Option<Vec<TypeParam>> {
+    let Some(value) = v else {
+        return Some(Vec::new());
+    };
+    value
+        .as_array()?
+        .iter()
+        .map(json_to_type_param)
+        .collect::<Option<Vec<_>>>()
+}
+
+fn json_to_type_param(v: &serde_json::Value) -> Option<TypeParam> {
+    Some(TypeParam {
+        name: v.get("name")?.as_str()?.to_string(),
+        constraint: v
+            .get("constraint")
+            .and_then(|constraint| {
+                if constraint.is_null() {
+                    None
+                } else {
+                    type_expr_from_json(constraint)
+                }
+            })
+            .map(Arc::new),
+        default: v
+            .get("default")
+            .and_then(|default| {
+                if default.is_null() {
+                    None
+                } else {
+                    type_expr_from_json(default)
+                }
+            })
+            .map(Arc::new),
     })
 }
 
@@ -688,6 +729,11 @@ impl TypeExpr {
         }
     }
 
+    /// Create a first-class generic type parameter reference.
+    pub fn type_parameter(param: TypeParam) -> Self {
+        Self::TypeParameter(param)
+    }
+
     /// Returns `true` if this is an `Unknown` node.
     pub fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown { .. })
@@ -776,16 +822,11 @@ impl TypeExpr {
                     }),
                 }).collect::<Vec<_>>()
             }),
-            Self::Function(func) => json!({
-                "kind": "function",
-                "parameters": func.parameters.iter().map(|p| json!({
-                    "name": p.name,
-                    "ty": p.ty.to_json_value(),
-                    "optional": p.optional,
-                    "rest": p.rest
-                })).collect::<Vec<_>>(),
-                "returnType": func.return_type.as_ref().map(|r| r.to_json_value()),
-            }),
+            Self::Function(func) => {
+                let mut value = Self::function_to_json(func);
+                value["kind"] = json!("function");
+                value
+            }
             Self::Ref {
                 name,
                 type_arguments,
@@ -794,6 +835,11 @@ impl TypeExpr {
                 "name": name,
                 "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
             }),
+            Self::TypeParameter(param) => {
+                let mut value = Self::type_param_to_json(param);
+                value["kind"] = json!("typeParameter");
+                value
+            }
             Self::KeyOf(operand) => json!({ "kind": "keyOf", "operand": operand.to_json_value() }),
             Self::TypeOf(vr) => json!({ "kind": "typeOf", "path": vr.path }),
             Self::IndexedAccess { object, index } => json!({
@@ -861,18 +907,21 @@ impl TypeExpr {
             v["typeParameters"] = json!(func
                 .type_parameters
                 .iter()
-                .map(|tp| {
-                    let mut obj = json!({ "name": tp.name });
-                    if let Some(ref c) = tp.constraint {
-                        obj["constraint"] = c.to_json_value();
-                    }
-                    if let Some(ref d) = tp.default {
-                        obj["default"] = d.to_json_value();
-                    }
-                    obj
-                })
+                .map(Self::type_param_to_json)
                 .collect::<Vec<serde_json::Value>>());
         }
         v
+    }
+
+    fn type_param_to_json(param: &TypeParam) -> serde_json::Value {
+        use serde_json::json;
+        let mut obj = json!({ "name": param.name });
+        if let Some(ref constraint) = param.constraint {
+            obj["constraint"] = constraint.to_json_value();
+        }
+        if let Some(ref default) = param.default {
+            obj["default"] = default.to_json_value();
+        }
+        obj
     }
 }

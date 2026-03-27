@@ -388,23 +388,25 @@ impl ProjectResolver {
             }
             let remainder = &specifier[alias.find.len()..];
             let base = join_paths(&alias.replacement, remainder);
-            if let Some(resolved) = probe_path_for_context(reader, &base, ctx) {
+            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
                 return Some((resolved, ResolutionKind::WorkspaceAlias));
             }
         }
 
-        if let Some(resolved) = resolve_tsconfig_paths(reader, importer_owner, specifier) {
+        if let Some(resolved) = resolve_tsconfig_paths(reader, importer_owner, specifier, ctx) {
             return Some((resolved, ResolutionKind::TsConfigPath));
         }
 
         if let Some(base_url) = importer_owner.compiler_options.base_url.as_deref() {
             let base = join_paths(base_url, specifier);
-            if let Some(resolved) = probe_path_for_context(reader, &base, ctx) {
+            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
                 return Some((resolved, ResolutionKind::TsConfigPath));
             }
         }
 
-        if let Some(resolved) = self.resolve_project_references(reader, importer_owner, specifier) {
+        if let Some(resolved) =
+            self.resolve_project_references(reader, importer_owner, specifier, ctx)
+        {
             return Some((resolved, ResolutionKind::ProjectReference));
         }
 
@@ -500,6 +502,7 @@ impl ProjectResolver {
         reader: &dyn crate::traits::WorkspaceAccess,
         importer_owner: &IdeProjectConfig,
         specifier: &str,
+        ctx: ResolutionContext,
     ) -> Option<String> {
         for reference in &importer_owner.references {
             let Some(project) = self
@@ -516,23 +519,24 @@ impl ProjectResolver {
                 }
                 let remainder = &specifier[alias.find.len()..];
                 let base = join_paths(&alias.replacement, remainder);
-                if let Some(resolved) = probe_path(reader, &base) {
+                if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
                     return Some(resolved);
                 }
             }
 
-            if let Some(resolved) = resolve_tsconfig_paths(reader, project, specifier) {
+            if let Some(resolved) = resolve_tsconfig_paths(reader, project, specifier, ctx) {
                 return Some(resolved);
             }
 
             if let Some(base_url) = project.compiler_options.base_url.as_deref() {
                 let base = join_paths(base_url, specifier);
-                if let Some(resolved) = probe_path(reader, &base) {
+                if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
                     return Some(resolved);
                 }
             }
 
-            if let Some(resolved) = self.resolve_project_references(reader, project, specifier) {
+            if let Some(resolved) = self.resolve_project_references(reader, project, specifier, ctx)
+            {
                 return Some(resolved);
             }
         }
@@ -564,6 +568,7 @@ fn resolve_tsconfig_paths(
     reader: &dyn crate::traits::WorkspaceAccess,
     project: &IdeProjectConfig,
     specifier: &str,
+    ctx: ResolutionContext,
 ) -> Option<String> {
     let base_url = project
         .compiler_options
@@ -578,13 +583,44 @@ fn resolve_tsconfig_paths(
 
         for target in targets {
             let candidate = apply_tsconfig_target(base_url, target, captured);
-            if let Some(resolved) = probe_path(reader, &candidate) {
+            if let Some(resolved) = resolve_path_mapping_target(reader, &candidate, ctx) {
                 return Some(resolved);
             }
         }
     }
 
     None
+}
+
+fn resolve_path_mapping_target(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    candidate: &str,
+    ctx: ResolutionContext,
+) -> Option<String> {
+    let normalized = normalize_canonical_id(candidate);
+    let package_json_path = join_paths(&normalized, "package.json");
+    if let Some(package_json) = reader.read_package_manifest(&package_json_path) {
+        if let Some(exports) = package_json.exports.as_ref() {
+            if let Some(resolved) = resolve_package_exports(reader, &normalized, exports, ".", ctx)
+            {
+                return Some(resolved);
+            }
+            if prefers_declaration_files(ctx) {
+                if let Some(types_entry) =
+                    resolve_manifest_types_entry(reader, &normalized, &package_json)
+                {
+                    return Some(types_entry);
+                }
+            }
+        }
+
+        if let Some(resolved) = resolve_legacy_package(reader, &normalized, &package_json, "", ctx)
+        {
+            return Some(resolved);
+        }
+    }
+
+    probe_path_for_context(reader, &normalized, ctx)
 }
 
 fn capture_tsconfig_pattern<'a>(pattern: &'a str, specifier: &'a str) -> Option<&'a str> {

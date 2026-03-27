@@ -28,9 +28,7 @@ onMounted(async () => {
     }
 
     // Fetch available tags/versions
-    const tagsResp = await fetch(
-      "https://data.jsdelivr.com/v1/packages/npm/vue",
-    );
+    const tagsResp = await fetch("https://data.jsdelivr.com/v1/packages/npm/vue");
     if (tagsResp.ok) {
       const data = await tagsResp.json();
       const allVersions: string[] = data.versions ?? [];
@@ -79,10 +77,16 @@ onMounted(() => {
 <template>
   <div class="vue-version-select">
     <button class="vue-version-btn" @click.stop="open = !open" title="Vue version">
-      <svg width="14" height="14" viewBox="0 0 256 221" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M204.8 0H256L128 220.8L0 0H97.92L128 51.2L157.44 0H204.8Z" fill="#41B883"/>
-        <path d="M0 0L128 220.8L256 0H204.8L128 141.44L50.56 0H0Z" fill="#41B883"/>
-        <path d="M50.56 0L128 141.44L204.8 0H157.44L128 51.2L97.92 0H50.56Z" fill="#35495E"/>
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 256 221"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <path d="M204.8 0H256L128 220.8L0 0H97.92L128 51.2L157.44 0H204.8Z" fill="#41B883" />
+        <path d="M0 0L128 220.8L256 0H204.8L128 141.44L50.56 0H0Z" fill="#41B883" />
+        <path d="M50.56 0L128 141.44L204.8 0H157.44L128 51.2L97.92 0H50.56Z" fill="#35495E" />
       </svg>
       <span>{{ store.vueVersion }}</span>
       <span class="caret">&#9662;</span>

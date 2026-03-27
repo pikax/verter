@@ -3189,6 +3189,78 @@ fn macro_type_dep_resolves_types_only_package_exports() {
 }
 
 #[test]
+fn type_dependency_resolution_in_view_prefers_package_declaration_entrypoint_over_cached_runtime_target(
+) {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/fancy/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./index.cjs" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+        Arc::from("export interface FancyProps { open: boolean }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/index.cjs".to_string(),
+        Arc::from("module.exports = require('./dist/index.js')"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+import type { FancyProps } from 'fancy'
+defineProps<FancyProps>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::DependencyResolution {
+            specifier: "fancy".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/fancy/index.cjs".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let view = host.resolver_store_view();
+    let resolved = host.resolve_type_dependency_canonical_in_view(
+        "/workspace/src/App.vue",
+        "fancy",
+        Some(&view),
+    );
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/node_modules/fancy/dist/index.d.ts"),
+        "type resolution should prefer the declaration entrypoint even when the cached runtime target points at CJS",
+    );
+}
+
+#[test]
 fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
     let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
         verter_vfs::MemoryOptions::default(),
@@ -3276,6 +3348,78 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             .iter()
             .map(|emit| emit.name.clone())
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn type_import_package_with_node_condition_still_prefers_types_entry() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{
+                "name": "vue-router",
+                "main": "index.cjs",
+                "module": "dist/vue-router.js",
+                "types": "dist/vue-router.d.ts",
+                "exports": {
+                    ".": {
+                        "types": "./dist/vue-router.d.ts",
+                        "node": {
+                            "import": "./vue-router.node.mjs",
+                            "require": "./index.cjs"
+                        },
+                        "import": "./dist/vue-router.js",
+                        "require": "./index.cjs"
+                    }
+                }
+            }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/index.cjs".to_string(),
+        Arc::from("module.exports = {}"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from("export interface RouterLinkProps { to: string }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/vue-router.node.mjs".to_string(),
+        Arc::from("export const nodeOnly = true"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws);
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    upsert_vue(
+        &host,
+        "/workspace/src/Consumer.vue",
+        "<script setup lang=\"ts\">\nimport type { RouterLinkProps } from 'vue-router'\ndefineProps<RouterLinkProps>()\n</script>\n<template><div /></template>",
+    );
+
+    let resolved = host.resolve_loaded_dependency_canonical(
+        "/workspace/src/Consumer.vue",
+        "vue-router",
+        verter_vfs::ResolveRequestKind::TypeImport,
+    );
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/node_modules/vue-router/dist/vue-router.d.ts"),
+        "TypeImport should prefer the package types entry even when exports also include node/import/require runtime branches",
     );
 }
 

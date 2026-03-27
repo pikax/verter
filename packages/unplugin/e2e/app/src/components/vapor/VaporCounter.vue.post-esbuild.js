@@ -1,6 +1,16 @@
 import { defineComponent as _defineComponent } from "vue";
 import { ref } from "vue";
-import { template as _template, setText as _setText, delegateEvents as _delegateEvents, renderEffect as _renderEffect, toDisplayString as _toDisplayString, txt as _txt, createInvoker as _createInvoker, child as _child, next as _next } from "vue";
+import {
+  template as _template,
+  setText as _setText,
+  delegateEvents as _delegateEvents,
+  renderEffect as _renderEffect,
+  toDisplayString as _toDisplayString,
+  txt as _txt,
+  createInvoker as _createInvoker,
+  child as _child,
+  next as _next,
+} from "vue";
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "VaporCounter",
   __vapor: true,
@@ -10,9 +20,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       count.value++;
     }
     return { count, increment };
-  }
+  },
 });
-const t0 = _template('<div data-testid="vapor-counter"><span data-testid="vapor-count"> </span><button data-testid="vapor-increment">+1');
+const t0 = _template(
+  '<div data-testid="vapor-counter"><span data-testid="vapor-count"> </span><button data-testid="vapor-increment">+1',
+);
 _delegateEvents("click");
 function render(_ctx) {
   const n0 = t0();

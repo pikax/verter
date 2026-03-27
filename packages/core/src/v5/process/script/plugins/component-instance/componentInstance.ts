@@ -22,9 +22,7 @@ export const ComponentInstancePlugin = definePlugin({
         ),
       );
     } else {
-      ctx.items.push(
-        createHelperImport(["OmitConstructorSignature", "Prettify"], ctx.prefix),
-      );
+      ctx.items.push(createHelperImport(["OmitConstructorSignature", "Prettify"], ctx.prefix));
     }
   },
 
@@ -110,9 +108,7 @@ export const ComponentInstancePlugin = definePlugin({
       const defaultOptionsName = ctx.prefix("default_Component");
       const instanceName = ctx.prefix("Instance");
       const componentName = ctx.prefix("Component");
-      const OmitConstructorSignature = ctx.prefix(
-        "OmitConstructorSignature" as AvailableExports,
-      );
+      const OmitConstructorSignature = ctx.prefix("OmitConstructorSignature" as AvailableExports);
       const Prettify = ctx.prefix("Prettify" as AvailableExports);
       const exportStr = ctx.isSingleFile ? "" : "export";
 

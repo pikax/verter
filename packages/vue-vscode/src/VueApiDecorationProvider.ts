@@ -94,11 +94,12 @@ export class VueApiDecorationProvider implements Disposable {
   private decorationTypes: Map<VueApiCategory, TextEditorDecorationType> = new Map();
   private subscriptions: Disposable[] = [];
   private enabled = false;
-  private _lastState: Map<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = new Map();
+  private _lastState: Map<
+    string,
+    Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+  > = new Map();
 
-  constructor(
-    private getClient: () => PatchClient<LanguageClient>,
-  ) {
+  constructor(private getClient: () => PatchClient<LanguageClient>) {
     this.readConfig();
 
     this.subscriptions.push(
@@ -240,8 +241,14 @@ export class VueApiDecorationProvider implements Disposable {
   }
 
   /** Returns the last-applied decoration ranges by category (for E2E testing). */
-  getState(): Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> {
-    const result: Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = {};
+  getState(): Record<
+    string,
+    Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+  > {
+    const result: Record<
+      string,
+      Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+    > = {};
     for (const [category, ranges] of this._lastState) {
       result[category] = ranges;
     }

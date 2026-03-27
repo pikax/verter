@@ -1,7 +1,7 @@
 import { normalizeForComparison, extractSsrRenderBody } from "./normalize.mjs";
 import fs from "fs";
 
-const data = JSON.parse(fs.readFileSync('C:/temp/ssr-full-5.json', 'utf-8'));
+const data = JSON.parse(fs.readFileSync("C:/temp/ssr-full-5.json", "utf-8"));
 const info = data.mismatches["1"];
 
 // Show raw vs normalized for Vue

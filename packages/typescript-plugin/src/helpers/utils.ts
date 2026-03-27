@@ -41,14 +41,9 @@ export function getVueVirtualFileInfo(
   return null;
 }
 
-export function toVueVirtualFileName(
-  fileName: string,
-  mode: VuePublicApiMode,
-): string {
+export function toVueVirtualFileName(fileName: string, mode: VuePublicApiMode): string {
   const normalized = normalizePath(fileName);
-  return mode === "testing"
-    ? `${normalized}.__verter_test.ts`
-    : `${normalized}.ts`;
+  return mode === "testing" ? `${normalized}.__verter_test.ts` : `${normalized}.ts`;
 }
 
 export function stripVueVirtualSuffix(fileName: string): string {

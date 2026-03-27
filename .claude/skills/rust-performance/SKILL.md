@@ -9,7 +9,7 @@ Principles for writing performant Rust in `verter_core`, grounded in the crate's
 
 ## 1. Batch Over Incremental
 
-The highest-impact pattern. `CodeTransform` operations like `overwrite()` and `prepend_left()` each walk the chunk list in O(n). Calling them in a loop is O(n*N).
+The highest-impact pattern. `CodeTransform` operations like `overwrite()` and `prepend_left()` each walk the chunk list in O(n). Calling them in a loop is O(n\*N).
 
 Instead, collect operations into `Vec`s and apply with the batch APIs:
 
@@ -39,13 +39,13 @@ Prefer allocations in this order (fastest to slowest):
 4. **Reusable `&mut String` buffer** — amortized cost via capacity reuse
 5. **`String`** — heap-allocated, avoid in hot paths
 
-| Need | Use |
-|------|-----|
-| Known constant value | `&'static str` |
+| Need                                          | Use                                             |
+| --------------------------------------------- | ----------------------------------------------- |
+| Known constant value                          | `&'static str`                                  |
 | Generated text that outlives current function | `code_transform.alloc_str(buf)` → `&'alloc str` |
-| Substring of source input | `&ctx.input[start..end]` |
-| Temporary text build-up | Shared `&mut String` buffer (see below) |
-| Truly owned, long-lived, mutable text | `String` |
+| Substring of source input                     | `&ctx.input[start..end]`                        |
+| Temporary text build-up                       | Shared `&mut String` buffer (see below)         |
+| Truly owned, long-lived, mutable text         | `String`                                        |
 
 ## 3. Reusable Buffer Pattern
 
@@ -232,27 +232,27 @@ Agent MCP config template: `mcp/hotpath.mcp.json`
 
 ### Where NOT to Look for Further Gains
 
-| Area | Why it won't help |
-|------|-------------------|
-| `offset_to_line_col` binary search | Already fast for typical file sizes |
-| `emit_mapped_content` signature | Changing parameters causes LLVM optimization regressions |
-| `memchr_iter` in source map | Already optimal — memchr uses SIMD |
-| `Vec<ChildRecord>` reuse | Small Vec allocations (1-10 items) are already fast |
+| Area                                        | Why it won't help                                              |
+| ------------------------------------------- | -------------------------------------------------------------- |
+| `offset_to_line_col` binary search          | Already fast for typical file sizes                            |
+| `emit_mapped_content` signature             | Changing parameters causes LLVM optimization regressions       |
+| `memchr_iter` in source map                 | Already optimal — memchr uses SIMD                             |
+| `Vec<ChildRecord>` reuse                    | Small Vec allocations (1-10 items) are already fast            |
 | `resolve_simple_expr` per-expression String | ~10-20 calls per component, ~20 bytes each — below noise floor |
-| Component resolution String allocation | Per-component, unavoidable (tag names are dynamic) |
+| Component resolution String allocation      | Per-component, unavoidable (tag names are dynamic)             |
 
 ## Anti-Patterns
 
-| Pattern | Problem | Fix |
-|---------|---------|-----|
-| `overwrite()`/`prepend_left()` in a loop | O(n) per call | Collect into Vec + batch API |
-| `buf.clone()` for storage | Heap alloc per clone | `code_transform.alloc_str(buf)` |
-| `.to_string()` on `ctx.input` slices | Unnecessary heap copy | `&ctx.input[start..end]` |
-| Fresh Vec-heavy structs per iteration | Alloc/dealloc churn | Pool + `reset()` with `.clear()` |
-| `Instant::now()` unconditionally | Panics in WASM | `#[cfg(not(target_arch = "wasm32"))]` guard |
-| SmallVec with large types (>64B) in Box'd structs | Inflates allocation size, 40-50% regression | Keep `Vec` |
-| `Vec<String>` for bump-allocatable content | Per-element heap alloc | `Vec<&'alloc str>` + save/truncate |
-| Explicit `is_sorted` check before sort | Rust's TimSort already detects sorted runs | Just call `.sort_by_key()` |
-| Changing hot function signatures | Causes LLVM optimization regressions | Keep hot function signatures stable |
-| Linear sweep replacing binary search on <1K elements | Binary search already in CPU branch predictor sweet spot | Only consider at >10K elements |
-| Reusing small Vecs (1-10 items) | Allocator handles small allocations efficiently | Only pool/reuse Vecs with >50 items |
+| Pattern                                              | Problem                                                  | Fix                                         |
+| ---------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------- |
+| `overwrite()`/`prepend_left()` in a loop             | O(n) per call                                            | Collect into Vec + batch API                |
+| `buf.clone()` for storage                            | Heap alloc per clone                                     | `code_transform.alloc_str(buf)`             |
+| `.to_string()` on `ctx.input` slices                 | Unnecessary heap copy                                    | `&ctx.input[start..end]`                    |
+| Fresh Vec-heavy structs per iteration                | Alloc/dealloc churn                                      | Pool + `reset()` with `.clear()`            |
+| `Instant::now()` unconditionally                     | Panics in WASM                                           | `#[cfg(not(target_arch = "wasm32"))]` guard |
+| SmallVec with large types (>64B) in Box'd structs    | Inflates allocation size, 40-50% regression              | Keep `Vec`                                  |
+| `Vec<String>` for bump-allocatable content           | Per-element heap alloc                                   | `Vec<&'alloc str>` + save/truncate          |
+| Explicit `is_sorted` check before sort               | Rust's TimSort already detects sorted runs               | Just call `.sort_by_key()`                  |
+| Changing hot function signatures                     | Causes LLVM optimization regressions                     | Keep hot function signatures stable         |
+| Linear sweep replacing binary search on <1K elements | Binary search already in CPU branch predictor sweet spot | Only consider at >10K elements              |
+| Reusing small Vecs (1-10 items)                      | Allocator handles small allocations efficiently          | Only pool/reuse Vecs with >50 items         |

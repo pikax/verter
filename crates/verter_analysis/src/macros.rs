@@ -2183,7 +2183,11 @@ fn extract_slot_bindings_from_params(
     let Some(ref ta) = first_param.type_annotation else {
         return Vec::new();
     };
-    extract_slot_bindings_from_type_literal(&ta.type_annotation, source)
+    let bindings = extract_slot_bindings_from_type_literal(&ta.type_annotation, source);
+    if !bindings.is_empty() {
+        return bindings;
+    }
+    extract_slot_bindings_from_source_type(&ta.type_annotation, source)
 }
 
 /// Extract binding names and types from a `TSTypeLiteral` (object type).
@@ -2228,6 +2232,123 @@ fn extract_slot_bindings_from_type_literal(
             }
         })
         .collect()
+}
+
+fn extract_slot_bindings_from_source_type(
+    ts_type: &TSType<'_>,
+    source: &str,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    let start = ts_type.span().start as usize;
+    let end = ts_type.span().end as usize;
+    if start >= end || end > source.len() {
+        return Vec::new();
+    }
+
+    extract_slot_bindings_from_type_text(source[start..end].trim())
+}
+
+fn extract_slot_bindings_from_type_text(type_text: &str) -> Vec<AnalyzedSlotFieldBinding> {
+    extract_slot_bindings_from_pick_type(type_text).unwrap_or_default()
+}
+
+fn extract_slot_bindings_from_pick_type(type_text: &str) -> Option<Vec<AnalyzedSlotFieldBinding>> {
+    let text = type_text.trim();
+    if !text.starts_with("Pick<") || !text.ends_with('>') {
+        return None;
+    }
+
+    let args = split_top_level_type_segments(&text["Pick<".len()..text.len() - 1], ',');
+    if args.len() != 2 {
+        return None;
+    }
+
+    let object = args[0].trim();
+    let keys = split_top_level_type_segments(args[1].trim(), '|');
+    let mut bindings = Vec::new();
+    for key in keys {
+        let key = key.trim();
+        let Some(name) = extract_type_string_literal_name(key) else {
+            return None;
+        };
+        bindings.push(AnalyzedSlotFieldBinding {
+            name,
+            type_annotation: Some(format!("{object}[{key}]")),
+            span: verter_span::Span::default(),
+        });
+    }
+
+    (!bindings.is_empty()).then_some(bindings)
+}
+
+fn split_top_level_type_segments(text: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0i32;
+    let mut bracket_depth = 0i32;
+    let mut brace_depth = 0i32;
+    let mut angle_depth = 0i32;
+    let mut in_string = false;
+    let mut string_delim = '\0';
+    let mut escape = false;
+
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == string_delim {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' => {
+                in_string = true;
+                string_delim = ch;
+            }
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth -= 1,
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            '<' => angle_depth += 1,
+            '>' => angle_depth -= 1,
+            _ if ch == separator
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0 =>
+            {
+                parts.push(text[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    parts
+}
+
+fn extract_type_string_literal_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.len() >= 2
+        && ((text.starts_with('\'') && text.ends_with('\''))
+            || (text.starts_with('"') && text.ends_with('"')))
+    {
+        return Some(text[1..text.len() - 1].to_string());
+    }
+    None
 }
 
 /// Check if a `defineOptions()` call has `inheritAttrs: false` in its first object argument.

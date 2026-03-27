@@ -1,7 +1,7 @@
 <script setup>
-import { ref } from 'vue'
-const msg = ref('Hello')
-const count = ref(0)
+import { ref } from "vue";
+const msg = ref("Hello");
+const count = ref(0);
 </script>
 
 <template>

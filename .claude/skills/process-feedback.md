@@ -8,9 +8,11 @@ description: "Review .claude/feedback/ files and process them into actionable pl
 ## Workflow
 
 1. **Read all feedback files** from `.claude/feedback/`:
+
    ```bash
    ls .claude/feedback/
    ```
+
    Read each `feedback-*.md` file.
 
 2. **Categorize entries** by scope (the part of the codebase they affect):
@@ -53,18 +55,22 @@ description: "Review .claude/feedback/ files and process them into actionable pl
 ## Plan: {Scope} improvements
 
 ### High Priority (issues)
+
 - [ ] [small] Fix {description} — `{file}:{line}`
   - Validation: {how to verify}
 
 ### Medium Priority (improvements)
+
 - [ ] [medium] Refactor {description} — `{file}:{line}`
   - Validation: {how to verify}
 
 ### Low Priority (debt)
+
 - [ ] [small] Clean up {description} — `{file}:{line}`
   - Validation: {how to verify}
 
 ### Docs
+
 - [ ] [small] Document {description} — `{file}`
 ```
 

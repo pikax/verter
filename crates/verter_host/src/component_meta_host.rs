@@ -60,12 +60,31 @@ impl From<crate::meta::MetaError> for ComponentMetaHostError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComponentMetaTraceCursor {
+    pub request_id: u64,
+    pub span_id: u64,
+    pub caller_id: Option<u64>,
+    pub depth: usize,
+}
+
 pub trait ComponentMetaTypeExpander: Send + Sync {
     fn expand_type(
         &self,
         request: &TypeExpansionRequest,
         snapshot: TypeExpansionSnapshot,
+        trace_cursor: Option<ComponentMetaTraceCursor>,
     ) -> Result<TypeExpansionResult, TypeExpansionError>;
+
+    fn expand_slot_bindings(
+        &self,
+        _request: &TypeExpansionRequest,
+        _snapshot: TypeExpansionSnapshot,
+        _slot_name: &str,
+        _trace_cursor: Option<ComponentMetaTraceCursor>,
+    ) -> Result<Option<TypeExpansionResult>, TypeExpansionError> {
+        Ok(None)
+    }
 
     fn shutdown(&self) {}
 }
@@ -321,6 +340,13 @@ impl ComponentMetaSession {
     pub fn delete(&self, canonical_id: &str) -> Result<(), ComponentMetaHostError> {
         self.inner
             .delete(canonical_id)
+            .map_err(ComponentMetaHostError::from)
+    }
+
+    /// Clear a session-local overlay for a file, revealing the shared base.
+    pub fn reset(&self, canonical_id: &str) -> Result<(), ComponentMetaHostError> {
+        self.inner
+            .reset(canonical_id)
             .map_err(ComponentMetaHostError::from)
     }
 
@@ -800,9 +826,33 @@ fn build_external_component_types(
             span: type_span,
             profile: verter_resolver::type_expansion::ExpansionProfile::ComponentMeta,
         };
+        let _trace = component_meta_trace_scope(
+            "component_meta_external_macro",
+            format!(
+                "owner={} macro_index={} macro_kind={:?} span={}..{}",
+                canonical_id, macro_index, mac.kind, type_span.start, type_span.end,
+            ),
+        );
         let expansion = expander
-            .expand_type(&request, snapshot.clone())
+            .expand_type(
+                &request,
+                snapshot.clone(),
+                crate::host_manage::current_component_meta_trace_cursor(),
+            )
             .map_err(external_expansion_error)?;
+
+        if matches!(
+            mac.kind,
+            verter_analysis::types::AnalyzedMacroKind::DefineSlots
+        ) {
+            collect_external_slot_binding_fields(
+                &mut output,
+                expander,
+                &request,
+                snapshot,
+                &expansion,
+            )?;
+        }
 
         apply_type_expansion_result(
             &mut output,
@@ -814,6 +864,92 @@ fn build_external_component_types(
     }
 
     Ok(output)
+}
+
+fn collect_external_slot_binding_fields(
+    output: &mut ExpandedComponentTypes,
+    expander: &dyn ComponentMetaTypeExpander,
+    request: &TypeExpansionRequest,
+    snapshot: &TypeExpansionSnapshot,
+    expansion: &TypeExpansionResult,
+) -> Result<(), ComponentMetaHostError> {
+    let slot_names = type_expansion_members(expansion)
+        .into_iter()
+        .map(|member| member.name)
+        .collect::<Vec<_>>();
+    component_meta_trace_event(
+        "component_meta_external_slot_binding_slots",
+        format!(
+            "owner={} slot_count={} slots={}",
+            request.canonical_id,
+            slot_names.len(),
+            slot_names.join(","),
+        ),
+    );
+    for slot_name in slot_names {
+        component_meta_trace_event(
+            "component_meta_external_slot_binding_query",
+            format!("owner={} slot={slot_name}", request.canonical_id),
+        );
+        let Some(slot_bindings) = expander
+            .expand_slot_bindings(
+                request,
+                snapshot.clone(),
+                &slot_name,
+                crate::host_manage::current_component_meta_trace_cursor(),
+            )
+            .map_err(external_expansion_error)?
+        else {
+            continue;
+        };
+        output
+            .slot_bindings
+            .extend(
+                type_expansion_members(&slot_bindings)
+                    .into_iter()
+                    .map(|member| ExpandedField {
+                        name: format!("{}.{}", slot_name, member.name),
+                        r#type: member.type_expr,
+                        raw_type: member.raw_type,
+                        optional: member.optional,
+                        completeness: analysis_completeness(slot_bindings.completeness),
+                        diagnostics: expansion_diagnostics(
+                            slot_bindings.completeness,
+                            format!("type expansion for slot binding {slot_name}"),
+                            None,
+                        ),
+                    }),
+            );
+    }
+    Ok(())
+}
+
+fn type_expansion_members(
+    expansion: &TypeExpansionResult,
+) -> Vec<verter_resolver::type_expansion::ExpandedMember> {
+    if !expansion.members.is_empty() {
+        return expansion.members.clone();
+    }
+
+    match &expansion.type_expr {
+        TypeExpr::Object(object) => object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => {
+                    Some(verter_resolver::type_expansion::ExpandedMember {
+                        name: property.name.clone(),
+                        type_expr: property.ty.clone(),
+                        raw_type: None,
+                        optional: property.optional,
+                        description: None,
+                    })
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn external_expansion_error(error: TypeExpansionError) -> ComponentMetaHostError {
@@ -830,15 +966,78 @@ fn apply_type_expansion_result(
     match mac.kind {
         verter_analysis::types::AnalyzedMacroKind::DefineProps
         | verter_analysis::types::AnalyzedMacroKind::WithDefaults => {
+            for member in &expansion.members {
+                output.props.push(ExpandedField {
+                    name: member.name.clone(),
+                    r#type: member.type_expr.clone(),
+                    raw_type: member.raw_type.clone(),
+                    optional: member.optional,
+                    completeness: analysis_completeness(expansion.completeness),
+                    diagnostics: expansion_diagnostics(
+                        expansion.completeness,
+                        format!("type expansion for prop {}", member.name),
+                        Some(member.name.clone()),
+                    ),
+                });
+            }
             output.define_props.push(ExpandedMacroProps {
                 macro_index,
                 result: expansion_result_to_object_shape(expansion),
             });
         }
         verter_analysis::types::AnalyzedMacroKind::DefineEmits => {
+            let emit_fields = merged_emit_fields(mac, resolved_macro);
+            if emit_fields.is_empty() {
+                output.define_emits.push(ExpandedMacroObjectShape {
+                    macro_index,
+                    result: expansion_result_to_object_shape(expansion),
+                });
+                return;
+            }
+
+            let completeness = analysis_completeness(expansion.completeness);
+            let diagnostics = expansion_diagnostics(
+                expansion.completeness,
+                "external type expansion".to_string(),
+                None,
+            );
+            let members_by_name: HashMap<_, _> = expansion
+                .members
+                .iter()
+                .map(|member| (member.name.as_str(), member))
+                .collect();
+            let expanded_events: Vec<_> = emit_fields
+                .iter()
+                .map(|field| {
+                    expanded_emit_field_from_source(
+                        field,
+                        members_by_name.get(field.name.as_str()).copied(),
+                        completeness,
+                        &diagnostics,
+                    )
+                })
+                .collect();
+
+            output.emits.extend(expanded_events.iter().cloned());
             output.define_emits.push(ExpandedMacroObjectShape {
                 macro_index,
-                result: expansion_result_to_object_shape(expansion),
+                result: AnalysisExpansionResult {
+                    value: ExpandedObjectShape {
+                        properties: expanded_events
+                            .iter()
+                            .map(|field| ExpandedProperty {
+                                name: field.name.clone(),
+                                ty: field.r#type.clone(),
+                                optional: field.optional,
+                                readonly: false,
+                            })
+                            .collect(),
+                        index_signatures: Vec::new(),
+                        call_signatures: Vec::new(),
+                    },
+                    completeness,
+                    diagnostics,
+                },
             });
         }
         verter_analysis::types::AnalyzedMacroKind::DefineSlots => {
@@ -859,6 +1058,7 @@ fn apply_type_expansion_result(
             let field = ExpandedField {
                 name: field_name.clone(),
                 r#type: expansion.type_expr.clone(),
+                raw_type: None,
                 optional: false,
                 completeness: analysis_completeness(expansion.completeness),
                 diagnostics: expansion_diagnostics(
@@ -879,6 +1079,7 @@ fn apply_type_expansion_result(
                     }]),
                     readonly: false,
                 },
+                raw_type: None,
                 optional: false,
                 completeness: field.completeness,
                 diagnostics: field.diagnostics,
@@ -886,6 +1087,103 @@ fn apply_type_expansion_result(
         }
         _ => {}
     }
+}
+
+fn merged_emit_fields(
+    mac: &verter_analysis::types::AnalyzedMacro,
+    resolved_macro: Option<&crate::meta_resolve::ResolvedMacroMeta>,
+) -> Vec<verter_analysis::types::AnalyzedEmitField> {
+    let mut fields = mac.emit_fields.clone();
+    let mut seen: std::collections::HashSet<String> =
+        fields.iter().map(|field| field.name.clone()).collect();
+    if let Some(resolved_macro) = resolved_macro {
+        for emit in &resolved_macro.emits {
+            if seen.insert(emit.name.clone()) {
+                fields.push(emit.clone());
+            }
+        }
+    }
+    fields
+}
+
+fn expanded_emit_field_from_source(
+    field: &verter_analysis::types::AnalyzedEmitField,
+    member: Option<&verter_resolver::type_expansion::ExpandedMember>,
+    completeness: AnalysisExpansionCompleteness,
+    diagnostics: &[ExpansionDiagnostic],
+) -> ExpandedField {
+    let source_payload = field
+        .payload_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|payload| !payload.is_empty());
+    if let Some(member) = member {
+        if !source_payload
+            .is_some_and(|payload| source_emit_payload_beats_backend_member(member, payload))
+        {
+            return ExpandedField {
+                name: field.name.clone(),
+                r#type: member.type_expr.clone(),
+                raw_type: member.raw_type.clone().or_else(|| {
+                    source_payload
+                        .and_then(strip_event_tuple_wrapper)
+                        .map(str::to_string)
+                }),
+                optional: member.optional,
+                completeness,
+                diagnostics: diagnostics.to_vec(),
+            };
+        }
+    }
+
+    let source_type = source_payload
+        .map(verter_resolver::type_text_parser::parse_type_text)
+        .unwrap_or_else(|| TypeExpr::Unknown {
+            raw: "unknown".to_string(),
+        });
+    ExpandedField {
+        name: field.name.clone(),
+        r#type: source_type,
+        raw_type: source_payload
+            .and_then(strip_event_tuple_wrapper)
+            .map(str::to_string)
+            .or_else(|| source_payload.map(str::to_string)),
+        optional: false,
+        completeness,
+        diagnostics: diagnostics.to_vec(),
+    }
+}
+
+fn source_emit_payload_beats_backend_member(
+    member: &verter_resolver::type_expansion::ExpandedMember,
+    source_payload: &str,
+) -> bool {
+    let source_inner = strip_event_tuple_wrapper(source_payload)
+        .unwrap_or(source_payload)
+        .trim();
+    if source_inner.is_empty() || matches!(source_inner, "any" | "unknown") {
+        return false;
+    }
+    if !matches!(member.type_expr, TypeExpr::Tuple { .. }) {
+        return true;
+    }
+
+    let Some(raw_type) = member.raw_type.as_deref().map(str::trim) else {
+        return false;
+    };
+    raw_type.is_empty()
+        || matches!(raw_type, "any" | "unknown")
+        || (source_payload.contains(" extends ") && !raw_type.contains(" extends "))
+        || (source_payload.contains('[')
+            && source_payload.contains(']')
+            && (raw_type.starts_with('{') || raw_type.contains('\n')))
+}
+
+fn strip_event_tuple_wrapper(payload: &str) -> Option<&str> {
+    let payload = payload.trim();
+    let payload = payload.strip_prefix("[value:")?;
+    let payload = payload.strip_suffix(']')?;
+    Some(payload.trim())
 }
 
 fn expansion_result_to_object_shape(
@@ -1216,18 +1514,23 @@ fn try_extract_block(rest: &str, tag: &str, base_offset: usize) -> Option<SfcBlo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::sync::Arc;
 
     struct FakeTypeExpander {
         requests: parking_lot::Mutex<Vec<TypeExpansionRequest>>,
+        slot_binding_requests: parking_lot::Mutex<Vec<(TypeExpansionRequest, String)>>,
+        trace_cursors: parking_lot::Mutex<Vec<Option<ComponentMetaTraceCursor>>>,
         result: TypeExpansionResult,
+        slot_binding_results: HashMap<String, TypeExpansionResult>,
     }
 
     impl FakeTypeExpander {
         fn object_with_members(members: Vec<(&str, TypeExpr, bool)>) -> Self {
             Self {
                 requests: parking_lot::Mutex::new(Vec::new()),
+                slot_binding_requests: parking_lot::Mutex::new(Vec::new()),
+                trace_cursors: parking_lot::Mutex::new(Vec::new()),
                 result: TypeExpansionResult {
                     type_expr: TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
                         properties: members
@@ -1248,6 +1551,7 @@ mod tests {
                             verter_resolver::type_expansion::ExpandedMember {
                                 name: name.to_string(),
                                 type_expr,
+                                raw_type: None,
                                 optional,
                                 description: None,
                             }
@@ -1255,7 +1559,46 @@ mod tests {
                         .collect(),
                     completeness: ExpansionCompleteness::Exact,
                 },
+                slot_binding_results: HashMap::new(),
             }
+        }
+
+        fn with_slot_bindings(
+            mut self,
+            slot_name: &str,
+            members: Vec<(&str, TypeExpr, bool)>,
+        ) -> Self {
+            let result = TypeExpansionResult {
+                type_expr: TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
+                    properties: members
+                        .iter()
+                        .map(|(name, ty, optional)| {
+                            ObjectMember::Property(verter_analysis::type_expr::ObjectProperty {
+                                name: (*name).to_string(),
+                                ty: ty.clone(),
+                                optional: *optional,
+                                readonly: false,
+                            })
+                        })
+                        .collect(),
+                })),
+                members: members
+                    .into_iter()
+                    .map(|(name, type_expr, optional)| {
+                        verter_resolver::type_expansion::ExpandedMember {
+                            name: name.to_string(),
+                            type_expr,
+                            raw_type: None,
+                            optional,
+                            description: None,
+                        }
+                    })
+                    .collect(),
+                completeness: ExpansionCompleteness::Exact,
+            };
+            self.slot_binding_results
+                .insert(slot_name.to_string(), result);
+            self
         }
     }
 
@@ -1264,9 +1607,24 @@ mod tests {
             &self,
             request: &TypeExpansionRequest,
             _snapshot: TypeExpansionSnapshot,
+            trace_cursor: Option<ComponentMetaTraceCursor>,
         ) -> Result<TypeExpansionResult, TypeExpansionError> {
             self.requests.lock().push(request.clone());
+            self.trace_cursors.lock().push(trace_cursor);
             Ok(self.result.clone())
+        }
+
+        fn expand_slot_bindings(
+            &self,
+            request: &TypeExpansionRequest,
+            _snapshot: TypeExpansionSnapshot,
+            slot_name: &str,
+            _trace_cursor: Option<ComponentMetaTraceCursor>,
+        ) -> Result<Option<TypeExpansionResult>, TypeExpansionError> {
+            self.slot_binding_requests
+                .lock()
+                .push((request.clone(), slot_name.to_string()));
+            Ok(self.slot_binding_results.get(slot_name).cloned())
         }
     }
 
@@ -1508,6 +1866,245 @@ defineProps<Props>()
             "request should use a session-scoped generated identity, got: {}",
             request.canonical_id
         );
+    }
+
+    #[test]
+    fn non_verter_backend_can_supply_slot_bindings_via_external_expander() {
+        let mut config = crate::types::HostConfig::default();
+        config.type_expansion_backend = TypeExpansionBackend::Tsgo;
+        let host = ComponentMetaHost::new_standalone(config);
+        let fake = Arc::new(
+            FakeTypeExpander::object_with_members(vec![(
+                "leading",
+                TypeExpr::named("SlotProps"),
+                true,
+            )])
+            .with_slot_bindings(
+                "leading",
+                vec![
+                    ("item", TypeExpr::primitive(PrimitiveName::String), false),
+                    ("index", TypeExpr::primitive(PrimitiveName::Number), false),
+                ],
+            ),
+        );
+        host.set_type_expander(fake.clone());
+        host.upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+defineSlots<{
+  leading?: (props: { item: string; index: number }) => any
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+        let session = host.open_session().unwrap();
+        let result = session
+            .get_component_meta("/src/Button.vue")
+            .unwrap()
+            .expect("external backend should return component meta");
+
+        let leading = result
+            .slots
+            .iter()
+            .find(|slot| slot.name == "leading")
+            .expect("leading slot should be present");
+        let bindings: BTreeSet<_> = leading
+            .bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect();
+        assert_eq!(
+            bindings,
+            BTreeSet::from(["index", "item"]),
+            "slot bindings should come from the external slot-binding query, got {:?}",
+            leading
+                .bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fake.slot_binding_requests.lock().len(),
+            1,
+            "defineSlots external path should request slot bindings for alias-based slot props"
+        );
+    }
+
+    #[test]
+    fn non_verter_backend_prefers_raw_emit_payload_over_macro_return_shape() {
+        let mut config = crate::types::HostConfig::default();
+        config.type_expansion_backend = TypeExpansionBackend::Tsgo;
+        let host = ComponentMetaHost::new_standalone(config);
+        let fake = Arc::new(FakeTypeExpander::object_with_members(vec![(
+            "update:modelValue",
+            TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
+                properties: vec![ObjectMember::Property(
+                    verter_analysis::type_expr::ObjectProperty {
+                        name: "$props".to_string(),
+                        ty: TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
+                            properties: Vec::new(),
+                        })),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+            false,
+        )]));
+        host.set_type_expander(fake);
+        host.upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+defineEmits<{
+  'update:modelValue': [value: string | number]
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+        let session = host.open_session().unwrap();
+        let result = session
+            .get_component_meta("/src/Button.vue")
+            .unwrap()
+            .expect("external backend should return component meta");
+
+        let event = result
+            .events
+            .iter()
+            .find(|event| event.name == "update:modelValue")
+            .expect("update:modelValue should be present");
+        assert!(
+            matches!(event.payload, TypeExpr::Tuple { .. }),
+            "event payload should come from the raw emit tuple, got {:?}",
+            event.payload
+        );
+        assert_eq!(
+            event.raw_signature.as_deref(),
+            Some("[value: string | number]")
+        );
+    }
+
+    #[test]
+    fn non_verter_backend_queries_slot_bindings_for_alias_slots() {
+        let mut config = crate::types::HostConfig::default();
+        config.type_expansion_backend = TypeExpansionBackend::Tsgo;
+        let host = ComponentMetaHost::new_standalone(config);
+        let fake = Arc::new(
+            FakeTypeExpander::object_with_members(vec![(
+                "leading",
+                TypeExpr::named("SlotProps"),
+                true,
+            )])
+            .with_slot_bindings(
+                "leading",
+                vec![
+                    ("item", TypeExpr::primitive(PrimitiveName::String), false),
+                    ("index", TypeExpr::primitive(PrimitiveName::Number), false),
+                ],
+            ),
+        );
+        host.set_type_expander(fake.clone());
+        host.upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+type SlotProps = (props: { item: string; index: number }) => any
+interface Slots {
+  leading?: SlotProps
+}
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+        let session = host.open_session().unwrap();
+        let result = session
+            .get_component_meta("/src/Button.vue")
+            .unwrap()
+            .expect("external backend should return component meta");
+
+        let leading = result
+            .slots
+            .iter()
+            .find(|slot| slot.name == "leading")
+            .expect("leading slot should be present");
+        let bindings: BTreeSet<_> = leading
+            .bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect();
+        assert_eq!(
+            bindings,
+            BTreeSet::from(["index", "item"]),
+            "slot bindings should be resolved through the alias-based external query, got {:?}",
+            leading
+                .bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fake.slot_binding_requests.lock().len(),
+            1,
+            "slot binding expansion should run for alias-based slot declarations"
+        );
+    }
+
+    #[test]
+    fn non_verter_backend_passes_trace_cursor_to_external_expander() {
+        unsafe {
+            std::env::set_var("VERTER_COMPONENT_META_TRACE", "1");
+        }
+
+        let mut config = crate::types::HostConfig::default();
+        config.type_expansion_backend = TypeExpansionBackend::Tsgo;
+        let host = ComponentMetaHost::new_standalone(config);
+        let fake = Arc::new(FakeTypeExpander::object_with_members(vec![(
+            "msg",
+            TypeExpr::primitive(PrimitiveName::String),
+            false,
+        )]));
+        host.set_type_expander(fake.clone());
+        host.upsert_base("/src/types.ts", "export interface Props { msg: string }")
+            .unwrap();
+        host.upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+import type { Props } from "./types"
+defineProps<Props>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        )
+        .unwrap();
+        host.host().set_import_dependencies(
+            "/src/Button.vue",
+            vec![crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let session = host.open_session().unwrap();
+        let result = session.get_component_meta("/src/Button.vue").unwrap();
+        assert!(result.is_some());
+
+        let cursor = fake
+            .trace_cursors
+            .lock()
+            .first()
+            .and_then(|cursor| *cursor)
+            .expect("external expander should receive a trace cursor");
+        assert!(cursor.request_id > 0);
+        assert!(cursor.span_id > 0);
+        assert!(cursor.depth > 0);
+
+        unsafe {
+            std::env::remove_var("VERTER_COMPONENT_META_TRACE");
+        }
     }
 
     #[test]

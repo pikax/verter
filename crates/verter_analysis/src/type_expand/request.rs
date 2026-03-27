@@ -247,6 +247,9 @@ pub struct ExpandedField {
     pub name: String,
     /// The expanded type expression (post-expansion normalized).
     pub r#type: TypeExpr,
+    /// Raw backend/display type text for this field, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
     /// Whether the source field is optional.
     #[serde(default)]
     pub optional: bool,

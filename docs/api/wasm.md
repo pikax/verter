@@ -19,9 +19,9 @@ pnpm add @verter/wasm
 Load the WASM module. Must be called before `compileSync()` or constructing a `Host`. Safe to call multiple times -- only initializes once. Subsequent calls return immediately.
 
 ```ts
-import { initialize } from '@verter/wasm'
+import { initialize } from "@verter/wasm";
 
-await initialize()
+await initialize();
 ```
 
 ### `isInitialized()`
@@ -29,10 +29,10 @@ await initialize()
 Check if the WASM module has been loaded.
 
 ```ts
-import { isInitialized } from '@verter/wasm'
+import { isInitialized } from "@verter/wasm";
 
 if (!isInitialized()) {
-  await initialize()
+  await initialize();
 }
 ```
 
@@ -41,9 +41,9 @@ if (!isInitialized()) {
 Compile a Vue SFC to JavaScript. Auto-initializes the WASM module if needed.
 
 ```ts
-import { compile } from '@verter/wasm'
+import { compile } from "@verter/wasm";
 
-const result = await compile(source, { filename: 'App.vue' })
+const result = await compile(source, { filename: "App.vue" });
 // result.code — compiled JavaScript
 // result.sourceMap — source map JSON string
 // result.codeWithSourceMap — code with inline source map appended
@@ -53,6 +53,7 @@ const result = await compile(source, { filename: 'App.vue' })
 ```
 
 **Parameters:**
+
 - `input` (`string | Uint8Array`) -- Vue SFC source code
 - `options` (`CodegenOptions?`) -- Optional compilation options
 
@@ -63,14 +64,15 @@ const result = await compile(source, { filename: 'App.vue' })
 Synchronous compilation. Requires `initialize()` to have been called first. Throws if the WASM module has not been initialized.
 
 ```ts
-import { initialize, compileSync } from '@verter/wasm'
+import { initialize, compileSync } from "@verter/wasm";
 
-await initialize()
+await initialize();
 
-const result = compileSync(source, { filename: 'App.vue' })
+const result = compileSync(source, { filename: "App.vue" });
 ```
 
 **Parameters:**
+
 - `input` (`string | Uint8Array`) -- Vue SFC source code
 - `options` (`CodegenOptions?`) -- Optional compilation options
 
@@ -81,21 +83,21 @@ const result = compileSync(source, { filename: 'App.vue' })
 In-memory host facade exposed by the WASM runtime. Provides the same multi-file compilation API as `@verter/native`'s `VerterHost`, but running in the browser via WebAssembly.
 
 ```ts
-import { createHost } from '@verter/wasm'
+import { createHost } from "@verter/wasm";
 
-const host = await createHost({ devMode: true })
+const host = await createHost({ devMode: true });
 
 const update = host.upsert({
-  inputId: 'App.vue',
+  inputId: "App.vue",
   source: sfcSource,
-})
+});
 
 // update.moduleReferences — import/require sites for dependency tracking
 
 const file = host.getVirtualFile({
-  rawId: 'App.vue',
+  rawId: "App.vue",
   compileProfile: { isProduction: false },
-})
+});
 ```
 
 #### `createHost(config?)`
@@ -103,9 +105,9 @@ const file = host.getVirtualFile({
 Async factory that initializes WASM (if needed) and returns a new `Host` instance.
 
 ```ts
-import { createHost } from '@verter/wasm'
+import { createHost } from "@verter/wasm";
 
-const host = await createHost()
+const host = await createHost();
 ```
 
 **Returns:** `Promise<Host>`
@@ -114,19 +116,19 @@ const host = await createHost()
 
 The `Host` class exposes the same methods as `@verter/native`'s `VerterHost`:
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `resolve(rawId)` | `HostResolvedId \| null` | Resolve raw ID to canonical ID |
-| `upsert(request)` | `HostUpdateResult` | Register/update a file |
-| `applyBlockOverrides(request)` | `HostUpdateResult` | Apply preprocessed block overrides |
-| `getIde(canonicalId, profile?)` | `HostIdeResponse \| null` | Get TSX or JSX for type checking |
-| `getVirtualFile(query)` | `HostVirtualFileResponse` | Get compiled virtual file |
-| `listVirtualFiles(canonicalId)` | `HostVirtualNodeKind[]` | List virtual nodes for a file |
-| `remove(canonicalOrAlias)` | `HostRemoveResult \| null` | Remove file from host |
-| `getAnalysis(canonicalOrAlias)` | `unknown \| null` | Get analysis snapshot (native JS object) |
-| `setImportDependencies(id, deps)` | `void` | Set resolved import dependencies |
-| `collectResolvableModuleReferenceSpecifiers(moduleReferences)` | `string[]` | Return exact/finite candidate specifiers in encounter order |
-| `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]` | Resolve exact/finite candidates against an in-memory file set |
+| Method                                                                                      | Returns                    | Description                                                   |
+| ------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------- |
+| `resolve(rawId)`                                                                            | `HostResolvedId \| null`   | Resolve raw ID to canonical ID                                |
+| `upsert(request)`                                                                           | `HostUpdateResult`         | Register/update a file                                        |
+| `applyBlockOverrides(request)`                                                              | `HostUpdateResult`         | Apply preprocessed block overrides                            |
+| `getIde(canonicalId, profile?)`                                                             | `HostIdeResponse \| null`  | Get TSX or JSX for type checking                              |
+| `getVirtualFile(query)`                                                                     | `HostVirtualFileResponse`  | Get compiled virtual file                                     |
+| `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`    | List virtual nodes for a file                                 |
+| `remove(canonicalOrAlias)`                                                                  | `HostRemoveResult \| null` | Remove file from host                                         |
+| `getAnalysis(canonicalOrAlias)`                                                             | `unknown \| null`          | Get analysis snapshot (native JS object)                      |
+| `setImportDependencies(id, deps)`                                                           | `void`                     | Set resolved import dependencies                              |
+| `collectResolvableModuleReferenceSpecifiers(moduleReferences)`                              | `string[]`                 | Return exact/finite candidate specifiers in encounter order   |
+| `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]`                 | Resolve exact/finite candidates against an in-memory file set |
 
 See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types.
 
@@ -142,18 +144,18 @@ For browser-only consumers such as the playground, keep resolution in memory:
 
 ```ts
 const update = host.upsert({
-  inputId: '/src/App.vue',
+  inputId: "/src/App.vue",
   source: sfcSource,
-})
+});
 
 const resolvedDeps = host.resolveKnownModuleReferenceDependencies(
-  '/src/App.vue',
+  "/src/App.vue",
   update.moduleReferences,
   Object.keys(fileMap),
-  ['.ts', '.tsx', '.js', '.jsx', '.vue', '/index.ts'],
-)
+  [".ts", ".tsx", ".js", ".jsx", ".vue", "/index.ts"],
+);
 
-host.setImportDependencies('/src/App.vue', resolvedDeps)
+host.setImportDependencies("/src/App.vue", resolvedDeps);
 ```
 
 This helper never reads from disk. It only considers the supplied `knownIds` and extension order, and it skips every `unknownDynamic` import. If you need a bundler to participate in resolution, use `collectResolvableModuleReferenceSpecifiers()` to hand only exact/finite candidates to that resolver, then call `setImportDependencies()` with the successfully resolved canonical IDs.
@@ -167,13 +169,13 @@ For IDE/provider consumers, importing `App.vue` resolves through the public `.vu
 ```ts
 interface CodegenOptions {
   /** Filename for source map generation */
-  filename?: string
+  filename?: string;
   /** Production mode — affects component ID and optimizations */
-  isProduction?: boolean
+  isProduction?: boolean;
   /** Custom component ID (overrides auto-generation) */
-  componentId?: string
+  componentId?: string;
   /** Generate TSX output alongside JavaScript. Default: false */
-  includeTsx?: boolean
+  includeTsx?: boolean;
 }
 ```
 
@@ -182,25 +184,25 @@ interface CodegenOptions {
 ```ts
 interface CodegenResult {
   /** The compiled JavaScript code */
-  code: string
+  code: string;
   /** Source map as JSON string */
-  sourceMap: string
+  sourceMap: string;
   /** Code with inline source map appended */
-  codeWithSourceMap: string
+  codeWithSourceMap: string;
   /** Compiled CSS blocks from <style> tags */
-  styles: CompiledStyleBlock[]
+  styles: CompiledStyleBlock[];
   /** Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if none */
-  scopeId: string
+  scopeId: string;
   /** Compilation diagnostics (errors, warnings) */
-  errors: WasmDiagnostic[]
+  errors: WasmDiagnostic[];
   /** Time taken for the Rust pipeline in milliseconds */
-  durationMs: number
+  durationMs: number;
   /** Generated TSX code (when includeTsx is true) */
-  tsx: string
+  tsx: string;
   /** Compiled CSS (scoped selectors applied, v-bind replaced) */
-  css: string
+  css: string;
   /** Time taken for TSX generation in milliseconds */
-  tsxDurationMs: number
+  tsxDurationMs: number;
 }
 ```
 
@@ -209,17 +211,17 @@ interface CodegenResult {
 ```ts
 interface CompiledStyleBlock {
   /** Compiled CSS code */
-  code: string
+  code: string;
   /** Whether this style block is scoped */
-  scoped: boolean
+  scoped: boolean;
   /** Style language (css, scss, less, stylus) */
-  lang: string | null
+  lang: string | null;
   /** Whether this is a CSS module block */
-  isModule: boolean
+  isModule: boolean;
   /** CSS module class mappings: [original, hashed][] */
-  moduleClasses: [string, string][]
+  moduleClasses: [string, string][];
   /** CSS processing errors */
-  errors: string[]
+  errors: string[];
 }
 ```
 
@@ -228,15 +230,15 @@ interface CompiledStyleBlock {
 ```ts
 interface WasmDiagnostic {
   /** Severity level: "error", "warning", or "info" */
-  severity: string
+  severity: string;
   /** Vue-compatible error code (e.g., "XMissingEndTag") */
-  code: string
+  code: string;
   /** Human-readable error message */
-  message: string
+  message: string;
   /** Source span start (byte offset) */
-  spanStart?: number
+  spanStart?: number;
   /** Source span end (byte offset) */
-  spanEnd?: number
+  spanEnd?: number;
 }
 ```
 
@@ -263,23 +265,23 @@ The WASM `compile()` and `compileSync()` functions accept both `string` and `Uin
 
 ```ts
 // String input
-const result = await compile('<template><div>Hello</div></template>')
+const result = await compile("<template><div>Hello</div></template>");
 
 // Uint8Array input (e.g., from fetch)
-const response = await fetch('/App.vue')
-const bytes = new Uint8Array(await response.arrayBuffer())
-const result = await compile(bytes, { filename: 'App.vue' })
+const response = await fetch("/App.vue");
+const bytes = new Uint8Array(await response.arrayBuffer());
+const result = await compile(bytes, { filename: "App.vue" });
 ```
 
 ## Differences from @verter/native
 
-| Feature | @verter/native | @verter/wasm |
-|---------|---------------|-------------|
-| Environment | Node.js | Browser / Web Worker |
-| Binary format | Platform-specific `.node` | WebAssembly `.wasm` |
-| `compile()` | Not available (use `VerterHost`) | Available (standalone) |
-| `compileSync()` | Not available | Available (after `initialize()`) |
-| `processStyle()` | Available | Not available (use `compile()`) |
-| `VerterHost` | Synchronous constructor | Async via `createHost()` |
-| `getAnalysis()` return | JSON `string` | Native JS `object` |
-| `source` accepts | `string \| Buffer` | `string` |
+| Feature                | @verter/native                   | @verter/wasm                     |
+| ---------------------- | -------------------------------- | -------------------------------- |
+| Environment            | Node.js                          | Browser / Web Worker             |
+| Binary format          | Platform-specific `.node`        | WebAssembly `.wasm`              |
+| `compile()`            | Not available (use `VerterHost`) | Available (standalone)           |
+| `compileSync()`        | Not available                    | Available (after `initialize()`) |
+| `processStyle()`       | Available                        | Not available (use `compile()`)  |
+| `VerterHost`           | Synchronous constructor          | Async via `createHost()`         |
+| `getAnalysis()` return | JSON `string`                    | Native JS `object`               |
+| `source` accepts       | `string \| Buffer`               | `string`                         |

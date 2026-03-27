@@ -12,15 +12,15 @@ The E2E tests launch a real VS Code instance with the Verter extension loaded, o
 
 Each test workspace is a self-contained fixture in `e2e/fixtures/`:
 
-| Fixture | What it tests |
-|---------|---------------|
-| `single-project/` | Standard Vue project with tsconfig |
-| `monorepo/` | pnpm workspace with cross-package imports |
-| `tsconfig-extends/` | tsconfig extending a base config |
-| `tsconfig-references/` | Project references with `composite: true` |
-| `path-aliases/` | tsconfig `paths` + vite `resolve.alias` |
-| `no-config/` | Bare folder with no tsconfig or package.json |
-| `single-file/` | Single `.vue` file only |
+| Fixture                | What it tests                                |
+| ---------------------- | -------------------------------------------- |
+| `single-project/`      | Standard Vue project with tsconfig           |
+| `monorepo/`            | pnpm workspace with cross-package imports    |
+| `tsconfig-extends/`    | tsconfig extending a base config             |
+| `tsconfig-references/` | Project references with `composite: true`    |
+| `path-aliases/`        | tsconfig `paths` + vite `resolve.alias`      |
+| `no-config/`           | Bare folder with no tsconfig or package.json |
+| `single-file/`         | Single `.vue` file only                      |
 
 **All 29 tests run for every fixture** — no suite-level skips. The extension works with default tsgo/tsserver config even without tsconfig. Individual tests that check for specific template tokens (e.g. `{{ title }}`) pass with an N/A message when the token isn't in the fixture.
 
@@ -58,46 +58,46 @@ All three are **idempotent** — safe to call again in individual suites (they r
 
 ### Warm-Session API (`helpers.ts`)
 
-| Function | Purpose |
-|----------|---------|
-| `ensureFixtureWarm()` | Idempotent. Activates extension + waits for LSP ready. |
-| `ensureTypeProviderSynced()` | Idempotent. Calls `ensureFixtureWarm()` then waits for type provider sync. |
+| Function                          | Purpose                                                                                                           |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `ensureFixtureWarm()`             | Idempotent. Activates extension + waits for LSP ready.                                                            |
+| `ensureTypeProviderSynced()`      | Idempotent. Calls `ensureFixtureWarm()` then waits for type provider sync.                                        |
 | `openReadyCached(path, options?)` | Opens a `.vue` file and waits for file readiness. Caches result — second call with same path returns immediately. |
-| `invalidateFileCache(path)` | Clears cached readiness for a file (use after mutation tests modify it on disk). |
+| `invalidateFileCache(path)`       | Clears cached readiness for a file (use after mutation tests modify it on disk).                                  |
 
 ### Timeout Policy
 
-| Category | Timeout | How |
-|----------|---------|-----|
-| Mocha default | 15s | Set in `suite/index.ts` `new Mocha({ timeout: 15_000 })` |
-| Root bootstrap | 60s | `this.timeout(60_000)` in root `beforeAll` |
-| Feature suites (completion, hover, definition, rename, etc.) | 15s | Inherit default — no explicit `this.timeout()` |
-| Mutation test suites (diagnostics insert/undo, external-file-changes) | 60s | Explicit `this.timeout(60_000)` on suite or test |
-| Benchmark suites | 90–120s | Explicit `this.timeout(90_000)` / `this.timeout(120_000)` |
+| Category                                                              | Timeout | How                                                       |
+| --------------------------------------------------------------------- | ------- | --------------------------------------------------------- |
+| Mocha default                                                         | 15s     | Set in `suite/index.ts` `new Mocha({ timeout: 15_000 })`  |
+| Root bootstrap                                                        | 60s     | `this.timeout(60_000)` in root `beforeAll`                |
+| Feature suites (completion, hover, definition, rename, etc.)          | 15s     | Inherit default — no explicit `this.timeout()`            |
+| Mutation test suites (diagnostics insert/undo, external-file-changes) | 60s     | Explicit `this.timeout(60_000)` on suite or test          |
+| Benchmark suites                                                      | 90–120s | Explicit `this.timeout(90_000)` / `this.timeout(120_000)` |
 
 **Rule**: Only add `this.timeout()` when a suite or test genuinely needs more than 15s. Most warm feature tests complete in 1–5s.
 
 ## Test Suites
 
-| File | Tests | Notes |
-|------|-------|-------|
-| `activation.test.ts` | Extension activates, LSP starts, heartbeat, no crashes | Hard asserts on LSP readiness |
-| `timing.test.ts` | Startup time measurement, type provider status | Hard asserts on LSP readiness |
-| `diagnostics.test.ts` | Activation, file open, diagnostics API, valid ranges | Runs for all fixtures including no-config |
-| `hover.test.ts` | Hover results + latency for ref/computed/prop/function | Tokens missing from fixture = pass (N/A) |
-| `decorations.test.ts` | Binding colors, Vue API annotations, prop constness | Polls with `triggerDecorationRefresh()` |
-| `_teardown.test.ts` | Flushes timing report data (root-level `suiteTeardown`) | Always runs |
+| File                  | Tests                                                   | Notes                                     |
+| --------------------- | ------------------------------------------------------- | ----------------------------------------- |
+| `activation.test.ts`  | Extension activates, LSP starts, heartbeat, no crashes  | Hard asserts on LSP readiness             |
+| `timing.test.ts`      | Startup time measurement, type provider status          | Hard asserts on LSP readiness             |
+| `diagnostics.test.ts` | Activation, file open, diagnostics API, valid ranges    | Runs for all fixtures including no-config |
+| `hover.test.ts`       | Hover results + latency for ref/computed/prop/function  | Tokens missing from fixture = pass (N/A)  |
+| `decorations.test.ts` | Binding colors, Vue API annotations, prop constness     | Polls with `triggerDecorationRefresh()`   |
+| `_teardown.test.ts`   | Flushes timing report data (root-level `suiteTeardown`) | Always runs                               |
 
 ## Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `VERTER_E2E_TEST` | Set to `"1"` to enable test hooks (log file dual-write, decoration state command) |
-| `VERTER_E2E_LOG_FILE` | Path to write log messages for test assertions |
-| `VERTER_E2E_FIXTURE` | Current fixture name |
-| `VERTER_E2E_TIMING_FILE` | Path for JSON timing report output |
-| `VERTER_E2E_LSP_PATH` | Path to a pre-copied LSP binary (prevents file locking on Windows) |
-| `VERTER_LOG` | Rust LSP log level (set to `"debug"` for verbose output) |
+| Variable                 | Purpose                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| `VERTER_E2E_TEST`        | Set to `"1"` to enable test hooks (log file dual-write, decoration state command) |
+| `VERTER_E2E_LOG_FILE`    | Path to write log messages for test assertions                                    |
+| `VERTER_E2E_FIXTURE`     | Current fixture name                                                              |
+| `VERTER_E2E_TIMING_FILE` | Path for JSON timing report output                                                |
+| `VERTER_E2E_LSP_PATH`    | Path to a pre-copied LSP binary (prevents file locking on Windows)                |
+| `VERTER_LOG`             | Rust LSP log level (set to `"debug"` for verbose output)                          |
 
 ## LSP Binary Copy
 
@@ -149,10 +149,12 @@ The E2E tests run in the CI workflow (`.github/workflows/ci.yml` → `vscode-e2e
 ## When to Run E2E Tests (MANDATORY)
 
 After ANY change to:
+
 - `crates/verter_lsp/` (LSP server) — handlers, sync, diagnostics, completions, hover, definition, etc.
 - `packages/vue-vscode/src/` (VS Code extension) — activation, client config, decoration providers, commands
 
 Run the E2E suite to verify no regressions:
+
 ```bash
 pnpm run build:lsp && pnpm --filter verter-vscode build:dev && E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
 ```
@@ -197,7 +199,7 @@ const diags = await waitForDiagnostics(doc.uri, { source: "ts", minCount: 1 });
 // Also GOOD: Checking for absence of diagnostics after file is ready
 await waitForFileReady(doc);
 const diags = vscode.languages.getDiagnostics(doc.uri);
-expect(diags.filter(d => d.code === "2307")).to.be.empty;
+expect(diags.filter((d) => d.code === "2307")).to.be.empty;
 ```
 
 **When to use:** When a test needs to wait for specific diagnostics to appear (e.g., TS2304 after inserting an error).
@@ -216,7 +218,7 @@ const diags = await waitForDiagnosticsSettled(doc.uri, {
 // BAD: predicate: () => false always burns the full timeout
 const diags = await waitForDiagnostics(doc.uri, {
   timeoutMs: 8_000,
-  predicate: () => false,  // DO NOT DO THIS
+  predicate: () => false, // DO NOT DO THIS
 });
 ```
 
@@ -236,10 +238,12 @@ invalidateFileCache("src/MyComp.vue");
 ### Never use `sleep()` for LSP readiness
 
 `sleep()` is only acceptable for:
+
 - Short pauses between undo commands: `await sleep(200)`
 - Letting VS Code process an edit before reading state: `await sleep(100)`
 
 Never use `sleep()` to wait for:
+
 - Type provider to process a file (use `waitForFileReady`)
 - Diagnostics to appear (use `waitForDiagnostics`)
 - LSP to be ready (use `ensureFixtureWarm`)

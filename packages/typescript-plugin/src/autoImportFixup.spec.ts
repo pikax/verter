@@ -61,8 +61,7 @@ describe("auto-import .vue.d.ts → .vue fixup", () => {
   });
 
   it("fixes multiple .vue.d.ts references in one text", () => {
-    const text =
-      'import Foo from "./Foo.vue.d.ts"\nimport Bar from "./Bar.vue.d.ts"';
+    const text = 'import Foo from "./Foo.vue.d.ts"\nimport Bar from "./Bar.vue.d.ts"';
     const fixed = fixVueDtsInImport(text);
     expect(fixed).toContain('./Foo.vue"');
     expect(fixed).toContain('./Bar.vue"');
@@ -88,9 +87,7 @@ describe("auto-import .vue.d.ts → .vue fixup", () => {
   // ── Source display fixup ──
 
   it("fixes source display parts", () => {
-    const parts = [
-      { text: "./components/Button.vue.d.ts", kind: "text" },
-    ];
+    const parts = [{ text: "./components/Button.vue.d.ts", kind: "text" }];
     const fixed = fixSourceDisplay(parts);
     expect(fixed[0].text).toBe("./components/Button.vue");
     expect(fixed[0].kind).toBe("text"); // preserves other properties
@@ -109,11 +106,8 @@ describe("auto-import .vue.d.ts → .vue fixup", () => {
   // ── Edge cases ──
 
   it("handles deeply nested .vue paths", () => {
-    const text =
-      'import Comp from "../../src/components/deep/MyComp.vue.d.ts"';
-    expect(fixVueDtsInImport(text)).toBe(
-      'import Comp from "../../src/components/deep/MyComp.vue"',
-    );
+    const text = 'import Comp from "../../src/components/deep/MyComp.vue.d.ts"';
+    expect(fixVueDtsInImport(text)).toBe('import Comp from "../../src/components/deep/MyComp.vue"');
   });
 
   it("does not double-fix already clean paths", () => {

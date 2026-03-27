@@ -103,11 +103,7 @@ async function tryCompileSass(msg) {
 
   try {
     const options = getStyleOptions(lang);
-    const content = await applyAdditionalData(
-      msg.content,
-      options.additionalData,
-      msg.filename,
-    );
+    const content = await applyAdditionalData(msg.content, options.additionalData, msg.filename);
     const result = await sass.compileStringAsync(content, {
       syntax: lang === "sass" ? "indented" : "scss",
       url: pathToFileURL(`${msg.filename}.${lang}`),
@@ -142,7 +138,7 @@ async function preprocessWithVite(msg) {
 
 async function handlePreprocess(msg) {
   try {
-    const result = await tryCompileSass(msg) ?? await preprocessWithVite(msg);
+    const result = (await tryCompileSass(msg)) ?? (await preprocessWithVite(msg));
     process.send({
       type: "result",
       id: msg.id,

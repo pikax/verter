@@ -58,6 +58,19 @@ pub trait TypeProvider: Send + Sync {
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult>;
 
+    /// Enrich a completion list with provider-specific detail/documentation.
+    ///
+    /// The default implementation returns the original items unchanged.
+    fn get_completion_details<'a>(
+        &'a self,
+        _path: &'a str,
+        _offset: u32,
+        items: &'a [Completion],
+    ) -> ProviderFuture<'a, Vec<Completion>> {
+        let cloned = items.to_vec();
+        Box::pin(async move { Ok(cloned) })
+    }
+
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>>;
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>>;

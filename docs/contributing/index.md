@@ -68,31 +68,31 @@ This project uses **conventional commits** for automatic changelog generation vi
 
 ### Types
 
-| Type | Description |
-|------|-------------|
-| `feat` | New feature |
-| `fix` | Bug fix |
-| `perf` | Performance improvement |
+| Type       | Description                           |
+| ---------- | ------------------------------------- |
+| `feat`     | New feature                           |
+| `fix`      | Bug fix                               |
+| `perf`     | Performance improvement               |
 | `refactor` | Code refactoring (no behavior change) |
-| `docs` | Documentation only |
-| `test` | Adding or updating tests |
-| `chore` | Build, CI, or tooling changes |
-| `release` | Version bump and release |
+| `docs`     | Documentation only                    |
+| `test`     | Adding or updating tests              |
+| `chore`    | Build, CI, or tooling changes         |
+| `release`  | Version bump and release              |
 
 ### Scopes
 
-| Scope | Area |
-|-------|------|
-| `core` | `verter_core` Rust crate |
-| `napi` | `verter_napi` / `@verter/native` |
-| `wasm` | `verter_wasm` / `@verter/wasm` |
-| `play` | Playground |
-| `unplugin` | `@verter/unplugin` |
-| `lsp` | Language server |
-| `types` | `@verter/types` |
-| `ts` | `@verter/core` (TypeScript) |
-| `ci` | CI/CD workflows |
-| `*` | Multiple areas |
+| Scope      | Area                             |
+| ---------- | -------------------------------- |
+| `core`     | `verter_core` Rust crate         |
+| `napi`     | `verter_napi` / `@verter/native` |
+| `wasm`     | `verter_wasm` / `@verter/wasm`   |
+| `play`     | Playground                       |
+| `unplugin` | `@verter/unplugin`               |
+| `lsp`      | Language server                  |
+| `types`    | `@verter/types`                  |
+| `ts`       | `@verter/core` (TypeScript)      |
+| `ci`       | CI/CD workflows                  |
+| `*`        | Multiple areas                   |
 
 ### Examples
 

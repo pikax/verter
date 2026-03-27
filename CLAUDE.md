@@ -108,6 +108,7 @@ scripts/
 The scheduler provides per-file async staging with priority queuing. Files progress independently through **Source → Analysis → Artifact** stages. Cross-file blocking (macro type deps, external `src`) is declarative — the scheduler manages wakeups.
 
 **Key types** (`crates/verter_scheduler/src/`):
+
 - `FileNode` (`node.rs`) — per-file: ArcSwap snapshots, AtomicU64 generation, pending requests
 - `Scheduler` (`scheduler.rs`) — DashMap of FileNodes, JobIndex, SubmissionInbox, driver thread
 - `CompletionHandle<T>` (`job.rs`) — request-scoped, resolves to Ready/Failed/Superseded/Shutdown
@@ -128,10 +129,10 @@ The scheduler provides per-file async staging with priority queuing. Files progr
 
 The Rust compiler has **two separate template codegen paths**. Modifying one does NOT affect the other:
 
-| Path | Module | Purpose | Output |
-|------|--------|---------|--------|
+| Path           | Module                    | Purpose                                     | Output                           |
+| -------------- | ------------------------- | ------------------------------------------- | -------------------------------- |
 | **VDOM/Vapor** | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
-| **IDE** | `ide/template/` | Valid JSX/TSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
+| **IDE**        | `ide/template/`           | Valid JSX/TSX for LSP/TSGO type checking    | `<div prop={expr}>` JSX elements |
 
 The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. The IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX), while JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
 
@@ -140,6 +141,7 @@ The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::
 When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree. These enforce that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
 
 **Generated pattern** (inside the block scope, after JSX):
+
 ```tsx
 ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp{offset}>['$slots']['{slot}']>, [TabItem, {} as HTMLElementTagNameMap["input"], "" as string]);
 ```
@@ -155,6 +157,7 @@ ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Com
 The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_analysis` extracts root reachability facts only. `verter_host` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
 
 **Public contract** (on `ComponentMetaAnalysis` / `FfiComponentMeta` / `ComponentMeta`):
+
 - `props` / `events` — declared component surface only (unchanged)
 - `acceptedProps` / `acceptedEvents` — computed call-site acceptance surface (declared + inherited)
 - `acceptedSurfaceCompleteness` — `Exact` or `LowerBound` (if any branch is partial/unresolved)
@@ -162,6 +165,7 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 - `fallthroughSurface` — branch-structured inherited surface after host resolution
 
 **Semantic rules**:
+
 - `inheritAttrs: false` → no inherited surface
 - Unconditional multi-root (fragment) → no inherited surface
 - Root `v-for` → no inherited surface
@@ -217,12 +221,13 @@ A lightweight token scanner (`ide/script_recover.rs`) recovers macro binding nam
 
 The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends are supported:
 
-| Backend | Binary | Protocol | Use Case |
-|---------|--------|----------|----------|
-| **TSGO** | `tsgo` (Go binary) | LSP over stdio (Content-Length + JSON-RPC) | Fast, native TS checking (preview) |
-| **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio | Workspace TS version, plugin support |
+| Backend      | Binary             | Protocol                                   | Use Case                             |
+| ------------ | ------------------ | ------------------------------------------ | ------------------------------------ |
+| **TSGO**     | `tsgo` (Go binary) | LSP over stdio (Content-Length + JSON-RPC) | Fast, native TS checking (preview)   |
+| **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio          | Workspace TS version, plugin support |
 
 **Provider selection** (`--type-provider` CLI arg / `verter.typeProvider` VS Code setting):
+
 - `auto` (default): if TS 5.x/6.x installed, uses tsserver; otherwise tries TSGO
 - `tsgo`: TSGO only
 - `tsserver`: tsserver only
@@ -233,6 +238,7 @@ Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/trait
 **tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. This mapping MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
 
 **Key modules** (`crates/verter_lsp/src/`):
+
 - `tsgo/` — TSGO integration (LSP client, resilient wrapper, project sync)
 - `tsserver/mod.rs` — `find_tsserver()`, `find_node()`, `detect_ts_major_version()`
 - `tsserver/ipc.rs` — `TsserverTypeProvider`, newline-delimited JSON transport, position conversion
@@ -244,6 +250,7 @@ Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/trait
 **Barrel-import eager sync** (TSGO): When a Vue file imports components through a barrel (non-Vue re-export file like `components/index.ts`), the LSP eagerly syncs the barrel and its Vue dependencies to TSGO during `did_open` and `resync_aliased_imports_for_open_files`. The process: (1) discover barrels from `TemplateComponentUsage.import_source` resolving to non-Vue files, (2) scan barrel's `module_references` for `.vue` specifiers, (3) sync Vue dependencies first, (4) sync barrel file. Without this, TSGO only receives barrels from the background scanner, which may not complete before hover/completion requests.
 
 **Freeze prevention** (fast typing): Three layers prevent tokio runtime starvation during rapid typing:
+
 1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. After syncing, computes and publishes merged (Verter lint + TS type) diagnostics via push. Holds shared `Arc<VerterHost>`, `ProjectSync`, `TypeProvider`, `cached_verter_diags`, and `PositionEncodingKind`.
 2. **Push diagnostics only**: The LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). During typing, no new diagnostics are published — VS Code automatically adjusts existing push diagnostic positions as the document changes. The SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
 3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
@@ -268,10 +275,12 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 - **Ready** (`ownership_ready: true`): After `background_init` builds the full project graph, a real snapshot is published. Ownership queries are now authoritative.
 
 **Provider sync state uses typed ownership** (`ProviderOwnerBinding`):
+
 - `Provisional` — file synced before ownership is known (bootstrap).
 - `Owned(String)` — file bound to a real project (tsconfig path or root).
 
 **Readiness-gated sync rules**:
+
 - `ensure_current_file_synced()`: During bootstrap, provisional sync is allowed. With a ready snapshot, only files with a project owner are synced — unowned files are queued in `pending_snapshot_provider_sync` for later drain.
 - `sync_imported_vue_api_lightweight()`: Same rule — provisional sync only during bootstrap.
 - `SyncCoordinator::sync_file()`: Always queues files with no owner for retry. Uses `ownership_ready` for log level (warn vs info).
@@ -283,6 +292,7 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
 
 **Key types** (`crates/verter_lsp/src/config.rs`):
+
 - `ProjectConfig` — per-project: root path, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path` and `vite_config_deps`
 - `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `find_project_root()`, `linter_for()`
 - `RegistryBuildResult` — returned from `from_workspace_roots()`, contains `registry` + `trust_required` list
@@ -290,6 +300,7 @@ In monorepo / multi-root VS Code workspaces, different packages have different `
 **Import resolution** (single VFS authority): All LSP import resolution goes through `WorkspaceAccess::resolve_import()` via the VFS `FilesystemWorkspace`. The workspace is created in `initialize()` with an empty project graph (enabling relative/node_modules resolution immediately), then `background_init` populates the full project graph via `set_project_graph()` for alias resolution. The host's internal `project_resolver` (set via `set_internal_resolver()`) is used only for compilation — never for LSP resolution. `preferred_specifier()` provides reverse-alias lookup for auto-imports.
 
 **Tsconfig/vite config discovery** delegates to `verter_vfs::config` — all tsconfig parsing, membership, references, and `raw_paths_json` live in VFS. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
+
 1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
 2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
 
@@ -304,6 +315,7 @@ The server sends `$/verter/viteConfigTrustRequired` notifications for complex co
 Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS. The pipeline differs between Vite and non-Vite bundlers:
 
 **Vite mode** (Vite-owned preprocessing, matching `@vitejs/plugin-vue`):
+
 1. During main `.vue` `transform()`, the plugin parses the SFC with `compiler.parse()` and caches raw style block content in `styleBlockCache`. Style preprocessing is **skipped** in `applyPreprocessorRequests()`.
 2. `load()` returns raw style source (e.g., SCSS with `$variables`) from `styleBlockCache`.
 3. Style URLs preserve the original lang (`lang.scss`, not `lang.css`) since `meta.style_langs` is never overwritten.
@@ -321,13 +333,13 @@ Style preprocessing goes through `preprocessBlock()` → `preprocessStyle()` whi
 
 The parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
 
-| Field | Directive | In `el.props`? | Notes |
-|-------|-----------|----------------|-------|
+| Field         | Directive                     | In `el.props`? | Notes                                            |
+| ------------- | ----------------------------- | -------------- | ------------------------------------------------ |
 | `v_condition` | `v-if`, `v-else-if`, `v-else` | **No** (taken) | Contains `ElementNodeCondition` with kind + prop |
-| `v_for` | `v-for` | **No** (taken) | Contains the full `NodeProp` |
-| `v_slot` | `v-slot`, `#name` | **No** (taken) | Contains the full `NodeProp` |
-| `v_once` | `v-once` | **No** (taken) | Contains the full `NodeProp` |
-| `v_ref` | `ref`, `:ref` | **No** (taken) | Contains the full `NodeProp` |
+| `v_for`       | `v-for`                       | **No** (taken) | Contains the full `NodeProp`                     |
+| `v_slot`      | `v-slot`, `#name`             | **No** (taken) | Contains the full `NodeProp`                     |
+| `v_once`      | `v-once`                      | **No** (taken) | Contains the full `NodeProp`                     |
+| `v_ref`       | `ref`, `:ref`                 | **No** (taken) | Contains the full `NodeProp`                     |
 
 **Consequence**: Code iterating `el.props` will **never see** these directives. Both codegen paths must handle them explicitly. The IDE module removes `v-if/v-for/v-slot/v-once` attributes (they become JSX wrappers/removals) and converts `ref` to JSX expression syntax (`ref={"name"}`).
 
@@ -338,6 +350,7 @@ See `/position-encoding` skill for full span type reference, encoding tables, an
 **Encoding source of truth**: The position encoding MUST come from the client capabilities negotiated during `initialize()`. The server stores it in `Arc<parking_lot::RwLock<PositionEncodingKind>>` shared with the SyncCoordinator. Default is UTF-16 (per LSP spec) until negotiated. **Rust-internal code uses UTF-8 byte offsets**; **LSP boundary code converts to negotiated encoding**; **JS/VS Code uses UTF-16**.
 
 **Line/Column Base Rules** (off-by-one bugs):
+
 - **PositionResolver is 1-based** — subtract 1 for source maps and LSP
 - **Source maps, LSP, VS Code are all 0-based**
 - **OXC/verter spans are byte offsets** — no line/column conversion needed
@@ -422,18 +435,21 @@ Skip this for purely internal refactors that don't change any public behavior, m
 **MANDATORY RULE — TDD (Test-Driven Development) must be followed for EVERY code change. This is non-negotiable. All agents, subagents, and automated workflows MUST comply. Skipping TDD is never acceptable, regardless of task size or urgency.**
 
 **TDD workflow (strict order — no exceptions):**
+
 1. **Write failing tests FIRST** — before writing ANY implementation code, write one or more tests that demonstrate the expected behavior. Run the tests and **verify they fail**. Do not proceed to step 2 until you have confirmed test failure.
 2. **Implement the minimum code** to make the failing tests pass. Do not write implementation code before tests exist.
 3. **Run the tests again** and verify they pass.
 4. **Refactor** if needed while keeping tests green.
 
 **Violation examples (DO NOT do these):**
+
 - Writing implementation code and then adding tests after the fact
 - Writing tests and implementation simultaneously without verifying the tests fail first
 - Skipping tests for "small" or "trivial" changes
 - Delegating implementation to a subagent without requiring TDD compliance
 
 Coverage expectations:
+
 - New features: Add tests covering the new functionality
 - Bug fixes: Add tests that would have caught the bug
 - Refactoring: Ensure existing tests pass and add tests for edge cases discovered
@@ -485,10 +501,12 @@ See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best
 Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`crates/verter_lsp/`) MUST be verified with automated tests, NOT manual testing. LSP changes directly affect extension behavior — hover, completions, diagnostics, etc. Two test tiers exist:
 
 **Unit tests** (Vitest, `*.spec.ts` co-located in `src/`):
+
 - For pure logic: utility functions, response parsing, restart logic, CSS scanning
 - Run: `pnpm vitest --run packages/vue-vscode/src/path/to/file.spec.ts`
 
 **E2E tests** (Mocha + @vscode/test-cli, `e2e/suite/*.test.ts`):
+
 - For LSP integration: completions, hover, diagnostics, go-to-definition, rename, decorations
 - Single fixture/provider: `E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e`
 - Full matrix from the repo root: `pnpm run test:e2e`
@@ -496,6 +514,7 @@ Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`cr
 - See `.claude/skills/e2e-vscode-testing.md` for fixture design, helpers API, and adding new tests
 
 **When to use which:**
+
 - New extension utility/parser logic → unit test
 - New/changed LSP feature (hover, completion, diagnostics, definition, rename, decorations) → E2E test
 - `verter_lsp` changes (new handler, changed response format, sync behavior) → E2E test
@@ -508,16 +527,19 @@ Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`cr
 During work sessions, agents encounter issues, discover improvement opportunities, and gain insights that may be lost when context is compacted. To preserve these observations, agents MUST continuously log feedback to a per-conversation file.
 
 **Setup** (at session start, when making code changes):
+
 - Create a feedback file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md` where `short-id` is a 6-character identifier (e.g., from the plan name or timestamp)
 - The `.claude/feedback/` directory is gitignored — these files are for human review only
 
 **What to log** — append entries whenever encountering something noteworthy:
+
 - `[issue]` — bugs, unexpected behavior, workarounds applied
 - `[improvement]` — code quality, performance, architecture ideas
 - `[debt]` — things that work but could be better
 - `[docs]` — missing or outdated documentation discovered
 
 **Format**:
+
 ```markdown
 ## {date}
 
@@ -526,6 +548,7 @@ During work sessions, agents encounter issues, discover improvement opportunitie
 ```
 
 **Rules**:
+
 - Append continuously as you work — do not wait for context compaction
 - When delegating to subagents, pass the feedback file path in the prompt and instruct them to append their observations
 - This is best-effort — do not let feedback capture slow down actual work
@@ -589,11 +612,11 @@ See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for detailed CI/CD 
 
 Detailed reference material is available as on-demand skills (loaded automatically when relevant):
 
-| Skill | Use When |
-|-------|----------|
-| `/architecture` | Working on any specific module, need key files, type tables, LSP features, plugin system, analysis types |
-| `/position-encoding` | Working with spans, positions, coordinate conversions, path normalization details |
-| `/build-and-profiling` | Debugging build order, rebuild sequences, profiling, MCP server setup |
-| `/testing` | Writing tests, test patterns, sourcemap testing, E2E workflow, server cleanup |
-| `/wsl-e2e-testing` | Running E2E tests in WSL to reproduce Linux/CI failures, fixture matrix, acceptance criteria |
-| `/rust-performance` | Optimizing Rust code, allocation patterns, batch operations, CodeTransform API |
+| Skill                  | Use When                                                                                                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------- |
+| `/architecture`        | Working on any specific module, need key files, type tables, LSP features, plugin system, analysis types |
+| `/position-encoding`   | Working with spans, positions, coordinate conversions, path normalization details                        |
+| `/build-and-profiling` | Debugging build order, rebuild sequences, profiling, MCP server setup                                    |
+| `/testing`             | Writing tests, test patterns, sourcemap testing, E2E workflow, server cleanup                            |
+| `/wsl-e2e-testing`     | Running E2E tests in WSL to reproduce Linux/CI failures, fixture matrix, acceptance criteria             |
+| `/rust-performance`    | Optimizing Rust code, allocation patterns, batch operations, CodeTransform API                           |

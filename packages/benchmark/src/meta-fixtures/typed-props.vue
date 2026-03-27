@@ -1,21 +1,21 @@
 <script setup lang="ts">
 interface ButtonSize {
-  width: number
-  height: number
+  width: number;
+  height: number;
 }
 
 const props = defineProps<{
-  label: string
-  disabled: boolean
-  size: ButtonSize
-  variant: 'primary' | 'secondary' | 'danger'
-  icon?: string
-}>()
+  label: string;
+  disabled: boolean;
+  size: ButtonSize;
+  variant: "primary" | "secondary" | "danger";
+  icon?: string;
+}>();
 
 const emit = defineEmits<{
-  click: [event: MouseEvent]
-  hover: [isHovered: boolean]
-}>()
+  click: [event: MouseEvent];
+  hover: [isHovered: boolean];
+}>();
 </script>
 
 <template>

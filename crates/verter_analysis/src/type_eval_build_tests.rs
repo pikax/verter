@@ -46,6 +46,26 @@ fn extracts_generic_type_alias() {
 }
 
 #[test]
+fn parse_type_parameter_clause_preserves_constraint_and_default() {
+    let params =
+        super::type_eval_build::parse_type_parameter_clause("T extends Item = DefaultItem, U");
+
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].name, "T");
+    assert!(matches!(
+        params[0].constraint.as_deref(),
+        Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+    ));
+    assert!(matches!(
+        params[0].default.as_deref(),
+        Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "DefaultItem"
+    ));
+    assert_eq!(params[1].name, "U");
+    assert!(params[1].constraint.is_none());
+    assert!(params[1].default.is_none());
+}
+
+#[test]
 fn parse_and_build_env_assigns_stable_type_declaration_ids_for_unchanged_source() {
     let env_a = parse_and_build_env("type Box<T> = { value: T }\ninterface User { id: number }");
     let env_b = parse_and_build_env("type Box<T> = { value: T }\ninterface User { id: number }");
@@ -558,6 +578,115 @@ fn no_value_symbols_for_type_aliases() {
     assert!(!env.value_symbols.contains_key("Foo"));
 }
 
+#[test]
+fn parse_and_build_env_preserves_union_type_aliases_with_local_interface_refs() {
+    let env = parse_and_build_env(
+        r#"
+export interface St { path: string }
+export interface vt { name: string }
+type RouteLocationRaw = string | St | vt
+export { RouteLocationRaw as Lt, St, vt }
+"#,
+    );
+
+    let route = env
+        .type_symbols
+        .get("RouteLocationRaw")
+        .expect("RouteLocationRaw alias should be registered");
+    let TypeExpr::Union(types) = &route.body else {
+        panic!(
+            "RouteLocationRaw should stay a union before evaluation, got {:?}",
+            route.body
+        );
+    };
+    assert!(
+        types
+            .iter()
+            .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+        "RouteLocationRaw should preserve its string branch, got {:?}",
+        route.body
+    );
+    assert!(
+        types.iter().any(|ty| {
+            matches!(ty, TypeExpr::Ref { name, .. } if name.as_ref() == "St")
+                || matches!(
+                    ty,
+                    TypeExpr::Object(shape)
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path"))
+                )
+        }),
+        "RouteLocationRaw should preserve its path-like branch, got {:?}",
+        route.body
+    );
+    assert!(
+        types.iter().any(|ty| {
+            matches!(ty, TypeExpr::Ref { name, .. } if name.as_ref() == "vt")
+                || matches!(
+                    ty,
+                    TypeExpr::Object(shape)
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "name"))
+                )
+        }),
+        "RouteLocationRaw should preserve its name-like branch, got {:?}",
+        route.body
+    );
+}
+
+#[test]
+fn evaluate_preserves_union_type_aliases_with_local_interface_refs() {
+    let mut env = parse_and_build_env(
+        r#"
+export interface St { path: string }
+export interface vt { name: string }
+type RouteLocationRaw = string | St | vt
+export { RouteLocationRaw as Lt, St, vt }
+"#,
+    );
+
+    let route = env
+        .type_symbols
+        .get("RouteLocationRaw")
+        .expect("RouteLocationRaw alias should be registered")
+        .body
+        .clone();
+    let evaluated = evaluate(&route, &mut env);
+    let TypeExpr::Union(types) = &evaluated else {
+        panic!(
+            "evaluating RouteLocationRaw should keep a union surface, got {:?}",
+            evaluated
+        );
+    };
+    assert!(
+        types
+            .iter()
+            .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+        "evaluated RouteLocationRaw should preserve its string branch, got {:?}",
+        evaluated
+    );
+    assert!(
+        types.iter().any(|ty| {
+            matches!(
+                ty,
+                TypeExpr::Object(shape)
+                    if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path"))
+            )
+        }),
+        "evaluated RouteLocationRaw should preserve its path-like branch, got {:?}",
+        evaluated
+    );
+    assert!(
+        types.iter().any(|ty| {
+            matches!(
+                ty,
+                TypeExpr::Object(shape)
+                    if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "name"))
+            )
+        }),
+        "evaluated RouteLocationRaw should preserve its name-like branch, got {:?}",
+        evaluated
+    );
+}
+
 // =============================================================================
 // evaluate_macro_types with real analysis snapshot
 // =============================================================================
@@ -840,7 +969,7 @@ defineProps<Props>()
 }
 
 #[test]
-fn evaluate_macro_types_skips_vue_ignore_intersection_branch() {
+fn evaluate_macro_types_keeps_vue_ignore_intersection_branch_for_meta() {
     use super::analysis::build_script_analysis;
     use oxc_allocator::Allocator;
 
@@ -869,13 +998,13 @@ defineProps<Props>()
         "should keep local props, got: {names:?}"
     );
     assert!(
-        !names.contains(&"title"),
-        "should skip @vue-ignore branch props, got: {names:?}"
+        names.contains(&"title"),
+        "component-meta should keep @vue-ignore branch props, got: {names:?}"
     );
 }
 
 #[test]
-fn evaluate_macro_types_skips_vue_ignore_interface_extends() {
+fn evaluate_macro_types_keeps_vue_ignore_interface_extends_for_meta() {
     use super::analysis::build_script_analysis;
     use oxc_allocator::Allocator;
 
@@ -903,8 +1032,8 @@ defineProps<Props>()
         "should keep local props, got: {names:?}"
     );
     assert!(
-        !names.contains(&"title"),
-        "should skip @vue-ignore extends props, got: {names:?}"
+        names.contains(&"title"),
+        "component-meta should keep @vue-ignore extends props, got: {names:?}"
     );
 }
 

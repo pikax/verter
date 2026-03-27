@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { inject } from 'vue'
+import { inject } from "vue";
 
-const theme = inject<string>('theme', 'default-theme')
+const theme = inject<string>("theme", "default-theme");
 </script>
 
 <template>

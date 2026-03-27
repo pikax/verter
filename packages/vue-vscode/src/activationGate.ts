@@ -7,9 +7,7 @@ export interface ActivationGate<T> {
   reset(): void;
 }
 
-export function createActivationGate<T>(
-  start: () => Promise<T>,
-): ActivationGate<T> {
+export function createActivationGate<T>(start: () => Promise<T>): ActivationGate<T> {
   let active = false;
   let current: Promise<T> | undefined;
 
@@ -19,18 +17,17 @@ export function createActivationGate<T>(
         return current;
       }
 
-      current = start()
-        .then(
-          (value) => {
-            active = true;
-            return value;
-          },
-          (error) => {
-            active = false;
-            current = undefined;
-            throw error;
-          },
-        );
+      current = start().then(
+        (value) => {
+          active = true;
+          return value;
+        },
+        (error) => {
+          active = false;
+          current = undefined;
+          throw error;
+        },
+      );
 
       return current;
     },

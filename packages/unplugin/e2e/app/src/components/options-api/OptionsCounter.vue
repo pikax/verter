@@ -1,29 +1,29 @@
 <script lang="ts">
-import { defineComponent } from 'vue'
+import { defineComponent } from "vue";
 
 export default defineComponent({
   data() {
     return {
       count: 0,
       watchHistory: [] as string[],
-    }
+    };
   },
   computed: {
     doubled(): number {
-      return this.count * 2
+      return this.count * 2;
     },
   },
   watch: {
     count(newVal: number, oldVal: number) {
-      this.watchHistory.push(`${oldVal} → ${newVal}`)
+      this.watchHistory.push(`${oldVal} → ${newVal}`);
     },
   },
   methods: {
     increment() {
-      this.count++
+      this.count++;
     },
   },
-})
+});
 </script>
 
 <template>

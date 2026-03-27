@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import SlotWrapper from './SlotWrapper.vue'
+import SlotWrapper from "./SlotWrapper.vue";
 </script>
 
 <template>

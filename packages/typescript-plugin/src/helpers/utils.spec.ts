@@ -105,15 +105,11 @@ describe("isLikelyTestFileName", () => {
 
 describe("resolveVuePublicApiMode", () => {
   it("stays public when testing bindings are disabled", () => {
-    expect(
-      resolveVuePublicApiMode(false, "/src/App.spec.ts", () => true),
-    ).toBe("public");
+    expect(resolveVuePublicApiMode(false, "/src/App.spec.ts", () => true)).toBe("public");
   });
 
   it("stays public for non-test importers when testing bindings are enabled", () => {
-    expect(
-      resolveVuePublicApiMode(true, "/src/components/App.vue", () => false),
-    ).toBe("public");
+    expect(resolveVuePublicApiMode(true, "/src/components/App.vue", () => false)).toBe("public");
   });
 
   it("switches to testing for test importers when enabled", () => {

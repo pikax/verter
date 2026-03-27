@@ -7,34 +7,34 @@ on:
       source:
         description: 'Plugin source: "npm" for published version, "artifact" for PR build'
         required: true
-        default: 'artifact'
+        default: "artifact"
         type: choice
         options:
           - artifact
           - npm
       dist-tag:
-        description: 'NPM dist-tag (only used when source is npm)'
+        description: "NPM dist-tag (only used when source is npm)"
         required: false
-        default: 'alpha'
+        default: "alpha"
         type: string
       projects:
         description: 'Projects to test (comma-separated, or "all" for default set)'
         required: false
-        default: 'all'
+        default: "all"
         type: string
 
   # Called by release workflow
   workflow_call:
     inputs:
       source:
-        description: 'Plugin source'
+        description: "Plugin source"
         required: true
         type: string
       dist-tag:
-        description: 'NPM dist-tag'
+        description: "NPM dist-tag"
         required: false
         type: string
-        default: 'alpha'
+        default: "alpha"
 
   # PR comment trigger (/integration)
   issue_comment:
@@ -69,13 +69,13 @@ jobs:
             const comment = context.payload.comment.body.toLowerCase();
             const isPR = !!context.payload.issue.pull_request;
             const hasIntegrationCommand = comment.includes('/integration');
-            
+
             if (!hasIntegrationCommand) {
               console.log('Not a PR comment with /integration command');
               core.setOutput('should-run', 'false');
               return;
             }
-            
+
             // Check if user has write permission
             try {
               const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -107,14 +107,14 @@ jobs:
               core.setOutput('should-run', 'false');
               return;
             }
-            
+
             // Get PR details
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.payload.issue.number
             });
-            
+
             // React with eyes to acknowledge
             await github.rest.reactions.createForIssueComment({
               owner: context.repo.owner,
@@ -122,7 +122,7 @@ jobs:
               comment_id: context.payload.comment.id,
               content: 'eyes'
             });
-            
+
             core.setOutput('should-run', 'true');
             core.setOutput('pr-number', context.payload.issue.number);
             core.setOutput('pr-sha', pr.head.sha);
@@ -1244,18 +1244,18 @@ jobs:
             const summary = fs.readFileSync('integration-test-summary.md', 'utf8');
             const overallStatus = fs.readFileSync('overall-status.txt', 'utf8').trim();
             const failedCount = parseInt(fs.readFileSync('failed-count.txt', 'utf8').trim());
-            
+
             // Get PR details to get the head SHA
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.payload.issue.number
             });
-            
+
             // Determine check status based on failures
             let checkConclusion = 'success';
             let checkTitle = 'Integration Tests Passed';
-            
+
             if (failedCount > 0) {
               checkConclusion = 'failure';
               checkTitle = `Integration Tests Failed (${failedCount} project(s))`;
@@ -1263,7 +1263,7 @@ jobs:
               checkConclusion = 'neutral';
               checkTitle = 'Integration Tests Passed with Warnings';
             }
-            
+
             // Create a check run for the PR
             try {
               await github.rest.checks.create({
@@ -1283,13 +1283,13 @@ jobs:
               console.log('Failed to create check run:', error.message);
               // Continue with comment posting even if check creation fails
             }
-            
+
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.issue.number
             });
-            
+
             // Find existing bot comment
             const botComment = comments.find(c =>
               c.user.login === 'github-actions[bot]' &&
@@ -1297,7 +1297,7 @@ jobs:
             );
 
             const commentBody = summary + `\n\n---\n[View full run](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
-            
+
             if (botComment) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
@@ -1313,7 +1313,7 @@ jobs:
                 body: commentBody
               });
             }
-            
+
             // React with checkmark to original comment
             await github.rest.reactions.createForIssueComment({
               owner: context.repo.owner,

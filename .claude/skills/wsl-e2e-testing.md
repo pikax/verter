@@ -53,6 +53,7 @@ chmod +x ~/ci-bin/node ~/ci-bin/npm ~/ci-bin/npx ~/ci-bin/pnpm
 ```
 
 **Sanity check** (run after every WSL session start):
+
 ```bash
 export PATH="$HOME/ci-bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/sbin"
 node --version   # should be native Linux node (v20+)
@@ -157,43 +158,50 @@ cat /tmp/verter-e2e-barrel-exports@tsgo.log
 
 ## Fixture × Provider Matrix
 
-| Fixture | tsgo | tsserver | What it validates |
-|---------|------|----------|-------------------|
-| `single-project` | CI-critical | Baseline | Full LSP stack: hover, completion, definition, diagnostics, rename |
-| `barrel-exports` | CI-critical | Baseline | Barrel re-export type resolution, eager sync |
-| `path-aliases` | CI-critical | Baseline | tsconfig `paths`, per-owner config timing |
-| `monorepo` | Control | Baseline | Cross-package imports, workspace folders |
-| `composite-paths` | Control | Baseline | Project references + path aliases |
+| Fixture           | tsgo        | tsserver | What it validates                                                  |
+| ----------------- | ----------- | -------- | ------------------------------------------------------------------ |
+| `single-project`  | CI-critical | Baseline | Full LSP stack: hover, completion, definition, diagnostics, rename |
+| `barrel-exports`  | CI-critical | Baseline | Barrel re-export type resolution, eager sync                       |
+| `path-aliases`    | CI-critical | Baseline | tsconfig `paths`, per-owner config timing                          |
+| `monorepo`        | Control     | Baseline | Cross-package imports, workspace folders                           |
+| `composite-paths` | Control     | Baseline | Project references + path aliases                                  |
 
 ## Acceptance Criteria
 
 ### `single-project@tsgo`
+
 - No `TS1192` (module has no default export — import rewrite regression)
 - No `TS2607` / `TS2786` (JSX namespace leakage from `.vue.tsx`)
 - P6 reports only `thisDoesNotExist` (not valid props flagged as errors)
 - All hover/completion/definition tests pass
 
 ### `barrel-exports@tsgo`
+
 - `:show` hover includes `showOverlay` and `boolean`
 - `:zIndex` prop-name hover shows `number`
 - `label` attr hover includes `string`
 - Barrel go-to-definition reaches terminal `.vue` file
 
 ### `path-aliases@tsgo`
+
 - `@/` imports resolve without `TS2307`
 - Hover on aliased imports shows typed results
 
 ## Troubleshooting
 
 ### "Cannot find module" errors in test output
+
 The compiled `out-test/` directory may have stale files. Clean and rebuild:
+
 ```bash
 rm -rf packages/vue-vscode/out-test
 pnpm --filter verter-vscode exec tsc -p tsconfig.test.json
 ```
 
 ### Double-nested `suite/suite/` directory
+
 If you accidentally `cp -r` the suite directory, it creates `suite/suite/`. Fix:
+
 ```bash
 rm -rf packages/vue-vscode/e2e/suite/suite
 rm -rf packages/vue-vscode/out-test/e2e/suite/suite
@@ -201,11 +209,14 @@ pnpm --filter verter-vscode exec tsc -p tsconfig.test.json
 ```
 
 ### WSL node picks up Windows node.exe
+
 Symptom: `Error: Cannot find module 'D:\usr\bin\npm'`
 Fix: Ensure `~/ci-bin` is first in PATH (see Step 1).
 
 ### GPU errors in output
+
 `ERROR:components/viz/service/main/viz_main_impl.cc` messages are harmless — `xvfb-run` provides a virtual display but GPU acceleration is unavailable. Tests still run correctly.
 
 ### Decoration timeout failures
+
 `Prop Constness Decorations "before all"` timeouts are a known flaky test in WSL/CI environments. Not related to LSP correctness — decorations depend on VS Code's internal scheduling which is slower under xvfb.

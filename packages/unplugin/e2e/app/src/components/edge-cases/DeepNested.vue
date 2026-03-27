@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { ref, provide } from 'vue'
-import DeepMiddle from './DeepMiddle.vue'
+import { ref, provide } from "vue";
+import DeepMiddle from "./DeepMiddle.vue";
 
-const rootValue = ref('root-initial')
+const rootValue = ref("root-initial");
 
-provide('deep-value', rootValue)
-provide('update-root', () => {
-  rootValue.value = 'leaf-updated'
-})
+provide("deep-value", rootValue);
+provide("update-root", () => {
+  rootValue.value = "leaf-updated";
+});
 </script>
 
 <template>

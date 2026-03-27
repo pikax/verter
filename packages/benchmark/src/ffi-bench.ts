@@ -152,7 +152,9 @@ async function benchNapiVsWasm(fixtures: Fixture[]) {
     WasmHost = wasm.Host;
     console.log("  WASM loaded successfully");
   } catch (e) {
-    console.log(`  WASM not available (${e instanceof Error ? e.message : e}), skipping WASM benchmarks`);
+    console.log(
+      `  WASM not available (${e instanceof Error ? e.message : e}), skipping WASM benchmarks`,
+    );
     return;
   }
 
@@ -221,9 +223,7 @@ async function benchNapiVsWasm(fixtures: Fixture[]) {
 
 async function benchBreakdown(fixtures: Fixture[]) {
   printHeader("GROUP 3 — COMPILE BREAKDOWN (NAPI)");
-  console.log(
-    "  Breakdown: JS total vs Rust parseDurationMs → FFI overhead = total - parse",
-  );
+  console.log("  Breakdown: JS total vs Rust parseDurationMs → FFI overhead = total - parse");
 
   const ITERATIONS = 200;
 
@@ -273,8 +273,12 @@ async function benchBreakdown(fixtures: Fixture[]) {
 
     console.log(`    Total cycle:          ${pad((total * 1000).toFixed(0), 8)} µs`);
     console.log(`      upsert (JS):        ${pad((avgUpsert * 1000).toFixed(0), 8)} µs`);
-    console.log(`        parse (Rust):     ${pad((avgParseDuration * 1000).toFixed(0), 8)} µs  (${((avgParseDuration / avgUpsert) * 100).toFixed(0)}% of upsert)`);
-    console.log(`        FFI overhead:     ${pad((ffiOverhead * 1000).toFixed(0), 8)} µs  (${((ffiOverhead / avgUpsert) * 100).toFixed(0)}% of upsert)`);
+    console.log(
+      `        parse (Rust):     ${pad((avgParseDuration * 1000).toFixed(0), 8)} µs  (${((avgParseDuration / avgUpsert) * 100).toFixed(0)}% of upsert)`,
+    );
+    console.log(
+      `        FFI overhead:     ${pad((ffiOverhead * 1000).toFixed(0), 8)} µs  (${((ffiOverhead / avgUpsert) * 100).toFixed(0)}% of upsert)`,
+    );
     console.log(`      getVirtualFile:     ${pad((avgGetVirtual * 1000).toFixed(0), 8)} µs`);
   }
 }

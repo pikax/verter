@@ -1409,21 +1409,13 @@
   "quote_escaping": {
     "template": "<div title='it\\'s'>content</div>",
     "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    title: \"it\\\\\",\n    \"s'\": \"\"\n  }, \"content\"))\n}",
-    "dev_errors": [
-      "Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."
-    ],
+    "dev_errors": ["Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."],
     "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    title: \"it\\\\\",\n    \"s'\": \"\"\n  }, \"content\"))\n}",
-    "prod_errors": [
-      "Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."
-    ],
+    "prod_errors": ["Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."],
     "vapor_dev": "import { template as _template } from 'vue';\nconst t0 = _template(\"<div title=it\\\\ s'>content\", true)\n\nexport function render(_ctx) {\n  const n0 = t0()\n  return n0\n}",
-    "vapor_dev_errors": [
-      "Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."
-    ],
+    "vapor_dev_errors": ["Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."],
     "vapor_prod": "import { template as _template } from 'vue';\nconst t0 = _template(\"<div title=it\\\\ s'>content\", true)\n\nexport function render(_ctx) {\n  const n0 = t0()\n  return n0\n}",
-    "vapor_prod_errors": [
-      "Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."
-    ]
+    "vapor_prod_errors": ["Attribute name cannot contain U+0022 (\"), U+0027 ('), and U+003C (<)."]
   },
   "attribute_no_value": {
     "template": "<input disabled>",
@@ -1442,21 +1434,13 @@
   "multiple_v_model": {
     "template": "<input v-model=\"a\" v-model=\"b\">",
     "dev": "import { vModelText as _vModelText, withDirectives as _withDirectives, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _withDirectives((_openBlock(), _createElementBlock(\"input\", {\n    \"onUpdate:modelValue\": [$event => ((_ctx.a) = $event), $event => ((_ctx.b) = $event)]\n  }, null, 8 /* PROPS */, [\"onUpdate:modelValue\"])), [\n    [_vModelText, _ctx.a],\n    [_vModelText, _ctx.b]\n  ])\n}",
-    "dev_errors": [
-      "Duplicate attribute."
-    ],
+    "dev_errors": ["Duplicate attribute."],
     "prod": "import { vModelText as _vModelText, withDirectives as _withDirectives, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _withDirectives((_openBlock(), _createElementBlock(\"input\", {\n    \"onUpdate:modelValue\": [$event => ((_ctx.a) = $event), $event => ((_ctx.b) = $event)]\n  }, null, 8 /* PROPS */, [\"onUpdate:modelValue\"])), [\n    [_vModelText, _ctx.a],\n    [_vModelText, _ctx.b]\n  ])\n}",
-    "prod_errors": [
-      "Duplicate attribute."
-    ],
+    "prod_errors": ["Duplicate attribute."],
     "vapor_dev": "import { applyTextModel as _applyTextModel, template as _template } from 'vue';\nconst t0 = _template(\"<input>\", true)\n\nexport function render(_ctx) {\n  const n0 = t0()\n  _applyTextModel(n0, () => (_ctx.a), _value => (_ctx.a = _value))\n  _applyTextModel(n0, () => (_ctx.b), _value => (_ctx.b = _value))\n  return n0\n}",
-    "vapor_dev_errors": [
-      "Duplicate attribute."
-    ],
+    "vapor_dev_errors": ["Duplicate attribute."],
     "vapor_prod": "import { applyTextModel as _applyTextModel, template as _template } from 'vue';\nconst t0 = _template(\"<input>\", true)\n\nexport function render(_ctx) {\n  const n0 = t0()\n  _applyTextModel(n0, () => (_ctx.a), _value => (_ctx.a = _value))\n  _applyTextModel(n0, () => (_ctx.b), _value => (_ctx.b = _value))\n  return n0\n}",
-    "vapor_prod_errors": [
-      "Duplicate attribute."
-    ]
+    "vapor_prod_errors": ["Duplicate attribute."]
   },
   "v_bind_after_v_for": {
     "template": "<div v-for=\"i in items\" v-bind=\"i\">{{ i }}</div>",

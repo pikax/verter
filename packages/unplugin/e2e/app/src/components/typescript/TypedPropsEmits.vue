@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import TypedChild from './TypedChild.vue'
+import { ref } from "vue";
+import TypedChild from "./TypedChild.vue";
 
-const parentMessage = ref('from-parent')
-const received = ref('')
+const parentMessage = ref("from-parent");
+const received = ref("");
 
 function onReply(value: string) {
-  received.value = value
+  received.value = value;
 }
 
 function updateMessage() {
-  parentMessage.value = 'updated-parent'
+  parentMessage.value = "updated-parent";
 }
 </script>
 

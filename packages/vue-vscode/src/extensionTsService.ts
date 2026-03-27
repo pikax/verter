@@ -45,11 +45,9 @@ export class ExtensionTsService {
 
     const host: ts.LanguageServiceHost = {
       getScriptFileNames: () => [...this.openFiles],
-      getScriptVersion: (fileName) =>
-        String(this.fileVersions.get(fileName) ?? 0),
+      getScriptVersion: (fileName) => String(this.fileVersions.get(fileName) ?? 0),
       getScriptSnapshot: (fileName) => {
-        if (this.fileSnapshots.has(fileName))
-          return this.fileSnapshots.get(fileName)!;
+        if (this.fileSnapshots.has(fileName)) return this.fileSnapshots.get(fileName)!;
         try {
           const content = this.ts.sys.readFile(fileName);
           if (content !== undefined) {
@@ -72,10 +70,7 @@ export class ExtensionTsService {
       getDirectories: this.ts.sys.getDirectories,
     };
 
-    this.service = this.ts.createLanguageService(
-      host,
-      this.ts.createDocumentRegistry(),
-    );
+    this.service = this.ts.createLanguageService(host, this.ts.createDocumentRegistry());
   }
 
   private resolveCompilerOptions(): ts.CompilerOptions {
@@ -87,10 +82,7 @@ export class ExtensionTsService {
     );
 
     if (tsconfigPath) {
-      const configFile = this.ts.readConfigFile(
-        tsconfigPath,
-        this.ts.sys.readFile,
-      );
+      const configFile = this.ts.readConfigFile(tsconfigPath, this.ts.sys.readFile);
       if (!configFile.error) {
         const parsed = this.ts.parseJsonConfigFileContent(
           configFile.config,
@@ -120,10 +112,7 @@ export class ExtensionTsService {
    * Handle a tsserver-format query. Called by the `$/verter/tsQuery` handler.
    * Returns the response body (same shape as tsserver responses).
    */
-  handleQuery(
-    command: string,
-    args: Record<string, unknown>,
-  ): unknown {
+  handleQuery(command: string, args: Record<string, unknown>): unknown {
     this.ensureInitialized();
 
     switch (command) {
@@ -138,14 +127,8 @@ export class ExtensionTsService {
         const content = args.fileContent as string | undefined;
         this.openFiles.add(file);
         if (content !== undefined) {
-          this.fileSnapshots.set(
-            file,
-            this.ts.ScriptSnapshot.fromString(content),
-          );
-          this.fileVersions.set(
-            file,
-            (this.fileVersions.get(file) ?? 0) + 1,
-          );
+          this.fileSnapshots.set(file, this.ts.ScriptSnapshot.fromString(content));
+          this.fileVersions.set(file, (this.fileVersions.get(file) ?? 0) + 1);
         }
         return {};
       }
@@ -172,10 +155,7 @@ export class ExtensionTsService {
               entry.file,
               this.ts.ScriptSnapshot.fromString(entry.fileContent),
             );
-            this.fileVersions.set(
-              entry.file,
-              (this.fileVersions.get(entry.file) ?? 0) + 1,
-            );
+            this.fileVersions.set(entry.file, (this.fileVersions.get(entry.file) ?? 0) + 1);
           }
         }
 
@@ -184,9 +164,7 @@ export class ExtensionTsService {
           if (currentSnap && entry.textChanges?.length) {
             let text = currentSnap.getText(0, currentSnap.getLength());
             const changes = [...entry.textChanges].sort(
-              (a, b) =>
-                b.start.line - a.start.line ||
-                b.start.offset - a.start.offset,
+              (a, b) => b.start.line - a.start.line || b.start.offset - a.start.offset,
             );
             for (const change of changes) {
               const startOffset = this.positionToOffset(
@@ -194,24 +172,11 @@ export class ExtensionTsService {
                 change.start.line,
                 change.start.offset,
               );
-              const endOffset = this.positionToOffset(
-                text,
-                change.end.line,
-                change.end.offset,
-              );
-              text =
-                text.slice(0, startOffset) +
-                change.newText +
-                text.slice(endOffset);
+              const endOffset = this.positionToOffset(text, change.end.line, change.end.offset);
+              text = text.slice(0, startOffset) + change.newText + text.slice(endOffset);
             }
-            this.fileSnapshots.set(
-              entry.fileName,
-              this.ts.ScriptSnapshot.fromString(text),
-            );
-            this.fileVersions.set(
-              entry.fileName,
-              (this.fileVersions.get(entry.fileName) ?? 0) + 1,
-            );
+            this.fileSnapshots.set(entry.fileName, this.ts.ScriptSnapshot.fromString(text));
+            this.fileVersions.set(entry.fileName, (this.fileVersions.get(entry.fileName) ?? 0) + 1);
           }
         }
 
@@ -231,20 +196,13 @@ export class ExtensionTsService {
       case "quickinfo": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const offset = this.positionToOffset(
-          text,
-          args.line as number,
-          args.offset as number,
-        );
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
         const info = this.service.getQuickInfoAtPosition(file, offset);
         if (!info) return undefined;
         const display = this.ts.displayPartsToString(info.displayParts);
         const docs = this.ts.displayPartsToString(info.documentation);
         const start = this.offsetToPosition(text, info.textSpan.start);
-        const end = this.offsetToPosition(
-          text,
-          info.textSpan.start + info.textSpan.length,
-        );
+        const end = this.offsetToPosition(text, info.textSpan.start + info.textSpan.length);
         return {
           kind: info.kind,
           kindModifiers: info.kindModifiers,
@@ -262,19 +220,11 @@ export class ExtensionTsService {
       case "completionInfo": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const offset = this.positionToOffset(
-          text,
-          args.line as number,
-          args.offset as number,
-        );
-        const completions = this.service.getCompletionsAtPosition(
-          file,
-          offset,
-          {
-            includeCompletionsForModuleExports: true,
-            includeCompletionsWithInsertText: true,
-          },
-        );
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
+        const completions = this.service.getCompletionsAtPosition(file, offset, {
+          includeCompletionsForModuleExports: true,
+          includeCompletionsWithInsertText: true,
+        });
         if (!completions) return undefined;
         return {
           isGlobalCompletion: completions.isGlobalCompletion,
@@ -296,11 +246,7 @@ export class ExtensionTsService {
       case "typeDefinition": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const offset = this.positionToOffset(
-          text,
-          args.line as number,
-          args.offset as number,
-        );
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
         const fn_ =
           command === "definition"
             ? this.service.getDefinitionAtPosition
@@ -308,10 +254,7 @@ export class ExtensionTsService {
         const defs = fn_.call(this.service, file, offset);
         return (defs ?? []).map((d) => ({
           file: d.fileName,
-          start: this.offsetToPosition(
-            this.getFileText(d.fileName),
-            d.textSpan.start,
-          ),
+          start: this.offsetToPosition(this.getFileText(d.fileName), d.textSpan.start),
           end: this.offsetToPosition(
             this.getFileText(d.fileName),
             d.textSpan.start + d.textSpan.length,
@@ -322,25 +265,17 @@ export class ExtensionTsService {
       case "references": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const offset = this.positionToOffset(
-          text,
-          args.line as number,
-          args.offset as number,
-        );
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
         const refs = this.service.getReferencesAtPosition(file, offset);
         return {
           refs: (refs ?? []).map((r) => ({
             file: r.fileName,
-            start: this.offsetToPosition(
-              this.getFileText(r.fileName),
-              r.textSpan.start,
-            ),
+            start: this.offsetToPosition(this.getFileText(r.fileName), r.textSpan.start),
             end: this.offsetToPosition(
               this.getFileText(r.fileName),
               r.textSpan.start + r.textSpan.length,
             ),
-            isDefinition:
-              (r as unknown as Record<string, unknown>).isDefinition ?? false,
+            isDefinition: (r as unknown as Record<string, unknown>).isDefinition ?? false,
             isWriteAccess: r.isWriteAccess,
           })),
         };
@@ -349,51 +284,31 @@ export class ExtensionTsService {
       case "rename": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const offset = this.positionToOffset(
-          text,
-          args.line as number,
-          args.offset as number,
-        );
-        const locations = this.service.findRenameLocations(
-          file,
-          offset,
-          false,
-          false,
-        );
-        const locArray: ts.RenameLocation[] = locations
-          ? [...locations]
-          : [];
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
+        const locations = this.service.findRenameLocations(file, offset, false, false);
+        const locArray: ts.RenameLocation[] = locations ? [...locations] : [];
         return {
           info: {
             canRename: !!locations,
             localizedErrorMessage: locations ? "" : "Cannot rename",
           },
-          locs: this.groupBy(locArray, (r) => r.fileName).map(
-            ([locFile, spans]) => ({
-              file: locFile,
-              locs: spans.map((s) => ({
-                start: this.offsetToPosition(
-                  this.getFileText(locFile),
-                  s.textSpan.start,
-                ),
-                end: this.offsetToPosition(
-                  this.getFileText(locFile),
-                  s.textSpan.start + s.textSpan.length,
-                ),
-              })),
-            }),
-          ),
+          locs: this.groupBy(locArray, (r) => r.fileName).map(([locFile, spans]) => ({
+            file: locFile,
+            locs: spans.map((s) => ({
+              start: this.offsetToPosition(this.getFileText(locFile), s.textSpan.start),
+              end: this.offsetToPosition(
+                this.getFileText(locFile),
+                s.textSpan.start + s.textSpan.length,
+              ),
+            })),
+          })),
         };
       }
 
       case "signatureHelp": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const offset = this.positionToOffset(
-          text,
-          args.line as number,
-          args.offset as number,
-        );
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
         const help = this.service.getSignatureHelpItems(file, offset, {});
         if (!help) return undefined;
         return {
@@ -421,10 +336,7 @@ export class ExtensionTsService {
         const text = this.getFileText(file);
         const diags = this.service.getSemanticDiagnostics(file);
         return diags.map((d) => ({
-          start:
-            d.start !== undefined
-              ? this.offsetToPosition(text, d.start)
-              : undefined,
+          start: d.start !== undefined ? this.offsetToPosition(text, d.start) : undefined,
           end:
             d.start !== undefined && d.length !== undefined
               ? this.offsetToPosition(text, d.start + d.length)
@@ -469,10 +381,7 @@ export class ExtensionTsService {
           changes: fix.changes.map((change) => ({
             fileName: change.fileName,
             textChanges: change.textChanges.map((tc) => ({
-              start: this.offsetToPosition(
-                this.getFileText(change.fileName),
-                tc.span.start,
-              ),
+              start: this.offsetToPosition(this.getFileText(change.fileName), tc.span.start),
               end: this.offsetToPosition(
                 this.getFileText(change.fileName),
                 tc.span.start + tc.span.length,
@@ -486,16 +395,10 @@ export class ExtensionTsService {
       case "encodedSemanticClassifications-full": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const startArg = args.start as
-          | { line: number; offset: number }
-          | undefined;
-        const endArg = args.end as
-          | { line: number; offset: number }
-          | undefined;
+        const startArg = args.start as { line: number; offset: number } | undefined;
+        const endArg = args.end as { line: number; offset: number } | undefined;
 
-        const startPos = startArg
-          ? this.positionToOffset(text, startArg.line, startArg.offset)
-          : 0;
+        const startPos = startArg ? this.positionToOffset(text, startArg.line, startArg.offset) : 0;
         const endPos = endArg
           ? this.positionToOffset(text, endArg.line, endArg.offset)
           : text.length;
@@ -512,27 +415,16 @@ export class ExtensionTsService {
       case "documentHighlights": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const offset = this.positionToOffset(
-          text,
-          args.line as number,
-          args.offset as number,
-        );
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
         const filesToSearch = (args.filesToSearch ?? [file]) as string[];
-        const highlights = this.service.getDocumentHighlights(
-          file,
-          offset,
-          filesToSearch,
-        );
+        const highlights = this.service.getDocumentHighlights(file, offset, filesToSearch);
 
         if (!highlights) return [];
 
         return highlights.map((group) => ({
           file: group.fileName,
           highlightSpans: group.highlightSpans.map((span) => ({
-            start: this.offsetToPosition(
-              this.getFileText(group.fileName),
-              span.textSpan.start,
-            ),
+            start: this.offsetToPosition(this.getFileText(group.fileName), span.textSpan.start),
             end: this.offsetToPosition(
               this.getFileText(group.fileName),
               span.textSpan.start + span.textSpan.length,
@@ -552,17 +444,12 @@ export class ExtensionTsService {
         const startPos = (args.start as number) ?? 0;
         const length = (args.length as number) ?? text.length;
 
-        const hints = this.service.provideInlayHints(
-          file,
-          { start: startPos, length },
-          undefined,
-        );
+        const hints = this.service.provideInlayHints(file, { start: startPos, length }, undefined);
 
         return hints.map((hint) => ({
           text: hint.text,
           position: this.offsetToPosition(text, hint.position),
-          kind:
-            hint.kind === this.ts.InlayHintKind.Type ? "Type" : "Parameter",
+          kind: hint.kind === this.ts.InlayHintKind.Type ? "Type" : "Parameter",
           whitespaceBefore: hint.whitespaceBefore,
           whitespaceAfter: hint.whitespaceAfter,
         }));
@@ -589,11 +476,7 @@ export class ExtensionTsService {
   }
 
   /** 1-based line/offset to 0-based byte offset */
-  private positionToOffset(
-    text: string,
-    line: number,
-    offset: number,
-  ): number {
+  private positionToOffset(text: string, line: number, offset: number): number {
     let currentLine = 1;
     let i = 0;
     while (currentLine < line && i < text.length) {
@@ -604,10 +487,7 @@ export class ExtensionTsService {
   }
 
   /** 0-based byte offset to 1-based line/offset */
-  private offsetToPosition(
-    text: string,
-    offset: number,
-  ): { line: number; offset: number } {
+  private offsetToPosition(text: string, offset: number): { line: number; offset: number } {
     let line = 1;
     let lastLineStart = 0;
     for (let i = 0; i < offset && i < text.length; i++) {
@@ -626,10 +506,7 @@ export class ExtensionTsService {
     };
   }
 
-  private groupBy<T>(
-    items: T[],
-    key: (item: T) => string,
-  ): [string, T[]][] {
+  private groupBy<T>(items: T[], key: (item: T) => string): [string, T[]][] {
     const map = new Map<string, T[]>();
     for (const item of items) {
       const k = key(item);

@@ -48,16 +48,20 @@ pnpm exec playwright test --project=preview 2>&1 | grep "error"  # wasteful re-r
 
 // For individual tests in existing files:
 // @ai-generated - Tests X functionality with Y scenarios
-it("does something", () => { /* ... */ });
+it("does something", () => {
+  /* ... */
+});
 ```
 
 **Sourcemap testing** (see `macros.map.spec.ts`):
+
 ```typescript
 const { s, source, result } = processMacrosForSourcemap(code);
 const map = s.generateMap({ source: "test.vue" });
 ```
 
 **Type testing best practices** (`packages/types/`):
+
 - Always include **both** a positive assertion and a `@ts-expect-error` negative assertion
 - This prevents `any`/`unknown`/`never` types from silently passing tests
 
@@ -81,6 +85,7 @@ it("type is correctly inferred", () => {
 When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file. Two patterns:
 
 **For standalone files** (e.g., `analysis.rs`):
+
 ```rust
 // In analysis.rs — replace the inline #[cfg(test)] mod tests { ... } block:
 #[cfg(test)]
@@ -89,6 +94,7 @@ mod analysis_tests;
 ```
 
 **For `mod.rs` files** (e.g., `ide/template/mod.rs`):
+
 ```rust
 // In mod.rs — loads tests.rs from the same directory:
 #[cfg(test)]
@@ -122,6 +128,7 @@ pub struct AstNode {
 ```
 
 `ElementNode` pre-computes metadata during parsing to avoid re-scanning in codegen:
+
 - `tag_type`: Element / Component / SlotOutlet / Template
 - `prop_flag`: Bitset of prop characteristics (has class, style, spread, etc.)
 - `children_flag`: Bitset of children characteristics (has text, elements, v-if, etc.)

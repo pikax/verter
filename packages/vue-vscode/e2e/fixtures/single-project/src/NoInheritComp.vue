@@ -1,5 +1,7 @@
 <script setup lang="ts">
-defineProps<{ label: string }>()
-defineOptions({ inheritAttrs: false })
+defineProps<{ label: string }>();
+defineOptions({ inheritAttrs: false });
 </script>
-<template><div>{{ label }}</div></template>
+<template>
+  <div>{{ label }}</div>
+</template>

@@ -16,13 +16,10 @@ const extensionTestsPath = path.resolve(
 
 const fixtureName = process.env.VERTER_COMPLETION_BENCHMARK_FIXTURE ?? "single-project";
 const providerKind = process.env.VERTER_COMPLETION_BENCHMARK_PROVIDER ?? "tsserver";
-const relativePath =
-  process.env.VERTER_COMPLETION_BENCHMARK_FILE ?? "src/App.vue";
-const anchor =
-  process.env.VERTER_COMPLETION_BENCHMARK_ANCHOR ?? "count.value * 2";
+const relativePath = process.env.VERTER_COMPLETION_BENCHMARK_FILE ?? "src/App.vue";
+const anchor = process.env.VERTER_COMPLETION_BENCHMARK_ANCHOR ?? "count.value * 2";
 const anchorOffset = readIntEnv("VERTER_COMPLETION_BENCHMARK_OFFSET", 6);
-const expectedLabel =
-  process.env.VERTER_COMPLETION_BENCHMARK_LABEL ?? "value";
+const expectedLabel = process.env.VERTER_COMPLETION_BENCHMARK_LABEL ?? "value";
 const triggerCharacter = process.env.VERTER_COMPLETION_BENCHMARK_TRIGGER;
 const runs = readIntEnv("VERTER_COMPLETION_BENCHMARK_RUNS", 5);
 const iterations = readIntEnv("VERTER_COMPLETION_BENCHMARK_ITERATIONS", 10);
@@ -47,14 +44,8 @@ async function main() {
 
   for (let index = 0; index < runs; index += 1) {
     const label = `${fixtureName}-${providerKind}-${scenario}-run-${index + 1}`;
-    const userDataDir = path.join(
-      os.tmpdir(),
-      `vcb-u-${Date.now()}-${index}`,
-    );
-    const extensionsDir = path.join(
-      os.tmpdir(),
-      `vcb-e-${Date.now()}-${index}`,
-    );
+    const userDataDir = path.join(os.tmpdir(), `vcb-u-${Date.now()}-${index}`);
+    const extensionsDir = path.join(os.tmpdir(), `vcb-e-${Date.now()}-${index}`);
     const logFile = path.join(os.tmpdir(), `${label}.log`);
     const timingFile = path.join(os.tmpdir(), `${label}-timing.json`);
     const reportFile = path.join(os.tmpdir(), `${label}-report.json`);
@@ -94,31 +85,22 @@ async function main() {
         VERTER_E2E_TIMING_FILE: timingFile,
         VERTER_LOG: "debug",
         ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
-        ...(triggerCharacter
-          ? { VERTER_E2E_COMPLETION_BENCHMARK_TRIGGER: triggerCharacter }
-          : {}),
+        ...(triggerCharacter ? { VERTER_E2E_COMPLETION_BENCHMARK_TRIGGER: triggerCharacter } : {}),
       },
     });
 
     const report = JSON.parse(fs.readFileSync(reportFile, "utf8"));
     reports.push(report);
 
-    fs.writeFileSync(
-      path.join(resultsDir, `${label}.json`),
-      JSON.stringify(report, null, 2),
-    );
+    fs.writeFileSync(path.join(resultsDir, `${label}.json`), JSON.stringify(report, null, 2));
   }
 
   const summary = {
     warmRequestMs: summarizeMetric(
-      reports.flatMap((report) =>
-        report.warmRequest.samples.map((sample) => sample.latencyMs),
-      ),
+      reports.flatMap((report) => report.warmRequest.samples.map((sample) => sample.latencyMs)),
     ),
     afterEditTypedMs: summarizeMetric(
-      reports.flatMap((report) =>
-        report.afterEditTyped.samples.map((sample) => sample.latencyMs),
-      ),
+      reports.flatMap((report) => report.afterEditTyped.samples.map((sample) => sample.latencyMs)),
     ),
   };
 

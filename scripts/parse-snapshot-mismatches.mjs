@@ -10,12 +10,9 @@
 import { readFileSync, writeFileSync } from "fs";
 import { resolve } from "path";
 
-const logFile =
-  process.argv[2] ||
-  resolve(".integration-tests/logs/nuxt-ui/verter-test.log");
+const logFile = process.argv[2] || resolve(".integration-tests/logs/nuxt-ui/verter-test.log");
 const outputFile =
-  process.argv[3] ||
-  resolve(".integration-tests/logs/nuxt-ui/snapshot-mismatches.json");
+  process.argv[3] || resolve(".integration-tests/logs/nuxt-ui/snapshot-mismatches.json");
 
 const raw = readFileSync(logFile, "utf-8");
 
@@ -30,9 +27,7 @@ let i = 0;
 
 while (i < lines.length) {
   // Look for: Error: Snapshot `...` mismatched
-  const matchError = lines[i].match(
-    /^Error: Snapshot `(.+?)` mismatched$/
-  );
+  const matchError = lines[i].match(/^Error: Snapshot `(.+?)` mismatched$/);
   if (!matchError) {
     i++;
     continue;
@@ -44,9 +39,7 @@ while (i < lines.length) {
   let testFile = "";
   let testPath = "";
   for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
-    const failMatch = lines[j].match(
-      /FAIL\s+(?:nuxt\s+)?(test\/\S+)\s*>\s*(.+)/
-    );
+    const failMatch = lines[j].match(/FAIL\s+(?:nuxt\s+)?(test\/\S+)\s*>\s*(.+)/);
     if (failMatch) {
       testFile = failMatch[1].trim();
       testPath = failMatch[2].trim();
@@ -153,8 +146,14 @@ const patternCounts = {};
 for (const entry of results) {
   for (const d of entry.diffs) {
     // Normalize: strip dynamic IDs and whitespace to find patterns
-    const expNorm = d.expected.replace(/v-\d+-\d+-\d+/g, "v-X").replace(/\s+/g, " ").trim();
-    const recNorm = d.received.replace(/v-\d+-\d+-\d+/g, "v-X").replace(/\s+/g, " ").trim();
+    const expNorm = d.expected
+      .replace(/v-\d+-\d+-\d+/g, "v-X")
+      .replace(/\s+/g, " ")
+      .trim();
+    const recNorm = d.received
+      .replace(/v-\d+-\d+-\d+/g, "v-X")
+      .replace(/\s+/g, " ")
+      .trim();
 
     // Find what changed between expected and received
     // Simple: check if it's just a class difference, attribute difference, etc.
@@ -174,8 +173,7 @@ for (const entry of results) {
     while (
       suffixLen < expNorm.length - prefixLen &&
       suffixLen < recNorm.length - prefixLen &&
-      expNorm[expNorm.length - 1 - suffixLen] ===
-        recNorm[recNorm.length - 1 - suffixLen]
+      expNorm[expNorm.length - 1 - suffixLen] === recNorm[recNorm.length - 1 - suffixLen]
     ) {
       suffixLen++;
     }
@@ -199,9 +197,7 @@ const output = {
   summary: {
     totalMismatches: results.length,
     componentCount: Object.keys(byComponent).length,
-    components: Object.fromEntries(
-      Object.entries(byComponent).map(([k, v]) => [k, v.length])
-    ),
+    components: Object.fromEntries(Object.entries(byComponent).map(([k, v]) => [k, v.length])),
   },
   topDiffPatterns: sortedPatterns,
   mismatches: results,

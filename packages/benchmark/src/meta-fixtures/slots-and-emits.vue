@@ -1,22 +1,22 @@
 <script setup lang="ts">
 defineProps<{
-  title: string
-  subtitle?: string
-  bordered: boolean
-}>()
+  title: string;
+  subtitle?: string;
+  bordered: boolean;
+}>();
 
 defineEmits<{
-  close: []
-  submit: [data: Record<string, unknown>]
-  resize: [width: number, height: number]
-  'update:visible': [visible: boolean]
-}>()
+  close: [];
+  submit: [data: Record<string, unknown>];
+  resize: [width: number, height: number];
+  "update:visible": [visible: boolean];
+}>();
 
 defineSlots<{
-  default(props: { isActive: boolean }): any
-  header(props: { title: string }): any
-  footer(props: { canSubmit: boolean; canClose: boolean }): any
-}>()
+  default(props: { isActive: boolean }): any;
+  header(props: { title: string }): any;
+  footer(props: { canSubmit: boolean; canClose: boolean }): any;
+}>();
 </script>
 
 <template>

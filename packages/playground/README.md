@@ -155,15 +155,15 @@ Deployment happens automatically via:
 
 ## Dependencies
 
-| Package                       | Purpose                                           |
-| ----------------------------- | ------------------------------------------------- |
-| `@verter/wasm`                | Rust-based Vue SFC compiler (WASM)                |
-| `vue`                         | Application framework                             |
-| `monaco-editor-core`          | Code editor component                             |
-| `shiki` / `@shikijs/monaco`   | Syntax highlighting                               |
-| `oxc-transform`               | TypeScript transpilation in the browser           |
-| `@verter/unplugin`            | Universal bundler plugin for Vue SFC compilation  |
-| `vite` / `@vitejs/plugin-vue` | Build tooling                                     |
+| Package                       | Purpose                                          |
+| ----------------------------- | ------------------------------------------------ |
+| `@verter/wasm`                | Rust-based Vue SFC compiler (WASM)               |
+| `vue`                         | Application framework                            |
+| `monaco-editor-core`          | Code editor component                            |
+| `shiki` / `@shikijs/monaco`   | Syntax highlighting                              |
+| `oxc-transform`               | TypeScript transpilation in the browser          |
+| `@verter/unplugin`            | Universal bundler plugin for Vue SFC compilation |
+| `vite` / `@vitejs/plugin-vue` | Build tooling                                    |
 
 ## License
 

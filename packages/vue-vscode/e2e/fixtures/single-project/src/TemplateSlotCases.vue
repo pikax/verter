@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import TypedSlotComp from './TypedSlotComp.vue'
+import TypedSlotComp from "./TypedSlotComp.vue";
 
-const outerLabel = 'outer'
+const outerLabel = "outer";
 </script>
 
 <template>

@@ -1,7 +1,11 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
-use verter_analysis::type_expr::{FunctionExpr, ObjectMember, TypeExpr};
+use verter_analysis::type_expand::{expand_object_shape, ExpandedObjectShape, ExpansionBudget};
+use verter_analysis::type_expr::{
+    FunctionExpr, FunctionParam, IndexSignature, ObjectExpr, ObjectMember, ObjectProperty,
+    PrimitiveName, TypeExpr, TypeParam,
+};
 
 use crate::{ImportedTypeAlias, ImportedTypeAliasResolveRequest};
 
@@ -124,11 +128,23 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
     }
 
     let body_has_structural_extends = body_has_structural_intersection_refs(&decl.body);
-    let preferred_body =
-        choose_preferred_imported_type_body(resolved_body.clone(), resolved_decl_body.clone());
-    let selected_body =
+    let decl_materialized_body = if body_has_structural_extends {
+        materialize_imported_type_body(&decl.body, &dep_env, &decl.type_parameters)
+    } else {
+        None
+    };
+    let preferred_body = choose_preferred_imported_type_body(
+        choose_preferred_imported_type_body(resolved_body.clone(), resolved_decl_body.clone()),
+        decl_materialized_body.clone(),
+    );
+    let selected_body = if body_has_structural_extends && decl_materialized_body.is_some() {
+        choose_preferred_imported_type_body(decl_materialized_body.clone(), preferred_body.clone())
+            .or(decl_materialized_body.clone())
+            .or(preferred_body.clone())
+    } else {
         choose_preferred_imported_type_body(Some(decl.body.clone()), preferred_body.clone())
-            .or(preferred_body.clone());
+            .or(preferred_body.clone())
+    };
     let requires_source_merge = if body_has_structural_extends {
         resolved_decl_body.is_none()
             && match selected_body.as_ref() {
@@ -148,7 +164,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         for param in &decl.type_parameters {
             normalized_env.type_bindings.insert(
                 param.name.clone(),
-                std::sync::Arc::new(TypeExpr::named(param.name.clone())),
+                std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
         let normalized_body = verter_analysis::type_eval::evaluate(&body, &mut normalized_env);
@@ -158,7 +174,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         for param in &decl.type_parameters {
             dep_env.type_bindings.insert(
                 param.name.clone(),
-                std::sync::Arc::new(TypeExpr::named(param.name.clone())),
+                std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
         decl.body = verter_analysis::type_eval::evaluate(&decl.body, &mut dep_env);
@@ -172,6 +188,77 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         decl,
         requires_source_merge,
     })
+}
+
+fn materialize_imported_type_body(
+    body: &TypeExpr,
+    dep_env: &EvalEnv,
+    type_parameters: &[TypeParam],
+) -> Option<TypeExpr> {
+    let mut eval_env = dep_env.clone();
+    for param in type_parameters {
+        eval_env.type_bindings.insert(
+            param.name.clone(),
+            Arc::new(TypeExpr::type_parameter(param.clone())),
+        );
+    }
+    let evaluated_body = verter_analysis::type_eval::evaluate(body, &mut eval_env);
+    let mut expansion_env = eval_env.clone();
+    let expanded = expand_object_shape(
+        &evaluated_body,
+        &mut expansion_env,
+        &ExpansionBudget::default(),
+    );
+    let materialized_body = expanded_object_shape_to_type_expr(&expanded.value)?;
+    choose_preferred_imported_type_body(Some(evaluated_body), Some(materialized_body))
+}
+
+fn expanded_object_shape_to_type_expr(shape: &ExpandedObjectShape) -> Option<TypeExpr> {
+    if shape.properties.is_empty()
+        && shape.index_signatures.is_empty()
+        && shape.call_signatures.is_empty()
+    {
+        return None;
+    }
+
+    let mut properties = Vec::with_capacity(
+        shape.properties.len() + shape.index_signatures.len() + shape.call_signatures.len(),
+    );
+
+    for prop in &shape.properties {
+        properties.push(ObjectMember::Property(ObjectProperty {
+            name: prop.name.clone(),
+            ty: prop.ty.clone(),
+            optional: prop.optional,
+            readonly: prop.readonly,
+        }));
+    }
+    for sig in &shape.index_signatures {
+        properties.push(ObjectMember::IndexSignature(IndexSignature {
+            key_name: "key".to_string(),
+            key_type: sig.key_type.clone(),
+            value_type: sig.value_type.clone(),
+            readonly: sig.readonly,
+        }));
+    }
+    for sig in &shape.call_signatures {
+        properties.push(ObjectMember::CallSignature(FunctionExpr {
+            parameters: sig
+                .parameters
+                .iter()
+                .map(|param| FunctionParam {
+                    name: Some(param.name.clone()),
+                    ty: param.ty.clone(),
+                    optional: param.optional,
+                    rest: param.rest,
+                })
+                .collect(),
+            return_type: Some(Arc::new(sig.return_type.clone())),
+            type_parameters: sig.type_parameters.clone(),
+        }));
+    }
+
+    Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
 }
 
 fn body_has_structural_intersection_refs(body: &TypeExpr) -> bool {
@@ -206,6 +293,16 @@ pub fn choose_preferred_imported_type_body(
                         right
                     });
                 }
+            }
+
+            let left_top_level_branching = top_level_branching_surface_score(&left);
+            let right_top_level_branching = top_level_branching_surface_score(&right);
+            if left_top_level_branching != right_top_level_branching {
+                return Some(if left_top_level_branching > right_top_level_branching {
+                    left
+                } else {
+                    right
+                });
             }
 
             let left_nested = contains_nested_resolution_targets(&left);
@@ -290,7 +387,10 @@ fn is_empty_object_surface(expr: &TypeExpr) -> bool {
 
 fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
     match expr {
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => false,
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeParameter(_) => false,
         TypeExpr::Ref { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::IndexedAccess { .. }
@@ -387,6 +487,28 @@ fn extracted_surface_property_count(expr: &TypeExpr) -> Option<usize> {
     }
 }
 
+fn top_level_branching_surface_score(expr: &TypeExpr) -> usize {
+    match expr {
+        TypeExpr::Parenthesized(inner) => top_level_branching_surface_score(inner),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            let mut score = 0usize;
+            for ty in types.iter() {
+                match ty {
+                    TypeExpr::Primitive(PrimitiveName::Undefined) => {}
+                    TypeExpr::Unknown { .. } => {}
+                    _ => score += 1,
+                }
+            }
+            if score >= 2 {
+                score
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
 const SPECIFICITY_UNKNOWN: usize = 0;
 const SPECIFICITY_TYPEOF: usize = 4;
 const SPECIFICITY_TERMINAL: usize = 8;
@@ -409,6 +531,19 @@ pub fn imported_type_body_specificity_score(expr: &TypeExpr) -> usize {
         TypeExpr::Unknown { .. } => SPECIFICITY_UNKNOWN,
         TypeExpr::Primitive(_) | TypeExpr::Literal(_) => SPECIFICITY_TERMINAL,
         TypeExpr::TypeOf(_) => SPECIFICITY_TYPEOF,
+        TypeExpr::TypeParameter(param) => {
+            SPECIFICITY_REF_BASE
+                + param
+                    .constraint
+                    .as_deref()
+                    .map(imported_type_body_specificity_score)
+                    .unwrap_or_default()
+                + param
+                    .default
+                    .as_deref()
+                    .map(imported_type_body_specificity_score)
+                    .unwrap_or_default()
+        }
         TypeExpr::Ref { type_arguments, .. } => {
             SPECIFICITY_REF_BASE
                 + type_arguments
@@ -550,7 +685,9 @@ mod tests {
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
     use verter_analysis::type_eval::{DeclarationId, TypeDeclKind};
-    use verter_analysis::type_expr::{ObjectExpr, ObjectProperty, PrimitiveName, TypeExpr};
+    use verter_analysis::type_expr::{
+        ObjectExpr, ObjectProperty, PrimitiveName, TypeExpr, TypeParam,
+    };
 
     #[derive(Default)]
     struct TestResolver {
@@ -632,6 +769,14 @@ mod tests {
             body,
         });
         env
+    }
+
+    fn generic_type_param(name: &str) -> TypeParam {
+        TypeParam {
+            name: name.to_string(),
+            constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+            default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+        }
     }
 
     #[test]
@@ -726,5 +871,133 @@ mod tests {
             .overflow_message
             .as_ref()
             .is_some_and(|message| message.contains("maxSteps=12")));
+    }
+
+    #[test]
+    fn choose_preferred_imported_type_body_keeps_meaningful_top_level_union_surface() {
+        let flattened_object = object_with_string_prop("path");
+        let symbolic_union = TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::named("St"),
+            TypeExpr::named("vt"),
+        ]);
+
+        let preferred = choose_preferred_imported_type_body(
+            Some(flattened_object.clone()),
+            Some(symbolic_union.clone()),
+        )
+        .expect("preferred body should exist");
+
+        assert_eq!(preferred, symbolic_union);
+        assert_ne!(preferred, flattened_object);
+    }
+
+    #[test]
+    fn prepare_imported_type_alias_preserves_generic_parameter_metadata() {
+        let request = ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/App.vue".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalProps".to_string(),
+            imported_name: "ImportedProps".to_string(),
+            source_canonical_id: "/src/types.ts".to_string(),
+            exported_name: "ImportedProps".to_string(),
+        };
+        let generic = generic_type_param("T");
+        let mut deps = BTreeSet::new();
+        let mut resolver = TestResolver::default();
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "ImportedProps".to_string(),
+            declaration_id: DeclarationId::default(),
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![generic.clone()],
+            body: TypeExpr::named("T"),
+        });
+        resolver.envs.insert("/src/types.ts".to_string(), env);
+
+        let helper_body = materialize_imported_type_body(
+            &resolver.envs["/src/types.ts"].type_symbols["ImportedProps"].body,
+            &resolver.envs["/src/types.ts"],
+            &[],
+        );
+        assert!(
+            matches!(helper_body, Some(TypeExpr::Object(_))),
+            "helper should materialize object body, got {:?}",
+            helper_body
+        );
+
+        let actual = prepare_imported_type_alias(&mut resolver, request, &mut deps).unwrap();
+
+        assert_eq!(actual.decl.body, TypeExpr::TypeParameter(generic));
+    }
+
+    #[test]
+    fn prepare_imported_type_alias_materializes_structural_interface_heritage() {
+        let request = ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/App.vue".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalProps".to_string(),
+            imported_name: "ImportedProps".to_string(),
+            source_canonical_id: "/src/types.ts".to_string(),
+            exported_name: "ImportedProps".to_string(),
+        };
+        let mut deps = BTreeSet::new();
+        let mut resolver = TestResolver::default();
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "BaseProps".to_string(),
+            declaration_id: DeclarationId::default(),
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "replace".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+        });
+        env.add_type(TypeDeclInfo {
+            name: "ImportedProps".to_string(),
+            declaration_id: DeclarationId::default(),
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::intersection(vec![
+                TypeExpr::named("BaseProps"),
+                TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(ObjectProperty {
+                        name: "activeClass".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: true,
+                        readonly: false,
+                    })],
+                })),
+            ]),
+        });
+        resolver.envs.insert("/src/types.ts".to_string(), env);
+
+        let actual = prepare_imported_type_alias(&mut resolver, request, &mut deps).unwrap();
+
+        let TypeExpr::Object(obj) = actual.decl.body else {
+            panic!("expected materialized object body: {:?}", actual.decl.body);
+        };
+        let prop_names: Vec<&str> = obj
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            prop_names.contains(&"replace"),
+            "missing inherited base member"
+        );
+        assert!(
+            prop_names.contains(&"activeClass"),
+            "missing local interface member"
+        );
+        assert!(!actual.requires_source_merge);
     }
 }

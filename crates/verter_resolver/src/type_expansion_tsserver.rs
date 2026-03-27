@@ -183,6 +183,7 @@ pub(crate) fn extract_members_from_type(
                 ObjectMember::Property(prop) => Some(ExpandedMember {
                     name: prop.name.clone(),
                     type_expr: prop.ty.clone(),
+                    raw_type: None,
                     optional: prop.optional,
                     description: None,
                 }),

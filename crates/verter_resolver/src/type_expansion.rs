@@ -103,6 +103,8 @@ pub struct ExpandedMember {
     pub name: String,
     /// Resolved type expression for this member.
     pub type_expr: TypeExpr,
+    /// Raw backend/display type text for this member, if available.
+    pub raw_type: Option<String>,
     /// Whether this member is optional (`?`).
     pub optional: bool,
     /// JSDoc or documentation description, if available.
@@ -234,6 +236,7 @@ mod tests {
         let member = ExpandedMember {
             name: "count".to_string(),
             type_expr: TypeExpr::primitive(verter_analysis::type_expr::PrimitiveName::Number),
+            raw_type: Some("number".to_string()),
             optional: true,
             description: Some("The counter value".to_string()),
         };

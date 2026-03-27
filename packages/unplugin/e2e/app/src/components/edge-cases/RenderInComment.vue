@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
 // Regression: this comment contains "function render(...)" which
 // should not cause a false positive render attachment in production builds.
 // Note: standalone `function render(...)` is NOT transformed here.
-const count = ref(0)
-const label = 'function render in comment'
+const count = ref(0);
+const label = "function render in comment";
 </script>
 
 <template>

@@ -22,7 +22,9 @@ function makeSourceMap(
   });
 }
 
-async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string }> {
+async function generateRealTsxOutput(
+  vueSource: string,
+): Promise<{ code: string; sourceMap: string }> {
   const thisDir = dirname(fileURLToPath(import.meta.url));
   const wasmJs = resolve(thisDir, "../../../wasm/wasm/verter_wasm.js");
   const wasmBin = resolve(thisDir, "../../../wasm/wasm/verter_wasm_bg.wasm");
@@ -242,7 +244,7 @@ function handleClick(e: MouseEvent) {
       const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
       const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
 
-      const vueHandlerOffset = vueCode.indexOf("handleClick\">");
+      const vueHandlerOffset = vueCode.indexOf('handleClick">');
       const mappedTsxOffset = mapper.vueOffsetToTsxOffset(vueHandlerOffset);
 
       expect(mappedTsxOffset).not.toBeNull();

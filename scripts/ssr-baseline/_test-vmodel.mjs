@@ -38,7 +38,12 @@ function compileVerter(source, filePath) {
   const result = host.getVirtualFile({
     canonicalId: upsertResult.canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: { filename: path.basename(filePath), ssr: true, forceJs: true, sourceMap: false },
+    compileProfile: {
+      filename: path.basename(filePath),
+      ssr: true,
+      forceJs: true,
+      sourceMap: false,
+    },
   });
   return result?.code;
 }
@@ -60,7 +65,9 @@ function showDiff(label, source) {
 }
 
 // Test 1: v-model on a component
-showDiff("v-model on component", `<script setup>
+showDiff(
+  "v-model on component",
+  `<script setup>
 import Comp from './Comp.vue'
 const val = ref('')
 </script>
@@ -68,10 +75,13 @@ const val = ref('')
   <div>
     <Comp v-model="val" class="mb-2" />
   </div>
-</template>`);
+</template>`,
+);
 
 // Test 2: v-model with custom prop name
-showDiff("v-model with custom prop name", `<script setup>
+showDiff(
+  "v-model with custom prop name",
+  `<script setup>
 import Comp from './Comp.vue'
 const val = ref('')
 </script>
@@ -79,10 +89,13 @@ const val = ref('')
   <div>
     <Comp v-model:title="val" class="mb-2" />
   </div>
-</template>`);
+</template>`,
+);
 
 // Test 3: Multiple v-models
-showDiff("Multiple v-models", `<script setup>
+showDiff(
+  "Multiple v-models",
+  `<script setup>
 import Comp from './Comp.vue'
 const a = ref('')
 const b = ref('')
@@ -91,10 +104,13 @@ const b = ref('')
   <div>
     <Comp v-model="a" v-model:title="b" class="mb-2" />
   </div>
-</template>`);
+</template>`,
+);
 
 // Test 4: v-model with modifiers
-showDiff("v-model with modifiers", `<script setup>
+showDiff(
+  "v-model with modifiers",
+  `<script setup>
 import Comp from './Comp.vue'
 const val = ref('')
 </script>
@@ -102,4 +118,5 @@ const val = ref('')
   <div>
     <Comp v-model.trim.lazy="val" class="mb-2" />
   </div>
-</template>`);
+</template>`,
+);

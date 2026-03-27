@@ -1,4 +1,4 @@
-const { compileTemplate, parse } = require('@vue/compiler-sfc');
+const { compileTemplate, parse } = require("@vue/compiler-sfc");
 
 // Check TransitionGroup SSR output
 const source1 = `<template>
@@ -13,11 +13,11 @@ const items = []
 const { descriptor: d1 } = parse(source1);
 const { code: ssr1 } = compileTemplate({
   source: d1.template.content,
-  filename: 'test.vue',
-  id: 'test',
+  filename: "test.vue",
+  id: "test",
   ssr: true,
 });
-console.log('=== TransitionGroup SSR ===');
+console.log("=== TransitionGroup SSR ===");
 console.log(ssr1);
 
 // Check Transition SSR output
@@ -34,11 +34,11 @@ const show = ref(true)
 const { descriptor: d2 } = parse(source2);
 const { code: ssr2 } = compileTemplate({
   source: d2.template.content,
-  filename: 'test.vue',
-  id: 'test',
+  filename: "test.vue",
+  id: "test",
   ssr: true,
 });
-console.log('\n=== Transition SSR ===');
+console.log("\n=== Transition SSR ===");
 console.log(ssr2);
 
 // Check KeepAlive SSR output
@@ -54,9 +54,9 @@ const currentTab = ref('TabA')
 const { descriptor: d3 } = parse(source3);
 const { code: ssr3 } = compileTemplate({
   source: d3.template.content,
-  filename: 'test.vue',
-  id: 'test',
+  filename: "test.vue",
+  id: "test",
   ssr: true,
 });
-console.log('\n=== KeepAlive SSR ===');
+console.log("\n=== KeepAlive SSR ===");
 console.log(ssr3);

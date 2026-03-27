@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { inject } from 'vue'
-import type { Ref } from 'vue'
+import { inject } from "vue";
+import type { Ref } from "vue";
 
-const deepValue = inject<Ref<string>>('deep-value')
-const updateRoot = inject<() => void>('update-root')
+const deepValue = inject<Ref<string>>("deep-value");
+const updateRoot = inject<() => void>("update-root");
 </script>
 
 <template>

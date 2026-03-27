@@ -16,10 +16,49 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::codec::{LineIndex, PositionEncoding};
 use crate::protocol::*;
+use crate::trace::{type_runtime_trace_event, type_runtime_trace_scope};
 use crate::traits::{ProviderFuture, TypeProvider};
 #[cfg(all(test, feature = "__lsp_tests"))]
 use crate::uri::percent_decode;
 use crate::uri::{file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string};
+
+fn trace_preview(contents: &str, max_len: usize) -> String {
+    let mut preview = String::new();
+    for ch in contents.chars().take(max_len) {
+        match ch {
+            '\n' => preview.push_str("\\n"),
+            '\r' => preview.push_str("\\r"),
+            '\t' => preview.push_str("\\t"),
+            _ => preview.push(ch),
+        }
+    }
+    if contents.chars().count() > max_len {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn summarize_lsp_params(params: &serde_json::Value) -> String {
+    let uri = params
+        .get("textDocument")
+        .and_then(|value| value.get("uri"))
+        .or_else(|| params.get("uri"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("-");
+    let line = params
+        .get("position")
+        .and_then(|value| value.get("line"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let character = params
+        .get("position")
+        .and_then(|value| value.get("character"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!("uri={} line={} character={}", uri, line, character)
+}
 
 /// Message sent to the dedicated stdin writer task.
 enum StdinMessage {
@@ -258,6 +297,15 @@ impl LspTransport {
         timeout_secs: u64,
         priority: ProviderPriority,
     ) -> Result<serde_json::Value, TypeProviderError> {
+        let _trace = type_runtime_trace_scope(
+            "tsgo_transport_request",
+            format!(
+                "method={} priority={:?} {}",
+                method,
+                priority,
+                summarize_lsp_params(&params),
+            ),
+        );
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let msg = serde_json::json!({
@@ -289,14 +337,45 @@ impl LspTransport {
                         .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown error");
+                    type_runtime_trace_event(
+                        "tsgo_transport_request_error",
+                        format!("method={} id={} message={}", method, id, msg),
+                    );
                     return Err(TypeProviderError::new(msg));
                 }
+                type_runtime_trace_event(
+                    "tsgo_transport_request_result",
+                    format!(
+                        "method={} id={} result_kind={}",
+                        method,
+                        id,
+                        val.get("result")
+                            .map(|result| match result {
+                                serde_json::Value::Null => "null",
+                                serde_json::Value::Array(_) => "array",
+                                serde_json::Value::Object(_) => "object",
+                                serde_json::Value::String(_) => "string",
+                                serde_json::Value::Bool(_) => "bool",
+                                serde_json::Value::Number(_) => "number",
+                            })
+                            .unwrap_or("missing"),
+                    ),
+                );
                 Ok(val
                     .get("result")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null))
             }
-            Ok(Err(_)) => Err(TypeProviderError::new("response channel closed")),
+            Ok(Err(_)) => {
+                type_runtime_trace_event(
+                    "tsgo_transport_request_error",
+                    format!(
+                        "method={} id={} message=response channel closed",
+                        method, id
+                    ),
+                );
+                Err(TypeProviderError::new("response channel closed"))
+            }
             Err(_) => {
                 // Timeout — clean up the pending entry to prevent leak
                 self.pending.lock().await.remove(&id);
@@ -309,6 +388,10 @@ impl LspTransport {
                         notify.notify_waiters();
                     }
                 }
+                type_runtime_trace_event(
+                    "tsgo_transport_request_error",
+                    format!("method={} id={} message=timeout", method, id),
+                );
                 Err(TypeProviderError::new(format!(
                     "request '{method}' timed out after {timeout_secs}s"
                 )))
@@ -324,6 +407,15 @@ impl LspTransport {
         params: serde_json::Value,
         priority: ProviderPriority,
     ) -> Result<(), TypeProviderError> {
+        let _trace = type_runtime_trace_scope(
+            "tsgo_transport_notify",
+            format!(
+                "method={} priority={:?} {}",
+                method,
+                priority,
+                summarize_lsp_params(&params),
+            ),
+        );
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -337,12 +429,26 @@ impl LspTransport {
             .tx_for_priority(priority)
             .try_send(StdinMessage::Frame(frame.into_bytes()))
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                type_runtime_trace_event(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=true", method),
+                );
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!("TSGO stdin channel full — dropping notification '{method}'");
+                type_runtime_trace_event(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=false reason=full", method),
+                );
                 Err(TypeProviderError::new("channel full"))
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
+                type_runtime_trace_event(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=false reason=closed", method),
+                );
                 Err(TypeProviderError::new("stdin writer closed"))
             }
         }
@@ -699,6 +805,14 @@ fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<
     let end_line = end.get("line")?.as_u64()? as u32;
     let end_char = end.get("character")?.as_u64()? as u32;
 
+    let disk_content;
+    let content = if let Some(content) = content {
+        Some(content)
+    } else {
+        disk_content = std::fs::read_to_string(&path).ok();
+        disk_content.as_deref()
+    };
+
     let (start_offset, end_offset) = if let Some(c) = content {
         (
             position_to_offset(c, start_line, start_char),
@@ -1054,6 +1168,15 @@ impl TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope(
+                "tsgo_update_file",
+                format!(
+                    "path={} uri={} content_len={}",
+                    path_owned,
+                    uri,
+                    content.len()
+                ),
+            );
             contents_cache
                 .lock()
                 .await
@@ -1120,7 +1243,7 @@ impl TsgoTypeProvider {
                     )
                     .await
             } else {
-                vers.insert(path_owned, 1);
+                vers.insert(path_owned.clone(), 1);
                 drop(vers);
                 transport
                     .notify_with_priority(
@@ -1216,6 +1339,15 @@ impl TypeProvider for TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope(
+                "tsgo_open_file",
+                format!(
+                    "path={} uri={} content_len={}",
+                    path_owned,
+                    uri,
+                    content.len()
+                ),
+            );
             contents_cache
                 .lock()
                 .await
@@ -1234,7 +1366,9 @@ impl TypeProvider for TsgoTypeProvider {
                         }
                     }),
                 )
-                .await
+                .await?;
+            type_runtime_trace_event("tsgo_open_file_result", "opened=true version=1".to_string());
+            Ok(())
         })
     }
 
@@ -1250,10 +1384,15 @@ impl TypeProvider for TsgoTypeProvider {
         let content_owned = rewrite_vue_imports_for_tsgo(content, path);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope(
+                "tsgo_load_file",
+                format!("path={} content_len={}", path_owned, content_owned.len()),
+            );
             contents_cache
                 .lock()
                 .await
                 .insert(path_owned, content_owned);
+            type_runtime_trace_event("tsgo_load_file_result", "cached_only=true".to_string());
             Ok(())
         })
     }
@@ -1300,12 +1439,17 @@ impl TypeProvider for TsgoTypeProvider {
                             }]
                         }),
                     )
-                    .await
+                    .await?;
+                type_runtime_trace_event(
+                    "tsgo_update_file_result",
+                    format!("path={} mode=didChange version={}", path_owned, version),
+                );
+                Ok(())
             } else {
                 // File never opened — must send didOpen first (LSP protocol requirement).
                 // Sending didChange without didOpen causes tsgo to panic with
                 // "overlay not found for changed file".
-                vers.insert(path_owned, 1);
+                vers.insert(path_owned.clone(), 1);
                 drop(vers);
                 transport
                     .notify(
@@ -1319,7 +1463,12 @@ impl TypeProvider for TsgoTypeProvider {
                             }
                         }),
                     )
-                    .await
+                    .await?;
+                type_runtime_trace_event(
+                    "tsgo_update_file_result",
+                    format!("path={} mode=didOpen version=1", path_owned),
+                );
+                Ok(())
             }
         })
     }
@@ -1332,6 +1481,10 @@ impl TypeProvider for TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope(
+                "tsgo_close_file",
+                format!("path={} uri={}", path_owned, uri),
+            );
             contents_cache.lock().await.remove(&path_owned);
             versions.lock().await.remove(&path_owned);
             transport
@@ -1341,7 +1494,9 @@ impl TypeProvider for TsgoTypeProvider {
                         "textDocument": { "uri": uri }
                     }),
                 )
-                .await
+                .await?;
+            type_runtime_trace_event("tsgo_close_file_result", "closed=true".to_string());
+            Ok(())
         })
     }
 
@@ -1432,13 +1587,23 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character) = {
+            let (line, character, cache_hit) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&path_owned) {
-                    Some(c) => offset_to_position(c, offset),
-                    None => (0, offset),
+                    Some(c) => {
+                        let (line, character) = offset_to_position(c, offset);
+                        (line, character, true)
+                    }
+                    None => (0, offset, false),
                 }
             };
+            let _trace = type_runtime_trace_scope(
+                "tsgo_get_hover",
+                format!(
+                    "path={} uri={} offset={} line={} character={} content_cache_hit={}",
+                    path_owned, uri, offset, line, character, cache_hit,
+                ),
+            );
             let result = transport
                 .request(
                     "textDocument/hover",
@@ -1450,6 +1615,10 @@ impl TypeProvider for TsgoTypeProvider {
                 .await?;
 
             if result.is_null() {
+                type_runtime_trace_event(
+                    "tsgo_get_hover_result",
+                    format!("path={} has_hover=false", path_owned),
+                );
                 return Ok(None);
             }
 
@@ -1494,8 +1663,22 @@ impl TypeProvider for TsgoTypeProvider {
                     format!("{c}")
                 }
             } else {
+                type_runtime_trace_event(
+                    "tsgo_get_hover_result",
+                    format!("path={} has_hover=false missing_contents=true", path_owned),
+                );
                 return Ok(None);
             };
+
+            type_runtime_trace_event(
+                "tsgo_get_hover_result",
+                format!(
+                    "path={} has_hover=true contents_len={} preview={}",
+                    path_owned,
+                    contents.len(),
+                    trace_preview(&contents, 120),
+                ),
+            );
 
             Ok(Some(HoverInfo {
                 contents,
@@ -1578,14 +1761,14 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&path_owned) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
+                        (l, ch)
                     }
-                    None => (0, offset, None),
+                    None => (0, offset),
                 }
             };
             let result = transport
@@ -1606,9 +1789,21 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(vec![]);
             };
 
+            let cache = contents_cache.lock().await;
             Ok(locations
                 .iter()
-                .filter_map(|loc| parse_lsp_location(loc, content_snapshot.as_deref()))
+                .filter_map(|loc| {
+                    let target_path = loc
+                        .get("uri")
+                        .and_then(|value| value.as_str())
+                        .map(uri_to_file_path)?;
+                    let target_content = if target_path == path_owned {
+                        cache.get(&path_owned).map(|text| text.as_str())
+                    } else {
+                        cache.get(&target_path).map(|text| text.as_str())
+                    };
+                    parse_lsp_location(loc, target_content)
+                })
                 .collect())
         })
     }
@@ -1624,14 +1819,14 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&path_owned) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
+                        (l, ch)
                     }
-                    None => (0, offset, None),
+                    None => (0, offset),
                 }
             };
             let result = transport
@@ -1652,9 +1847,21 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(vec![]);
             };
 
+            let cache = contents_cache.lock().await;
             Ok(locations
                 .iter()
-                .filter_map(|loc| parse_lsp_location(loc, content_snapshot.as_deref()))
+                .filter_map(|loc| {
+                    let target_path = loc
+                        .get("uri")
+                        .and_then(|value| value.as_str())
+                        .map(uri_to_file_path)?;
+                    let target_content = if target_path == path_owned {
+                        cache.get(&path_owned).map(|text| text.as_str())
+                    } else {
+                        cache.get(&target_path).map(|text| text.as_str())
+                    };
+                    parse_lsp_location(loc, target_content)
+                })
                 .collect())
         })
     }
@@ -4183,6 +4390,31 @@ const props = withDefaults(defineProps({ bar: String }), {})
         assert_eq!(loc.path, "/test.ts");
         assert_eq!(loc.start, 6);
         assert_eq!(loc.end, 11);
+    }
+
+    #[test]
+    fn test_parse_lsp_location_without_inline_content_reads_disk_content() {
+        let temp_root =
+            std::env::temp_dir().join(format!("verter-tsgo-location-disk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let file_path = temp_root.join("types.ts");
+        let content = "export interface Props {\n  label: string;\n}\n";
+        std::fs::write(&file_path, content).unwrap();
+        let uri = path_to_file_uri_string(file_path.to_string_lossy().as_ref());
+        let json = serde_json::json!({
+            "uri": uri,
+            "range": {
+                "start": { "line": 1, "character": 2 },
+                "end": { "line": 1, "character": 7 }
+            }
+        });
+
+        let loc = parse_lsp_location(&json, None).unwrap();
+        assert_eq!(loc.start, 27);
+        assert_eq!(loc.end, 32);
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     /// @ai-generated — parse_lsp_diagnostic extracts diagnostics from JSON

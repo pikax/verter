@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { ref, provide } from 'vue'
-import InjectedChild from './InjectedChild.vue'
+import { ref, provide } from "vue";
+import InjectedChild from "./InjectedChild.vue";
 
-const theme = ref('light')
+const theme = ref("light");
 
-provide('theme', theme)
+provide("theme", theme);
 
 function toggleTheme() {
-  theme.value = theme.value === 'light' ? 'dark' : 'light'
+  theme.value = theme.value === "light" ? "dark" : "light";
 }
 </script>
 

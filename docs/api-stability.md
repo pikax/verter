@@ -18,33 +18,33 @@ These APIs are considered stable as of beta.1. Breaking changes will be document
 
 The bundler plugin options passed to `verter()`:
 
-| Option | Type | Status |
-|--------|------|--------|
+| Option                | Type                                       | Status |
+| --------------------- | ------------------------------------------ | ------ |
 | `include` / `exclude` | `string \| RegExp \| (string \| RegExp)[]` | Stable |
-| `compiler` | resolved `vue/compiler-sfc` module | Stable |
-| `root` | `string` | Stable |
-| `compileProfile` | `{ filename, target, mode }` | Stable |
+| `compiler`            | resolved `vue/compiler-sfc` module         | Stable |
+| `root`                | `string`                                   | Stable |
+| `compileProfile`      | `{ filename, target, mode }`               | Stable |
 
 ### `.verterrc.json` Schema
 
 The project-level configuration file format:
 
-| Field | Status |
-|-------|--------|
-| `lint.enabled` | Stable |
-| `lint.preset` | Stable (`"essential"`, `"recommended"`, `"all"`, `"off"`) |
-| `lint.rules` | Stable (rule names and severity values) |
+| Field          | Status                                                    |
+| -------------- | --------------------------------------------------------- |
+| `lint.enabled` | Stable                                                    |
+| `lint.preset`  | Stable (`"essential"`, `"recommended"`, `"all"`, `"off"`) |
+| `lint.rules`   | Stable (rule names and severity values)                   |
 
 ### VS Code Settings
 
-| Setting | Status |
-|---------|--------|
-| `verter.lint.enabled` | Stable |
-| `verter.lint.preset` | Stable |
-| `verter.lint.rules` | Stable |
-| `verter.typeProvider` | Stable (`"auto"`, `"tsgo"`, `"tsserver"`, `"off"`) |
-| `verter.viteConfig.enabled` | Stable |
-| `verter.viteConfig.trustedFiles` | Stable |
+| Setting                          | Status                                             |
+| -------------------------------- | -------------------------------------------------- |
+| `verter.lint.enabled`            | Stable                                             |
+| `verter.lint.preset`             | Stable                                             |
+| `verter.lint.rules`              | Stable                                             |
+| `verter.typeProvider`            | Stable (`"auto"`, `"tsgo"`, `"tsserver"`, `"off"`) |
+| `verter.viteConfig.enabled`      | Stable                                             |
+| `verter.viteConfig.trustedFiles` | Stable                                             |
 
 ### Diagnostic Rule Names
 
@@ -62,53 +62,53 @@ The inline suppression syntax is stable:
 
 ### LSP Custom Methods
 
-| Method | Status |
-|--------|--------|
-| `$/verter/getVirtualFiles` | Stable |
-| `$/verter/getAnalysis` | Stable |
-| `$/verter/applyStyleOverrides` | Stable |
-| `$/verter/getRouteTree` | Stable |
-| `$/verter/heartbeat` | Stable |
-| `$/verter/tsgoLimitation` | Stable (notification) |
+| Method                             | Status                |
+| ---------------------------------- | --------------------- |
+| `$/verter/getVirtualFiles`         | Stable                |
+| `$/verter/getAnalysis`             | Stable                |
+| `$/verter/applyStyleOverrides`     | Stable                |
+| `$/verter/getRouteTree`            | Stable                |
+| `$/verter/heartbeat`               | Stable                |
+| `$/verter/tsgoLimitation`          | Stable (notification) |
 | `$/verter/viteConfigTrustRequired` | Stable (notification) |
 
 ### Native Host API (`@verter/native`)
 
-| Method | Status |
-|--------|--------|
-| `new VerterHost(config)` | Stable |
-| `host.upsert(request)` | Stable |
-| `host.resolve(rawId)` | Stable |
-| `host.getVirtualFile(query)` | Stable |
+| Method                               | Status |
+| ------------------------------------ | ------ |
+| `new VerterHost(config)`             | Stable |
+| `host.upsert(request)`               | Stable |
+| `host.resolve(rawId)`                | Stable |
+| `host.getVirtualFile(query)`         | Stable |
 | `host.listVirtualFiles(canonicalId)` | Stable |
-| `host.remove(canonicalOrAlias)` | Stable |
-| `host.applyBlockOverrides(request)` | Stable |
+| `host.remove(canonicalOrAlias)`      | Stable |
+| `host.applyBlockOverrides(request)`  | Stable |
 
 ## Experimental APIs
 
 These features are behind opt-in flags and may change or be removed in any release without prior notice.
 
-| Feature | Setting | Description |
-|---------|---------|-------------|
-| Strict Slots | `verter.experimental.strictSlots` | Type-checks slot children against `defineSlots()` signatures |
-| Conditional Root Narrowing | `verter.experimental.conditionalRootNarrowing` | Narrows component root element type based on prop values |
-| Expose Bindings Testing | `verter.experimental.exposeBindingsTesting` | Exposes binding type information for testing |
+| Feature                    | Setting                                        | Description                                                  |
+| -------------------------- | ---------------------------------------------- | ------------------------------------------------------------ |
+| Strict Slots               | `verter.experimental.strictSlots`              | Type-checks slot children against `defineSlots()` signatures |
+| Conditional Root Narrowing | `verter.experimental.conditionalRootNarrowing` | Narrows component root element type based on prop values     |
+| Expose Bindings Testing    | `verter.experimental.exposeBindingsTesting`    | Exposes binding type information for testing                 |
 
 ### `@verter/component-meta/compat` (Volar Drop-in)
 
-| API | Status |
-|-----|--------|
-| `createChecker(tsconfig, options?)` | Stable |
-| `createCheckerByJson(root, config, options?)` | Stable |
-| `checker.getComponentMeta(filePath)` | Stable |
-| `checker.getExportNames(filePath)` | Stable |
-| `checker.updateFile(path, content)` | Stable |
-| `checker.deleteFile(path)` | Stable |
-| `checker.reload()` / `clearCache()` | Stable |
-| `PropertyMeta` shape | Stable (matches Volar) |
-| `PropertyMetaSchema` shape | Stable (matches Volar) |
-| `MetaCheckerOptions` | Stable |
-| `VolarComponentMeta._verter` | Experimental (opt-in Verter extension) |
+| API                                           | Status                                 |
+| --------------------------------------------- | -------------------------------------- |
+| `createChecker(tsconfig, options?)`           | Stable                                 |
+| `createCheckerByJson(root, config, options?)` | Stable                                 |
+| `checker.getComponentMeta(filePath)`          | Stable                                 |
+| `checker.getExportNames(filePath)`            | Stable                                 |
+| `checker.updateFile(path, content)`           | Stable                                 |
+| `checker.deleteFile(path)`                    | Stable                                 |
+| `checker.reload()` / `clearCache()`           | Stable                                 |
+| `PropertyMeta` shape                          | Stable (matches Volar)                 |
+| `PropertyMetaSchema` shape                    | Stable (matches Volar)                 |
+| `MetaCheckerOptions`                          | Stable                                 |
+| `VolarComponentMeta._verter`                  | Experimental (opt-in Verter extension) |
 
 ## Internal / Unstable
 

@@ -1,185 +1,197 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, provide, inject } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, provide, inject } from "vue";
 
 interface User {
-  id: number
-  name: string
-  email: string
-  avatar?: string
-  role: 'admin' | 'user' | 'guest'
-  permissions: string[]
-  settings: UserSettings
+  id: number;
+  name: string;
+  email: string;
+  avatar?: string;
+  role: "admin" | "user" | "guest";
+  permissions: string[];
+  settings: UserSettings;
 }
 
 interface UserSettings {
-  theme: 'light' | 'dark' | 'auto'
-  language: string
-  notifications: boolean
-  emailFrequency: 'realtime' | 'daily' | 'weekly' | 'never'
+  theme: "light" | "dark" | "auto";
+  language: string;
+  notifications: boolean;
+  emailFrequency: "realtime" | "daily" | "weekly" | "never";
 }
 
 interface Activity {
-  id: string
-  type: 'login' | 'logout' | 'update' | 'delete' | 'create'
-  timestamp: Date
-  details: string
+  id: string;
+  type: "login" | "logout" | "update" | "delete" | "create";
+  timestamp: Date;
+  details: string;
 }
 
 // Props
 const props = defineProps<{
-  userId: number
-  initialView?: 'profile' | 'settings' | 'activity'
-}>()
+  userId: number;
+  initialView?: "profile" | "settings" | "activity";
+}>();
 
 // Emits
 const emit = defineEmits<{
-  userUpdated: [user: User]
-  settingsChanged: [settings: UserSettings]
-  viewChanged: [view: string]
-}>()
+  userUpdated: [user: User];
+  settingsChanged: [settings: UserSettings];
+  viewChanged: [view: string];
+}>();
 
 // State
-const user = ref<User | null>(null)
-const activities = ref<Activity[]>([])
-const isLoading = ref(false)
-const error = ref<string | null>(null)
-const currentView = ref(props.initialView || 'profile')
-const isDirty = ref(false)
-const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
+const user = ref<User | null>(null);
+const activities = ref<Activity[]>([]);
+const isLoading = ref(false);
+const error = ref<string | null>(null);
+const currentView = ref(props.initialView || "profile");
+const isDirty = ref(false);
+const saveStatus = ref<"idle" | "saving" | "saved" | "error">("idle");
 
 // Computed
 const hasPermission = computed(() => (permission: string) => {
-  return user.value?.permissions.includes(permission) || user.value?.role === 'admin'
-})
+  return user.value?.permissions.includes(permission) || user.value?.role === "admin";
+});
 
-const canEditProfile = computed(() => hasPermission.value('edit:profile'))
-const canViewActivity = computed(() => hasPermission.value('view:activity'))
-const isAdmin = computed(() => user.value?.role === 'admin')
+const canEditProfile = computed(() => hasPermission.value("edit:profile"));
+const canViewActivity = computed(() => hasPermission.value("view:activity"));
+const isAdmin = computed(() => user.value?.role === "admin");
 
 const activityStats = computed(() => {
   const stats = {
     logins: 0,
     updates: 0,
     creates: 0,
-    deletes: 0
-  }
-  activities.value.forEach(a => {
-    if (a.type === 'login') stats.logins++
-    else if (a.type === 'update') stats.updates++
-    else if (a.type === 'create') stats.creates++
-    else if (a.type === 'delete') stats.deletes++
-  })
-  return stats
-})
+    deletes: 0,
+  };
+  activities.value.forEach((a) => {
+    if (a.type === "login") stats.logins++;
+    else if (a.type === "update") stats.updates++;
+    else if (a.type === "create") stats.creates++;
+    else if (a.type === "delete") stats.deletes++;
+  });
+  return stats;
+});
 
 const displayName = computed(() => {
-  if (!user.value) return 'Unknown User'
-  return user.value.name || user.value.email || `User #${user.value.id}`
-})
+  if (!user.value) return "Unknown User";
+  return user.value.name || user.value.email || `User #${user.value.id}`;
+});
 
 // Watchers
-watch(() => props.userId, async (newId) => {
-  if (newId) {
-    await loadUser(newId)
-  }
-}, { immediate: true })
+watch(
+  () => props.userId,
+  async (newId) => {
+    if (newId) {
+      await loadUser(newId);
+    }
+  },
+  { immediate: true },
+);
 
-watch(user, (newUser) => {
-  if (newUser) {
-    isDirty.value = true
-    emit('userUpdated', newUser)
-  }
-}, { deep: true })
+watch(
+  user,
+  (newUser) => {
+    if (newUser) {
+      isDirty.value = true;
+      emit("userUpdated", newUser);
+    }
+  },
+  { deep: true },
+);
 
-watch(() => user.value?.settings, (newSettings) => {
-  if (newSettings) {
-    emit('settingsChanged', newSettings)
-  }
-}, { deep: true })
+watch(
+  () => user.value?.settings,
+  (newSettings) => {
+    if (newSettings) {
+      emit("settingsChanged", newSettings);
+    }
+  },
+  { deep: true },
+);
 
 watch(currentView, (newView) => {
-  emit('viewChanged', newView)
-})
+  emit("viewChanged", newView);
+});
 
 // Methods
 async function loadUser(id: number) {
-  isLoading.value = true
-  error.value = null
+  isLoading.value = true;
+  error.value = null;
   try {
     // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 500))
+    await new Promise((resolve) => setTimeout(resolve, 500));
     user.value = {
       id,
       name: `User ${id}`,
       email: `user${id}@example.com`,
-      role: 'user',
-      permissions: ['view:profile', 'edit:profile'],
+      role: "user",
+      permissions: ["view:profile", "edit:profile"],
       settings: {
-        theme: 'auto',
-        language: 'en',
+        theme: "auto",
+        language: "en",
         notifications: true,
-        emailFrequency: 'daily'
-      }
-    }
+        emailFrequency: "daily",
+      },
+    };
   } catch (e) {
-    error.value = 'Failed to load user'
+    error.value = "Failed to load user";
   } finally {
-    isLoading.value = false
+    isLoading.value = false;
   }
 }
 
 async function loadActivities() {
-  if (!canViewActivity.value) return
-  
+  if (!canViewActivity.value) return;
+
   try {
     // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 300))
+    await new Promise((resolve) => setTimeout(resolve, 300));
     activities.value = [
-      { id: '1', type: 'login', timestamp: new Date(), details: 'Logged in from Chrome' },
-      { id: '2', type: 'update', timestamp: new Date(), details: 'Updated profile' }
-    ]
+      { id: "1", type: "login", timestamp: new Date(), details: "Logged in from Chrome" },
+      { id: "2", type: "update", timestamp: new Date(), details: "Updated profile" },
+    ];
   } catch (e) {
-    console.error('Failed to load activities', e)
+    console.error("Failed to load activities", e);
   }
 }
 
 async function saveUser() {
-  if (!user.value || !isDirty.value) return
-  
-  saveStatus.value = 'saving'
+  if (!user.value || !isDirty.value) return;
+
+  saveStatus.value = "saving";
   try {
     // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    saveStatus.value = 'saved'
-    isDirty.value = false
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    saveStatus.value = "saved";
+    isDirty.value = false;
     setTimeout(() => {
-      saveStatus.value = 'idle'
-    }, 2000)
+      saveStatus.value = "idle";
+    }, 2000);
   } catch (e) {
-    saveStatus.value = 'error'
-    error.value = 'Failed to save user'
+    saveStatus.value = "error";
+    error.value = "Failed to save user";
   }
 }
 
 function changeView(view: typeof currentView.value) {
-  currentView.value = view
-  if (view === 'activity') {
-    loadActivities()
+  currentView.value = view;
+  if (view === "activity") {
+    loadActivities();
   }
 }
 
 // Lifecycle
 onMounted(() => {
-  console.log('Component mounted', props.userId)
-})
+  console.log("Component mounted", props.userId);
+});
 
 onUnmounted(() => {
-  console.log('Component unmounted')
-})
+  console.log("Component unmounted");
+});
 
 // Provide
-provide('user', user)
-provide('canEdit', canEditProfile)
+provide("user", user);
+provide("canEdit", canEditProfile);
 </script>
 
 <template>
@@ -187,19 +199,13 @@ provide('canEdit', canEditProfile)
     <header>
       <h1>{{ displayName }}</h1>
       <nav>
-        <button 
-          :class="{ active: currentView === 'profile' }"
-          @click="changeView('profile')"
-        >
+        <button :class="{ active: currentView === 'profile' }" @click="changeView('profile')">
           Profile
         </button>
-        <button 
-          :class="{ active: currentView === 'settings' }"
-          @click="changeView('settings')"
-        >
+        <button :class="{ active: currentView === 'settings' }" @click="changeView('settings')">
           Settings
         </button>
-        <button 
+        <button
           v-if="canViewActivity"
           :class="{ active: currentView === 'activity' }"
           @click="changeView('activity')"
@@ -214,30 +220,22 @@ provide('canEdit', canEditProfile)
         <h2>Profile Information</h2>
         <div class="form-group">
           <label>Name</label>
-          <input 
-            v-model="user.name" 
-            :disabled="!canEditProfile"
-            type="text"
-          >
+          <input v-model="user.name" :disabled="!canEditProfile" type="text" />
         </div>
         <div class="form-group">
           <label>Email</label>
-          <input 
-            v-model="user.email" 
-            :disabled="!canEditProfile"
-            type="email"
-          >
+          <input v-model="user.email" :disabled="!canEditProfile" type="email" />
         </div>
         <div class="form-group">
           <label>Role</label>
           <span>{{ user.role }}</span>
         </div>
-        <button 
+        <button
           v-if="canEditProfile && isDirty"
           :disabled="saveStatus === 'saving'"
           @click="saveUser"
         >
-          {{ saveStatus === 'saving' ? 'Saving...' : 'Save Changes' }}
+          {{ saveStatus === "saving" ? "Saving..." : "Save Changes" }}
         </button>
         <span v-if="saveStatus === 'saved'" class="success">Saved!</span>
       </section>
@@ -262,7 +260,7 @@ provide('canEdit', canEditProfile)
         </div>
         <div class="form-group">
           <label>
-            <input type="checkbox" v-model="user.settings.notifications">
+            <input type="checkbox" v-model="user.settings.notifications" />
             Enable notifications
           </label>
         </div>
@@ -303,9 +301,7 @@ provide('canEdit', canEditProfile)
       </section>
     </main>
 
-    <div v-else-if="isLoading" class="loading">
-      Loading user data...
-    </div>
+    <div v-else-if="isLoading" class="loading">Loading user data...</div>
 
     <div v-else-if="error" class="error">
       {{ error }}

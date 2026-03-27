@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const scopedCount = ref(0)
+const scopedCount = ref(0);
 
 function incrementScoped() {
-  scopedCount.value++
+  scopedCount.value++;
 }
 </script>
 

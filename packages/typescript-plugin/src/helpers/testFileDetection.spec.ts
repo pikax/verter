@@ -1,8 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import {
-  clearTestFileDetectionCache,
-  isTestFileWithContext,
-} from "./testFileDetection";
+import { clearTestFileDetectionCache, isTestFileWithContext } from "./testFileDetection";
 
 interface TestFileSystem {
   [fileName: string]: string;

@@ -13,7 +13,14 @@ publish = false
 default = ["scheduler"]
 host_metrics = []
 scheduler = ["verter_scheduler", "dashmap"]
-hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_core/hotpath", "verter_analysis/hotpath", "verter_scheduler?/hotpath", "verter_vfs/hotpath"]
+hotpath = [
+  "dep:hotpath",
+  "hotpath/hotpath",
+  "verter_core/hotpath",
+  "verter_analysis/hotpath",
+  "verter_scheduler?/hotpath",
+  "verter_vfs/hotpath",
+]
 
 [dependencies]
 verter_core = { path = "../verter_core" }

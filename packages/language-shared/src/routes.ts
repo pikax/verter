@@ -39,10 +39,7 @@ export interface NavigationLink {
 }
 
 /** The target of a navigation link. */
-export type NavigationTarget =
-  | { path: string }
-  | { namedRoute: string }
-  | "dynamic";
+export type NavigationTarget = { path: string } | { namedRoute: string } | "dynamic";
 
 /** A `<RouterView>` or `<NuxtPage>` usage. */
 export interface RouterViewLocation {

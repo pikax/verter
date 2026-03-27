@@ -61,7 +61,7 @@ Custom directives receive full type checking for their value, argument, and modi
 
 ```vue
 <script setup lang="ts">
-import type { Directive } from 'vue';
+import type { Directive } from "vue";
 
 const vColor: Directive<HTMLElement, string, "red" | "blue"> = (el, binding) => {
   el.style.color = binding.value;
@@ -92,24 +92,24 @@ Invalid modifiers or value types produce compile-time type errors rather than si
 
 Verter supports all Vue script setup macros with full type inference:
 
-| Macro | Purpose |
-|-------|---------|
-| `defineProps` | Declare component props with type-based or runtime syntax |
-| `defineEmits` | Declare emitted events with typed payloads |
-| `defineModel` | Two-way binding prop declaration (Vue 3.4+) |
-| `defineSlots` | Typed slot definitions |
-| `defineExpose` | Control which bindings are exposed to parent refs |
-| `withDefaults` | Provide default values for type-based props |
-| `defineOptions` | Set component options (name, inheritAttrs, etc.) |
+| Macro           | Purpose                                                   |
+| --------------- | --------------------------------------------------------- |
+| `defineProps`   | Declare component props with type-based or runtime syntax |
+| `defineEmits`   | Declare emitted events with typed payloads                |
+| `defineModel`   | Two-way binding prop declaration (Vue 3.4+)               |
+| `defineSlots`   | Typed slot definitions                                    |
+| `defineExpose`  | Control which bindings are exposed to parent refs         |
+| `withDefaults`  | Provide default values for type-based props               |
+| `defineOptions` | Set component options (name, inheritAttrs, etc.)          |
 
 All macros work with both inline type literals and imported types. Cross-file type resolution is supported -- you can define your prop types in a separate `.ts` file and import them into `defineProps<Props>()`.
 
 ```vue
 <script setup lang="ts">
-import type { UserProps } from './types';
+import type { UserProps } from "./types";
 
 const props = withDefaults(defineProps<UserProps>(), {
-  role: 'viewer',
+  role: "viewer",
 });
 
 const emit = defineEmits<{
@@ -134,7 +134,7 @@ Verter provides full Options API support with type inference. Components defined
 
 ```vue
 <script lang="ts">
-import { defineComponent } from 'vue';
+import { defineComponent } from "vue";
 
 export default defineComponent({
   props: {
@@ -143,7 +143,7 @@ export default defineComponent({
   },
   data() {
     return {
-      message: 'hello',
+      message: "hello",
     };
   },
   computed: {
@@ -155,7 +155,7 @@ export default defineComponent({
   methods: {
     increment() {
       // this.count is number
-      this.$emit('update', this.count + 1);
+      this.$emit("update", this.count + 1);
     },
   },
 });
@@ -168,16 +168,10 @@ Vue SFCs compiled by Verter can be seamlessly used in JSX/TSX projects. Since Ve
 
 ```tsx
 // App.tsx
-import MyComponent from './MyComponent.vue';
+import MyComponent from "./MyComponent.vue";
 
 export default function App() {
-  return (
-    <MyComponent
-      title="Hello"
-      count={42}
-      onUpdate={(value) => console.log(value)}
-    />
-  );
+  return <MyComponent title="Hello" count={42} onUpdate={(value) => console.log(value)} />;
 }
 ```
 

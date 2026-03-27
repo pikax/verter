@@ -28,7 +28,11 @@ const editor = shallowRef<monaco.editor.IStandaloneCodeEditor>();
 const pendingCode = ref<string | null>(null);
 let suppressExternalSync = false;
 let lspDisposables: monaco.IDisposable[] = [];
-let tsService: TypeScriptServiceBridge & { init(): Promise<void>; dispose(): void; syncTsx: TypeScriptService["syncTsx"] } = new TypeScriptService();
+let tsService: TypeScriptServiceBridge & {
+  init(): Promise<void>;
+  dispose(): void;
+  syncTsx: TypeScriptService["syncTsx"];
+} = new TypeScriptService();
 let tsgoService: TsgoService | null = null;
 let tsDiagnostics: MappedDiagnostic[] = [];
 let decorationIds: string[] = [];
@@ -57,9 +61,7 @@ function saveAndCompile() {
   }
 }
 
-function lintSeverityToMarkerSeverity(
-  severity: LintDiagnostic["severity"],
-): monaco.MarkerSeverity {
+function lintSeverityToMarkerSeverity(severity: LintDiagnostic["severity"]): monaco.MarkerSeverity {
   switch (severity) {
     case "error":
       return monaco.MarkerSeverity.Error;
@@ -70,9 +72,7 @@ function lintSeverityToMarkerSeverity(
   }
 }
 
-function hostSeverityToMarkerSeverity(
-  severity: HostDiagnostic["severity"],
-): monaco.MarkerSeverity {
+function hostSeverityToMarkerSeverity(severity: HostDiagnostic["severity"]): monaco.MarkerSeverity {
   switch (severity) {
     case "error":
       return monaco.MarkerSeverity.Error;
@@ -83,9 +83,7 @@ function hostSeverityToMarkerSeverity(
   }
 }
 
-function tsSeverityToMarkerSeverity(
-  severity: MappedDiagnostic["severity"],
-): monaco.MarkerSeverity {
+function tsSeverityToMarkerSeverity(severity: MappedDiagnostic["severity"]): monaco.MarkerSeverity {
   switch (severity) {
     case "error":
       return monaco.MarkerSeverity.Error;
@@ -493,7 +491,9 @@ onMounted(() => {
           console.log("[type-checker] tsgo initialized successfully");
           props.store.setTypeCheckerStatus("active");
         } else {
-          console.warn("[type-checker] tsgo unavailable (SharedArrayBuffer missing or init failed)");
+          console.warn(
+            "[type-checker] tsgo unavailable (SharedArrayBuffer missing or init failed)",
+          );
           props.store.setTypeCheckerStatus("unavailable");
         }
       } else {
@@ -504,7 +504,10 @@ onMounted(() => {
         const newTsService = new TypeScriptService();
         tsService = newTsService;
         const curVueVersion = extractVueVersion(props.store.importMap) ?? "3.5";
-        await newTsService.init({ vueVersion: curVueVersion, verterTypesContent: typeHelpersSource });
+        await newTsService.init({
+          vueVersion: curVueVersion,
+          verterTypesContent: typeHelpersSource,
+        });
         console.log("[type-checker] tsc initialized successfully");
         props.store.setTypeCheckerStatus("active");
       }

@@ -30,18 +30,13 @@ export interface RestartDeps {
  *
  * @returns `true` if the restart succeeded, `false` if it failed.
  */
-export async function restartLanguageServer(
-  deps: RestartDeps,
-): Promise<boolean> {
+export async function restartLanguageServer(deps: RestartDeps): Promise<boolean> {
   try {
     deps.log.info("Restarting language server...");
     try {
       await deps.stop();
     } catch (e) {
-      deps.log.warn(
-        "Failed to stop language server cleanly, forcing restart",
-        e,
-      );
+      deps.log.warn("Failed to stop language server cleanly, forcing restart", e);
       deps.killTrackedTypeProvider();
     }
     await deps.createAndStart();

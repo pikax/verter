@@ -1944,6 +1944,37 @@ fn resolve_local_interface_in_define_slots() {
 }
 
 #[test]
+fn resolve_local_interface_in_define_slots_preserves_pick_binding_source() {
+    let source = r#"
+        interface CalendarCellTriggerProps {
+            day: Date
+            month: number
+        }
+        interface Slots {
+            day(props: Pick<CalendarCellTriggerProps, 'day'>): any
+        }
+        defineSlots<Slots>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let ds = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+        .unwrap();
+    let day_slot = ds
+        .slot_fields
+        .iter()
+        .find(|slot| slot.name == "day")
+        .expect("should have day slot");
+    assert_eq!(day_slot.bindings.len(), 1);
+    assert_eq!(day_slot.bindings[0].name, "day");
+    assert_eq!(
+        day_slot.bindings[0].type_annotation.as_deref(),
+        Some("CalendarCellTriggerProps['day']")
+    );
+}
+
+#[test]
 fn resolve_local_type_alias_in_define_slots() {
     let source = r#"
         type MySlots = { default(props: { row: string }): any }

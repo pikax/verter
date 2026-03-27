@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const show = ref(true)
+const show = ref(true);
 
 function toggle() {
-  show.value = !show.value
+  show.value = !show.value;
 }
 </script>
 

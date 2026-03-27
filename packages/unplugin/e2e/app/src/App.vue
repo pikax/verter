@@ -1,70 +1,70 @@
 <script setup lang="ts">
 // Reactivity
-import RefCounter from './components/reactivity/RefCounter.vue'
-import ReactiveObject from './components/reactivity/ReactiveObject.vue'
+import RefCounter from "./components/reactivity/RefCounter.vue";
+import ReactiveObject from "./components/reactivity/ReactiveObject.vue";
 
 // TypeScript
-import TypedPropsEmits from './components/typescript/TypedPropsEmits.vue'
-import WithDefaultsDemo from './components/typescript/WithDefaultsDemo.vue'
-import DefineModelParent from './components/typescript/DefineModelParent.vue'
-import ExposeParent from './components/typescript/ExposeParent.vue'
-import GenericComponent from './components/typescript/GenericComponent.vue'
+import TypedPropsEmits from "./components/typescript/TypedPropsEmits.vue";
+import WithDefaultsDemo from "./components/typescript/WithDefaultsDemo.vue";
+import DefineModelParent from "./components/typescript/DefineModelParent.vue";
+import ExposeParent from "./components/typescript/ExposeParent.vue";
+import GenericComponent from "./components/typescript/GenericComponent.vue";
 
 // Options API
-import OptionsCounter from './components/options-api/OptionsCounter.vue'
-import OptionsComponent from './components/options-api/OptionsComponent.vue'
+import OptionsCounter from "./components/options-api/OptionsCounter.vue";
+import OptionsComponent from "./components/options-api/OptionsComponent.vue";
 
 // Directives
-import ConditionalRendering from './components/directives/ConditionalRendering.vue'
-import ListRendering from './components/directives/ListRendering.vue'
-import FormInputs from './components/directives/FormInputs.vue'
-import EventModifiers from './components/directives/EventModifiers.vue'
-import DynamicBindings from './components/directives/DynamicBindings.vue'
+import ConditionalRendering from "./components/directives/ConditionalRendering.vue";
+import ListRendering from "./components/directives/ListRendering.vue";
+import FormInputs from "./components/directives/FormInputs.vue";
+import EventModifiers from "./components/directives/EventModifiers.vue";
+import DynamicBindings from "./components/directives/DynamicBindings.vue";
 
 // Slots
-import SlotShowcase from './components/slots/SlotShowcase.vue'
+import SlotShowcase from "./components/slots/SlotShowcase.vue";
 
 // Styles
-import ScopedCss from './components/styles/ScopedCss.vue'
-import CssModules from './components/styles/CssModules.vue'
-import ScssDemo from './components/styles/ScssDemo.vue'
-import LessDemo from './components/styles/LessDemo.vue'
-import CssVBind from './components/styles/CssVBind.vue'
+import ScopedCss from "./components/styles/ScopedCss.vue";
+import CssModules from "./components/styles/CssModules.vue";
+import ScssDemo from "./components/styles/ScssDemo.vue";
+import LessDemo from "./components/styles/LessDemo.vue";
+import CssVBind from "./components/styles/CssVBind.vue";
 
 // Composables
-import ComposableDemo from './components/composables/ComposableDemo.vue'
-import ProvideInject from './components/composables/ProvideInject.vue'
+import ComposableDemo from "./components/composables/ComposableDemo.vue";
+import ProvideInject from "./components/composables/ProvideInject.vue";
 
 // Edge Cases
-import FragmentRoots from './components/edge-cases/FragmentRoots.vue'
-import MultiInstance from './components/edge-cases/MultiInstance.vue'
-import ArrayMutations from './components/edge-cases/ArrayMutations.vue'
-import AsyncUpdate from './components/edge-cases/AsyncUpdate.vue'
-import TemplateRefs from './components/edge-cases/TemplateRefs.vue'
-import DynamicComponent from './components/edge-cases/DynamicComponent.vue'
-import DeepNested from './components/edge-cases/DeepNested.vue'
-import ExportDefaultComment from './components/edge-cases/ExportDefaultComment.vue'
-import RenderInComment from './components/edge-cases/RenderInComment.vue'
-import MixedTextChildren from './components/edge-cases/MixedTextChildren.vue'
+import FragmentRoots from "./components/edge-cases/FragmentRoots.vue";
+import MultiInstance from "./components/edge-cases/MultiInstance.vue";
+import ArrayMutations from "./components/edge-cases/ArrayMutations.vue";
+import AsyncUpdate from "./components/edge-cases/AsyncUpdate.vue";
+import TemplateRefs from "./components/edge-cases/TemplateRefs.vue";
+import DynamicComponent from "./components/edge-cases/DynamicComponent.vue";
+import DeepNested from "./components/edge-cases/DeepNested.vue";
+import ExportDefaultComment from "./components/edge-cases/ExportDefaultComment.vue";
+import RenderInComment from "./components/edge-cases/RenderInComment.vue";
+import MixedTextChildren from "./components/edge-cases/MixedTextChildren.vue";
 
 // Vapor
-import VaporCounter from './components/vapor/VaporCounter.vue'
+import VaporCounter from "./components/vapor/VaporCounter.vue";
 // TODO: Re-enable once Rust vapor codegen for v-if/v-for is fixed
 // import VaporConditional from './components/vapor/VaporConditional.vue'
 // import VaporList from './components/vapor/VaporList.vue'
-import VaporBindings from './components/vapor/VaporBindings.vue'
+import VaporBindings from "./components/vapor/VaporBindings.vue";
 
 // Integration
-import TodoApp from './components/integration/TodoApp.vue'
+import TodoApp from "./components/integration/TodoApp.vue";
 
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const optionsReceived = ref('')
+const optionsReceived = ref("");
 const genericItems = [
-  { id: 1, label: 'Alpha' },
-  { id: 2, label: 'Beta' },
-  { id: 3, label: 'Gamma' },
-]
+  { id: 1, label: "Alpha" },
+  { id: 2, label: "Beta" },
+  { id: 3, label: "Gamma" },
+];
 </script>
 
 <template>
@@ -89,7 +89,7 @@ const genericItems = [
     <section data-testid="section-options-api">
       <h2>Options API</h2>
       <OptionsCounter />
-      <OptionsComponent label="test-label" @action="(v: string) => optionsReceived = v" />
+      <OptionsComponent label="test-label" @action="(v: string) => (optionsReceived = v)" />
       <span data-testid="options-received">{{ optionsReceived }}</span>
     </section>
 

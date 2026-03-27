@@ -1,17 +1,17 @@
 <script setup lang="ts" generic="T extends { id: number; label: string }">
-import { ref } from 'vue'
+import { ref } from "vue";
 
 const props = defineProps<{
-  items: T[]
-}>()
+  items: T[];
+}>();
 
-const currentIndex = ref(0)
+const currentIndex = ref(0);
 
 function next() {
-  currentIndex.value = (currentIndex.value + 1) % props.items.length
+  currentIndex.value = (currentIndex.value + 1) % props.items.length;
 }
 
-const currentItem = () => props.items[currentIndex.value]
+const currentItem = () => props.items[currentIndex.value];
 </script>
 
 <template>

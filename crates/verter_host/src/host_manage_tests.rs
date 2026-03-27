@@ -1,5 +1,7 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use verter_resolver::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
     should_attempt_owner_env_resolution, ImportedEvalLookupResolver,
@@ -1442,6 +1444,538 @@ defineProps<Props>()
     assert!(
         inputs.canonical_dependencies.contains("/src/types.ts"),
         "declaration source should be tracked for invalidation"
+    );
+}
+
+#[test]
+fn evaluate_imported_decl_with_owner_env_preserves_route_union_surface_for_package_alias_exports() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from(
+            r#"import { Lt as RouteLocationRaw, St, vt } from "./index-typed.js";
+export { RouteLocationRaw, St, vt };"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface St { path: string }
+export interface vt { name: string }
+type RouteLocationRaw = string | St | vt
+export { RouteLocationRaw as Lt, St, vt }
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/Link.vue",
+        r#"<script lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
+export interface Props {
+  to?: RouteLocationRaw
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let view = host.resolver_store_view();
+    let dep_resolutions = host
+        .dependency_resolutions_for_eval_in_view("/workspace/src/Link.vue", Some(&view))
+        .unwrap_or_default();
+    let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
+        &host,
+        "/workspace/src/Link.vue",
+        dep_resolutions,
+        Some(&view),
+    );
+    let mut deps = BTreeSet::new();
+    let evaluated = verter_resolver::evaluate_imported_decl_with_owner_env(
+        &mut resolver,
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts",
+        "RouteLocationRaw",
+        &mut deps,
+    )
+    .expect("route alias should evaluate through imported decl context");
+
+    let TypeExpr::Union(types) = &evaluated else {
+        panic!(
+            "evaluated imported route alias should stay a union surface, got {:?}",
+            evaluated
+        );
+    };
+    assert!(
+        types
+            .iter()
+            .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+        "evaluated imported route alias should preserve its string branch, got {:?}",
+        evaluated
+    );
+    assert!(
+        types.iter().any(|ty| {
+            matches!(
+                ty,
+                TypeExpr::Object(shape)
+                    if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path"))
+            )
+        }),
+        "evaluated imported route alias should preserve its path-like branch, got {:?}",
+        evaluated
+    );
+    assert!(
+        types.iter().any(|ty| {
+            matches!(
+                ty,
+                TypeExpr::Object(shape)
+                    if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "name"))
+            )
+        }),
+        "evaluated imported route alias should preserve its name-like branch, got {:?}",
+        evaluated
+    );
+}
+
+#[test]
+fn imported_type_alias_dependency_eval_env_preserves_route_union_surface_for_package_alias_exports()
+{
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from(
+            r#"import { Lt as RouteLocationRaw, St, vt } from "./index-typed.js";
+export { RouteLocationRaw, St, vt };"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface St { path: string }
+export interface vt { name: string }
+type RouteLocationRaw = string | St | vt
+export { RouteLocationRaw as Lt, St, vt }
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/Link.vue",
+        r#"<script lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
+export interface Props {
+  to?: RouteLocationRaw
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let view = host.resolver_store_view();
+    let resolver = HostImportedEvalResolver::new(&host, "/workspace/src/Link.vue", Some(&view));
+    let env = ImportedEvalLookupResolver::dependency_eval_env(
+        &resolver,
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts",
+    )
+    .expect("dependency eval env should exist");
+    let route = env
+        .type_symbols
+        .get("RouteLocationRaw")
+        .expect("dependency eval env should keep RouteLocationRaw");
+
+    let TypeExpr::Union(types) = &route.body else {
+        panic!(
+            "dependency eval env should keep RouteLocationRaw as a union, got {:?}",
+            route.body
+        );
+    };
+    assert!(
+        types
+            .iter()
+            .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+        "dependency eval env should preserve the string route branch, got {:?}",
+        route.body
+    );
+}
+
+#[test]
+fn collect_imported_type_alias_preserves_route_union_surface_for_package_alias_exports() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from(
+            r#"import { Lt as RouteLocationRaw, St, vt } from "./index-typed.js";
+export { RouteLocationRaw, St, vt };"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface St { path: string }
+export interface vt { name: string }
+type RouteLocationRaw = string | St | vt
+export { RouteLocationRaw as Lt, St, vt }
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/Link.vue",
+        r#"<script lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
+export interface Props {
+  to?: RouteLocationRaw
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let view = host.resolver_store_view();
+    let mut resolver = HostImportedEvalResolver::new(&host, "/workspace/src/Link.vue", Some(&view));
+    let mut deps = BTreeSet::new();
+    let mut budget =
+        verter_resolver::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
+    let alias = verter_resolver::ImportedEvalCollectorResolver::collect_imported_type_alias(
+        &mut resolver,
+        verter_resolver::ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/workspace/src/Link.vue".to_string(),
+            import_source: "vue-router".to_string(),
+            local_name: "RouteLocationRaw".to_string(),
+            imported_name: "RouteLocationRaw".to_string(),
+            source_canonical_id: "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
+                .to_string(),
+            exported_name: "RouteLocationRaw".to_string(),
+        },
+        &mut deps,
+        &mut budget,
+    )
+    .expect("imported alias should be collected");
+
+    let TypeExpr::Union(types) = &alias.decl.body else {
+        panic!(
+            "collected imported alias should keep RouteLocationRaw as a union, got {:?}",
+            alias.decl.body
+        );
+    };
+    assert!(
+        types
+            .iter()
+            .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+        "collected imported alias should preserve the string route branch, got {:?}",
+        alias.decl.body
+    );
+}
+
+#[test]
+fn imported_eval_inputs_preserve_route_union_surface_for_package_alias_exports() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from(
+            r#"import { Lt as RouteLocationRaw, St, vt } from "./index-typed.js";
+export { RouteLocationRaw, St, vt };"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface St { path: string }
+export interface vt { name: string }
+type RouteLocationRaw = string | St | vt
+export { RouteLocationRaw as Lt, St, vt }
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/Link.vue",
+        r#"<script lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
+export interface Props {
+  to?: RouteLocationRaw
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/Link.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/workspace/src/Link.vue");
+    let inputs = host.imported_eval_inputs("/workspace/src/Link.vue", &snapshot, &dep_resolutions);
+    let aliases: Vec<_> = inputs
+        .type_aliases
+        .iter()
+        .filter(|alias| alias.local_name == "RouteLocationRaw")
+        .collect();
+    assert!(
+        !aliases.is_empty(),
+        "RouteLocationRaw should be present in imported eval inputs"
+    );
+    assert!(
+        aliases.iter().all(|alias| {
+            alias.source_canonical_id == "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
+                && alias.exported_name == "RouteLocationRaw"
+        }),
+        "RouteLocationRaw aliases should target the actual declaration source/name, got {:?}",
+        aliases
+            .iter()
+            .map(|alias| (
+                alias.source_canonical_id.clone(),
+                alias.exported_name.clone(),
+                alias.decl.body.clone(),
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        aliases
+            .iter()
+            .any(|alias| matches!(alias.decl.body, TypeExpr::Union(_))),
+        "at least one RouteLocationRaw alias should preserve a union surface, got {:?}",
+        aliases
+            .iter()
+            .map(|alias| alias.decl.body.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn collect_imported_type_alias_preserves_same_file_base_members_for_package_alias_exports() {
+    fn has_property(expr: &TypeExpr, name: &str) -> bool {
+        match expr {
+            TypeExpr::Object(shape) => shape.properties.iter().any(|member| {
+                matches!(member, ObjectMember::Property(property) if property.name == name)
+            }),
+            TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+                types.iter().any(|ty| has_property(ty, name))
+            }
+            _ => false,
+        }
+    }
+
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from(r#"export { o as RouterLinkProps } from "./index-typed.js";"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+        Arc::from(
+            r#"
+interface RouterLinkOptions {
+  to?: string
+  replace?: boolean
+}
+
+interface RouterLinkProps extends RouterLinkOptions {
+  activeClass?: string
+  exactActiveClass?: string
+  ariaCurrentValue?: 'page'
+  viewTransition?: boolean
+}
+
+export { RouterLinkProps as o }
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/Link.vue",
+        r#"<script lang="ts">
+import type { RouterLinkProps } from 'vue-router'
+
+export interface Props extends Omit<RouterLinkProps, 'to'> {
+  href?: string
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let view = host.resolver_store_view();
+    let mut resolver = HostImportedEvalResolver::new(&host, "/workspace/src/Link.vue", Some(&view));
+    let mut deps = BTreeSet::new();
+    let mut budget =
+        verter_resolver::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
+    let alias = verter_resolver::ImportedEvalCollectorResolver::collect_imported_type_alias(
+        &mut resolver,
+        verter_resolver::ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/workspace/src/Link.vue".to_string(),
+            import_source: "vue-router".to_string(),
+            local_name: "RouterLinkProps".to_string(),
+            imported_name: "RouterLinkProps".to_string(),
+            source_canonical_id: "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
+                .to_string(),
+            exported_name: "RouterLinkProps".to_string(),
+        },
+        &mut deps,
+        &mut budget,
+    )
+    .expect("imported alias should be collected");
+
+    assert!(
+        has_property(&alias.decl.body, "replace"),
+        "collected imported alias should preserve inherited base members, got {:?}",
+        alias.decl.body
+    );
+    assert!(
+        has_property(&alias.decl.body, "activeClass"),
+        "collected imported alias should preserve own interface members, got {:?}",
+        alias.decl.body
     );
 }
 

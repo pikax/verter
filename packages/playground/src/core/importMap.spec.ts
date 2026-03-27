@@ -13,9 +13,7 @@ import {
 describe("getDefaultImportMap", () => {
   it("returns default import map with default vue version", () => {
     const map = getDefaultImportMap();
-    expect(map.imports.vue).toBe(
-      "https://cdn.jsdelivr.net/npm/vue@3.5.26/dist/vue.esm-browser.js",
-    );
+    expect(map.imports.vue).toBe("https://cdn.jsdelivr.net/npm/vue@3.5.26/dist/vue.esm-browser.js");
     expect(map.imports["vue/server-renderer"]).toBe(
       "https://cdn.jsdelivr.net/npm/@vue/server-renderer@3.5.26/dist/server-renderer.esm-browser.js",
     );
@@ -152,10 +150,7 @@ describe("isDefaultImport", () => {
 
   it("returns false without vue version", () => {
     expect(
-      isDefaultImport(
-        "vue",
-        "https://cdn.jsdelivr.net/npm/vue@3.5.26/dist/vue.esm-browser.js",
-      ),
+      isDefaultImport("vue", "https://cdn.jsdelivr.net/npm/vue@3.5.26/dist/vue.esm-browser.js"),
     ).toBe(false);
   });
 });

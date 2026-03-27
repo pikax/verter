@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const internalCount = ref(0)
+const internalCount = ref(0);
 
 function increment() {
-  internalCount.value++
+  internalCount.value++;
 }
 
 function getCount() {
-  return internalCount.value
+  return internalCount.value;
 }
 
-defineExpose({ increment, getCount })
+defineExpose({ increment, getCount });
 </script>
 
 <template>

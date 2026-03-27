@@ -1,8 +1,8 @@
 <script setup lang="ts">
 interface PropsObject {
-  partialImage?: string | (Partial<HTMLImageElement> & { [key: string]: any })
+  partialImage?: string | (Partial<HTMLImageElement> & { [key: string]: any });
 }
-defineProps<PropsObject>()
+defineProps<PropsObject>();
 </script>
 
 <template><div /></template>

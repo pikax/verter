@@ -3,7 +3,6 @@
   "displayName": "Verter VSCode",
   "version": "0.0.1-beta.1",
   "description": "Verter VSCode Extension",
-  "icon": "logo.png",
   "categories": [
     "Programming Languages"
   ],
@@ -12,9 +11,9 @@
     "vetur",
     "vue"
   ],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
   "author": "Carlos Rodrigues <pikax>",
-  "homepage": "https://verterjs.dev/",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
@@ -70,11 +69,6 @@
     "vscode-languageserver-protocol": "^3.17.5",
     "vscode-languageserver-textdocument": "^1.0.12",
     "vscode-languageserver-types": "^3.17.5"
-  },
-  "configurationDefaults": {
-    "emmet.includeLanguages": {
-      "vue": "html"
-    }
   },
   "contributes": {
     "mcpServerDefinitionProviders": [
@@ -646,18 +640,24 @@
   },
   "activationEvents": [
     "onCommand:verter.restartLanguageServer",
-    "onCommand:verter.showStatistics",
     "onCommand:verter.setupMcpForClaudeCode",
-    "onView:verterVirtualFiles",
-    "onView:verterAnalysis",
+    "onCommand:verter.showStatistics",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
-    "onLanguage:vue"
+    "onLanguage:vue",
+    "onView:verterAnalysis",
+    "onView:verterVirtualFiles"
   ],
+  "icon": "logo.png",
   "engines": {
     "vscode": "^1.110.0"
+  },
+  "configurationDefaults": {
+    "emmet.includeLanguages": {
+      "vue": "html"
+    }
   },
   "vsce": {
     "dependencies": false,

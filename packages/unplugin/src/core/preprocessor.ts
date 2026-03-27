@@ -30,12 +30,7 @@ export async function preprocessBlock(
     case "style":
       return preprocessStyle(req.lang, req.content, filename, viteConfig);
     case "custom":
-      return preprocessCustom(
-        req.lang,
-        req.content,
-        filename,
-        customBlockHandlers,
-      );
+      return preprocessCustom(req.lang, req.content, filename, customBlockHandlers);
     default:
       return null;
   }
@@ -117,9 +112,7 @@ export async function preprocessStyle(
       );
       return {
         code: result.code,
-        sourceMap: result.map
-          ? JSON.stringify(result.map)
-          : undefined,
+        sourceMap: result.map ? JSON.stringify(result.map) : undefined,
       };
     } catch (e: unknown) {
       console.warn(

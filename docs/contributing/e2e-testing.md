@@ -131,16 +131,22 @@ Use this for consistent testing across fixtures:
 
 ```vue
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from "vue";
 
-const count = ref(0)
-const doubled = computed(() => count.value * 2)
-const props = defineProps<{ title: string }>()
+const count = ref(0);
+const doubled = computed(() => count.value * 2);
+const props = defineProps<{ title: string }>();
 
-onMounted(() => { console.log('mounted') })
-watch(count, (val) => { console.log(val) })
+onMounted(() => {
+  console.log("mounted");
+});
+watch(count, (val) => {
+  console.log(val);
+});
 
-function increment() { count.value++ }
+function increment() {
+  count.value++;
+}
 </script>
 <template>
   <div>
@@ -160,6 +166,7 @@ cat /tmp/verter-e2e-timing-single-project.json | jq .
 ```
 
 Fields:
+
 - `startup.activationToReadyMs` — Time from extension activation to LSP ready
 - `hover.samples[].latencyMs` — Individual hover latencies
 - `hover.avgMs` / `hover.p95Ms` — Aggregate hover stats

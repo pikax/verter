@@ -2,7 +2,7 @@
   <div class="dashboard">
     <header class="header">
       <div class="logo">
-        <img src="/logo.svg" alt="Logo">
+        <img src="/logo.svg" alt="Logo" />
         <h1>Dashboard</h1>
       </div>
       <nav class="nav">
@@ -12,7 +12,7 @@
         <a href="#settings">Settings</a>
       </nav>
       <div class="user-menu">
-        <img src="/avatar.jpg" alt="User" class="avatar">
+        <img src="/avatar.jpg" alt="User" class="avatar" />
         <span class="username">John Doe</span>
         <button class="dropdown-toggle">▼</button>
       </div>
@@ -248,7 +248,7 @@
   background: white;
   padding: 1.5rem;
   border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .charts {
@@ -273,7 +273,7 @@
 
 .bar {
   flex: 1;
-  background: #4CAF50;
+  background: #4caf50;
   border-radius: 4px 4px 0 0;
 }
 
@@ -347,10 +347,10 @@
 }
 
 .indicator.online {
-  background: #4CAF50;
+  background: #4caf50;
 }
 
 .indicator.warning {
-  background: #FFC107;
+  background: #ffc107;
 }
 </style>

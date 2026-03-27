@@ -9,12 +9,12 @@ description: "Position encoding, span types, coordinate systems, path normalizat
 
 All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type enforces a specific coordinate system at compile time:
 
-| Type | Meaning | Serde? | Used Where |
-|------|---------|--------|------------|
-| `Span` | SFC-absolute byte offsets `[start, end)` | **Yes** (`spanStart`/`spanEnd`) | Analysis types, diagnostics, CSS analysis, CodeTransform, Raw* template data, CSS variable spans |
-| `RelativeSpan` | Byte offsets relative to a base stored elsewhere | **No** | CSS scanner internals, OXC binding extraction (`Binding.span`) |
-| `PartialGeneratedSpan` | Unresolved position in generated output (TSX) | **No** | TSGO response parsing before PositionMapper resolution |
-| `GeneratedSpan` | Resolved mapping: generated position + SFC origin | **No** | TSGO diagnostics after resolution, codegen error mapping |
+| Type                   | Meaning                                           | Serde?                          | Used Where                                                                                        |
+| ---------------------- | ------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `Span`                 | SFC-absolute byte offsets `[start, end)`          | **Yes** (`spanStart`/`spanEnd`) | Analysis types, diagnostics, CSS analysis, CodeTransform, Raw\* template data, CSS variable spans |
+| `RelativeSpan`         | Byte offsets relative to a base stored elsewhere  | **No**                          | CSS scanner internals, OXC binding extraction (`Binding.span`)                                    |
+| `PartialGeneratedSpan` | Unresolved position in generated output (TSX)     | **No**                          | TSGO response parsing before PositionMapper resolution                                            |
+| `GeneratedSpan`        | Resolved mapping: generated position + SFC origin | **No**                          | TSGO diagnostics after resolution, codegen error mapping                                          |
 
 ## Typed Span Rules
 
@@ -38,30 +38,30 @@ All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type en
 
 All CSS variable span fields use SFC-absolute `Span`:
 
-| Type | Field | Meaning |
-|------|-------|---------|
-| `AnalyzedCustomProperty` | `name_span` | Span of `--name` in declaration |
-| `AnalyzedCustomProperty` | `value_span` | Span of the value text after `:` |
-| `CssVarReference` | `span` | Span of entire `var(...)` expression |
-| `CssVarReference` | `name_span` | Span of variable name within `var()` |
-| `CssVarFallback` | `span` | Span of fallback text within `var()` |
-| `CssVarManipulation` | `span` | Span of DOM API call expression (e.g., `setProperty(...)`) |
+| Type                     | Field        | Meaning                                                    |
+| ------------------------ | ------------ | ---------------------------------------------------------- |
+| `AnalyzedCustomProperty` | `name_span`  | Span of `--name` in declaration                            |
+| `AnalyzedCustomProperty` | `value_span` | Span of the value text after `:`                           |
+| `CssVarReference`        | `span`       | Span of entire `var(...)` expression                       |
+| `CssVarReference`        | `name_span`  | Span of variable name within `var()`                       |
+| `CssVarFallback`         | `span`       | Span of fallback text within `var()`                       |
+| `CssVarManipulation`     | `span`       | Span of DOM API call expression (e.g., `setProperty(...)`) |
 
 These spans are computed as `content_offset + local_offset` during CSS scanning, where `content_offset` is the SFC-absolute byte offset of the `<style>` block content start. For script-side `CssVarManipulation`, spans come from OXC and are adjusted by the script block's SFC offset.
 
 ## Position Encoding Layers
 
-| Layer | Offset Format | Line/Col Base | Description |
-|-------|---------------|---------------|-------------|
-| **oxc_span** | UTF-8 byte offset, relative to parse start | N/A (byte offsets only) | OXC parser spans are byte offsets from the start of the parsed source text |
-| **verter `Span`** | UTF-8 byte offset, absolute for the document | N/A (byte offsets only) | All stored Rust spans (`span` fields in analysis types, `CodeTransform` positions) are byte offsets from the start of the SFC source |
-| **verter `RelativeSpan`** | UTF-8 byte offset, relative to a base | N/A (byte offsets only) | CSS scanner internals (relative to style content start), OXC bindings (relative to expression start) |
-| **PositionResolver** | N/A | **1-based** line, **1-based** UTF-16 column | `cursor/position.rs` — returns 1-based. When passing to source maps or LSP, subtract 1 |
-| **Source maps** | N/A | **0-based** line, **0-based** column | VLQ-encoded. `source_map.rs` converts from PositionResolver via `(line - 1, col - 1)` |
-| **LSP Protocol** | Negotiated (UTF-8/UTF-16/UTF-32) | **0-based** line, **0-based** character | `Position { line: 0, character: 0 }` = first char of file. `LineIndex` handles conversion |
-| **VS Code API** | UTF-16 code units | **0-based** line, **0-based** character | `new Position(0, 0)` = first char. Matches LSP UTF-16 |
-| **verter_ffi** | UTF-16 code units | N/A (byte offsets only) | NAPI/WASM boundary always communicates in UTF-16 offsets. Reference: `crates/verter_ffi/src/convert.rs:byte_offset_to_utf16()` |
-| **verter_lsp** | Negotiated encoding (UTF-8, UTF-16, or UTF-32) | **0-based** | The LSP negotiates encoding with the client during `initialize()`. All positions sent to and received from the client use the negotiated encoding |
+| Layer                     | Offset Format                                  | Line/Col Base                               | Description                                                                                                                                       |
+| ------------------------- | ---------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **oxc_span**              | UTF-8 byte offset, relative to parse start     | N/A (byte offsets only)                     | OXC parser spans are byte offsets from the start of the parsed source text                                                                        |
+| **verter `Span`**         | UTF-8 byte offset, absolute for the document   | N/A (byte offsets only)                     | All stored Rust spans (`span` fields in analysis types, `CodeTransform` positions) are byte offsets from the start of the SFC source              |
+| **verter `RelativeSpan`** | UTF-8 byte offset, relative to a base          | N/A (byte offsets only)                     | CSS scanner internals (relative to style content start), OXC bindings (relative to expression start)                                              |
+| **PositionResolver**      | N/A                                            | **1-based** line, **1-based** UTF-16 column | `cursor/position.rs` — returns 1-based. When passing to source maps or LSP, subtract 1                                                            |
+| **Source maps**           | N/A                                            | **0-based** line, **0-based** column        | VLQ-encoded. `source_map.rs` converts from PositionResolver via `(line - 1, col - 1)`                                                             |
+| **LSP Protocol**          | Negotiated (UTF-8/UTF-16/UTF-32)               | **0-based** line, **0-based** character     | `Position { line: 0, character: 0 }` = first char of file. `LineIndex` handles conversion                                                         |
+| **VS Code API**           | UTF-16 code units                              | **0-based** line, **0-based** character     | `new Position(0, 0)` = first char. Matches LSP UTF-16                                                                                             |
+| **verter_ffi**            | UTF-16 code units                              | N/A (byte offsets only)                     | NAPI/WASM boundary always communicates in UTF-16 offsets. Reference: `crates/verter_ffi/src/convert.rs:byte_offset_to_utf16()`                    |
+| **verter_lsp**            | Negotiated encoding (UTF-8, UTF-16, or UTF-32) | **0-based**                                 | The LSP negotiates encoding with the client during `initialize()`. All positions sent to and received from the client use the negotiated encoding |
 
 ## Line/Column Base Rules (CRITICAL — off-by-one bugs)
 
@@ -87,13 +87,13 @@ These spans are computed as `content_offset + local_offset` during CSS scanning,
 
 ## Encoding Conversion Reference
 
-| Boundary | Pattern | Reference Implementation |
-|----------|---------|--------------------------|
-| Rust internal → NAPI/WASM | `byte_offset_to_utf16()` | `crates/verter_ffi/src/convert.rs:281` |
-| Rust internal → LSP client | Negotiated encoding conversion | `crates/verter_lsp/src/documents/mod.rs` |
-| LSP Position → byte offset | `LineIndex::position_to_offset()` | `crates/verter_lsp/src/documents/line_index.rs` |
-| Byte offset → LSP Position | `LineIndex::offset_to_position()` | `crates/verter_lsp/src/documents/line_index.rs` |
-| TSGO response → byte offset | `position_to_offset()` | `crates/verter_lsp/src/tsgo/ipc.rs` (ASCII TSX only) |
+| Boundary                    | Pattern                           | Reference Implementation                             |
+| --------------------------- | --------------------------------- | ---------------------------------------------------- |
+| Rust internal → NAPI/WASM   | `byte_offset_to_utf16()`          | `crates/verter_ffi/src/convert.rs:281`               |
+| Rust internal → LSP client  | Negotiated encoding conversion    | `crates/verter_lsp/src/documents/mod.rs`             |
+| LSP Position → byte offset  | `LineIndex::position_to_offset()` | `crates/verter_lsp/src/documents/line_index.rs`      |
+| Byte offset → LSP Position  | `LineIndex::offset_to_position()` | `crates/verter_lsp/src/documents/line_index.rs`      |
+| TSGO response → byte offset | `position_to_offset()`            | `crates/verter_lsp/src/tsgo/ipc.rs` (ASCII TSX only) |
 
 ## VS Code Extension
 
@@ -111,30 +111,30 @@ All file paths are stored internally in **canonical ID** format. Normalization h
 
 ## Canonical ID Format
 
-| Rule | Example |
-|------|---------|
-| Forward slashes only | `c:/Users/dev/App.vue` (never `c:\Users\dev\App.vue`) |
-| Lowercase Windows drive | `c:/Users/...` (never `C:/Users/...`) |
-| No query strings | `App.vue` (not `App.vue?vue&type=script`) |
-| No virtual suffixes | `App.vue` (not `App.vue._VERTER_.bundle.ts`) |
-| UTF-8, no percent-encoding | `/home/user/my project/App.vue` (not `my%20project`) |
+| Rule                       | Example                                               |
+| -------------------------- | ----------------------------------------------------- |
+| Forward slashes only       | `c:/Users/dev/App.vue` (never `c:\Users\dev\App.vue`) |
+| Lowercase Windows drive    | `c:/Users/...` (never `C:/Users/...`)                 |
+| No query strings           | `App.vue` (not `App.vue?vue&type=script`)             |
+| No virtual suffixes        | `App.vue` (not `App.vue._VERTER_.bundle.ts`)          |
+| UTF-8, no percent-encoding | `/home/user/my project/App.vue` (not `my%20project`)  |
 
 ## Entry Boundaries (External → Canonical)
 
-| Source | Function | Location |
-|--------|----------|----------|
-| LSP client URI | `uri_to_canonical_id_from_str()` | `verter_lsp/src/documents/mod.rs` |
-| File system / bundler path | `canonicalize_id()` | `verter_host/src/id.rs` |
-| Bundler plugin | `generateComponentId()` | `packages/unplugin/src/core/compiler.ts` |
-| CLI args | `path_to_file_uri()` | `verter_lsp/src/main.rs` |
+| Source                     | Function                         | Location                                 |
+| -------------------------- | -------------------------------- | ---------------------------------------- |
+| LSP client URI             | `uri_to_canonical_id_from_str()` | `verter_lsp/src/documents/mod.rs`        |
+| File system / bundler path | `canonicalize_id()`              | `verter_host/src/id.rs`                  |
+| Bundler plugin             | `generateComponentId()`          | `packages/unplugin/src/core/compiler.ts` |
+| CLI args                   | `path_to_file_uri()`             | `verter_lsp/src/main.rs`                 |
 
 ## Exit Boundaries (Canonical → External)
 
-| Target | Pattern | Location |
-|--------|---------|----------|
-| LSP client (file URI) | `file:///` + canonical ID | `verter_lsp/src/features/definition.rs` |
-| TSGO type provider | `path_to_file_uri()` | `verter_lsp/src/main.rs` |
-| File I/O | `std::path::Path::new(canonical_id)` | OS handles both `/` and `\` on Windows |
+| Target                | Pattern                              | Location                                |
+| --------------------- | ------------------------------------ | --------------------------------------- |
+| LSP client (file URI) | `file:///` + canonical ID            | `verter_lsp/src/features/definition.rs` |
+| TSGO type provider    | `path_to_file_uri()`                 | `verter_lsp/src/main.rs`                |
+| File I/O              | `std::path::Path::new(canonical_id)` | OS handles both `/` and `\` on Windows  |
 
 ## Implementation Rules
 

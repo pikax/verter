@@ -14,10 +14,10 @@ The integration test suite has two layers:
 
 There are two entry points that share the same project list:
 
-| Entry | File | Environment |
-|-------|------|-------------|
-| **Local runner** | `scripts/integration-test/run.mjs` | Any machine (Windows/macOS/Linux) |
-| **CI workflow** | `.github/workflows/integration-test.yml` | GitHub Actions |
+| Entry            | File                                     | Environment                       |
+| ---------------- | ---------------------------------------- | --------------------------------- |
+| **Local runner** | `scripts/integration-test/run.mjs`       | Any machine (Windows/macOS/Linux) |
+| **CI workflow**  | `.github/workflows/integration-test.yml` | GitHub Actions                    |
 
 Both read their project matrix from `scripts/integration-test/projects.mjs`.
 
@@ -106,13 +106,13 @@ For local discovery runs:
 
 ## Local Discovery Recipes
 
-| Recipe | Meaning |
-|--------|---------|
-| `full_stack` | Replace editor recommendations/settings, TS plugin, `vue-tsc`, and build/Nuxt wiring |
-| `typecheck_only` | Replace `vue-tsc` and TS plugin only |
-| `editor_only` | Replace Vue Official / Volar workspace settings only |
-| `build_only` | Replace Vite/Rollup/Nuxt compiler wiring only |
-| `manual_review` | Vue-related repo found, but the root build/typecheck surface is ambiguous or non-deterministic |
+| Recipe           | Meaning                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------------------- |
+| `full_stack`     | Replace editor recommendations/settings, TS plugin, `vue-tsc`, and build/Nuxt wiring           |
+| `typecheck_only` | Replace `vue-tsc` and TS plugin only                                                           |
+| `editor_only`    | Replace Vue Official / Volar workspace settings only                                           |
+| `build_only`     | Replace Vite/Rollup/Nuxt compiler wiring only                                                  |
+| `manual_review`  | Vue-related repo found, but the root build/typecheck surface is ambiguous or non-deterministic |
 
 `manual_review` is intentional. The runner will not guess through mixed-bundler monorepos or toolchain workspaces.
 
@@ -136,18 +136,18 @@ Tier 2 local execution never mutates the source repo. Each run copies the repo i
 
 Each local run writes to `D:\dev\temp\verter-toolchain-runs\<run-id>\` by default:
 
-| Path | Purpose |
-|------|---------|
-| `discovery.json` | Machine-readable inventory of Tier 1 + Tier 2 repos |
-| `discovery.md` | Human-readable recipe summary grouped by repo classification |
-| `sandboxes/<repo>/` | Disposable copy of the source repo used for execution |
-| `reports/<repo>/project.json` | Captured manifest entry for that repo |
-| `reports/<repo>/baseline-*.log` | Baseline build/test logs when applicable |
-| `reports/<repo>/verter-*.log` | Verter build/test logs when applicable |
-| `reports/<repo>/typecheck/diagnostics.normalized.json` | Parsed `vue-tsc` / `verter-tsc` diagnostics |
-| `reports/<repo>/typecheck/diagnostics.diff.json` | Shared / Vue-only / Verter-only diagnostic diff |
-| `reports/<repo>/typecheck/review-queue.json` | Persisted triage queue for Verter-only diagnostics |
-| `reports/<repo>/summary.md` | Per-repo execution summary |
+| Path                                                   | Purpose                                                      |
+| ------------------------------------------------------ | ------------------------------------------------------------ |
+| `discovery.json`                                       | Machine-readable inventory of Tier 1 + Tier 2 repos          |
+| `discovery.md`                                         | Human-readable recipe summary grouped by repo classification |
+| `sandboxes/<repo>/`                                    | Disposable copy of the source repo used for execution        |
+| `reports/<repo>/project.json`                          | Captured manifest entry for that repo                        |
+| `reports/<repo>/baseline-*.log`                        | Baseline build/test logs when applicable                     |
+| `reports/<repo>/verter-*.log`                          | Verter build/test logs when applicable                       |
+| `reports/<repo>/typecheck/diagnostics.normalized.json` | Parsed `vue-tsc` / `verter-tsc` diagnostics                  |
+| `reports/<repo>/typecheck/diagnostics.diff.json`       | Shared / Vue-only / Verter-only diagnostic diff              |
+| `reports/<repo>/typecheck/review-queue.json`           | Persisted triage queue for Verter-only diagnostics           |
+| `reports/<repo>/summary.md`                            | Per-repo execution summary                                   |
 
 Verter-only `.vue` diagnostics are queued for later review instead of failing immediately unless the runner detects a tool crash.
 
@@ -164,15 +164,15 @@ Verter-only `.vue` diagnostics are queued for later review instead of failing im
 `scripts/integration-test/projects.mjs` and `.github/workflows/integration-test.yml` define the same project matrix. When changing one, you **must** update the other. Field mapping:
 
 | JS (projects.mjs) | YAML (integration-test.yml) |
-|-------------------|-----------------------------|
-| `name` | `name` |
-| `repo` | `repo` |
-| `branch` | `branch` |
-| `buildCmd` | `build-cmd` |
-| `testCmd` | `test-cmd` |
-| `e2eCmd` | `e2e-cmd` |
-| `packageManager` | `package-manager` |
-| `bundler` | `bundler` |
+| ----------------- | --------------------------- |
+| `name`            | `name`                      |
+| `repo`            | `repo`                      |
+| `branch`          | `branch`                    |
+| `buildCmd`        | `build-cmd`                 |
+| `testCmd`         | `test-cmd`                  |
+| `e2eCmd`          | `e2e-cmd`                   |
+| `packageManager`  | `package-manager`           |
+| `bundler`         | `bundler`                   |
 
 ## Interpreting Results
 
@@ -183,14 +183,14 @@ element-plus           120.3s     125.8s     +4%        skipped        skipped  
 my-project             30.1s      ERROR                                               BUILD FAIL
 ```
 
-| Status | Meaning |
-|--------|---------|
-| `OK` | Verter build/tests match or improve on baseline |
-| `SLOWER` | Verter build/tests pass but take longer |
-| `BUILD FAIL` | Verter build failed (baseline succeeded) |
-| `TEST REGR` | Verter has **more** test failures than baseline (regression) |
-| `TEST FAIL` | Verter tests fail but not worse than baseline |
-| `ERROR` | Script error (clone failed, install failed, etc.) |
+| Status       | Meaning                                                      |
+| ------------ | ------------------------------------------------------------ |
+| `OK`         | Verter build/tests match or improve on baseline              |
+| `SLOWER`     | Verter build/tests pass but take longer                      |
+| `BUILD FAIL` | Verter build failed (baseline succeeded)                     |
+| `TEST REGR`  | Verter has **more** test failures than baseline (regression) |
+| `TEST FAIL`  | Verter tests fail but not worse than baseline                |
+| `ERROR`      | Script error (clone failed, install failed, etc.)            |
 
 ## Troubleshooting
 
@@ -206,23 +206,23 @@ my-project             30.1s      ERROR                                         
 
 ## Project List
 
-| Project | Repo | Bundler | PM | Tests | E2E |
-|---------|------|---------|----|-------|-----|
-| vuetify | vuetifyjs/vuetify | vite | pnpm | vitest | — |
-| oku-primitives | oku-ui/primitives | vite | pnpm | vitest | — |
-| hoppscotch | hoppscotch/hoppscotch | vite | pnpm | vitest | — |
-| element-plus | element-plus/element-plus | rollup | pnpm | — | — |
-| coreui | coreui/coreui-free-vue-admin-template | vite | npm | — | — |
-| balancer-frontend-v2 | balancer/frontend-v2 | vite | npm | vitest | — |
-| shadcn-vue | unovue/shadcn-vue | vite | pnpm | vitest | — |
-| slidev | slidevjs/slidev | vite | pnpm | vitest | Cypress |
-| zyronon-douyin | zyronon/douyin | vite | pnpm | — | — |
-| primevue | primefaces/primevue | rollup | pnpm | — | — |
-| ant-design-vue | vueComponent/ant-design-vue | vite | npm | jest | — |
-| nuxt-ui | nuxt/ui | nuxt | pnpm | vitest | — |
-| vue-vben-admin | vbenjs/vue-vben-admin | vite | pnpm | — | Playwright |
-| vant | youzan/vant | vite | pnpm | vitest | — |
-| naive-ui | tusen-ai/naive-ui | vite | pnpm | vitest | — |
-| tdesign-vue-next | Tencent/tdesign-vue-next | vite | pnpm | vitest | — |
-| radix-vue | unovue/radix-vue | vite | pnpm | vitest | — |
-| vitepress | vuejs/vitepress | vite | pnpm | vitest | Playwright |
+| Project              | Repo                                  | Bundler | PM   | Tests  | E2E        |
+| -------------------- | ------------------------------------- | ------- | ---- | ------ | ---------- |
+| vuetify              | vuetifyjs/vuetify                     | vite    | pnpm | vitest | —          |
+| oku-primitives       | oku-ui/primitives                     | vite    | pnpm | vitest | —          |
+| hoppscotch           | hoppscotch/hoppscotch                 | vite    | pnpm | vitest | —          |
+| element-plus         | element-plus/element-plus             | rollup  | pnpm | —      | —          |
+| coreui               | coreui/coreui-free-vue-admin-template | vite    | npm  | —      | —          |
+| balancer-frontend-v2 | balancer/frontend-v2                  | vite    | npm  | vitest | —          |
+| shadcn-vue           | unovue/shadcn-vue                     | vite    | pnpm | vitest | —          |
+| slidev               | slidevjs/slidev                       | vite    | pnpm | vitest | Cypress    |
+| zyronon-douyin       | zyronon/douyin                        | vite    | pnpm | —      | —          |
+| primevue             | primefaces/primevue                   | rollup  | pnpm | —      | —          |
+| ant-design-vue       | vueComponent/ant-design-vue           | vite    | npm  | jest   | —          |
+| nuxt-ui              | nuxt/ui                               | nuxt    | pnpm | vitest | —          |
+| vue-vben-admin       | vbenjs/vue-vben-admin                 | vite    | pnpm | —      | Playwright |
+| vant                 | youzan/vant                           | vite    | pnpm | vitest | —          |
+| naive-ui             | tusen-ai/naive-ui                     | vite    | pnpm | vitest | —          |
+| tdesign-vue-next     | Tencent/tdesign-vue-next              | vite    | pnpm | vitest | —          |
+| radix-vue            | unovue/radix-vue                      | vite    | pnpm | vitest | —          |
+| vitepress            | vuejs/vitepress                       | vite    | pnpm | vitest | Playwright |

@@ -26,37 +26,24 @@ const BUILT_IN_TS_PLUGIN_LANGUAGE_IDS = new Set([
   "javascriptreact",
 ]);
 
-export function computeStartupSegments(
-  timing: StartupTimingLike,
-): StartupSegments {
+export function computeStartupSegments(timing: StartupTimingLike): StartupSegments {
   return {
     activationToReadyMs: diff(timing.activationStartMs, timing.lspReadyMs),
     activationToFirstTypedCompletionMs: diff(
       timing.activationStartMs,
       timing.firstTypedCompletionMs,
     ),
-    readyToFirstTypedCompletionMs: diff(
-      timing.lspReadyMs,
-      timing.firstTypedCompletionMs,
-    ),
-    activationToTypeProviderStartedMs: diff(
-      timing.activationStartMs,
-      timing.typeProviderStartedMs,
-    ),
+    readyToFirstTypedCompletionMs: diff(timing.lspReadyMs, timing.firstTypedCompletionMs),
+    activationToTypeProviderStartedMs: diff(timing.activationStartMs, timing.typeProviderStartedMs),
     typeProviderStartedToFirstTypedCompletionMs: diff(
       timing.typeProviderStartedMs,
       timing.firstTypedCompletionMs,
     ),
-    typeProviderStartedToReadyMs: diff(
-      timing.typeProviderStartedMs,
-      timing.lspReadyMs,
-    ),
+    typeProviderStartedToReadyMs: diff(timing.typeProviderStartedMs, timing.lspReadyMs),
   };
 }
 
-export function shouldConfigureBuiltInTypeScriptPlugin(
-  languageId?: string,
-): boolean {
+export function shouldConfigureBuiltInTypeScriptPlugin(languageId?: string): boolean {
   return languageId !== undefined && BUILT_IN_TS_PLUGIN_LANGUAGE_IDS.has(languageId);
 }
 

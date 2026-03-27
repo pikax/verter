@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { ImportedProps } from "./importedProps"
+import type { ImportedProps } from "./importedProps";
 
 const props = withDefaults(defineProps<ImportedProps>(), {
   title: "hello",
-})
+});
 </script>
 
 <template>

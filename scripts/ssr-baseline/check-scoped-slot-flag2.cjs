@@ -1,4 +1,4 @@
-const { compileTemplate, parse } = require('@vue/compiler-sfc');
+const { compileTemplate, parse } = require("@vue/compiler-sfc");
 
 // Check VDOM output for scoped slot nesting
 const source = `<template>
@@ -19,27 +19,27 @@ const { descriptor } = parse(source);
 // SSR output (has VDOM fallback)
 const { code: ssrCode } = compileTemplate({
   source: descriptor.template.content,
-  filename: 'test.vue',
-  id: 'test',
+  filename: "test.vue",
+  id: "test",
   ssr: true,
 });
 
-console.log('=== SSR Output ===');
+console.log("=== SSR Output ===");
 console.log(ssrCode);
 
 // VDOM output (for reference)
 const { code: vdomCode } = compileTemplate({
   source: descriptor.template.content,
-  filename: 'test.vue',
-  id: 'test',
+  filename: "test.vue",
+  id: "test",
   ssr: false,
 });
 
-console.log('\n=== VDOM Output ===');
+console.log("\n=== VDOM Output ===");
 console.log(vdomCode);
 
 // Find all slot flags in both
 const ssrFlags = [...ssrCode.matchAll(/_:\s*(\d+)\s*(\/\*\s*(\w+)\s*\*\/)?/g)];
 const vdomFlags = [...vdomCode.matchAll(/_:\s*(\d+)\s*(\/\*\s*(\w+)\s*\*\/)?/g)];
-console.log('\nSSR slot flags:', ssrFlags.map(m => m[1]+'/'+m[3]).join(', '));
-console.log('VDOM slot flags:', vdomFlags.map(m => m[1]+'/'+m[3]).join(', '));
+console.log("\nSSR slot flags:", ssrFlags.map((m) => m[1] + "/" + m[3]).join(", "));
+console.log("VDOM slot flags:", vdomFlags.map((m) => m[1] + "/" + m[3]).join(", "));

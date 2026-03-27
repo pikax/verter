@@ -12,7 +12,7 @@ When a Vue component has conditional root elements (`v-if`/`v-else-if`/`v-else`)
 
 ```vue
 <script setup lang="ts">
-const props = defineProps<{ mode: 'light' | 'dark', simple?: boolean }>()
+const props = defineProps<{ mode: "light" | "dark"; simple?: boolean }>();
 </script>
 <template>
   <div v-if="simple">Simple mode</div>
@@ -39,14 +39,14 @@ Or in the UI: search for "conditionalRootNarrowing" in Settings.
 
 The following simple patterns are supported for narrowing:
 
-| Pattern | Example | Narrows to |
-|---------|---------|------------|
-| Bare prop | `v-if="show"` | `T_show extends true ? A : B` |
-| Negated prop | `v-if="!show"` | `T_show extends false ? A : B` |
-| Prop === string | `v-if="mode === 'dark'"` | `T_mode extends 'dark' ? A : B` |
-| Prop !== string | `v-if="mode !== 'dark'"` | Inverted conditional |
-| Prop === number | `v-if="count === 42"` | `T_count extends 42 ? A : B` |
-| Prop === boolean | `v-if="flag === true"` | `T_flag extends true ? A : B` |
+| Pattern          | Example                  | Narrows to                      |
+| ---------------- | ------------------------ | ------------------------------- |
+| Bare prop        | `v-if="show"`            | `T_show extends true ? A : B`   |
+| Negated prop     | `v-if="!show"`           | `T_show extends false ? A : B`  |
+| Prop === string  | `v-if="mode === 'dark'"` | `T_mode extends 'dark' ? A : B` |
+| Prop !== string  | `v-if="mode !== 'dark'"` | Inverted conditional            |
+| Prop === number  | `v-if="count === 42"`    | `T_count extends 42 ? A : B`    |
+| Prop === boolean | `v-if="flag === true"`   | `T_flag extends true ? A : B`   |
 
 ### Unsupported Patterns
 
@@ -56,7 +56,7 @@ Complex conditions fall back to the standard union type (no narrowing). When the
 - **Member expressions:** `v-if="items.length > 0"`
 - **Function calls:** `v-if="isReady()"`
 - **Non-prop bindings:** `v-if="computedValue"` (refs, computed, etc.)
-- **Template literals:** `` v-if="`${x}`" ``
+- **Template literals:** ``v-if="`${x}`"``
 
 ### Interaction with SFC Generics
 

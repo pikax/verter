@@ -2,21 +2,23 @@
   "name": "@verter/typescript-plugin",
   "version": "0.0.1-beta.1",
   "description": "Vue TypeScript Plugin powered by Verter",
-  "keywords": ["vue", "typescript", "plugin", "language-service"],
+  "keywords": [
+    "language-service",
+    "plugin",
+    "typescript",
+    "vue"
+  ],
   "homepage": "https://verterjs.dev/",
   "license": "MIT",
+  "author": "Carlos Rodrigues <pikax>",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "Carlos Rodrigues <pikax>",
-  "type": "commonjs",
-  "engines": {
-    "node": ">=18"
-  },
   "files": [
     "dist"
   ],
+  "type": "commonjs",
   "main": "dist/index.js",
   "exports": {
     ".": {
@@ -36,5 +38,8 @@
     "@types/node": "^25.4.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

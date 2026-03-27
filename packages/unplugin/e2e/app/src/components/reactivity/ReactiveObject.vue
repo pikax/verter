@@ -1,24 +1,24 @@
 <script setup lang="ts">
-import { reactive } from 'vue'
+import { reactive } from "vue";
 
 interface State {
-  name: string
-  items: string[]
+  name: string;
+  items: string[];
 }
 
-const initialState = (): State => ({ name: 'Hello', items: ['a', 'b', 'c'] })
-const state = reactive<State>(initialState())
+const initialState = (): State => ({ name: "Hello", items: ["a", "b", "c"] });
+const state = reactive<State>(initialState());
 
 function changeName() {
-  state.name = 'World'
+  state.name = "World";
 }
 
 function addItem() {
-  state.items.push('item-' + (state.items.length + 1))
+  state.items.push("item-" + (state.items.length + 1));
 }
 
 function reset() {
-  Object.assign(state, initialState())
+  Object.assign(state, initialState());
 }
 </script>
 

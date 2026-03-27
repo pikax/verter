@@ -61,7 +61,9 @@ export function formatBindingHover(binding: AnalysisBinding): string {
 
 export function formatImportHover(binding: AnalysisImportBinding, source: string): string {
   const typePrefix = binding.isTypeOnly ? "type " : "";
-  const lines = [`\`\`\`typescript\nimport ${typePrefix}{ ${binding.name} } from '${source}'\n\`\`\``];
+  const lines = [
+    `\`\`\`typescript\nimport ${typePrefix}{ ${binding.name} } from '${source}'\n\`\`\``,
+  ];
 
   if (binding.vueApi) {
     lines.push(`Vue API: \`${binding.vueApi}\``);
@@ -81,8 +83,7 @@ export function formatMacroHover(mac: AnalysisMacro): string {
   }
 
   if (mac.isTypeBased) {
-    const types =
-      mac.typeReferences.length === 0 ? "inline type" : mac.typeReferences.join(", ");
+    const types = mac.typeReferences.length === 0 ? "inline type" : mac.typeReferences.join(", ");
     lines.push(`Type-based: \`<${types}>\``);
   }
 
@@ -114,8 +115,7 @@ export interface CompletionEntry {
 }
 
 function bindingDetail(binding: AnalysisBinding): string {
-  const base =
-    binding.kind === "AsyncFunction" ? "async function" : binding.kind.toLowerCase();
+  const base = binding.kind === "AsyncFunction" ? "async function" : binding.kind.toLowerCase();
   if (binding.reactivityKind && binding.reactivityKind !== "None") {
     return `${base} (${binding.reactivityKind.toLowerCase()})`;
   }
@@ -167,8 +167,7 @@ export function collectCompletions(
       seen.add(binding.name);
       items.push({
         label: binding.name,
-        kind:
-          binding.isTypeOnly || imp.isTypeOnly ? "TypeParameter" : "Module",
+        kind: binding.isTypeOnly || imp.isTypeOnly ? "TypeParameter" : "Module",
         detail: `from '${imp.source}'`,
       });
     }

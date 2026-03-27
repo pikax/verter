@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const condition = ref<'a' | 'b' | 'c'>('a')
-const visible = ref(true)
+const condition = ref<"a" | "b" | "c">("a");
+const visible = ref(true);
 
 function cycleCondition() {
-  const order: Array<'a' | 'b' | 'c'> = ['a', 'b', 'c']
-  const idx = order.indexOf(condition.value)
-  condition.value = order[(idx + 1) % order.length]
+  const order: Array<"a" | "b" | "c"> = ["a", "b", "c"];
+  const idx = order.indexOf(condition.value);
+  condition.value = order[(idx + 1) % order.length];
 }
 
 function toggleVisible() {
-  visible.value = !visible.value
+  visible.value = !visible.value;
 }
 </script>
 

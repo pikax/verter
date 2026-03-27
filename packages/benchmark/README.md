@@ -5,6 +5,7 @@ Performance benchmarks comparing Vue and Verter SFC compilation.
 ## Overview
 
 This package benchmarks Vue and Verter compilers using real-world Vue SFC fixtures:
+
 - **Vue**: 2-phase compilation (parse → compileScript → compileTemplate)
 - **Verter**: Single-pass compilation via Rust/NAPI
 
@@ -19,6 +20,7 @@ This package benchmarks Vue and Verter compilers using real-world Vue SFC fixtur
 ## Fixtures
 
 Eight fixtures from tiny to complex:
+
 1. `tiny-template.vue` - Minimal single element
 2. `simple-interactive.vue` - Basic interactivity with ref
 3. `list-rendering.vue` - v-for with dynamic lists
@@ -92,6 +94,7 @@ CI uses a separate `/lsp-benchmark` workflow that runs the PrimeVue target on Li
 Triggered via PR comment `/benchmark` or manually through GitHub Actions.
 
 Results posted as PR comments with:
+
 - ✅ **Pass**: Verter ≥ Vue performance (speedup ≥ 1.0x)
 - ⚠️ **Warning**: Verter 50-99% of Vue performance (speedup 0.5-1.0x)
 - ❌ **Fail**: Verter < 50% of Vue performance (speedup < 0.5x)
@@ -99,6 +102,7 @@ Results posted as PR comments with:
 ## Stress Test
 
 Includes a stress test with ~20,000 files (created by repeating all fixtures):
+
 - **Default**: 1 iteration, 1 warmup (fast)
 - Useful for measuring aggregate throughput on large compilations
 - Reports per-file compilation time and overall MB/s throughput

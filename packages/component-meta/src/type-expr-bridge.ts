@@ -15,6 +15,7 @@ import {
   tuple,
   object,
   func,
+  typeParameter,
   ref as typeRef,
   unknown,
 } from "./type-ir.js";
@@ -102,9 +103,15 @@ export type NativeTypeExpr =
       kind: "function";
       parameters: NativeFunctionParam[];
       returnType?: NativeTypeExpr;
-      typeParameters?: unknown[];
+      typeParameters?: NativeTypeParameter[];
     }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
+  | {
+      kind: "typeParameter";
+      name: string;
+      constraint?: NativeTypeExpr;
+      default?: NativeTypeExpr;
+    }
   | { kind: "keyOf"; operand: NativeTypeExpr }
   | { kind: "typeOf"; path: string[] }
   | { kind: "indexedAccess"; object: NativeTypeExpr; index: NativeTypeExpr }
@@ -121,6 +128,8 @@ export type NativeTypeExpr =
   | { kind: "unknown"; raw: string }
   | { kind: "infer"; name: string }
   | { kind: "rest"; inner: NativeTypeExpr };
+
+type NativeTypeRegistry = Map<string, NativeTypeExpr>;
 
 interface NativeTupleElement {
   label?: string | null;
@@ -154,7 +163,13 @@ interface NativeFunctionParam {
 interface NativeFunctionExpr {
   parameters: NativeFunctionParam[];
   returnType?: NativeTypeExpr | null;
-  typeParameters?: unknown[];
+  typeParameters?: NativeTypeParameter[];
+}
+
+interface NativeTypeParameter {
+  name: string;
+  constraint?: NativeTypeExpr | null;
+  default?: NativeTypeExpr | null;
 }
 
 // ── Converter ────────────────────────────────────────────────────
@@ -165,7 +180,11 @@ interface NativeFunctionExpr {
  * This bridges the gap between the Rust evaluator output and the
  * JS type IR consumed by adapters (Storybook, Zod, JSON Schema, etc.).
  */
-export function typeExprToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
+export function typeExprToDescriptor(
+  expr: NativeTypeExpr,
+  nativeRegistry?: NativeTypeRegistry,
+  visiting: Set<string> = new Set(),
+): TypeDescriptor {
   switch (expr.kind) {
     case "primitive": {
       const validPrimitives = new Set([
@@ -197,16 +216,18 @@ export function typeExprToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
       return literal(expr.value);
 
     case "union":
-      return union(expr.types.map(typeExprToDescriptor));
+      return union(expr.types.map((type) => typeExprToDescriptor(type, nativeRegistry, visiting)));
 
     case "intersection":
-      return intersection(expr.types.map(typeExprToDescriptor));
+      return intersection(
+        expr.types.map((type) => typeExprToDescriptor(type, nativeRegistry, visiting)),
+      );
 
     case "array":
-      return array(typeExprToDescriptor(expr.element));
+      return array(typeExprToDescriptor(expr.element, nativeRegistry, visiting));
 
     case "tuple":
-      return tuple(expr.elements.map((e) => typeExprToDescriptor(e.ty)));
+      return tuple(expr.elements.map((e) => typeExprToDescriptor(e.ty, nativeRegistry, visiting)));
 
     case "object": {
       const props = expr.properties
@@ -215,9 +236,9 @@ export function typeExprToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
           name: m.name ?? "",
           type:
             m.memberKind === "method" && m.function
-              ? nativeFunctionToDescriptor(m.function)
+              ? nativeFunctionToDescriptor(m.function, nativeRegistry, visiting)
               : m.ty
-                ? typeExprToDescriptor(m.ty)
+                ? typeExprToDescriptor(m.ty, nativeRegistry, visiting)
                 : primitive("any"),
           optional: m.optional ?? false,
         }));
@@ -225,16 +246,20 @@ export function typeExprToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
         .filter((m) => m.memberKind === "indexSignature")
         .map((m) => ({
           keyName: m.keyName ?? "key",
-          keyType: m.keyType ? typeExprToDescriptor(m.keyType) : primitive("string"),
-          valueType: m.valueType ? typeExprToDescriptor(m.valueType) : primitive("any"),
+          keyType: m.keyType
+            ? typeExprToDescriptor(m.keyType, nativeRegistry, visiting)
+            : primitive("string"),
+          valueType: m.valueType
+            ? typeExprToDescriptor(m.valueType, nativeRegistry, visiting)
+            : primitive("any"),
           ...(m.readonly ? { readonly: true } : {}),
         }));
       const callSignatures = expr.properties
         .filter((m) => m.memberKind === "callSignature" && m.function)
-        .map((m) => nativeFunctionToDescriptor(m.function!));
+        .map((m) => nativeFunctionToDescriptor(m.function!, nativeRegistry, visiting));
       const constructSignatures = expr.properties
         .filter((m) => m.memberKind === "constructSignature" && m.function)
-        .map((m) => nativeFunctionToDescriptor(m.function!));
+        .map((m) => nativeFunctionToDescriptor(m.function!, nativeRegistry, visiting));
       return object(props, {
         ...(indexSignatures.length > 0 ? { indexSignatures } : {}),
         ...(callSignatures.length > 0 ? { callSignatures } : {}),
@@ -245,24 +270,35 @@ export function typeExprToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
     case "function": {
       const params = expr.parameters.map((p) => ({
         name: p.name ?? "",
-        type: typeExprToDescriptor(p.ty),
+        type: typeExprToDescriptor(p.ty, nativeRegistry, visiting),
         optional: p.optional,
       }));
       const returnType = expr.returnType
-        ? typeExprToDescriptor(expr.returnType)
+        ? typeExprToDescriptor(expr.returnType, nativeRegistry, visiting)
         : primitive("void");
-      return func(params, returnType);
+      return func(params, returnType, {
+        typeParameters: expr.typeParameters?.map((typeParam) =>
+          nativeTypeParameterToDescriptor(typeParam, nativeRegistry, visiting),
+        ),
+      });
     }
 
     case "ref":
       if (expr.typeArguments.length > 0) {
-        return typeRef(expr.name, expr.typeArguments.map(typeExprToDescriptor));
+        return typeRef(
+          expr.name,
+          expr.typeArguments.map((typeArgument) =>
+            typeExprToDescriptor(typeArgument, nativeRegistry, visiting),
+          ),
+        );
       }
       return typeRef(expr.name);
 
+    case "typeParameter":
+      return nativeTypeParameterToDescriptor(expr, nativeRegistry, visiting);
+
     case "keyOf":
     case "typeOf":
-    case "indexedAccess":
     case "conditional":
     case "mapped":
     case "templateLiteral":
@@ -272,8 +308,18 @@ export function typeExprToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
       // If they reach here, they couldn't be reduced — fall back to unknown.
       return unknown(nativeTypeExprToString(expr));
 
+    case "indexedAccess": {
+      const resolved = nativeRegistry
+        ? resolveNativeIndexedAccess(expr, nativeRegistry, visiting)
+        : undefined;
+      if (resolved) {
+        return typeExprToDescriptor(resolved, nativeRegistry, visiting);
+      }
+      return unknown(nativeTypeExprToString(expr));
+    }
+
     case "parenthesized":
-      return typeExprToDescriptor(expr.inner);
+      return typeExprToDescriptor(expr.inner, nativeRegistry, visiting);
 
     case "unknown":
       return unknown(expr.raw);
@@ -283,15 +329,118 @@ export function typeExprToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
   }
 }
 
-function nativeFunctionToDescriptor(expr: NativeFunctionExpr) {
+function nativeFunctionToDescriptor(
+  expr: NativeFunctionExpr,
+  nativeRegistry?: NativeTypeRegistry,
+  visiting: Set<string> = new Set(),
+) {
   return func(
     (expr.parameters ?? []).map((p) => ({
       name: p.name ?? "",
-      type: typeExprToDescriptor(p.ty),
+      type: typeExprToDescriptor(p.ty, nativeRegistry, visiting),
       optional: p.optional,
     })),
-    expr.returnType ? typeExprToDescriptor(expr.returnType) : primitive("void"),
+    expr.returnType
+      ? typeExprToDescriptor(expr.returnType, nativeRegistry, visiting)
+      : primitive("void"),
+    {
+      typeParameters: expr.typeParameters?.map((typeParam) =>
+        nativeTypeParameterToDescriptor(typeParam, nativeRegistry, visiting),
+      ),
+    },
   );
+}
+
+function nativeTypeParameterToDescriptor(
+  expr: NativeTypeParameter,
+  nativeRegistry?: NativeTypeRegistry,
+  visiting: Set<string> = new Set(),
+) {
+  return typeParameter(expr.name, {
+    ...(expr.constraint
+      ? { constraint: typeExprToDescriptor(expr.constraint, nativeRegistry, visiting) }
+      : {}),
+    ...(expr.default
+      ? { default: typeExprToDescriptor(expr.default, nativeRegistry, visiting) }
+      : {}),
+  });
+}
+
+function resolveNativeIndexedAccess(
+  expr: Extract<NativeTypeExpr, { kind: "indexedAccess" }>,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+): NativeTypeExpr | undefined {
+  const objectExpr = resolveNativeRegistryExpr(expr.object, nativeRegistry, visiting);
+  const indexExpr = resolveNativeRegistryExpr(expr.index, nativeRegistry, visiting);
+  if (indexExpr.kind !== "literal" || indexExpr.literalKind !== "string") {
+    return undefined;
+  }
+
+  const property = resolveNativeObjectProperty(objectExpr, indexExpr.value);
+  if (!property) {
+    return undefined;
+  }
+
+  if (!property.optional) {
+    return property.ty;
+  }
+
+  return {
+    kind: "union",
+    types: [property.ty, { kind: "primitive", name: "undefined" }],
+  };
+}
+
+function resolveNativeRegistryExpr(
+  expr: NativeTypeExpr,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+): NativeTypeExpr {
+  if (expr.kind === "parenthesized") {
+    return resolveNativeRegistryExpr(expr.inner, nativeRegistry, visiting);
+  }
+
+  if (expr.kind === "ref" && expr.typeArguments.length === 0) {
+    if (visiting.has(expr.name)) {
+      return expr;
+    }
+    const resolved = nativeRegistry.get(expr.name);
+    if (!resolved) {
+      return expr;
+    }
+    visiting.add(expr.name);
+    const next = resolveNativeRegistryExpr(resolved, nativeRegistry, visiting);
+    visiting.delete(expr.name);
+    return next;
+  }
+
+  if (expr.kind === "indexedAccess") {
+    return resolveNativeIndexedAccess(expr, nativeRegistry, visiting) ?? expr;
+  }
+
+  return expr;
+}
+
+function resolveNativeObjectProperty(
+  expr: NativeTypeExpr,
+  propertyName: string,
+): { ty: NativeTypeExpr; optional: boolean } | undefined {
+  if (expr.kind !== "object") {
+    return undefined;
+  }
+
+  const member = expr.properties.find(
+    (candidate) => candidate.memberKind === "property" && candidate.name === propertyName,
+  );
+  if (!member?.ty) {
+    return undefined;
+  }
+
+  return {
+    ty: member.ty,
+    optional: member.optional ?? false,
+  };
 }
 
 /**

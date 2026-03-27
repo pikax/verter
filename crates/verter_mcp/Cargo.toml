@@ -24,10 +24,10 @@ verter_analysis = { path = "../verter_analysis" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 rmcp = { version = "1", features = [
-    "server",
-    "macros",
-    "transport-io",
-    "transport-streamable-http-server",
+  "server",
+  "macros",
+  "transport-io",
+  "transport-streamable-http-server",
 ] }
 tokio = { version = "1", features = ["full"] }
 serde = { workspace = true }

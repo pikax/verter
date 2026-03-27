@@ -36,11 +36,13 @@ const CONSTNESS_THEME_COLORS: Record<ConstnessCategory, string> = {
  * props that are always const across all usage sites can skip reactive tracking.
  */
 export class PropConstnessDecorationProvider implements Disposable {
-  private decorationTypes: Map<ConstnessCategory, TextEditorDecorationType> =
-    new Map();
+  private decorationTypes: Map<ConstnessCategory, TextEditorDecorationType> = new Map();
   private subscriptions: Disposable[] = [];
   private enabled = false;
-  private _lastState: Map<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = new Map();
+  private _lastState: Map<
+    string,
+    Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+  > = new Map();
 
   constructor(private getClient: () => PatchClient<LanguageClient>) {
     this.readConfig();
@@ -182,8 +184,14 @@ export class PropConstnessDecorationProvider implements Disposable {
   }
 
   /** Returns the last-applied decoration ranges by category (for E2E testing). */
-  getState(): Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> {
-    const result: Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = {};
+  getState(): Record<
+    string,
+    Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+  > {
+    const result: Record<
+      string,
+      Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
+    > = {};
     for (const [category, ranges] of this._lastState) {
       result[category] = ranges;
     }
@@ -197,9 +205,7 @@ export class PropConstnessDecorationProvider implements Disposable {
   }
 }
 
-function classifyPropConstness(
-  constness: PropValueConstness,
-): ConstnessCategory | undefined {
+function classifyPropConstness(constness: PropValueConstness): ConstnessCategory | undefined {
   switch (constness) {
     case "Const":
       return "const";

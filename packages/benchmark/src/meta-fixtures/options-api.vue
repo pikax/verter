@@ -1,8 +1,8 @@
 <script lang="ts">
-import { defineComponent } from 'vue'
+import { defineComponent } from "vue";
 
 export default defineComponent({
-  name: 'OptionsCard',
+  name: "OptionsCard",
   props: {
     title: {
       type: String,
@@ -17,40 +17,40 @@ export default defineComponent({
       default: () => [],
     },
     variant: {
-      type: String as () => 'default' | 'outlined' | 'filled',
-      default: 'default',
+      type: String as () => "default" | "outlined" | "filled",
+      default: "default",
     },
   },
   emits: {
-    select: (item: string) => typeof item === 'string',
+    select: (item: string) => typeof item === "string",
     clear: () => true,
-    'update:count': (value: number) => typeof value === 'number',
+    "update:count": (value: number) => typeof value === "number",
   },
-  expose: ['reset', 'scrollTo'],
+  expose: ["reset", "scrollTo"],
   data() {
     return {
       isExpanded: false,
-    }
+    };
   },
   computed: {
     hasItems(): boolean {
-      return this.items.length > 0
+      return this.items.length > 0;
     },
   },
   methods: {
     reset() {
-      this.isExpanded = false
-      this.$emit('update:count', 0)
+      this.isExpanded = false;
+      this.$emit("update:count", 0);
     },
     scrollTo(index: number) {
-      const el = this.$refs[`item-${index}`] as HTMLElement | undefined
-      el?.scrollIntoView()
+      const el = this.$refs[`item-${index}`] as HTMLElement | undefined;
+      el?.scrollIntoView();
     },
     toggle() {
-      this.isExpanded = !this.isExpanded
+      this.isExpanded = !this.isExpanded;
     },
   },
-})
+});
 </script>
 
 <template>
@@ -59,12 +59,7 @@ export default defineComponent({
     <div v-if="isExpanded">
       <slot name="header" />
       <ul v-if="hasItems">
-        <li
-          v-for="(item, i) in items"
-          :key="i"
-          :ref="`item-${i}`"
-          @click="$emit('select', item)"
-        >
+        <li v-for="(item, i) in items" :key="i" :ref="`item-${i}`" @click="$emit('select', item)">
           {{ item }}
         </li>
       </ul>

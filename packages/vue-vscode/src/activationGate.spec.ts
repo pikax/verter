@@ -29,10 +29,7 @@ describe("createActivationGate", () => {
   });
 
   it("retries after a failed activation attempt", async () => {
-    const start = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("boom"))
-      .mockResolvedValueOnce("ready");
+    const start = vi.fn().mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce("ready");
 
     const gate = createActivationGate(start);
 

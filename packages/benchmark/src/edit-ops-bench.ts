@@ -22,9 +22,7 @@ const __dirname = dirname(__filename);
 // ---------------------------------------------------------------------------
 
 /** An edit operation: either keep a range from the original, or insert new content. */
-type EditOp =
-  | { type: "keep"; start: number; end: number }
-  | { type: "insert"; content: string };
+type EditOp = { type: "keep"; start: number; end: number } | { type: "insert"; content: string };
 
 interface Fixture {
   name: string;
@@ -154,10 +152,7 @@ function computeEditOps(original: string, compiled: string): EditOp[] {
     for (const origPos of allCandidates) {
       // Extend the match as far as possible
       let matchLen = 0;
-      const maxLen = Math.min(
-        original.length - origPos,
-        compiled.length - compiledPos,
-      );
+      const maxLen = Math.min(original.length - origPos, compiled.length - compiledPos);
       while (
         matchLen < maxLen &&
         original[origPos + matchLen] === compiled[compiledPos + matchLen]
@@ -167,8 +162,7 @@ function computeEditOps(original: string, compiled: string): EditOp[] {
 
       if (
         matchLen >= MIN_MATCH_LEN &&
-        (!bestMatch ||
-          matchLen > bestMatch.origEnd - bestMatch.origStart)
+        (!bestMatch || matchLen > bestMatch.origEnd - bestMatch.origStart)
       ) {
         bestMatch = {
           origStart: origPos,
@@ -212,10 +206,7 @@ function computeEditOps(original: string, compiled: string): EditOp[] {
 
       if (nextMatch) {
         // Insert everything up to the next match
-        const insertContent = compiled.substring(
-          compiledPos,
-          nextMatchPos,
-        );
+        const insertContent = compiled.substring(compiledPos, nextMatchPos);
         if (insertContent.length > 0) {
           ops.push({ type: "insert", content: insertContent });
         }
@@ -257,10 +248,7 @@ function applyEditOps(original: string, ops: EditOp[]): string {
  * Apply edit operations using MagicString (more realistic — preserves sourcemaps).
  * Builds a new MagicString by composing chunks.
  */
-function applyEditOpsWithMagicString(
-  _original: string,
-  ops: EditOp[],
-): string {
+function applyEditOpsWithMagicString(_original: string, ops: EditOp[]): string {
   // MagicString doesn't directly support "build from ops" — it patches an existing string.
   // For a fair comparison, simulate by building the output with string concatenation
   // (which is what MagicString.toString() effectively does internally for sourcemaps).
@@ -283,11 +271,7 @@ function applyEditOpsWithMagicString(
  * as a MagicString, then overwrite/remove/prepend/append to produce the compiled output.
  * This is the most realistic "edit ops" implementation.
  */
-function applyWithMagicStringOnOriginal(
-  original: string,
-  compiled: string,
-  ops: EditOp[],
-): string {
+function applyWithMagicStringOnOriginal(original: string, compiled: string, ops: EditOp[]): string {
   // Build a MagicString from a buffer large enough to hold the output.
   // We prepend the generated header, keep original ranges, and append the rest.
   const s = new MagicString(original);
@@ -425,9 +409,7 @@ function printSubHeader(title: string) {
 
 async function benchEditOpsVsFullString(analyses: FixtureAnalysis[]) {
   printHeader("EDIT-OPS vs FULL-STRING — DATA SIZE COMPARISON");
-  console.log(
-    "  Compares data transferred: full compiled string vs edit-ops payload",
-  );
+  console.log("  Compares data transferred: full compiled string vs edit-ops payload");
 
   console.log(
     `\n    ${"Fixture".padEnd(25)} ${"Source".padStart(10)} ${"Compiled".padStart(10)} ${"Edit Payload".padStart(13)} ${"Edit Wire".padStart(11)} ${"Savings".padStart(9)}`,
@@ -435,10 +417,7 @@ async function benchEditOpsVsFullString(analyses: FixtureAnalysis[]) {
   console.log("    " + "─".repeat(78));
 
   for (const a of analyses) {
-    const savings = (
-      (1 - a.editOpsWireSize / a.compiledCode.length) *
-      100
-    ).toFixed(0);
+    const savings = ((1 - a.editOpsWireSize / a.compiledCode.length) * 100).toFixed(0);
     const keepOps = a.editOps.filter((o) => o.type === "keep").length;
     const insertOps = a.editOps.filter((o) => o.type === "insert").length;
     console.log(
@@ -449,9 +428,7 @@ async function benchEditOpsVsFullString(analyses: FixtureAnalysis[]) {
 
 async function benchJsSideApplicationCost(analyses: FixtureAnalysis[]) {
   printHeader("EDIT-OPS — JS-SIDE APPLICATION COST");
-  console.log(
-    "  Measures how long JS takes to reconstruct the output from edit-ops",
-  );
+  console.log("  Measures how long JS takes to reconstruct the output from edit-ops");
 
   for (const a of analyses) {
     printSubHeader(
@@ -472,11 +449,7 @@ async function benchJsSideApplicationCost(analyses: FixtureAnalysis[]) {
 
     // MagicString on original (most realistic for sourcemaps)
     bench.add("MagicString: prepend/remove/append", () => {
-      applyWithMagicStringOnOriginal(
-        a.fixture.source,
-        a.compiledCode,
-        a.editOps,
-      );
+      applyWithMagicStringOnOriginal(a.fixture.source, a.compiledCode, a.editOps);
     });
 
     // Baseline: just receiving a string (simulates getVirtualFile JS overhead)
@@ -493,12 +466,8 @@ async function benchJsSideApplicationCost(analyses: FixtureAnalysis[]) {
 
 async function benchEndToEnd(analyses: FixtureAnalysis[], host: VerterHost) {
   printHeader("END-TO-END — getVirtualFile vs EDIT-OPS TOTAL");
-  console.log(
-    "  Current: getVirtualFile returns full string",
-  );
-  console.log(
-    "  Alternative: getVirtualFile returns edit-ops + JS applies them",
-  );
+  console.log("  Current: getVirtualFile returns full string");
+  console.log("  Alternative: getVirtualFile returns edit-ops + JS applies them");
 
   for (const a of analyses) {
     printSubHeader(
@@ -540,25 +509,18 @@ async function benchEndToEnd(analyses: FixtureAnalysis[], host: VerterHost) {
 
 async function benchNapiTransferCost(host: VerterHost, analyses: FixtureAnalysis[]) {
   printHeader("NAPI TRANSFER COST — STRING SIZE vs LATENCY");
-  console.log(
-    "  Measures how getVirtualFile latency correlates with output size",
-  );
-  console.log(
-    "  This reveals per-byte NAPI transfer overhead",
-  );
+  console.log("  Measures how getVirtualFile latency correlates with output size");
+  console.log("  This reveals per-byte NAPI transfer overhead");
 
   const bench = new Bench({ time: 2000, warmupIterations: 30 });
 
   for (const a of analyses) {
-    bench.add(
-      `getVirtualFile: ${a.fixture.name} (${fmtBytes(a.compiledCode.length)})`,
-      () => {
-        host.getVirtualFile({
-          canonicalId: `${a.fixture.name}.vue`,
-          nodeKind: { kind: "main" },
-        });
-      },
-    );
+    bench.add(`getVirtualFile: ${a.fixture.name} (${fmtBytes(a.compiledCode.length)})`, () => {
+      host.getVirtualFile({
+        canonicalId: `${a.fixture.name}.vue`,
+        nodeKind: { kind: "main" },
+      });
+    });
   }
 
   await bench.run();
@@ -630,9 +592,7 @@ async function main() {
   for (const a of analyses) {
     const reconstructed = applyEditOps(a.fixture.source, a.editOps);
     if (reconstructed !== a.compiledCode) {
-      console.log(
-        `  WARNING: ${a.fixture.name} edit-ops reconstruction mismatch!`,
-      );
+      console.log(`  WARNING: ${a.fixture.name} edit-ops reconstruction mismatch!`);
       console.log(`    Expected length: ${a.compiledCode.length}`);
       console.log(`    Got length: ${reconstructed.length}`);
       // Find first difference

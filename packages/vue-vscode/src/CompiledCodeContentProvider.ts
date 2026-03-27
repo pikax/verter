@@ -80,10 +80,9 @@ export default class CompiledCodeContentProvider implements TextDocumentContentP
       return;
     }
 
-    const response = await this.getLanguageClient().sendRequest(
-      RequestType.GetCompiledCode,
-      { uri: this.selectedVueFile },
-    );
+    const response = await this.getLanguageClient().sendRequest(RequestType.GetCompiledCode, {
+      uri: this.selectedVueFile,
+    });
 
     const path = this.selectedVueFile.replace("file://", "");
 

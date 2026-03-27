@@ -14,8 +14,14 @@ const host = new VerterHost({ devMode: false, analysisLevel: "none" });
 
 // Use one of the actual mergeProps mismatch files
 const VERTER_TEST_REPOS = process.env.VERTER_TEST_REPOS;
-if (!VERTER_TEST_REPOS) { console.error('Set VERTER_TEST_REPOS env var'); process.exit(1); }
-const file = path.join(VERTER_TEST_REPOS, "balancer-frontend-v2/src/components/contextual/pages/vebal/MultiVoting/VoteInput.vue");
+if (!VERTER_TEST_REPOS) {
+  console.error("Set VERTER_TEST_REPOS env var");
+  process.exit(1);
+}
+const file = path.join(
+  VERTER_TEST_REPOS,
+  "balancer-frontend-v2/src/components/contextual/pages/vebal/MultiVoting/VoteInput.vue",
+);
 if (!fs.existsSync(file)) {
   console.log("File not found:", file);
   process.exit(1);
@@ -59,7 +65,10 @@ const verterNorm = normalizeForComparison(verterBody);
 // Find first diff
 let diffAt = 0;
 for (let i = 0; i < Math.min(vueNorm.length, verterNorm.length); i++) {
-  if (vueNorm[i] !== verterNorm[i]) { diffAt = i; break; }
+  if (vueNorm[i] !== verterNorm[i]) {
+    diffAt = i;
+    break;
+  }
 }
 
 console.log("First diff at char", diffAt);
@@ -69,7 +78,7 @@ console.log("Verter: ..." + verterNorm.substring(Math.max(0, diffAt - 60), diffA
 // Also show the raw context around the diff
 // Find corresponding position in raw vue body
 const beforeStr = vueNorm.substring(Math.max(0, diffAt - 30), diffAt);
-const rawIdx = vueBody?.indexOf(beforeStr.replace(/\s+/g, ' '));
+const rawIdx = vueBody?.indexOf(beforeStr.replace(/\s+/g, " "));
 if (rawIdx !== -1 && rawIdx !== undefined) {
   console.log("\n--- Vue raw around diff ---");
   console.log(vueBody.substring(Math.max(0, rawIdx), rawIdx + 300));

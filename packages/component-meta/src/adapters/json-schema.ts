@@ -101,6 +101,9 @@ export function typeToJsonSchema(type: TypeDescriptor): JSONSchema {
       // Functions can't be represented in JSON Schema
       return {};
 
+    case "typeParameter":
+      return { description: type.name };
+
     case "ref":
       // Named type reference — cannot resolve without context
       return { description: type.name };

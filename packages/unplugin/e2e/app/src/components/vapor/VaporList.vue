@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const items = ref(['Alpha', 'Beta', 'Gamma'])
+const items = ref(["Alpha", "Beta", "Gamma"]);
 
 function addItem() {
-  items.value.push(`Item ${items.value.length + 1}`)
+  items.value.push(`Item ${items.value.length + 1}`);
 }
 </script>
 

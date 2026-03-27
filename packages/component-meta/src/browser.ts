@@ -41,6 +41,7 @@ export type {
   ObjectIndexSignature,
   FunctionType,
   FunctionParameter,
+  TypeParameterType,
   EnumType,
   EnumMember,
   RefType,
@@ -56,6 +57,7 @@ export {
   tuple,
   object,
   func,
+  typeParameter,
   ref,
   unknown,
 } from "./type-ir.js";

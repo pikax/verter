@@ -18,6 +18,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::codec::{line_column_to_offset_utf16, offset_to_line_column_utf16};
 use crate::protocol::*;
+use crate::trace::{type_runtime_trace_event, type_runtime_trace_scope};
 use crate::traits::{ProviderFuture, TypeProvider};
 
 /// Environment variables to strip from child processes to prevent VS Code/Electron
@@ -27,6 +28,41 @@ pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &[
     "VSCODE_INSPECTOR_OPTIONS",
     "ELECTRON_RUN_AS_NODE",
 ];
+
+fn trace_preview(contents: &str, max_len: usize) -> String {
+    let mut preview = String::new();
+    for ch in contents.chars().take(max_len) {
+        match ch {
+            '\n' => preview.push_str("\\n"),
+            '\r' => preview.push_str("\\r"),
+            '\t' => preview.push_str("\\t"),
+            _ => preview.push(ch),
+        }
+    }
+    if contents.chars().count() > max_len {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn summarize_tsserver_args(arguments: &serde_json::Value) -> String {
+    let file = arguments
+        .get("file")
+        .or_else(|| arguments.get("fileName"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("-");
+    let line = arguments
+        .get("line")
+        .and_then(|value| value.as_u64())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let offset = arguments
+        .get("offset")
+        .and_then(|value| value.as_u64())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!("file={} line={} offset={}", file, line, offset)
+}
 
 /// Message sent to the dedicated stdin writer task.
 enum TsserverStdinMessage {
@@ -72,6 +108,14 @@ impl TsserverTransport {
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
+        let _trace = type_runtime_trace_scope(
+            "tsserver_transport_request",
+            format!(
+                "command={} {}",
+                command,
+                summarize_tsserver_args(&arguments),
+            ),
+        );
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
         let msg = serde_json::json!({
@@ -102,14 +146,49 @@ impl TsserverTransport {
                         .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown error");
+                    type_runtime_trace_event(
+                        "tsserver_transport_request_error",
+                        format!("command={} seq={} message={}", command, seq, msg),
+                    );
                     return Err(TypeProviderError::new(msg));
                 }
+                type_runtime_trace_event(
+                    "tsserver_transport_request_result",
+                    format!(
+                        "command={} seq={} body_kind={}",
+                        command,
+                        seq,
+                        val.get("body")
+                            .map(|body| match body {
+                                serde_json::Value::Null => "null",
+                                serde_json::Value::Array(_) => "array",
+                                serde_json::Value::Object(_) => "object",
+                                serde_json::Value::String(_) => "string",
+                                serde_json::Value::Bool(_) => "bool",
+                                serde_json::Value::Number(_) => "number",
+                            })
+                            .unwrap_or("missing"),
+                    ),
+                );
                 Ok(val.get("body").cloned().unwrap_or(serde_json::Value::Null))
             }
-            Ok(Err(_)) => Err(TypeProviderError::new("response channel closed")),
+            Ok(Err(_)) => {
+                type_runtime_trace_event(
+                    "tsserver_transport_request_error",
+                    format!(
+                        "command={} seq={} message=response channel closed",
+                        command, seq
+                    ),
+                );
+                Err(TypeProviderError::new("response channel closed"))
+            }
             Err(_) => {
                 // Timeout — clean up the pending entry to prevent leak
                 self.pending.lock().await.remove(&seq);
+                type_runtime_trace_event(
+                    "tsserver_transport_request_error",
+                    format!("command={} seq={} message=timeout", command, seq),
+                );
                 Err(TypeProviderError::new(format!(
                     "request '{command}' timed out after 10s"
                 )))
@@ -123,6 +202,14 @@ impl TsserverTransport {
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<(), TypeProviderError> {
+        let _trace = type_runtime_trace_scope(
+            "tsserver_transport_command",
+            format!(
+                "command={} {}",
+                command,
+                summarize_tsserver_args(&arguments),
+            ),
+        );
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
         let msg = serde_json::json!({
@@ -140,6 +227,10 @@ impl TsserverTransport {
             .await
             .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
+        type_runtime_trace_event(
+            "tsserver_transport_command_result",
+            format!("command={} seq={} queued=true", command, seq),
+        );
         Ok(())
     }
 }
@@ -591,6 +682,15 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope(
+                "tsserver_open_file",
+                format!(
+                    "file={} content_len={} project_root={}",
+                    file,
+                    content.len(),
+                    project_root,
+                ),
+            );
             contents_cache
                 .lock()
                 .await
@@ -611,7 +711,12 @@ impl TypeProvider for TsserverTypeProvider {
                         "projectRootPath": project_root,
                     }),
                 )
-                .await
+                .await?;
+            type_runtime_trace_event(
+                "tsserver_open_file_result",
+                format!("file={} opened=true", file),
+            );
+            Ok(())
         })
     }
 
@@ -626,7 +731,12 @@ impl TypeProvider for TsserverTypeProvider {
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope(
+                "tsserver_load_file",
+                format!("file={} content_len={}", file, content.len()),
+            );
             contents_cache.lock().await.insert(file, content);
+            type_runtime_trace_event("tsserver_load_file_result", "cached_only=true".to_string());
             Ok(())
         })
     }
@@ -639,6 +749,15 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope(
+                "tsserver_update_file",
+                format!(
+                    "file={} content_len={} project_root={}",
+                    file,
+                    content.len(),
+                    project_root,
+                ),
+            );
             // Read old content's line count BEFORE inserting new content.
             // tsserver validates the end line against the old file's line map,
             // so we must use the actual old line count (not a hardcoded sentinel).
@@ -674,7 +793,12 @@ impl TypeProvider for TsserverTypeProvider {
                                 }]
                             }),
                         )
-                        .await
+                        .await?;
+                    type_runtime_trace_event(
+                        "tsserver_update_file_result",
+                        format!("file={} mode=update_open old_line_count={}", file, end_line),
+                    );
+                    Ok(())
                 } else {
                     // No old content in cache (shouldn't happen since opened_files
                     // is only set when content was sent) — close and reopen
@@ -695,7 +819,12 @@ impl TypeProvider for TsserverTypeProvider {
                                 }]
                             }),
                         )
-                        .await
+                        .await?;
+                    type_runtime_trace_event(
+                        "tsserver_update_file_result",
+                        format!("file={} mode=reopen_after_cache_miss", file),
+                    );
+                    Ok(())
                 }
             } else {
                 // File not open yet — open it and track
@@ -718,7 +847,12 @@ impl TypeProvider for TsserverTypeProvider {
                             "projectRootPath": project_root,
                         }),
                     )
-                    .await
+                    .await?;
+                type_runtime_trace_event(
+                    "tsserver_update_file_result",
+                    format!("file={} mode=first_open", file),
+                );
+                Ok(())
             }
         })
     }
@@ -729,11 +863,14 @@ impl TypeProvider for TsserverTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
         Box::pin(async move {
+            let _trace = type_runtime_trace_scope("tsserver_close_file", format!("file={}", file));
             contents_cache.lock().await.remove(&file);
             opened_files.lock().await.remove(&file);
             transport
                 .command_no_response("close", serde_json::json!({ "file": file }))
-                .await
+                .await?;
+            type_runtime_trace_event("tsserver_close_file_result", "closed=true".to_string());
+            Ok(())
         })
     }
 
@@ -793,13 +930,23 @@ impl TypeProvider for TsserverTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
+            let (line, col, cache_hit) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
+                    Some(c) => {
+                        let (line, col) = byte_offset_to_tsserver_pos(c, offset);
+                        (line, col, true)
+                    }
+                    None => (1, offset + 1, false),
                 }
             };
+            let _trace = type_runtime_trace_scope(
+                "tsserver_get_hover",
+                format!(
+                    "file={} offset={} line={} col={} content_cache_hit={}",
+                    file, offset, line, col, cache_hit,
+                ),
+            );
 
             let result = transport
                 .request(
@@ -831,10 +978,25 @@ impl TypeProvider for TsserverTypeProvider {
                         tracing::debug!(
                             "tsserver quickinfo: empty displayString for {file} at {line}:{col}"
                         );
+                        type_runtime_trace_event(
+                            "tsserver_get_hover_result",
+                            format!("file={} empty_display=true", file),
+                        );
                         return Ok(None);
                     }
 
                     let contents = format_quickinfo_hover(kind, display, docs);
+                    type_runtime_trace_event(
+                        "tsserver_get_hover_result",
+                        format!(
+                            "file={} empty_display=false kind={} display_len={} docs_len={} preview={}",
+                            file,
+                            kind,
+                            display.len(),
+                            docs.len(),
+                            trace_preview(&contents, 120),
+                        ),
+                    );
 
                     Ok(Some(HoverInfo {
                         contents,
@@ -844,7 +1006,99 @@ impl TypeProvider for TsserverTypeProvider {
                 }
                 Err(e) => {
                     tracing::warn!("tsserver quickinfo error for {file}: {e}");
+                    type_runtime_trace_event(
+                        "tsserver_get_hover_result",
+                        format!("file={} error={}", file, e),
+                    );
                     Ok(None)
+                }
+            }
+        })
+    }
+
+    fn get_completion_details<'a>(
+        &'a self,
+        path: &'a str,
+        offset: u32,
+        items: &'a [Completion],
+    ) -> ProviderFuture<'a, Vec<Completion>> {
+        let file = Self::normalize_path(path);
+        let transport = Arc::clone(&self.transport);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            if items.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+            let _trace = type_runtime_trace_scope(
+                "tsserver_get_completion_details",
+                format!(
+                    "file={} offset={} line={} col={} item_count={}",
+                    file,
+                    offset,
+                    line,
+                    col,
+                    items.len(),
+                ),
+            );
+
+            let entry_names: Vec<_> = items
+                .iter()
+                .map(|item| serde_json::json!({ "name": item.label }))
+                .collect();
+            let result = transport
+                .request(
+                    "completionEntryDetails",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                        "entryNames": entry_names,
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let detail_map: HashMap<String, &serde_json::Value> = body
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|detail| {
+                            detail
+                                .get("name")
+                                .and_then(|value| value.as_str())
+                                .map(|name| (name.to_string(), detail))
+                        })
+                        .collect();
+                    let enriched = items
+                        .iter()
+                        .map(|item| {
+                            detail_map
+                                .get(&item.label)
+                                .map(|detail| enrich_tsserver_completion(item, detail))
+                                .unwrap_or_else(|| item.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    type_runtime_trace_event(
+                        "tsserver_get_completion_details_result",
+                        format!("file={} item_count={} enriched=true", file, enriched.len()),
+                    );
+                    Ok(enriched)
+                }
+                Err(error) => {
+                    type_runtime_trace_event(
+                        "tsserver_get_completion_details_result",
+                        format!("file={} item_count={} error={}", file, items.len(), error),
+                    );
+                    Ok(items.to_vec())
                 }
             }
         })
@@ -1679,6 +1933,67 @@ pub fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion>
     })
 }
 
+fn enrich_tsserver_completion(item: &Completion, detail: &serde_json::Value) -> Completion {
+    let display = tsserver_display_parts_text(detail.get("displayParts"));
+    let documentation = tsserver_completion_documentation(detail);
+    Completion {
+        label: item.label.clone(),
+        kind: item.kind,
+        detail: if display.is_empty() {
+            item.detail.clone()
+        } else {
+            Some(display)
+        },
+        documentation: documentation.or_else(|| item.documentation.clone()),
+        edit_range_start: item.edit_range_start,
+        edit_range_end: item.edit_range_end,
+        insert_text: item.insert_text.clone(),
+        sort_text: item.sort_text.clone(),
+        data: item.data.clone(),
+    }
+}
+
+fn tsserver_display_parts_text(parts: Option<&serde_json::Value>) -> String {
+    parts
+        .and_then(|value| value.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
+fn tsserver_completion_documentation(detail: &serde_json::Value) -> Option<String> {
+    let documentation = tsserver_display_parts_text(detail.get("documentation"));
+    let tag_text = detail
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|tag| {
+                    let name = tag.get("name").and_then(|value| value.as_str())?;
+                    let text = tsserver_display_parts_text(tag.get("text"));
+                    Some(if text.is_empty() {
+                        format!("@{name}")
+                    } else {
+                        format!("@{name} {text}")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    let combined = match (documentation.is_empty(), tag_text.is_empty()) {
+        (true, true) => return None,
+        (false, true) => documentation,
+        (true, false) => tag_text,
+        (false, false) => format!("{documentation}\n{tag_text}"),
+    };
+    Some(combined)
+}
+
 /// Parse a tsserver location (used in definition/references responses).
 ///
 /// tsserver locations have: `{ file, start: {line, offset}, end: {line, offset} }`
@@ -1702,7 +2017,15 @@ pub fn parse_tsserver_location(
     let el = end.get("line")?.as_u64()? as u32;
     let eo = end.get("offset")?.as_u64()? as u32;
 
-    let (s, e) = if let Some(content) = contents_cache.get(&file) {
+    let disk_content;
+    let content = if let Some(content) = contents_cache.get(&file) {
+        Some(content.as_str())
+    } else {
+        disk_content = std::fs::read_to_string(&file).ok();
+        disk_content.as_deref()
+    };
+
+    let (s, e) = if let Some(content) = content {
         (
             tsserver_pos_to_byte_offset(content, sl, so),
             tsserver_pos_to_byte_offset(content, el, eo),
@@ -2366,6 +2689,33 @@ mod tests {
             "start must NOT be a packed position for line 10+"
         );
         assert!(parsed.start < 200, "start should be a small byte offset");
+    }
+
+    #[test]
+    fn test_parse_tsserver_location_without_cache_reads_disk_content() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "verter-tsserver-location-disk-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let file_path = temp_root.join("types.ts");
+        let content = "export interface Props {\n  label: string;\n}\n";
+        std::fs::write(&file_path, content).unwrap();
+        let file_key = file_path.to_string_lossy().replace('\\', "/");
+        let cache = HashMap::new();
+
+        let loc = serde_json::json!({
+            "file": file_key,
+            "start": { "line": 2, "offset": 3 },
+            "end": { "line": 2, "offset": 8 },
+        });
+
+        let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+        assert_eq!(parsed.start, 27);
+        assert_eq!(parsed.end, 32);
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     #[test]

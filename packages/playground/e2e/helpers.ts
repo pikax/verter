@@ -14,10 +14,7 @@ export async function getPreviewFrame(page: Page) {
 }
 
 /** Collect console errors from the preview iframe for a given duration */
-export async function collectIframeErrors(
-  page: Page,
-  duration: number = 3000,
-): Promise<string[]> {
+export async function collectIframeErrors(page: Page, duration: number = 3000): Promise<string[]> {
   const errors: string[] = [];
 
   page.on("console", (msg) => {
@@ -98,9 +95,7 @@ export async function getOutputCode(page: Page): Promise<string> {
   }
 
   // Sort by vertical position and join
-  const sorted = [...allLines.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([, text]) => text);
+  const sorted = [...allLines.entries()].sort(([a], [b]) => a - b).map(([, text]) => text);
   return sorted.join("\n");
 }
 

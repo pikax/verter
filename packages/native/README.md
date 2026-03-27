@@ -97,14 +97,14 @@ import { Workspace, VerterHost } from "@verter/native";
 const ws = new Workspace(["/path/to/project"]);
 
 // File reads
-const content = await ws.readFile("/src/App.vue");     // string | null
-const exists  = await ws.fileExists("/src/App.vue");   // boolean
-const isDir   = await ws.isDir("/src");                 // boolean
-const real    = await ws.realpath("/src/link.vue");     // string | null
+const content = await ws.readFile("/src/App.vue"); // string | null
+const exists = await ws.fileExists("/src/App.vue"); // boolean
+const isDir = await ws.isDir("/src"); // boolean
+const real = await ws.realpath("/src/link.vue"); // string | null
 
 // Directory listing
-const entries = await ws.readDir("/src");               // {path, isDir}[]
-const files   = await ws.walk("/src", ["node_modules", ".git"], [".vue", ".ts"]);
+const entries = await ws.readDir("/src"); // {path, isDir}[]
+const files = await ws.walk("/src", ["node_modules", ".git"], [".vue", ".ts"]);
 
 // File writes
 await ws.writeFile("/src/new.ts", "export const x = 1;");
@@ -120,11 +120,13 @@ const resolved = await ws.resolveImport("/src/App.vue", "./Child.vue");
 const types = await ws.resolveImport("/src/App.vue", "pkg", "provider", "type");
 
 // Project configuration
-ws.configureProjects([{
-  root: "/project",
-  workspaceRoot: "/project",
-  compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
-}]);
+ws.configureProjects([
+  {
+    root: "/project",
+    workspaceRoot: "/project",
+    compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+  },
+]);
 
 // Create host backed by workspace
 const host = VerterHost.withWorkspace({ devMode: true }, ws);

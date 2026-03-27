@@ -127,7 +127,7 @@ function isMcpAlreadyConfigured(workspaceRoot: string): boolean {
     const mcpJsonPath = join(workspaceRoot, ".mcp.json");
     if (!existsSync(mcpJsonPath)) return false;
     const config = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
-    return !!(config?.mcpServers?.verter);
+    return !!config?.mcpServers?.verter;
   } catch {
     return false;
   }

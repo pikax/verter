@@ -29,7 +29,9 @@ When adding tests with AI assistance, mark them appropriately:
 
 // For individual tests in existing files:
 // @ai-generated - Tests X functionality with Y scenarios
-it("does something", () => { /* ... */ });
+it("does something", () => {
+  /* ... */
+});
 ```
 
 ### Sourcemap Testing
@@ -55,6 +57,7 @@ cargo test --package verter_core 2>&1 | tail -60  # Truncated output
 When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file to keep source files focused on production code.
 
 **For standalone files** (e.g., `analysis.rs`):
+
 ```rust
 // In analysis.rs:
 #[cfg(test)]
@@ -63,6 +66,7 @@ mod analysis_tests;
 ```
 
 **For `mod.rs` files** (e.g., `ide/template/mod.rs`):
+
 ```rust
 // In mod.rs — loads tests.rs from the same directory:
 #[cfg(test)]
@@ -82,6 +86,7 @@ Small rule files (e.g., diagnostic rules at 50-150 lines) can keep tests inline.
 3. **Refactor** while keeping tests green
 
 This applies to:
+
 - **New features**: Add tests covering the new functionality
 - **Bug fixes**: Add tests that would have caught the bug
 - **Refactoring**: Ensure existing tests pass, add tests for edge cases discovered
@@ -125,8 +130,8 @@ assert!(
 ```typescript
 // GOOD
 expect(output).toContain('_createElementVNode("div")');
-expect(output).not.toContain('v-for');
-expect(output).not.toContain('v-if');
+expect(output).not.toContain("v-for");
+expect(output).not.toContain("v-if");
 
 // BAD
 expect(output).toContain('_createElementVNode("div")');

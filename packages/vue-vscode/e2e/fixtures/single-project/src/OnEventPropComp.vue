@@ -1,8 +1,8 @@
 <script setup lang="ts">
 defineProps<{
-  label: string
-  onAlert?: (payload: string) => void
-}>()
+  label: string;
+  onAlert?: (payload: string) => void;
+}>();
 </script>
 
 <template>

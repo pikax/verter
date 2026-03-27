@@ -182,7 +182,5 @@ export function findStyleBlockAt(
   // Edge case: if line is beyond source, offset stays 0
   if (currentLine < line) return undefined;
 
-  return blocks.find(
-    (b) => offset >= b.contentStartOffset && offset <= b.contentEndOffset,
-  );
+  return blocks.find((b) => offset >= b.contentStartOffset && offset <= b.contentEndOffset);
 }

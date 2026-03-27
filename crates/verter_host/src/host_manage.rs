@@ -85,6 +85,25 @@ thread_local! {
     static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
 }
 
+pub(crate) fn current_component_meta_trace_cursor(
+) -> Option<crate::component_meta_host::ComponentMetaTraceCursor> {
+    COMPONENT_META_TRACE_STACK.with(|stack| {
+        let stack = stack.borrow();
+        let current = stack.last().copied()?;
+        let caller_id = stack
+            .len()
+            .checked_sub(2)
+            .and_then(|index| stack.get(index).copied())
+            .map(|ctx| ctx.span_id);
+        Some(crate::component_meta_host::ComponentMetaTraceCursor {
+            request_id: current.trace_id,
+            span_id: current.span_id,
+            caller_id,
+            depth: stack.len().saturating_sub(1),
+        })
+    })
+}
+
 fn component_meta_trace_output_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -278,6 +297,7 @@ pub(crate) fn component_meta_trace_event(name: &'static str, detail: impl Into<S
 }
 
 const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
+const COMPONENT_META_RETRY_MAX_SYMBOLIC_STEPS: usize = 50_000;
 const COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS: usize = 2_000;
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
@@ -612,11 +632,59 @@ pub(crate) fn component_meta_symbolic_step_budget() -> usize {
     COMPONENT_META_MAX_SYMBOLIC_STEPS
 }
 
-fn component_meta_expansion_budget() -> verter_analysis::type_expand::ExpansionBudget {
+fn component_meta_expansion_budget_with_max_symbolic_work(
+    max_symbolic_work: usize,
+) -> verter_analysis::type_expand::ExpansionBudget {
     verter_analysis::type_expand::ExpansionBudget {
-        max_symbolic_work: COMPONENT_META_MAX_SYMBOLIC_STEPS,
+        max_symbolic_work,
         ..Default::default()
     }
+}
+
+fn component_meta_expansion_budget() -> verter_analysis::type_expand::ExpansionBudget {
+    component_meta_expansion_budget_with_max_symbolic_work(COMPONENT_META_MAX_SYMBOLIC_STEPS)
+}
+
+fn expanded_component_types_hit_symbolic_budget(
+    types: &verter_analysis::type_expand::ExpandedComponentTypes,
+) -> bool {
+    use verter_analysis::type_expand::ExpansionStopReason;
+
+    let field_has_budget = |field: &verter_analysis::type_expand::ExpandedField| {
+        field
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+    };
+    let macro_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroObjectShape| {
+        shape
+            .result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+    };
+    let props_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroProps| {
+        shape
+            .result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+    };
+
+    types.props.iter().any(field_has_budget)
+        || types.emits.iter().any(field_has_budget)
+        || types.slot_bindings.iter().any(field_has_budget)
+        || types.bindings.iter().any(field_has_budget)
+        || types.define_props.iter().any(props_has_budget)
+        || types.define_emits.iter().any(macro_has_budget)
+        || types.define_slots.iter().any(macro_has_budget)
+}
+
+fn computed_evaluated_types_hit_symbolic_budget(computed: &ComputedEvaluatedTypes) -> bool {
+    computed
+        .evaluated_types
+        .as_ref()
+        .is_some_and(expanded_component_types_hit_symbolic_budget)
 }
 
 fn macro_debug_summary(snapshot: &FileAnalysisSnapshot) -> String {
@@ -664,8 +732,9 @@ struct HostImportedEvalResolver<'a> {
     alias_env_stack: rustc_hash::FxHashSet<String>,
     budget: ImportedEvalTraversalBudget,
     external_type_cache: verter_resolver::ExternalTypeBodyCache,
-    snapshot_cache: rustc_hash::FxHashMap<String, Option<FileAnalysisSnapshot>>,
-    eval_source_cache: rustc_hash::FxHashMap<String, Option<String>>,
+    snapshot_cache: RefCell<rustc_hash::FxHashMap<String, Option<FileAnalysisSnapshot>>>,
+    eval_source_cache: RefCell<rustc_hash::FxHashMap<String, Option<String>>>,
+    type_dependency_cache: RefCell<rustc_hash::FxHashMap<(String, String), Option<String>>>,
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
@@ -702,8 +771,9 @@ impl<'a> HostImportedEvalResolver<'a> {
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
             external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
-            snapshot_cache: rustc_hash::FxHashMap::default(),
-            eval_source_cache: rustc_hash::FxHashMap::default(),
+            snapshot_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+            eval_source_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+            type_dependency_cache: RefCell::new(rustc_hash::FxHashMap::default()),
             store_view,
         }
     }
@@ -729,11 +799,81 @@ impl<'a> HostImportedEvalResolver<'a> {
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
             external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
-            snapshot_cache: rustc_hash::FxHashMap::default(),
-            eval_source_cache: rustc_hash::FxHashMap::default(),
+            snapshot_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+            eval_source_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+            type_dependency_cache: RefCell::new(rustc_hash::FxHashMap::default()),
             store_view,
         }
     }
+
+    fn cached_eval_source(&self, canonical_id: &str) -> Option<String> {
+        if let Some(cached) = self.eval_source_cache.borrow().get(canonical_id).cloned() {
+            return cached;
+        }
+
+        let loaded = self
+            .host
+            .current_eval_state_in_view(canonical_id, self.store_view)
+            .map(|(source, cached_parse, _)| {
+                VerterHost::build_eval_script_source(&source, cached_parse.as_deref())
+            });
+        self.eval_source_cache
+            .borrow_mut()
+            .insert(canonical_id.to_string(), loaded.clone());
+        loaded
+    }
+
+    fn cached_type_dependency_canonical(
+        &self,
+        owner_canonical_id: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        let key = (owner_canonical_id.to_string(), import_source.to_string());
+        if let Some(cached) = self.type_dependency_cache.borrow().get(&key).cloned() {
+            return cached;
+        }
+
+        let resolved = self.host.resolve_type_dependency_canonical_in_view(
+            owner_canonical_id,
+            import_source,
+            self.store_view,
+        );
+        self.type_dependency_cache
+            .borrow_mut()
+            .insert(key, resolved.clone());
+        resolved
+    }
+}
+
+fn exact_resolution_uses_type_preferred_target(
+    phase: verter_vfs::ResolvePhase,
+    kind: verter_vfs::ResolveRequestKind,
+) -> bool {
+    matches!(
+        (phase, kind),
+        (
+            verter_vfs::ResolvePhase::CodegenBlocker,
+            verter_vfs::ResolveRequestKind::TypeImport
+        ) | (verter_vfs::ResolvePhase::ProviderGraph, _)
+    )
+}
+
+fn is_runtime_script_target(canonical_id: &str) -> bool {
+    canonical_id.ends_with(".js")
+        || canonical_id.ends_with(".jsx")
+        || canonical_id.ends_with(".mjs")
+        || canonical_id.ends_with(".cjs")
+}
+
+fn is_type_preferred_target(canonical_id: &str) -> bool {
+    canonical_id.ends_with(".d.ts")
+        || canonical_id.ends_with(".d.mts")
+        || canonical_id.ends_with(".d.cts")
+        || canonical_id.ends_with(".ts")
+        || canonical_id.ends_with(".tsx")
+        || canonical_id.ends_with(".mts")
+        || canonical_id.ends_with(".cts")
+        || canonical_id.ends_with(".vue")
 }
 
 impl ExportGraphResolver for HostExportGraphResolver<'_> {
@@ -872,11 +1012,7 @@ impl DeclarationMetadataResolver for HostImportedEvalResolver<'_> {
         from_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        self.host.resolve_type_dependency_canonical_in_view(
-            from_canonical,
-            import_source,
-            self.store_view,
-        )
+        self.cached_type_dependency_canonical(from_canonical, import_source)
     }
 }
 
@@ -886,9 +1022,8 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         import: &verter_analysis::AnalyzedImport,
     ) -> Option<String> {
-        import
-            .resolved_canonical_id
-            .clone()
+        self.cached_type_dependency_canonical(owner_canonical_id, &import.source)
+            .or_else(|| import.resolved_canonical_id.clone())
             .or_else(|| {
                 self.dep_resolutions
                     .get(&import.source)
@@ -899,18 +1034,6 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
                     .get(&import.source)
                     .and_then(DependencyResolution::effective_target)
                     .map(str::to_string)
-            })
-            .or_else(|| {
-                if !self.allow_live_dependency_fallback
-                    && self.dep_resolutions.contains_key(&import.source)
-                {
-                    return None;
-                }
-                self.host.resolve_type_dependency_canonical_in_view(
-                    owner_canonical_id,
-                    &import.source,
-                    self.store_view,
-                )
             })
             .or_else(|| {
                 // Fallback: resolve relative imports via path manipulation when VFS
@@ -1089,9 +1212,8 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         import: &verter_analysis::AnalyzedImport,
     ) -> Option<String> {
-        import
-            .resolved_canonical_id
-            .clone()
+        self.cached_type_dependency_canonical(owner_canonical_id, &import.source)
+            .or_else(|| import.resolved_canonical_id.clone())
             .or_else(|| {
                 self.dep_resolutions
                     .get(&import.source)
@@ -1102,18 +1224,6 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
                     .get(&import.source)
                     .and_then(DependencyResolution::effective_target)
                     .map(str::to_string)
-            })
-            .or_else(|| {
-                if !self.allow_live_dependency_fallback
-                    && self.dep_resolutions.contains_key(&import.source)
-                {
-                    return None;
-                }
-                self.host.resolve_type_dependency_canonical_in_view(
-                    owner_canonical_id,
-                    &import.source,
-                    self.store_view,
-                )
             })
             .or_else(|| {
                 (self.store_view.is_none() && import.source.starts_with('.'))
@@ -1167,11 +1277,7 @@ impl ImportedEvalOwnerContextResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
     ) -> String {
-        self.host
-            .current_eval_state_in_view(owner_canonical_id, self.store_view)
-            .map(|(source, cached_parse, _)| {
-                VerterHost::build_eval_script_source(&source, cached_parse.as_deref())
-            })
+        self.cached_eval_source(owner_canonical_id)
             .unwrap_or_default()
     }
 
@@ -1363,16 +1469,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
     }
 
     fn load_eval_source_for_merge(&mut self, canonical_id: &str) -> Option<String> {
-        self.eval_source_cache
-            .entry(canonical_id.to_string())
-            .or_insert_with(|| {
-                self.host
-                    .current_eval_state_in_view(canonical_id, self.store_view)
-                    .map(|(source, cached_parse, _)| {
-                        VerterHost::build_eval_script_source(&source, cached_parse.as_deref())
-                    })
-            })
-            .clone()
+        self.cached_eval_source(canonical_id)
     }
 
     fn import_bindings_for_merge(
@@ -1380,14 +1477,18 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         canonical_id: &str,
         eval_source: &str,
     ) -> Vec<ImportedEvalBinding> {
-        let snapshot = self
-            .snapshot_cache
-            .entry(canonical_id.to_string())
-            .or_insert_with(|| {
-                self.host
-                    .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)
-            })
-            .clone();
+        let snapshot = if let Some(cached) = self.snapshot_cache.borrow().get(canonical_id).cloned()
+        {
+            cached
+        } else {
+            let loaded = self
+                .host
+                .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view);
+            self.snapshot_cache
+                .borrow_mut()
+                .insert(canonical_id.to_string(), loaded.clone());
+            loaded
+        };
 
         if let Some(snapshot) = snapshot {
             return snapshot
@@ -1439,9 +1540,8 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         binding: &ImportedEvalBinding,
     ) -> Option<String> {
-        binding
-            .resolved_canonical_id
-            .clone()
+        self.cached_type_dependency_canonical(owner_canonical_id, &binding.source)
+            .or_else(|| binding.resolved_canonical_id.clone())
             .or_else(|| {
                 self.dep_resolutions
                     .get(&binding.source)
@@ -1452,13 +1552,6 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
                     .get(&binding.source)
                     .and_then(DependencyResolution::effective_target)
                     .map(str::to_string)
-            })
-            .or_else(|| {
-                self.host.resolve_type_dependency_canonical_in_view(
-                    owner_canonical_id,
-                    &binding.source,
-                    self.store_view,
-                )
             })
             .or_else(|| {
                 (self.store_view.is_none() && binding.source.starts_with('.'))
@@ -1512,6 +1605,120 @@ impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
 }
 
 impl VerterHost {
+    fn exact_resolution_candidates(
+        resolved_canonical_id: Option<&String>,
+        possible_canonical_ids: &[String],
+    ) -> Vec<String> {
+        let mut candidates = Vec::with_capacity(
+            possible_canonical_ids.len() + usize::from(resolved_canonical_id.is_some()),
+        );
+        if let Some(resolved) = resolved_canonical_id {
+            candidates.push(resolved.clone());
+        }
+        for candidate in possible_canonical_ids {
+            if !candidates.iter().any(|existing| existing == candidate) {
+                candidates.push(candidate.clone());
+            }
+        }
+        candidates
+    }
+
+    fn resolve_existing_canonical_in_workspace(&self, canonical_id: &str) -> Option<String> {
+        if !self.ws().file_exists(canonical_id) {
+            return None;
+        }
+        Some(
+            self.ws()
+                .realpath(canonical_id)
+                .map(|path| canonicalize_id(&path).into_owned())
+                .unwrap_or_else(|| canonical_id.to_string()),
+        )
+    }
+
+    fn resolve_declaration_companion_in_workspace(&self, canonical_id: &str) -> Option<String> {
+        let normalized = canonicalize_id(canonical_id);
+        let normalized = normalized.as_ref();
+        let (runtime_ext, companion_exts): (&str, &[&str]) = if normalized.ends_with(".mjs") {
+            (".mjs", &[".d.mts", ".d.ts"])
+        } else if normalized.ends_with(".cjs") {
+            (".cjs", &[".d.cts", ".d.ts"])
+        } else if normalized.ends_with(".jsx") {
+            (".jsx", &[".d.ts"])
+        } else if normalized.ends_with(".js") {
+            (".js", &[".d.ts"])
+        } else {
+            return None;
+        };
+
+        let stem = normalized.strip_suffix(runtime_ext)?;
+        companion_exts.iter().find_map(|companion_ext| {
+            self.resolve_existing_canonical_in_workspace(&format!("{stem}{companion_ext}"))
+        })
+    }
+
+    fn package_dir_for_resolved_target(canonical_id: &str) -> Option<String> {
+        let normalized = canonicalize_id(canonical_id);
+        let normalized = normalized.as_ref();
+        let marker = "/node_modules/";
+        let marker_index = normalized.rfind(marker)?;
+        let package_start = marker_index + marker.len();
+        let package_path = &normalized[package_start..];
+        let mut segments = package_path.split('/');
+        let first = segments.next()?;
+        let package_suffix = if first.starts_with('@') {
+            format!("{first}/{}", segments.next()?)
+        } else {
+            first.to_string()
+        };
+        Some(format!("{}{package_suffix}", &normalized[..package_start]))
+    }
+
+    fn resolve_manifest_types_entry_for_target(
+        &self,
+        resolved_canonical_id: &str,
+    ) -> Option<String> {
+        let package_dir = Self::package_dir_for_resolved_target(resolved_canonical_id)?;
+        let package_json_path = format!("{package_dir}/package.json");
+        let manifest = self.ws().read_package_manifest(&package_json_path)?;
+        let type_targets = [manifest.types.clone(), manifest.typings.clone()];
+        type_targets.into_iter().flatten().find_map(|target| {
+            let candidate = if target.starts_with("./") {
+                format!("{package_dir}/{}", target.trim_start_matches("./"))
+            } else if target.starts_with('/') {
+                target
+            } else {
+                format!("{package_dir}/{target}")
+            };
+            self.resolve_existing_canonical_in_workspace(&candidate)
+        })
+    }
+
+    fn derive_type_preferred_exact_target(
+        &self,
+        resolution: &DependencyResolution,
+    ) -> Option<String> {
+        let candidates = Self::exact_resolution_candidates(
+            resolution.resolved_canonical_id.as_ref(),
+            &resolution.possible_canonical_ids,
+        );
+        if let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| is_type_preferred_target(candidate))
+            .cloned()
+        {
+            return Some(candidate);
+        }
+
+        let resolved = resolution.resolved_canonical_id.as_deref()?;
+        if let Some(companion) = self.resolve_declaration_companion_in_workspace(resolved) {
+            return Some(companion);
+        }
+        if resolved.contains("/node_modules/") && is_runtime_script_target(resolved) {
+            return self.resolve_manifest_types_entry_for_target(resolved);
+        }
+        (!resolved.contains("/node_modules/")).then(|| resolved.to_string())
+    }
+
     pub(crate) fn store_view_allows_current_whole_hash(
         &self,
         canonical_id: &str,
@@ -1525,6 +1732,45 @@ impl VerterHost {
         view.accepts_whole_hash(canonical_id, whole_hash)
             || (!view.tracks_whole_hash(canonical_id)
                 && self.current_store_view_epoch() == view.mutation_epoch())
+    }
+
+    fn sfc_script_setup_type_params(
+        source: &str,
+        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+    ) -> Vec<verter_analysis::type_expr::TypeParam> {
+        let Some(setup) = cached_parse.and_then(|parsed| parsed.script_setup()) else {
+            return Vec::new();
+        };
+        let Some(generic_span) = setup.generic else {
+            return Vec::new();
+        };
+        let clause = source[generic_span.start as usize..generic_span.end as usize].trim();
+        if clause.is_empty() {
+            return Vec::new();
+        }
+        verter_analysis::type_eval_build::parse_type_parameter_clause(clause)
+    }
+
+    fn apply_sfc_script_setup_type_params(
+        env: &mut verter_analysis::type_eval::EvalEnv,
+        source: &str,
+        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+    ) {
+        for param in Self::sfc_script_setup_type_params(source, cached_parse) {
+            env.type_bindings.insert(
+                param.name.clone(),
+                Arc::new(verter_analysis::type_expr::TypeExpr::type_parameter(param)),
+            );
+        }
+    }
+
+    fn owner_generic_type_bindings(
+        env: &verter_analysis::type_eval::EvalEnv,
+    ) -> rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr> {
+        env.type_bindings
+            .iter()
+            .map(|(name, bound)| (name.clone(), (**bound).clone()))
+            .collect()
     }
 
     pub(crate) fn build_eval_script_source(
@@ -1669,7 +1915,8 @@ impl VerterHost {
             }
 
             let eval_source = Self::build_eval_script_source(&source, cached_parse.as_deref());
-            let env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
+            let mut env = verter_analysis::type_eval_build::parse_and_build_env(&eval_source);
+            Self::apply_sfc_script_setup_type_params(&mut env, &source, cached_parse.as_deref());
             component_meta_trace_event(
                 "base_eval_env_built",
                 format!(
@@ -2357,6 +2604,67 @@ impl VerterHost {
                 },
             )
         })?;
+        let owner_env = owner_env;
+        let mut computed = self.compute_evaluated_types_with_budget_from_owner_context_in_view(
+            canonical,
+            snapshot,
+            imported_inputs,
+            &eval_source,
+            owner_env.clone(),
+            store_view,
+            component_meta_expansion_budget(),
+        )?;
+
+        if COMPONENT_META_RETRY_MAX_SYMBOLIC_STEPS > COMPONENT_META_MAX_SYMBOLIC_STEPS
+            && computed_evaluated_types_hit_symbolic_budget(&computed)
+        {
+            component_meta_trace_event(
+                "compute_evaluated_types_retry",
+                format!(
+                    "owner={} from={} to={}",
+                    canonical,
+                    COMPONENT_META_MAX_SYMBOLIC_STEPS,
+                    COMPONENT_META_RETRY_MAX_SYMBOLIC_STEPS,
+                ),
+            );
+            if component_meta_debug_enabled() {
+                component_meta_debug(format!(
+                    "compute_evaluated_types owner={} retrying symbolic expansion budget from {} to {}",
+                    canonical,
+                    COMPONENT_META_MAX_SYMBOLIC_STEPS,
+                    COMPONENT_META_RETRY_MAX_SYMBOLIC_STEPS,
+                ));
+            }
+            if let Some(retried) = self
+                .compute_evaluated_types_with_budget_from_owner_context_in_view(
+                    canonical,
+                    snapshot,
+                    imported_inputs,
+                    &eval_source,
+                    owner_env,
+                    store_view,
+                    component_meta_expansion_budget_with_max_symbolic_work(
+                        COMPONENT_META_RETRY_MAX_SYMBOLIC_STEPS,
+                    ),
+                )
+            {
+                computed = retried;
+            }
+        }
+
+        Some(computed)
+    }
+
+    fn compute_evaluated_types_with_budget_from_owner_context_in_view(
+        &self,
+        canonical: &str,
+        snapshot: &FileAnalysisSnapshot,
+        imported_inputs: &ImportedEvalInputs,
+        eval_source: &str,
+        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        budget: verter_analysis::type_expand::ExpansionBudget,
+    ) -> Option<ComputedEvaluatedTypes> {
         let built = self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
             canonical,
             snapshot,
@@ -2370,10 +2678,9 @@ impl VerterHost {
         let mut lookup =
             ImportedEvalLookup::new(&mut resolver, canonical, snapshot.imports.as_slice());
 
-        let budget = component_meta_expansion_budget();
         let result = verter_analysis::type_eval_build::expand_macro_types_with_lookup(
             snapshot.macros.as_ref(),
-            Some(&eval_source),
+            Some(eval_source),
             &mut env,
             Some(&built.requested_binding_names),
             &budget,
@@ -2382,14 +2689,16 @@ impl VerterHost {
         let discovered_dependencies = lookup.into_discovered_dependencies();
         if component_meta_debug_enabled() {
             component_meta_debug(format!(
-                "compute_evaluated_types owner={} props={} define_props={} emits={} slot_bindings={} bindings={} discovered_deps={}",
+                "compute_evaluated_types owner={} max_symbolic_work={} props={} define_props={} emits={} slot_bindings={} bindings={} discovered_deps={} budget_exhausted={}",
                 canonical,
+                budget.max_symbolic_work,
                 result.props.len(),
                 result.define_props.len(),
                 result.emits.len(),
                 result.slot_bindings.len(),
                 result.bindings.len(),
                 discovered_dependencies.len(),
+                expanded_component_types_hit_symbolic_budget(&result),
             ));
         }
         Some(ComputedEvaluatedTypes {
@@ -4838,39 +5147,79 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let parse_deps = self.parse_dependency_set_for_file(&canonical);
 
-        // Build VFS exact resolutions for ALL relevant (phase, kind) contexts.
-        let vfs_resolutions: Vec<verter_vfs::ExactResolution> = resolutions
-            .iter()
-            .flat_map(|r| {
-                let resolved = r.resolved_canonical_id.as_ref().map(|id| {
-                    let norm = canonicalize_id(id);
+        // Runtime codegen honors caller-provided targets directly. Type-preferring
+        // contexts must either get a declaration-safe target or fall back to the
+        // resolver instead of being pinned to runtime JS/CJS package entrypoints.
+        let mut vfs_resolutions = Vec::new();
+        for resolution in &resolutions {
+            let resolved = resolution.resolved_canonical_id.as_ref().map(|id| {
+                let norm = canonicalize_id(id);
+                norm.into_owned()
+            });
+            let possible: Vec<String> = resolution
+                .possible_canonical_ids
+                .iter()
+                .map(|candidate| {
+                    let norm = canonicalize_id(candidate);
                     norm.into_owned()
-                });
-                let possible: Vec<String> = r
-                    .possible_canonical_ids
-                    .iter()
-                    .map(|c| {
-                        let norm = canonicalize_id(c);
-                        norm.into_owned()
-                    })
-                    .collect();
-                use verter_vfs::{ResolvePhase as P, ResolveRequestKind as K};
-                [
-                    (P::CodegenBlocker, K::EsmImport),
-                    (P::CodegenBlocker, K::TypeImport),
-                    (P::ProviderGraph, K::EsmImport),
-                    (P::ProviderGraph, K::TypeImport),
-                ]
-                .into_iter()
-                .map(move |(phase, kind)| verter_vfs::ExactResolution {
-                    specifier: r.specifier.clone(),
-                    phase,
-                    kind,
-                    resolved_canonical_id: resolved.clone(),
-                    possible_canonical_ids: possible.clone(),
                 })
-            })
-            .collect();
+                .collect();
+            let normalized_resolution = DependencyResolution {
+                specifier: resolution.specifier.clone(),
+                resolved_canonical_id: resolved.clone(),
+                possible_canonical_ids: possible.clone(),
+            };
+            let mut exact_summaries = Vec::new();
+
+            use verter_vfs::{ResolvePhase as P, ResolveRequestKind as K};
+            for (phase, kind) in [
+                (P::CodegenBlocker, K::EsmImport),
+                (P::CodegenBlocker, K::TypeImport),
+                (P::ProviderGraph, K::EsmImport),
+                (P::ProviderGraph, K::TypeImport),
+            ] {
+                let exact = if exact_resolution_uses_type_preferred_target(phase, kind) {
+                    self.derive_type_preferred_exact_target(&normalized_resolution)
+                        .map(|target| verter_vfs::ExactResolution {
+                            specifier: resolution.specifier.clone(),
+                            phase,
+                            kind,
+                            resolved_canonical_id: Some(target),
+                            possible_canonical_ids: Vec::new(),
+                        })
+                } else {
+                    Some(verter_vfs::ExactResolution {
+                        specifier: resolution.specifier.clone(),
+                        phase,
+                        kind,
+                        resolved_canonical_id: resolved.clone(),
+                        possible_canonical_ids: possible.clone(),
+                    })
+                };
+                if let Some(exact) = exact {
+                    exact_summaries.push(format!(
+                        "{phase:?}/{kind:?}->{:?}",
+                        exact
+                            .resolved_canonical_id
+                            .as_deref()
+                            .or_else(|| exact.possible_canonical_ids.first().map(String::as_str))
+                    ));
+                    vfs_resolutions.push(exact);
+                } else {
+                    exact_summaries.push(format!("{phase:?}/{kind:?}-><resolver>"));
+                }
+            }
+            if component_meta_debug_enabled() {
+                component_meta_debug(format!(
+                    "set_import_dependencies owner={} specifier={} resolved={:?} possible=[{}] exacts=[{}]",
+                    canonical,
+                    resolution.specifier,
+                    normalized_resolution.resolved_canonical_id,
+                    normalized_resolution.possible_canonical_ids.join(", "),
+                    exact_summaries.join("; "),
+                ));
+            }
+        }
 
         // Normalize resolutions and persist direct import resolutions.
         let mut dep_resolutions = rustc_hash::FxHashMap::default();
@@ -5508,7 +5857,7 @@ fn collect_required_owner_import_names_from_parts(
             owner_env.value_symbols.len(),
         ));
     }
-    let type_bindings = rustc_hash::FxHashMap::default();
+    let type_bindings = VerterHost::owner_generic_type_bindings(owner_env);
     let mut active_locals = rustc_hash::FxHashSet::default();
     let macro_type_params =
         verter_analysis::type_eval_build::collect_define_macro_type_params(owner_eval_source);
@@ -5701,7 +6050,7 @@ fn collect_required_import_names_for_type_decl(
     for param in &decl.type_parameters {
         type_bindings.insert(
             param.name.clone(),
-            verter_analysis::type_expr::TypeExpr::named(param.name.clone()),
+            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
         );
         if let Some(constraint) = param.constraint.as_deref() {
             collect_surface_eval_import_names_from_expr(
@@ -5851,6 +6200,28 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
         | TypeExpr::Infer { .. }
         | TypeExpr::Unknown { .. }
         | TypeExpr::TypeOf(_) => {}
+        TypeExpr::TypeParameter(param) => {
+            if let Some(constraint) = param.constraint.as_deref() {
+                collect_slot_eval_import_names_from_expr_with_mode(
+                    constraint,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                    mode,
+                );
+            }
+            if let Some(default) = param.default.as_deref() {
+                collect_slot_eval_import_names_from_expr_with_mode(
+                    default,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                    mode,
+                );
+            }
+        }
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
             for ty in types.iter() {
                 collect_slot_eval_import_names_from_expr_with_mode(
@@ -5998,10 +6369,11 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
 
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let arg = type_arguments
-                        .get(index)
-                        .cloned()
-                        .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
+                    let arg = type_arguments.get(index).cloned().or_else(|| {
+                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
+                            param.clone(),
+                        ))
+                    });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
                     }
@@ -6188,7 +6560,7 @@ fn collect_slot_eval_import_names_from_function_structural(
     for param in &func.type_parameters {
         local_bindings.insert(
             param.name.clone(),
-            verter_analysis::type_expr::TypeExpr::named(param.name.clone()),
+            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
         );
         if let Some(constraint) = param.constraint.as_deref() {
             collect_slot_eval_import_names_from_expr_with_mode(
@@ -6306,10 +6678,11 @@ fn collect_slot_eval_import_names_for_member(
 
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let arg = type_arguments
-                        .get(index)
-                        .cloned()
-                        .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
+                    let arg = type_arguments.get(index).cloned().or_else(|| {
+                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
+                            param.clone(),
+                        ))
+                    });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
                     }
@@ -6472,6 +6845,26 @@ fn collect_surface_eval_import_names_from_expr(
         | TypeExpr::Literal(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::Unknown { .. } => {}
+        TypeExpr::TypeParameter(param) => {
+            if let Some(constraint) = param.constraint.as_deref() {
+                collect_surface_eval_import_names_from_expr(
+                    constraint,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+            if let Some(default) = param.default.as_deref() {
+                collect_surface_eval_import_names_from_expr(
+                    default,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
             for ty in types.iter() {
                 collect_surface_eval_import_names_from_expr(
@@ -6585,10 +6978,11 @@ fn collect_surface_eval_import_names_from_expr(
 
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let arg = type_arguments
-                        .get(index)
-                        .cloned()
-                        .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
+                    let arg = type_arguments.get(index).cloned().or_else(|| {
+                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
+                            param.clone(),
+                        ))
+                    });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
                     }
@@ -6774,10 +7168,11 @@ fn collect_surface_eval_import_names_for_member(
 
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let arg = type_arguments
-                        .get(index)
-                        .cloned()
-                        .or_else(|| param.default.as_ref().map(|default| (**default).clone()));
+                    let arg = type_arguments.get(index).cloned().or_else(|| {
+                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
+                            param.clone(),
+                        ))
+                    });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
                     }

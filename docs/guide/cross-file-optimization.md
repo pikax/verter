@@ -25,8 +25,8 @@ Cross-file optimization requires the `preCompile` option to be enabled, since Ve
 
 ```ts
 // vite.config.ts
-import { defineConfig } from 'vite'
-import VerterVite from '@verter/unplugin/vite'
+import { defineConfig } from "vite";
+import VerterVite from "@verter/unplugin/vite";
 
 export default defineConfig({
   plugins: [
@@ -35,7 +35,7 @@ export default defineConfig({
       crossFileOptimize: true,
     }),
   ],
-})
+});
 ```
 
 ## How It Works
@@ -69,14 +69,14 @@ In standard compilation, a component with dynamic props includes patch flags tha
 
 ```js
 // Without cross-file optimization
-_createVNode(AppHeader, { title: "Dashboard" }, null, 8 /* PROPS */, ["title"])
+_createVNode(AppHeader, { title: "Dashboard" }, null, 8 /* PROPS */, ["title"]);
 ```
 
 With cross-file optimization, when `title` is always constant:
 
 ```js
 // With cross-file optimization
-_createVNode(AppHeader, { title: "Dashboard" })
+_createVNode(AppHeader, { title: "Dashboard" });
 ```
 
 The patch flag and dynamic prop list are removed, so Vue skips diffing `title` entirely.
@@ -88,15 +88,15 @@ In Vapor mode, dynamic props are wrapped in `renderEffect` so Vue can re-execute
 ```js
 // Without cross-file optimization
 _renderEffect(() => {
-  _setDynamicProp(n0, "title", "Dashboard")
-})
+  _setDynamicProp(n0, "title", "Dashboard");
+});
 ```
 
 With cross-file optimization:
 
 ```js
 // With cross-file optimization
-_setDynamicProp(n0, "title", "Dashboard")
+_setDynamicProp(n0, "title", "Dashboard");
 ```
 
 The `renderEffect` wrapper is removed, and the prop is set once during initialization.

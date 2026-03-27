@@ -36,9 +36,7 @@ interface TestFileMatcher {
   regexes: RegExp[];
 }
 
-type ConfigLoadResult =
-  | { kind: "ignore" }
-  | { kind: "resolved"; matcher: TestFileMatcher | null };
+type ConfigLoadResult = { kind: "ignore" } | { kind: "resolved"; matcher: TestFileMatcher | null };
 
 const nearestMatcherCache = new Map<string, TestFileMatcher | null>();
 const parsedConfigCache = new Map<string, ConfigLoadResult>();
@@ -48,10 +46,7 @@ export function clearTestFileDetectionCache(): void {
   parsedConfigCache.clear();
 }
 
-export function isTestFileWithContext(
-  fileName: string,
-  host: TestFileDetectionHost,
-): boolean {
+export function isTestFileWithContext(fileName: string, host: TestFileDetectionHost): boolean {
   const normalizedFileName = normalizePath(fileName);
   if (isLikelyTestFileName(normalizedFileName)) {
     return true;
@@ -61,10 +56,7 @@ export function isTestFileWithContext(
   return matcher ? matcherMatchesFile(matcher, normalizedFileName) : false;
 }
 
-function findNearestMatcher(
-  fileName: string,
-  host: TestFileDetectionHost,
-): TestFileMatcher | null {
+function findNearestMatcher(fileName: string, host: TestFileDetectionHost): TestFileMatcher | null {
   const startDir = path.posix.dirname(normalizePath(fileName));
   const cached = nearestMatcherCache.get(startDir);
   if (cached !== undefined) {
@@ -219,10 +211,7 @@ function buildMatcher(
     testRegex?: string | string[] | null;
   },
 ): TestFileMatcher | null {
-  const globs = [
-    ...(config.include ?? []),
-    ...(config.testMatch ?? []),
-  ]
+  const globs = [...(config.include ?? []), ...(config.testMatch ?? [])]
     .map((pattern) => normalizeTestPattern(pattern))
     .flatMap((pattern) => {
       const compiled = globToRegExp(pattern);
@@ -248,9 +237,7 @@ function buildMatcher(
 
 function matcherMatchesFile(matcher: TestFileMatcher, fileName: string): boolean {
   const normalizedFileName = normalizePath(fileName);
-  const relativeFileName = normalizePath(
-    path.posix.relative(matcher.rootDir, normalizedFileName),
-  );
+  const relativeFileName = normalizePath(path.posix.relative(matcher.rootDir, normalizedFileName));
 
   if (relativeFileName.startsWith("../")) {
     return false;
@@ -271,9 +258,7 @@ function normalizeTestPattern(pattern: string): string {
 }
 
 function extractStringArrayProperty(sourceText: string, propertyName: string): string[] {
-  const match = new RegExp(`\\b${propertyName}\\s*:\\s*\\[([\\s\\S]*?)\\]`, "m").exec(
-    sourceText,
-  );
+  const match = new RegExp(`\\b${propertyName}\\s*:\\s*\\[([\\s\\S]*?)\\]`, "m").exec(sourceText);
   if (!match) {
     return [];
   }

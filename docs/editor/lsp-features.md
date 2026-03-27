@@ -8,38 +8,38 @@ Verter includes a full Rust LSP server (`verter-lsp`) that communicates with edi
 
 ## Text Document Features
 
-| Feature | LSP Method | Description |
-|---------|-----------|-------------|
-| Completion | `textDocument/completion` | Context-aware completions with trigger characters `.` `@` `<` `:` `"` `'` and space. Supports resolve for additional detail. |
-| Hover | `textDocument/hover` | Type information, CSS rules on template elements, matched elements on CSS selectors |
-| Definition | `textDocument/definition` | Go-to-definition for bindings, imports, CSS-to-template navigation, DOM query selectors |
-| Type Definition | `textDocument/typeDefinition` | Navigate to type declarations |
-| Declaration | `textDocument/declaration` | Navigate to declarations |
-| References | `textDocument/references` | Find all references to a symbol |
-| Rename | `textDocument/rename` | Symbol renaming with prepare support (`textDocument/prepareRename`) for validation before rename |
-| Diagnostics | `textDocument/diagnostic` | Pull-based diagnostics with inter-file dependency support. Covers script errors, template errors, and Vue-specific lint rules. |
-| Document Symbols | `textDocument/documentSymbol` | Document outline showing the structure of SFC blocks, script declarations, and template elements |
-| Document Highlight | `textDocument/documentHighlight` | Highlight all occurrences of the same symbol in the current document |
-| Signature Help | `textDocument/signatureHelp` | Function signature information with trigger characters `(` and `,`, retrigger on `,` |
+| Feature            | LSP Method                       | Description                                                                                                                    |
+| ------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Completion         | `textDocument/completion`        | Context-aware completions with trigger characters `.` `@` `<` `:` `"` `'` and space. Supports resolve for additional detail.   |
+| Hover              | `textDocument/hover`             | Type information, CSS rules on template elements, matched elements on CSS selectors                                            |
+| Definition         | `textDocument/definition`        | Go-to-definition for bindings, imports, CSS-to-template navigation, DOM query selectors                                        |
+| Type Definition    | `textDocument/typeDefinition`    | Navigate to type declarations                                                                                                  |
+| Declaration        | `textDocument/declaration`       | Navigate to declarations                                                                                                       |
+| References         | `textDocument/references`        | Find all references to a symbol                                                                                                |
+| Rename             | `textDocument/rename`            | Symbol renaming with prepare support (`textDocument/prepareRename`) for validation before rename                               |
+| Diagnostics        | `textDocument/diagnostic`        | Pull-based diagnostics with inter-file dependency support. Covers script errors, template errors, and Vue-specific lint rules. |
+| Document Symbols   | `textDocument/documentSymbol`    | Document outline showing the structure of SFC blocks, script declarations, and template elements                               |
+| Document Highlight | `textDocument/documentHighlight` | Highlight all occurrences of the same symbol in the current document                                                           |
+| Signature Help     | `textDocument/signatureHelp`     | Function signature information with trigger characters `(` and `,`, retrigger on `,`                                           |
 
 ## Navigation
 
-| Feature | LSP Method | Description |
-|---------|-----------|-------------|
-| Folding Range | `textDocument/foldingRange` | Folding ranges for SFC blocks (`<template>`, `<script>`, `<style>`) and nested template elements |
-| Selection Range | `textDocument/selectionRange` | Smart selection expansion -- progressively selects larger syntactic units |
-| Linked Editing | `textDocument/linkedEditingRange` | Rename matching open/close HTML tags simultaneously |
-| Call Hierarchy | `textDocument/prepareCallHierarchy` | Call hierarchy navigation for incoming and outgoing calls |
-| Document Link | `textDocument/documentLink` | Clickable links in source code (e.g., import paths, `src` attributes) |
+| Feature         | LSP Method                          | Description                                                                                      |
+| --------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Folding Range   | `textDocument/foldingRange`         | Folding ranges for SFC blocks (`<template>`, `<script>`, `<style>`) and nested template elements |
+| Selection Range | `textDocument/selectionRange`       | Smart selection expansion -- progressively selects larger syntactic units                        |
+| Linked Editing  | `textDocument/linkedEditingRange`   | Rename matching open/close HTML tags simultaneously                                              |
+| Call Hierarchy  | `textDocument/prepareCallHierarchy` | Call hierarchy navigation for incoming and outgoing calls                                        |
+| Document Link   | `textDocument/documentLink`         | Clickable links in source code (e.g., import paths, `src` attributes)                            |
 
 ## Code Intelligence
 
-| Feature | LSP Method | Description |
-|---------|-----------|-------------|
-| Code Actions | `textDocument/codeAction` | Quick fixes, refactoring, organize imports (`source.organizeImports`), and extract component (`refactor.extract`). Supported kinds: `source.organizeImports`, `quickfix`, `refactor`, `refactor.extract`. |
-| Code Lens | `textDocument/codeLens` | Code lens annotations displayed above code elements |
-| Inlay Hints | `textDocument/inlayHint` | Inline hints showing DOM query matched elements and `useTemplateRef` matched refs |
-| Semantic Tokens | `textDocument/semanticTokens/full` | Full semantic token support with 23 token types and 10 modifiers |
+| Feature         | LSP Method                         | Description                                                                                                                                                                                               |
+| --------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Code Actions    | `textDocument/codeAction`          | Quick fixes, refactoring, organize imports (`source.organizeImports`), and extract component (`refactor.extract`). Supported kinds: `source.organizeImports`, `quickfix`, `refactor`, `refactor.extract`. |
+| Code Lens       | `textDocument/codeLens`            | Code lens annotations displayed above code elements                                                                                                                                                       |
+| Inlay Hints     | `textDocument/inlayHint`           | Inline hints showing DOM query matched elements and `useTemplateRef` matched refs                                                                                                                         |
+| Semantic Tokens | `textDocument/semanticTokens/full` | Full semantic token support with 23 token types and 10 modifiers                                                                                                                                          |
 
 ### Semantic Token Types
 
@@ -55,18 +55,18 @@ The following 10 modifiers can be applied to any token type:
 
 ## Formatting and Color
 
-| Feature | LSP Method | Description |
-|---------|-----------|-------------|
-| Document Formatting | `textDocument/formatting` | Format the entire document |
-| Color Information | `textDocument/documentColor` | CSS color picker with color presentation support |
+| Feature             | LSP Method                   | Description                                      |
+| ------------------- | ---------------------------- | ------------------------------------------------ |
+| Document Formatting | `textDocument/formatting`    | Format the entire document                       |
+| Color Information   | `textDocument/documentColor` | CSS color picker with color presentation support |
 
 ## Workspace Features
 
-| Feature | LSP Method | Description |
-|---------|-----------|-------------|
-| Workspace Symbols | `workspace/symbol` | Project-wide symbol search across all `.vue` files |
-| Workspace Folders | `workspace/workspaceFolders` | Multi-root workspace support with change notifications |
-| File Operations | `workspace/didCreateFiles`, `workspace/didDeleteFiles` | Tracks file creation and deletion for cache invalidation |
+| Feature           | LSP Method                                             | Description                                              |
+| ----------------- | ------------------------------------------------------ | -------------------------------------------------------- |
+| Workspace Symbols | `workspace/symbol`                                     | Project-wide symbol search across all `.vue` files       |
+| Workspace Folders | `workspace/workspaceFolders`                           | Multi-root workspace support with change notifications   |
+| File Operations   | `workspace/didCreateFiles`, `workspace/didDeleteFiles` | Tracks file creation and deletion for cache invalidation |
 
 ## Document Synchronization
 
@@ -106,9 +106,9 @@ Each feature module in `features/` handles one or more related LSP methods. The 
 
 The LSP delegates TypeScript type checking to an external process. Two backends are supported:
 
-| Backend | Binary | Protocol | Use Case |
-|---------|--------|----------|----------|
-| **TSGO** | `tsgo` (Go binary) | LSP over stdio | Fast, native TS checking (preview) |
+| Backend      | Binary             | Protocol               | Use Case                             |
+| ------------ | ------------------ | ---------------------- | ------------------------------------ |
+| **TSGO**     | `tsgo` (Go binary) | LSP over stdio         | Fast, native TS checking (preview)   |
 | **tsserver** | `node tsserver.js` | Newline-delimited JSON | Workspace TS version, plugin support |
 
 Provider selection is configured via the `--type-provider` CLI arg or `verter.typeProvider` VS Code setting. See [Settings Reference](/editor/settings#type-provider) for details.

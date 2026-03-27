@@ -2,14 +2,23 @@
   "name": "@verter/component-meta",
   "version": "0.0.1-beta.1",
   "description": "Extract Vue component metadata (props, events, slots, models, expose) with a generic Type IR",
-  "keywords": ["vue", "component", "metadata", "props", "storybook", "histoire", "zod", "json-schema"],
+  "keywords": [
+    "component",
+    "histoire",
+    "json-schema",
+    "metadata",
+    "props",
+    "storybook",
+    "vue",
+    "zod"
+  ],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
+  "author": "pikax",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "pikax",
-  "homepage": "https://verterjs.dev/",
   "files": [
     "dist",
     "readme.md",
@@ -66,6 +75,12 @@
   "dependencies": {
     "@verter/native": "workspace:*"
   },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0",
+    "zod": "^3.24.4"
+  },
   "peerDependencies": {
     "@verter/wasm": "workspace:*",
     "zod": "^3.0.0"
@@ -77,11 +92,5 @@
     "zod": {
       "optional": true
     }
-  },
-  "devDependencies": {
-    "@types/node": "^22.15.3",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0",
-    "zod": "^3.24.4"
   }
 }

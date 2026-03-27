@@ -32,20 +32,20 @@ Alternatively, you can build from source (see [Building from Source](#building-f
 
 ## Commands
 
-| Command | ID | Description |
-|---------|----|----|
-| Restart Language Server | `verter.restartLanguageServer` | Restart the Verter LSP server |
-| Show Compiled Code to Side | `verter.showCompiledCodeToSide` | View generated TSX in a side panel |
-| Write Virtual Files | `verter.writeVirtualFiles` | Write virtual files to disk for debugging |
-| Show Statistics | `verter.showStatistics` | Display processing statistics |
-| Open Virtual File | `verter.openVirtualFile` | Open a virtual file in the editor |
-| Show Source Map | `verter.showSourceMapForFile` | Show source map for the current file |
-| Refresh Virtual Files | `verter.refreshVirtualFiles` | Refresh the virtual files view |
-| Refresh Analysis | `verter.refreshAnalysis` | Refresh the analysis view |
-| Show Source Map Visualization | `verter.showSourceMapVisualization` | Show source map visualization side-by-side |
-| Go to Component Definition | `verter.goToComponent` | Navigate to a component's definition file |
-| Go to Parent File | `verter.goToParentFile` | Navigate to the parent file |
-| Setup MCP for Claude Code | `verter.setupMcpForClaudeCode` | Configure `.mcp.json` for Claude Code MCP integration |
+| Command                       | ID                                  | Description                                           |
+| ----------------------------- | ----------------------------------- | ----------------------------------------------------- |
+| Restart Language Server       | `verter.restartLanguageServer`      | Restart the Verter LSP server                         |
+| Show Compiled Code to Side    | `verter.showCompiledCodeToSide`     | View generated TSX in a side panel                    |
+| Write Virtual Files           | `verter.writeVirtualFiles`          | Write virtual files to disk for debugging             |
+| Show Statistics               | `verter.showStatistics`             | Display processing statistics                         |
+| Open Virtual File             | `verter.openVirtualFile`            | Open a virtual file in the editor                     |
+| Show Source Map               | `verter.showSourceMapForFile`       | Show source map for the current file                  |
+| Refresh Virtual Files         | `verter.refreshVirtualFiles`        | Refresh the virtual files view                        |
+| Refresh Analysis              | `verter.refreshAnalysis`            | Refresh the analysis view                             |
+| Show Source Map Visualization | `verter.showSourceMapVisualization` | Show source map visualization side-by-side            |
+| Go to Component Definition    | `verter.goToComponent`              | Navigate to a component's definition file             |
+| Go to Parent File             | `verter.goToParentFile`             | Navigate to the parent file                           |
+| Setup MCP for Claude Code     | `verter.setupMcpForClaudeCode`      | Configure `.mcp.json` for Claude Code MCP integration |
 
 ## Analysis Sidebar
 

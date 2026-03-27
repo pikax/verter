@@ -254,9 +254,12 @@ test.describe("Editor LSP Features", () => {
       await expect(errorLine).toBeVisible({ timeout: 10000 });
 
       await expect
-        .poll(async () => errorLine.locator("span.squiggly-error", { hasText: "oops_marker" }).count(), {
-          timeout: 15000,
-        })
+        .poll(
+          async () => errorLine.locator("span.squiggly-error", { hasText: "oops_marker" }).count(),
+          {
+            timeout: 15000,
+          },
+        )
         .toBeGreaterThan(0);
 
       const emojiLine = page

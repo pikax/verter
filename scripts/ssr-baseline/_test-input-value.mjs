@@ -21,7 +21,10 @@ function compileVue(source, filename) {
     } catch {}
   }
   const result = compileTemplate({
-    source: descriptor.template.content, filename, id: filename, ssr: true,
+    source: descriptor.template.content,
+    filename,
+    id: filename,
+    ssr: true,
     compilerOptions: { mode: "module", bindingMetadata: bm },
   });
   if (result.errors?.length) return null;
@@ -33,7 +36,12 @@ function compileVerter(source, filePath) {
   const result = host.getVirtualFile({
     canonicalId: upsertResult.canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: { filename: path.basename(filePath), ssr: true, forceJs: true, sourceMap: false },
+    compileProfile: {
+      filename: path.basename(filePath),
+      ssr: true,
+      forceJs: true,
+      sourceMap: false,
+    },
   });
   return result?.code;
 }
@@ -49,17 +57,23 @@ function showDiff(label, source) {
 }
 
 // Test: v-model on native input in SSR
-showDiff("v-model on native input", `<script setup>
+showDiff(
+  "v-model on native input",
+  `<script setup>
 const modelValue = defineModel()
 </script>
 <template>
   <input v-model="modelValue" class="test" />
-</template>`);
+</template>`,
+);
 
 // Test: v-model on root input (with _attrs)
-showDiff("v-model on root input", `<script setup>
+showDiff(
+  "v-model on root input",
+  `<script setup>
 const modelValue = defineModel()
 </script>
 <template>
   <input v-model="modelValue" class="test" />
-</template>`);
+</template>`,
+);

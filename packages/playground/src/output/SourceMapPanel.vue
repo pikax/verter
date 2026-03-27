@@ -19,9 +19,7 @@ const generatedCode = computed(() => {
 const sourceMapJson = computed(() => {
   const file = props.store.activeFile;
   if (!file) return "";
-  return mapSource.value === "types"
-    ? file.compiled.typesSourceMap
-    : file.compiled.verterSourceMap;
+  return mapSource.value === "types" ? file.compiled.typesSourceMap : file.compiled.verterSourceMap;
 });
 
 const hasJsMap = computed(() => !!props.store.activeFile?.compiled.verterSourceMap);
@@ -77,14 +75,14 @@ const highlightedVueLine = computed<number | null>(() => {
 
 /** Color palette for mapping segments (cycles through) */
 const SEGMENT_COLORS = [
-  "rgba(59, 130, 246, 0.2)",   // blue
-  "rgba(139, 92, 246, 0.2)",   // purple
-  "rgba(6, 182, 212, 0.2)",    // cyan
-  "rgba(34, 197, 94, 0.2)",    // green
-  "rgba(234, 179, 8, 0.2)",    // yellow
-  "rgba(249, 115, 22, 0.2)",   // orange
-  "rgba(236, 72, 153, 0.2)",   // pink
-  "rgba(168, 85, 247, 0.2)",   // violet
+  "rgba(59, 130, 246, 0.2)", // blue
+  "rgba(139, 92, 246, 0.2)", // purple
+  "rgba(6, 182, 212, 0.2)", // cyan
+  "rgba(34, 197, 94, 0.2)", // green
+  "rgba(234, 179, 8, 0.2)", // yellow
+  "rgba(249, 115, 22, 0.2)", // orange
+  "rgba(236, 72, 153, 0.2)", // pink
+  "rgba(168, 85, 247, 0.2)", // violet
 ];
 
 /** Compute background colors for generated lines based on mapping density */
@@ -147,8 +145,8 @@ const segmentCount = computed(() => {
           </button>
         </div>
         <span class="map-stats">
-          {{ segmentCount }} segment{{ segmentCount !== 1 ? "s" : "" }}
-          · {{ genLines.length }} generated line{{ genLines.length !== 1 ? "s" : "" }}
+          {{ segmentCount }} segment{{ segmentCount !== 1 ? "s" : "" }} ·
+          {{ genLines.length }} generated line{{ genLines.length !== 1 ? "s" : "" }}
         </span>
       </div>
       <div class="map-split">

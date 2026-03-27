@@ -2,21 +2,23 @@
   "name": "@verter/language-shared",
   "version": "0.0.1-beta.1",
   "description": "Contains shared information between the language server and the language client",
-  "keywords": ["vue", "lsp", "language-server", "protocol"],
+  "keywords": [
+    "language-server",
+    "lsp",
+    "protocol",
+    "vue"
+  ],
   "homepage": "https://verterjs.dev/",
   "license": "MIT",
+  "author": "Carlos Rodrigues <pikax>",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "Carlos Rodrigues <pikax>",
-  "type": "commonjs",
-  "engines": {
-    "node": ">=18"
-  },
   "files": [
     "dist"
   ],
+  "type": "commonjs",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -34,5 +36,8 @@
     "typescript": "^5.9.3",
     "vite": "^8.0.0",
     "vite-plugin-dts": "^4.5.4"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

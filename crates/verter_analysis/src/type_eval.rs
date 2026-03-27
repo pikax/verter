@@ -480,7 +480,10 @@ pub fn evaluate_with_lookup(
 fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup) -> TypeExpr {
     match expr {
         // Terminals — pass through
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => expr.clone(),
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeParameter(_) => expr.clone(),
 
         // Unwrap parenthesized
         TypeExpr::Parenthesized(inner) => evaluate_with_lookup(inner, env, lookup),
@@ -650,6 +653,9 @@ fn evaluate_ref(
     // Check type bindings first (generic parameters)
     if type_arguments.is_empty() {
         if let Some(bound) = env.type_bindings.get(name).cloned() {
+            if binding_requires_symbolic_preservation(name, bound.as_ref()) {
+                return (*bound).clone();
+            }
             return evaluate_with_lookup(bound.as_ref(), env, lookup);
         }
     }
@@ -915,6 +921,109 @@ fn is_function_opaque_for_instantiation(
         })
 }
 
+fn binding_requires_symbolic_preservation(name: &str, bound: &TypeExpr) -> bool {
+    match bound {
+        TypeExpr::Ref {
+            name: bound_name,
+            type_arguments,
+        } => {
+            bound_name.as_ref() == name
+                || type_arguments
+                    .iter()
+                    .any(|arg| binding_requires_symbolic_preservation(name, arg))
+        }
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::KeyOf(inner)
+        | TypeExpr::Rest(inner)
+        | TypeExpr::Array { element: inner, .. } => {
+            binding_requires_symbolic_preservation(name, inner)
+        }
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| binding_requires_symbolic_preservation(name, &element.ty)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .any(|ty| binding_requires_symbolic_preservation(name, ty)),
+        TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
+            ObjectMember::Property(prop) => binding_requires_symbolic_preservation(name, &prop.ty),
+            ObjectMember::IndexSignature(sig) => {
+                binding_requires_symbolic_preservation(name, &sig.key_type)
+                    || binding_requires_symbolic_preservation(name, &sig.value_type)
+            }
+            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                function_binding_requires_symbolic_preservation(name, func)
+            }
+            ObjectMember::Method(method) => {
+                function_binding_requires_symbolic_preservation(name, &method.function)
+            }
+        }),
+        TypeExpr::Function(func) => function_binding_requires_symbolic_preservation(name, func),
+        TypeExpr::IndexedAccess { object, index } => {
+            binding_requires_symbolic_preservation(name, object)
+                || binding_requires_symbolic_preservation(name, index)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => [check, extends, true_type, false_type]
+            .into_iter()
+            .any(|ty| binding_requires_symbolic_preservation(name, ty)),
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            binding_requires_symbolic_preservation(name, source)
+                || binding_requires_symbolic_preservation(name, value)
+                || name_type
+                    .as_deref()
+                    .is_some_and(|ty| binding_requires_symbolic_preservation(name, ty))
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|expr| binding_requires_symbolic_preservation(name, expr)),
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Infer { .. } => false,
+        TypeExpr::TypeParameter(param) => {
+            param.name == name
+                || param
+                    .constraint
+                    .as_deref()
+                    .is_some_and(|ty| binding_requires_symbolic_preservation(name, ty))
+                || param
+                    .default
+                    .as_deref()
+                    .is_some_and(|ty| binding_requires_symbolic_preservation(name, ty))
+        }
+    }
+}
+
+fn function_binding_requires_symbolic_preservation(name: &str, func: &FunctionExpr) -> bool {
+    func.parameters
+        .iter()
+        .any(|param| binding_requires_symbolic_preservation(name, &param.ty))
+        || func
+            .return_type
+            .as_deref()
+            .is_some_and(|ty| binding_requires_symbolic_preservation(name, ty))
+        || func.type_parameters.iter().any(|param| {
+            param
+                .constraint
+                .as_deref()
+                .is_some_and(|ty| binding_requires_symbolic_preservation(name, ty))
+                || param
+                    .default
+                    .as_deref()
+                    .is_some_and(|ty| binding_requires_symbolic_preservation(name, ty))
+        })
+}
+
 fn instantiate_generic(
     decl: &TypeDeclInfo,
     args: &[TypeExpr],
@@ -955,10 +1064,8 @@ pub(crate) fn bind_type_parameters(
     for (i, param) in decl.type_parameters.iter().enumerate() {
         let arg = if i < args.len() {
             Arc::new(args[i].clone())
-        } else if let Some(ref default) = param.default {
-            Arc::clone(default)
         } else {
-            Arc::new(TypeExpr::Primitive(PrimitiveName::Any))
+            Arc::new(TypeExpr::type_parameter(param.clone()))
         };
         env.type_bindings.insert(param.name.clone(), arg);
     }
@@ -1689,10 +1796,32 @@ fn try_lazy_member_lookup(
             }
             None // Member not found in this object
         }
+        TypeExpr::Intersection(types) => {
+            let mut matches = Vec::new();
+            for branch in types.iter() {
+                if let Some(result) = try_lazy_member_lookup(branch, key, env, lookup) {
+                    matches.push(result);
+                }
+            }
+            match matches.len() {
+                0 => None,
+                1 => matches.into_iter().next(),
+                _ => Some(merge_intersection(matches)),
+            }
+        }
         TypeExpr::Ref {
             name,
             type_arguments,
         } => {
+            if type_arguments.is_empty() {
+                if let Some(bound) = env.type_bindings.get(name.as_ref()).cloned() {
+                    if binding_requires_symbolic_preservation(name, bound.as_ref()) {
+                        return None;
+                    }
+                    return try_lazy_member_lookup(bound.as_ref(), key, env, lookup);
+                }
+            }
+
             if let Some(result) =
                 try_lazy_builtin_member_lookup(name, type_arguments, key, env, lookup)
             {
@@ -1705,7 +1834,13 @@ fn try_lazy_member_lookup(
                 .cloned()
                 .or_else(|| lookup.resolve_type_decl(name))?;
             if env.active.contains(&**name) {
-                return None;
+                let member_guard = format!("{name}[{key}]");
+                if !env.active.insert(member_guard.clone()) {
+                    return None;
+                }
+                let result = try_lazy_member_lookup(&decl.body, key, env, lookup);
+                env.active.remove(&member_guard);
+                return result;
             }
             env.active.insert(name.to_string());
             let saved = bind_type_parameters(&decl, type_arguments, env);
@@ -1771,6 +1906,15 @@ fn try_project_object_shape(
             name,
             type_arguments,
         } => {
+            if type_arguments.is_empty() {
+                if let Some(bound) = env.type_bindings.get(name.as_ref()).cloned() {
+                    if binding_requires_symbolic_preservation(name, bound.as_ref()) {
+                        return None;
+                    }
+                    return try_project_object_shape(bound.as_ref(), keys, omit_mode, env, lookup);
+                }
+            }
+
             let decl = env
                 .type_symbols
                 .get(&**name)

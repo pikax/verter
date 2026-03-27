@@ -223,13 +223,10 @@ function captureMode(opts, mode, vueFiles, runDir, compiler) {
   const isDevLike = mode === "dev" || mode === "ssr";
 
   // Verter plugin path (absolute, forward slashes for JS)
-  const verterPluginPath = join(
-    VERTER_ROOT,
-    "packages",
-    "unplugin",
-    "dist",
-    "vite.mjs",
-  ).replace(/\\/g, "/");
+  const verterPluginPath = join(VERTER_ROOT, "packages", "unplugin", "dist", "vite.mjs").replace(
+    /\\/g,
+    "/",
+  );
 
   // Write a runner script that will execute inside the project's node context
   const runnerPath = join(runDir, `_runner_${compiler}_${mode}.mjs`);

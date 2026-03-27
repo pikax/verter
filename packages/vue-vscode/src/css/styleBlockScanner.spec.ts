@@ -73,7 +73,7 @@ describe("langAttributeRange", () => {
     expect(blocks[0].langAttributeRange).toBeUndefined();
   });
 
-  it("covers the full lang=\"scss\" attribute text with double quotes", () => {
+  it('covers the full lang="scss" attribute text with double quotes', () => {
     const source = `<style lang="scss">
 .foo { color: red; }
 </style>`;

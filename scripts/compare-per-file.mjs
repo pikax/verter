@@ -118,14 +118,26 @@ function ensureDir(dir) {
 function findVueFiles(dir, filter) {
   const results = [];
   const excludeDirs = new Set([
-    "node_modules", "dist", "dist_vue", "dist_verter", ".git",
-    ".verter-compare", ".verter-compare-files", ".nuxt", ".output",
-    "coverage", "__snapshots__",
+    "node_modules",
+    "dist",
+    "dist_vue",
+    "dist_verter",
+    ".git",
+    ".verter-compare",
+    ".verter-compare-files",
+    ".nuxt",
+    ".output",
+    "coverage",
+    "__snapshots__",
   ]);
 
   function walk(d) {
     let entries;
-    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (entry.isDirectory()) {
         if (!excludeDirs.has(entry.name) && !entry.name.startsWith(".")) {
@@ -167,14 +179,22 @@ function tryParseJs(code) {
       const renderCode = code.slice(renderIdx);
       // Count braces, properly handling strings and template literals
       let braces = 0;
-      let inString = false, stringChar = "", escaped = false;
+      let inString = false,
+        stringChar = "",
+        escaped = false;
       let templateDepth = 0; // track ${} nesting inside template literals
 
       for (let i = 0; i < renderCode.length; i++) {
         const ch = renderCode[i];
 
-        if (escaped) { escaped = false; continue; }
-        if (ch === "\\") { escaped = true; continue; }
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
 
         if (inString) {
           if (stringChar === "`") {
@@ -194,7 +214,10 @@ function tryParseJs(code) {
               }
               continue;
             }
-            if (ch === "`") { inString = false; continue; }
+            if (ch === "`") {
+              inString = false;
+              continue;
+            }
           } else {
             if (ch === stringChar) inString = false;
           }
@@ -210,7 +233,8 @@ function tryParseJs(code) {
         else if (ch === "}") braces--;
         if (braces < 0) return { valid: false, error: "Unbalanced '}' in render function" };
       }
-      if (braces !== 0) return { valid: false, error: `Unbalanced braces in render function: ${braces}` };
+      if (braces !== 0)
+        return { valid: false, error: `Unbalanced braces in render function: ${braces}` };
     }
 
     return { valid: true };
@@ -230,7 +254,8 @@ function normalizeJs(code) {
 
 function extractImports(code) {
   const imports = [];
-  const re = /import\s+(?:\{[^}]+\}|\*\s+as\s+\w+|\w+)?\s*(?:,\s*(?:\{[^}]+\}|\*\s+as\s+\w+))?\s*from\s+['"]([^'"]+)['"]/g;
+  const re =
+    /import\s+(?:\{[^}]+\}|\*\s+as\s+\w+|\w+)?\s*(?:,\s*(?:\{[^}]+\}|\*\s+as\s+\w+))?\s*from\s+['"]([^'"]+)['"]/g;
   let m;
   while ((m = re.exec(code)) !== null) imports.push(m[1]);
   return imports;
@@ -243,7 +268,12 @@ function extractHelperImports(code) {
   let m;
   while ((m = re.exec(code)) !== null) {
     for (const name of m[1].split(",")) {
-      helpers.add(name.trim().split(/\s+as\s+/)[0].trim());
+      helpers.add(
+        name
+          .trim()
+          .split(/\s+as\s+/)[0]
+          .trim(),
+      );
     }
   }
   return helpers;
@@ -263,7 +293,8 @@ function extractPatchFlags(code) {
 function extractHoistedNodes(code) {
   // Count _hoisted_N declarations
   const re = /const _hoisted_(\d+)/g;
-  let count = 0, m;
+  let count = 0,
+    m;
   while ((m = re.exec(code)) !== null) count = Math.max(count, parseInt(m[1], 10));
   return count;
 }
@@ -316,7 +347,8 @@ function classifyDiff(vueCode, verterCode) {
   const verterHoisted = extractHoistedNodes(verterCode);
   if (Math.abs(vueHoisted - verterHoisted) > 0) {
     return {
-      category: "C", severity: "P2",
+      category: "C",
+      severity: "P2",
       reason: `Hoisted nodes: vue=${vueHoisted} verter=${verterHoisted}`,
     };
   }
@@ -326,14 +358,16 @@ function classifyDiff(vueCode, verterCode) {
   const verterFlags = extractPatchFlags(verterCode);
   if (vueFlags.length !== verterFlags.length) {
     return {
-      category: "D", severity: "P2",
+      category: "D",
+      severity: "P2",
       reason: `Patch flag count: vue=${vueFlags.length} verter=${verterFlags.length}`,
     };
   }
   for (let i = 0; i < vueFlags.length; i++) {
     if (vueFlags[i].value !== verterFlags[i]?.value) {
       return {
-        category: "D", severity: "P2",
+        category: "D",
+        severity: "P2",
         reason: `Patch flag mismatch at #${i}: vue=${vueFlags[i].value}(${vueFlags[i].name}) verter=${verterFlags[i]?.value}(${verterFlags[i]?.name})`,
       };
     }
@@ -344,7 +378,8 @@ function classifyDiff(vueCode, verterCode) {
   const verterFnCount = (verterCode.match(/function\s/g) || []).length;
   if (Math.abs(vueFnCount - verterFnCount) > 2) {
     return {
-      category: "C", severity: "P2",
+      category: "C",
+      severity: "P2",
       reason: `Function count: vue=${vueFnCount} verter=${verterFnCount}`,
     };
   }
@@ -731,7 +766,10 @@ function runViteLayer(opts, vueFiles, outDir) {
   const resultsPath = join(outDir, "_vite_results.json");
   const configPathFwd = viteConfig.replace(/\\/g, "/");
   const projectDirFwd = opts.project.replace(/\\/g, "/");
-  const verterPluginPath = join(VERTER_ROOT, "packages", "unplugin", "dist", "vite.mjs").replace(/\\/g, "/");
+  const verterPluginPath = join(VERTER_ROOT, "packages", "unplugin", "dist", "vite.mjs").replace(
+    /\\/g,
+    "/",
+  );
   const modesJson = JSON.stringify(opts.modes);
   const vueFilesJson = JSON.stringify(vueFiles);
 
@@ -895,7 +933,10 @@ main().catch(err => {
     const { vue, verter } = entry;
     if (!vue || !verter) continue;
 
-    if (vue.error && !verter.error) { vueErrors++; continue; }
+    if (vue.error && !verter.error) {
+      vueErrors++;
+      continue;
+    }
     if (verter.error) {
       verterErrors++;
       diffs.push({
@@ -934,7 +975,10 @@ main().catch(err => {
         const hash = getHash(entry.file + entry.mode + "vite");
         ensureDir(join(outDir, "captures-vite"));
         writeFileSync(join(outDir, "captures-vite", `${hash}_vue_${entry.mode}.js`), vue.code);
-        writeFileSync(join(outDir, "captures-vite", `${hash}_verter_${entry.mode}.js`), verter.code);
+        writeFileSync(
+          join(outDir, "captures-vite", `${hash}_verter_${entry.mode}.js`),
+          verter.code,
+        );
       }
     } else {
       identical++;

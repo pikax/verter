@@ -31,6 +31,7 @@ pub mod discovery;
 pub mod protocol;
 pub mod provider_adapter;
 pub mod resilient;
+pub mod trace;
 pub mod traits;
 pub mod tsgo;
 pub mod tsserver;
@@ -48,6 +49,11 @@ pub use codec::{
 pub use discovery::{detect_ts_major_version, find_node, find_tsserver};
 pub use protocol::*;
 pub use provider_adapter::TypeProviderAdapter;
+pub use trace::{
+    format_type_runtime_trace_line, type_runtime_trace_enabled, type_runtime_trace_event,
+    type_runtime_trace_scope, with_type_runtime_trace_context, TypeRuntimeTraceContext,
+    TypeRuntimeTraceEvent,
+};
 pub use traits::{ProviderFuture, ProviderPriority, TypeProvider};
 pub use uri::{
     file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string, percent_decode,

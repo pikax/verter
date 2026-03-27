@@ -36,7 +36,12 @@ function compileVerter(source, filePath) {
   return host.getVirtualFile({
     canonicalId: upsertResult.canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: { filename: path.basename(filePath), ssr: true, forceJs: true, sourceMap: false },
+    compileProfile: {
+      filename: path.basename(filePath),
+      ssr: true,
+      forceJs: true,
+      sourceMap: false,
+    },
   });
 }
 

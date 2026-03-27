@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const inputRef = ref<HTMLInputElement | null>(null)
-const readValue = ref('')
+const inputRef = ref<HTMLInputElement | null>(null);
+const readValue = ref("");
 
 function focusInput() {
-  inputRef.value?.focus()
+  inputRef.value?.focus();
 }
 
 function readInputValue() {
-  readValue.value = inputRef.value?.value ?? ''
+  readValue.value = inputRef.value?.value ?? "";
 }
 </script>
 

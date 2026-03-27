@@ -6,33 +6,33 @@ real-world Vue projects.
 
 ## Integration Test Results Summary
 
-*Last verified: 2026-02-23 (after P0/P1/P2 fixes)*
+_Last verified: 2026-02-23 (after P0/P1/P2 fixes)_
 
-| # | Project | Build | Tests | Status | Notes |
-|---|---------|-------|-------|--------|-------|
-| 1 | coreui | PASS | - | OK | |
-| 2 | slidev | PASS | 8/8 | OK | |
-| 3 | vitepress | PASS | PASS | OK | |
-| 4 | tdesign-vue-next | PASS | - | OK | |
-| 5 | vue-vben-admin | PASS | - | OK | Fixed: cross-file withDefaults key_name (P0) |
-| 6 | primevue | PASS | - | OK | Fixed: interstitial comment leak (P1) |
-| 7 | element-plus | PASS | - | OK | Fixed: cross-file withDefaults key_name (P0) |
-| 8 | shadcn-vue | PASS | 17/20 | OK | 3 failures are Windows path separators (env) |
-| 9 | radix-vue | PASS | ~64/64 | OK | Fixed: forceJs for rolldown/tsdown (P2) |
-| 10 | vant | PASS | 171/172 | OK | 1 failure is timer teardown (not Verter) |
-| 11 | nuxt-ui | PASS | 2510/5026 | OK* | Obsolete snapshot failures in nuxt env; all tests run |
-| 12 | oku-primitives | PASS | 1/1 | OK | 1 event handling regression — see note below |
-| 13 | hoppscotch | PASS | 50/50 | OK | Build fails due to vite-plugin-pages (not Verter) |
-| 14 | balancer-frontend-v2 | PASS | 92/92 | OK | Vite 4 |
-| 15 | naive-ui | PASS | 187/189 | OK | 2 failures: timezone + Card selector (env) |
-| 16 | ant-design-vue | PASS | 56/167 | OK | Fixed: style parse error. Type-only import issue remains (see below) |
-| 17 | vuetify | PASS | - | OK | Build fixed: now builds vuetify package first |
-| 18 | zyronon-douyin | PASS | - | OK | VueMacros + LESS preprocessing |
+| #   | Project              | Build | Tests     | Status | Notes                                                                |
+| --- | -------------------- | ----- | --------- | ------ | -------------------------------------------------------------------- |
+| 1   | coreui               | PASS  | -         | OK     |                                                                      |
+| 2   | slidev               | PASS  | 8/8       | OK     |                                                                      |
+| 3   | vitepress            | PASS  | PASS      | OK     |                                                                      |
+| 4   | tdesign-vue-next     | PASS  | -         | OK     |                                                                      |
+| 5   | vue-vben-admin       | PASS  | -         | OK     | Fixed: cross-file withDefaults key_name (P0)                         |
+| 6   | primevue             | PASS  | -         | OK     | Fixed: interstitial comment leak (P1)                                |
+| 7   | element-plus         | PASS  | -         | OK     | Fixed: cross-file withDefaults key_name (P0)                         |
+| 8   | shadcn-vue           | PASS  | 17/20     | OK     | 3 failures are Windows path separators (env)                         |
+| 9   | radix-vue            | PASS  | ~64/64    | OK     | Fixed: forceJs for rolldown/tsdown (P2)                              |
+| 10  | vant                 | PASS  | 171/172   | OK     | 1 failure is timer teardown (not Verter)                             |
+| 11  | nuxt-ui              | PASS  | 2510/5026 | OK\*   | Obsolete snapshot failures in nuxt env; all tests run                |
+| 12  | oku-primitives       | PASS  | 1/1       | OK     | 1 event handling regression — see note below                         |
+| 13  | hoppscotch           | PASS  | 50/50     | OK     | Build fails due to vite-plugin-pages (not Verter)                    |
+| 14  | balancer-frontend-v2 | PASS  | 92/92     | OK     | Vite 4                                                               |
+| 15  | naive-ui             | PASS  | 187/189   | OK     | 2 failures: timezone + Card selector (env)                           |
+| 16  | ant-design-vue       | PASS  | 56/167    | OK     | Fixed: style parse error. Type-only import issue remains (see below) |
+| 17  | vuetify              | PASS  | -         | OK     | Build fixed: now builds vuetify package first                        |
+| 18  | zyronon-douyin       | PASS  | -         | OK     | VueMacros + LESS preprocessing                                       |
 
 **Build pass rate: 18/18 (100%)**
 **Functionally passing: 17/18 (94%)**
 
-*nuxt-ui: All 5026 tests execute, but 2510 fail on snapshot alignment (stale snapshots
+\*nuxt-ui: All 5026 tests execute, but 2510 fail on snapshot alignment (stale snapshots
 from baseline compiler). The `vue` environment tests (110/110 files) pass; the `nuxt`
 environment tests fail on obsolete snapshot detection, not on functional assertions.
 
@@ -253,6 +253,7 @@ contained literal newlines (e.g., multi-line braces in ant-design-vue), the
 output JS had unescaped newlines inside string literals, causing parse errors.
 
 Audited and fixed all codegen paths across VDOM and Vapor backends:
+
 - `vdom/props.rs`: style object property names
 - `vdom/element.rs`: ref values, prop keys, tag names, dynamic_props, modifiers
 - `vdom/slots.rs`: slot names, dynamic_props arrays

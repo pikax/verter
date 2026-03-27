@@ -387,10 +387,7 @@ test.describe("New playground features", () => {
       // there should be no crashes
       const criticalErrors = errors.filter(
         (e) =>
-          !e.includes("fetch") &&
-          !e.includes("CDN") &&
-          !e.includes("CORS") &&
-          !e.includes("net::"),
+          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
       );
       expect(criticalErrors).toEqual([]);
 
@@ -432,10 +429,7 @@ test.describe("New playground features", () => {
       // No crashes is the primary assertion
       const criticalErrors = errors.filter(
         (e) =>
-          !e.includes("fetch") &&
-          !e.includes("CDN") &&
-          !e.includes("CORS") &&
-          !e.includes("net::"),
+          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
       );
       expect(criticalErrors).toEqual([]);
 
@@ -473,10 +467,7 @@ test.describe("New playground features", () => {
       // No crashes
       const criticalErrors = errors.filter(
         (e) =>
-          !e.includes("fetch") &&
-          !e.includes("CDN") &&
-          !e.includes("CORS") &&
-          !e.includes("net::"),
+          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
       );
       expect(criticalErrors).toEqual([]);
 
@@ -515,10 +506,7 @@ test.describe("New playground features", () => {
       // No crashes
       const criticalErrors = errors.filter(
         (e) =>
-          !e.includes("fetch") &&
-          !e.includes("CDN") &&
-          !e.includes("CORS") &&
-          !e.includes("net::"),
+          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
       );
       expect(criticalErrors).toEqual([]);
 
@@ -558,10 +546,7 @@ test.describe("New playground features", () => {
       // No crashes
       const criticalErrors = errors.filter(
         (e) =>
-          !e.includes("fetch") &&
-          !e.includes("CDN") &&
-          !e.includes("CORS") &&
-          !e.includes("net::"),
+          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
       );
       expect(criticalErrors).toEqual([]);
 
@@ -595,10 +580,7 @@ test.describe("New playground features", () => {
 
       const criticalErrors = errors.filter(
         (e) =>
-          !e.includes("fetch") &&
-          !e.includes("CDN") &&
-          !e.includes("CORS") &&
-          !e.includes("net::"),
+          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
       );
       expect(criticalErrors).toEqual([]);
     });

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { Overlay, Button } from './components'
+import { ref, computed } from "vue";
+import { Overlay, Button } from "./components";
 
-const count = ref(0)
-const doubled = computed(() => count.value * 2)
-const showOverlay = ref(false)
+const count = ref(0);
+const doubled = computed(() => count.value * 2);
+const showOverlay = ref(false);
 
-function increment() { count.value++ }
+function increment() {
+  count.value++;
+}
 </script>
 <template>
   <div>
@@ -16,7 +18,7 @@ function increment() { count.value++ }
     <Overlay :show="showOverlay" :zIndex="100" :lockScroll="true">
       <p>Overlay content</p>
     </Overlay>
-    <Button  />
-    <Overlay  />
+    <Button />
+    <Overlay />
   </div>
 </template>

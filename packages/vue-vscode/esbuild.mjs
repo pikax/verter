@@ -42,10 +42,7 @@ function prepareDeps() {
   if (existsSync(path.join(nativeSrc, "dist"))) {
     for (const file of readdirSync(path.join(nativeSrc, "dist"))) {
       if (file.endsWith(".node") && !file.endsWith(".old")) {
-        cpSync(
-          path.join(nativeSrc, "dist", file),
-          path.join(nativeDst, "dist", file),
-        );
+        cpSync(path.join(nativeSrc, "dist", file), path.join(nativeDst, "dist", file));
       }
     }
   }
@@ -67,7 +64,11 @@ function removeSafe(p) {
 }
 
 function lstatSafe(p) {
-  try { return lstatSync(p); } catch { return null; }
+  try {
+    return lstatSync(p);
+  } catch {
+    return null;
+  }
 }
 
 /**

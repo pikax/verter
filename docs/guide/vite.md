@@ -28,12 +28,12 @@ yarn add -D @verter/unplugin
 
 ```ts
 // vite.config.ts
-import { defineConfig } from 'vite'
-import VerterVite from '@verter/unplugin/vite'
+import { defineConfig } from "vite";
+import VerterVite from "@verter/unplugin/vite";
 
 export default defineConfig({
   plugins: [VerterVite()],
-})
+});
 ```
 
 ## Options
@@ -50,7 +50,7 @@ File patterns to include for Vue SFC compilation. Matches the `include` option f
 ```ts
 VerterVite({
   include: [/\.vue$/, /\.custom\.vue$/],
-})
+});
 ```
 
 ### `componentId`
@@ -64,9 +64,9 @@ Custom component ID generator. The ID is used for scoped CSS (`data-v-xxxxxxxx`)
 VerterVite({
   componentId: (filename, source, isProd) => {
     // Return a unique string ID for this component
-    return myCustomHash(filename)
+    return myCustomHash(filename);
   },
-})
+});
 ```
 
 ### `preCompile`
@@ -79,7 +79,7 @@ Pre-compile all `.vue` files during Vite's `buildStart` phase. This scans the pr
 ```ts
 VerterVite({
   preCompile: true,
-})
+});
 ```
 
 This is particularly useful for large projects where you want to front-load compilation work. Files in `node_modules` are excluded from scanning and compile on-demand during `transform()`.
@@ -97,7 +97,7 @@ After all files are pre-compiled, Verter analyzes the render tree to determine w
 VerterVite({
   preCompile: true,
   crossFileOptimize: true,
-})
+});
 ```
 
 ### `template`
@@ -111,10 +111,10 @@ Template compiler options. Accepted for compatibility with `@vitejs/plugin-vue`,
 VerterVite({
   template: {
     compilerOptions: {
-      isCustomElement: (tag) => tag.startsWith('my-'),
+      isCustomElement: (tag) => tag.startsWith("my-"),
     },
   },
-})
+});
 ```
 
 ## Migration from @vitejs/plugin-vue
@@ -129,18 +129,18 @@ VerterVite({
 
    ```ts
    // Before
-   import vue from '@vitejs/plugin-vue'
+   import vue from "@vitejs/plugin-vue";
 
    export default defineConfig({
      plugins: [vue()],
-   })
+   });
 
    // After
-   import VerterVite from '@verter/unplugin/vite'
+   import VerterVite from "@verter/unplugin/vite";
 
    export default defineConfig({
      plugins: [VerterVite()],
-   })
+   });
    ```
 
 3. Optionally remove the old plugin:

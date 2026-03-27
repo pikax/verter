@@ -1,6 +1,6 @@
 <script setup lang="ts">
-defineProps<{ foo: string; bar: number }>()
-const emit = defineEmits<{ custom: [payload: string] }>()
+defineProps<{ foo: string; bar: number }>();
+const emit = defineEmits<{ custom: [payload: string] }>();
 </script>
 <template>
   <div>

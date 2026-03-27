@@ -28,11 +28,7 @@ export function extractVueVersion(importMap: ImportMap): string | undefined {
   return match?.[1];
 }
 
-export function isDefaultImport(
-  key: string,
-  value: string,
-  vueVersion?: string,
-): boolean {
+export function isDefaultImport(key: string, value: string, vueVersion?: string): boolean {
   if (!vueVersion) return false;
   const defaults = getDefaultImportMap(vueVersion);
   return defaults.imports[key] === value;

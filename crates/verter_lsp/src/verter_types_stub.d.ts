@@ -25,17 +25,27 @@ export declare function createMacroReturn<T>(): T;
 export type OmitConstructorSignature<T> = { [K in keyof T]: T[K] };
 
 // components/components.ts
-export type ExtractComponentProps<T> = T extends { new (): infer I } ? { [K in keyof I]: I[K] } : {};
+export type ExtractComponentProps<T> = T extends { new (): infer I }
+  ? { [K in keyof I]: I[K] }
+  : {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
 
 // instance/instance.ts
-export type PublicInstanceFromMacro<Props, Emits, Expose, Slots, Attrs, El extends Element = Element> = {
+export type PublicInstanceFromMacro<
+  Props,
+  Emits,
+  Expose,
+  Slots,
+  Attrs,
+  El extends Element = Element,
+> = {
   $props: Props;
   $emit: Emits;
   $slots: Slots;
   $attrs: Attrs;
   $el: El;
-} & Props & Expose;
+} & Props &
+  Expose;
 
 // vue/vue.ts
 export declare function shallowUnwrapRef<T>(obj: T): ShallowUnwrapRef<T>;
@@ -63,12 +73,19 @@ interface PropOptions<T = any, D = T> {
 // ── Box helpers (vue/vue.macros.ts) ─────────────────────────────
 
 // defineProps
-export declare function defineProps_Box<PropNames extends string = string>(props: PropNames[]): PropNames[];
-export declare function defineProps_Box<PP extends ComponentObjectPropsOptions = ComponentObjectPropsOptions>(props: PP): PP;
+export declare function defineProps_Box<PropNames extends string = string>(
+  props: PropNames[],
+): PropNames[];
+export declare function defineProps_Box<
+  PP extends ComponentObjectPropsOptions = ComponentObjectPropsOptions,
+>(props: PP): PP;
 export declare function defineProps_Box<TypeProps>(): TypeProps;
 
 // withDefaults
-export declare function withDefaults_Box<T, Defaults extends InferDefaults<T>>(props: T, defaults: Defaults): [T, Defaults];
+export declare function withDefaults_Box<T, Defaults extends InferDefaults<T>>(
+  props: T,
+  defaults: Defaults,
+): [T, Defaults];
 
 // defineEmits
 export declare function defineEmits_Box<EE extends string = string>(emitOptions: EE[]): EE[];
@@ -84,7 +101,7 @@ export declare function defineOptions_Box<
   Mixin extends ComponentOptionsMixin = ComponentOptionsMixin,
   Extends extends ComponentOptionsMixin = ComponentOptionsMixin,
   InheritAttrs extends true | false = true,
-  T = Record<string, any>
+  T = Record<string, any>,
 >(
   options?: T &
     ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
@@ -93,27 +110,29 @@ export declare function defineOptions_Box<
       expose?: never;
       slots?: never;
       inheritAttrs?: InheritAttrs;
-    }
+    },
 ): T;
 
 // defineModel
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
+  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>,
 ): ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>;
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  options?: PropOptions<T> & DefineModelOptions<T, G, S>
+  options?: PropOptions<T> & DefineModelOptions<T, G, S>,
 ): PropOptions<T> & DefineModelOptions<T, G, S>;
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
   name: string,
-  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
+  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>,
 ): [string, ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>];
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
   name: string,
-  options?: PropOptions<T> & DefineModelOptions<T, G, S>
+  options?: PropOptions<T> & DefineModelOptions<T, G, S>,
 ): [string, PropOptions<T> & DefineModelOptions<T, G, S>];
 
 // defineExpose
-export declare function defineExpose_Box<Exposed extends Record<string, any> = Record<string, any>>(exposed?: Exposed): Exposed;
+export declare function defineExpose_Box<Exposed extends Record<string, any> = Record<string, any>>(
+  exposed?: Exposed,
+): Exposed;
 
 // defineSlots
 export declare function defineSlots_Box<S extends Record<string, any> = Record<string, any>>(): S;

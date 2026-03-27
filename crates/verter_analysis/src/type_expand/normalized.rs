@@ -275,7 +275,10 @@ pub(crate) fn record_partial_markers(
                 record_partial_markers(ret, diagnostics, property_name);
             }
         }
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => {}
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeParameter(_) => {}
     }
 }
 

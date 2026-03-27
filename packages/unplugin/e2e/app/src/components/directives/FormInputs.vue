@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const text = ref('')
-const checked = ref(false)
-const radio = ref('opt1')
-const selected = ref('a')
-const textarea = ref('')
+const text = ref("");
+const checked = ref(false);
+const radio = ref("opt1");
+const selected = ref("a");
+const textarea = ref("");
 </script>
 
 <template>

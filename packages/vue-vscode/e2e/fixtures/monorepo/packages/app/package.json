@@ -2,7 +2,7 @@
   "name": "@monorepo/app",
   "private": true,
   "dependencies": {
-    "vue": "^3.5.0",
-    "@monorepo/shared": "workspace:*"
+    "@monorepo/shared": "workspace:*",
+    "vue": "^3.5.0"
   }
 }

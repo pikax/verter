@@ -1,15 +1,23 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const regularCount = ref(0)
-const onceCount = ref(0)
-const parentCount = ref(0)
-const enterCount = ref(0)
+const regularCount = ref(0);
+const onceCount = ref(0);
+const parentCount = ref(0);
+const enterCount = ref(0);
 
-function regularClick() { regularCount.value++ }
-function onceClick() { onceCount.value++ }
-function parentClick() { parentCount.value++ }
-function enterHandler() { enterCount.value++ }
+function regularClick() {
+  regularCount.value++;
+}
+function onceClick() {
+  onceCount.value++;
+}
+function parentClick() {
+  parentCount.value++;
+}
+function enterHandler() {
+  enterCount.value++;
+}
 </script>
 
 <template>

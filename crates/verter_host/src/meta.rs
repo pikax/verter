@@ -73,8 +73,23 @@ fn component_meta_expansion_budget_exceeded(
         || types.define_slots.iter().any(macro_has_budget)
 }
 
+fn component_meta_symbolic_budget_is_fatal(
+    analysis: Option<&verter_analysis::component_meta::ComponentMetaAnalysis>,
+) -> bool {
+    let Some(analysis) = analysis else {
+        return true;
+    };
+
+    analysis.props.is_empty()
+        && analysis.events.is_empty()
+        && analysis.slots.is_empty()
+        && analysis.models.is_empty()
+        && analysis.exposed.is_empty()
+}
+
 fn component_meta_resolution_budget_error(
     canonical_or_alias: &str,
+    analysis: Option<&verter_analysis::component_meta::ComponentMetaAnalysis>,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> Option<MetaError> {
     if let Some(message) = resolved
@@ -90,6 +105,7 @@ fn component_meta_resolution_budget_error(
         .evaluated_types
         .as_ref()
         .is_some_and(component_meta_expansion_budget_exceeded)
+        && component_meta_symbolic_budget_is_fatal(analysis)
     {
         return Some(MetaError::Host(format!(
             "component-meta symbolic expansion budget exceeded (maxSteps={}) for '{}'",
@@ -524,21 +540,22 @@ impl MetaSession {
     pub fn upsert(&self, canonical_id: &str, source: String) -> Result<(), MetaError> {
         self.check_alive()?;
 
+        let mut gate = self
+            .project
+            .overlay_gate
+            .lock()
+            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
+        if gate.active_session == Some(self.id) {
+            self.project.revert_session_overlays(self.id);
+            gate.active_session = None;
+        }
+
         let mut sessions = self.project.sessions.write();
         let state = sessions.get_mut(&self.id).ok_or(MetaError::SessionClosed)?;
         state
             .overlays
             .insert(canonical_id.to_string(), SessionOverlay::Upsert { source });
         state.generation += 1;
-
-        // Invalidate the overlay gate if this session is active (force re-apply)
-        drop(sessions);
-        if let Ok(mut gate) = self.project.overlay_gate.lock() {
-            if gate.active_session == Some(self.id) {
-                // Mark as needing re-apply by clearing
-                gate.active_session = None;
-            }
-        }
 
         Ok(())
     }
@@ -547,6 +564,16 @@ impl MetaSession {
     pub fn delete(&self, canonical_id: &str) -> Result<(), MetaError> {
         self.check_alive()?;
 
+        let mut gate = self
+            .project
+            .overlay_gate
+            .lock()
+            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
+        if gate.active_session == Some(self.id) {
+            self.project.revert_session_overlays(self.id);
+            gate.active_session = None;
+        }
+
         let mut sessions = self.project.sessions.write();
         let state = sessions.get_mut(&self.id).ok_or(MetaError::SessionClosed)?;
         state
@@ -554,12 +581,28 @@ impl MetaSession {
             .insert(canonical_id.to_string(), SessionOverlay::Delete);
         state.generation += 1;
 
-        // Invalidate the overlay gate if this session is active
-        drop(sessions);
-        if let Ok(mut gate) = self.project.overlay_gate.lock() {
-            if gate.active_session == Some(self.id) {
-                gate.active_session = None;
-            }
+        Ok(())
+    }
+
+    /// Clear any session-local overlay for a file, revealing the shared base
+    /// state again.
+    pub fn reset(&self, canonical_id: &str) -> Result<(), MetaError> {
+        self.check_alive()?;
+
+        let mut gate = self
+            .project
+            .overlay_gate
+            .lock()
+            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
+        if gate.active_session == Some(self.id) {
+            self.project.revert_session_overlays(self.id);
+            gate.active_session = None;
+        }
+
+        let mut sessions = self.project.sessions.write();
+        let state = sessions.get_mut(&self.id).ok_or(MetaError::SessionClosed)?;
+        if state.overlays.remove(canonical_id).is_some() {
+            state.generation += 1;
         }
 
         Ok(())
@@ -610,9 +653,11 @@ impl MetaSession {
 
         match resolved {
             Some((analysis, resolved)) => {
-                if let Some(err) =
-                    component_meta_resolution_budget_error(canonical_or_alias, &resolved)
-                {
+                if let Some(err) = component_meta_resolution_budget_error(
+                    canonical_or_alias,
+                    Some(&analysis),
+                    &resolved,
+                ) {
                     Err(err)
                 } else {
                     Ok(Some(analysis))
@@ -638,20 +683,22 @@ impl MetaSession {
             else {
                 return Ok(None);
             };
+            let analysis = crate::host_manage::extract_component_meta_from_resolved(
+                host,
+                canonical_or_alias,
+                &resolved,
+                false,
+            );
 
-            if let Some(err) = component_meta_resolution_budget_error(canonical_or_alias, &resolved)
-            {
+            if let Some(err) = component_meta_resolution_budget_error(
+                canonical_or_alias,
+                Some(&analysis),
+                &resolved,
+            ) {
                 return Err(err);
             }
 
-            Ok(Some(
-                crate::host_manage::extract_component_meta_from_resolved(
-                    host,
-                    canonical_or_alias,
-                    &resolved,
-                    false,
-                ),
-            ))
+            Ok(Some(analysis))
         })?
     }
 
@@ -677,9 +724,11 @@ impl MetaSession {
         })?;
         match resolved {
             Some((analysis, resolved)) => {
-                if let Some(err) =
-                    component_meta_resolution_budget_error(canonical_or_alias, &resolved)
-                {
+                if let Some(err) = component_meta_resolution_budget_error(
+                    canonical_or_alias,
+                    Some(&analysis),
+                    &resolved,
+                ) {
                     Err(err)
                 } else {
                     Ok(Some((analysis, resolved)))

@@ -77,12 +77,38 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
     let export_span = resolver
         .get_export_span_follow_reexports(dep_canonical, requested_name)
         .unwrap_or_default();
-    let (kind, span, text) = resolver
-        .read_source(canonical_source.as_str())
-        .map(|source| extract_declaration_details(&source, export_span, resolved_name.as_str()))
+    let source = resolver.read_source(canonical_source.as_str());
+    let (kind, span, text) = source
+        .as_deref()
+        .map(|source| extract_declaration_details(source, export_span, resolved_name.as_str()))
         .unwrap_or((ResolvedDeclarationKind::Unknown, export_span, None));
     let declaration_id =
         resolver.type_declaration_id(canonical_source.as_str(), resolved_name.as_str());
+
+    if kind == ResolvedDeclarationKind::Unknown {
+        if let Some(source) = source.as_deref() {
+            if let Some(local_name) =
+                resolve_local_export_alias_target(source, resolved_name.as_str())
+            {
+                let followed_details =
+                    extract_declaration_details(source, export_span, local_name.as_str());
+                if followed_details.0 != ResolvedDeclarationKind::Unknown
+                    || followed_details.2.is_some()
+                {
+                    return ResolvedTypeDeclaration {
+                        requested_name: requested_name.to_string(),
+                        declaration_id: resolver
+                            .type_declaration_id(canonical_source.as_str(), local_name.as_str()),
+                        resolved_name: local_name,
+                        canonical_source,
+                        span: followed_details.1,
+                        kind: followed_details.0,
+                        text: followed_details.2,
+                    };
+                }
+            }
+        }
+    }
 
     if kind == ResolvedDeclarationKind::Unknown
         && text.is_none()
@@ -186,6 +212,71 @@ fn follow_direct_type_reexport_chain<R: DeclarationMetadataResolver>(
         current_canonical = next_canonical;
         current_name = reexport.imported_name.clone();
     }
+}
+
+fn resolve_local_export_alias_target(source: &str, exported_name: &str) -> Option<String> {
+    let mut current = exported_name.to_string();
+    let mut visited = FxHashSet::default();
+    let mut changed = false;
+
+    while visited.insert(current.clone()) {
+        let next = find_local_export_alias_target(source, current.as_str());
+
+        match next {
+            Some(local) if local != current => {
+                current = local;
+                changed = true;
+            }
+            _ => break,
+        }
+    }
+
+    changed.then_some(current)
+}
+
+fn find_local_export_alias_target(source: &str, exported_name: &str) -> Option<String> {
+    let mut search_from = 0usize;
+    while let Some(relative_index) = source[search_from..].find("export") {
+        let export_index = search_from + relative_index;
+        let after_export = &source[export_index + "export".len()..];
+        let after_export = after_export.trim_start();
+        let after_export = after_export
+            .strip_prefix("type")
+            .map(str::trim_start)
+            .unwrap_or(after_export);
+        let Some(body) = after_export.strip_prefix('{') else {
+            search_from = export_index + "export".len();
+            continue;
+        };
+        let Some(close_index) = body.find('}') else {
+            break;
+        };
+        let specifiers = &body[..close_index];
+        let trailing = body[close_index + 1..].trim_start();
+        if trailing.starts_with("from") {
+            search_from = export_index + "export".len();
+            continue;
+        }
+
+        for raw_specifier in specifiers.split(',') {
+            let specifier = raw_specifier.trim();
+            if specifier.is_empty() {
+                continue;
+            }
+            let specifier = specifier.strip_prefix("type ").unwrap_or(specifier).trim();
+            let (local, exported) = specifier
+                .split_once(" as ")
+                .map(|(local, exported)| (local.trim(), exported.trim()))
+                .unwrap_or((specifier, specifier));
+            if exported == exported_name {
+                return Some(local.to_string());
+            }
+        }
+
+        search_from = export_index + "export".len();
+    }
+
+    None
 }
 
 fn extract_declaration_details(
@@ -470,5 +561,35 @@ type Props = {
         assert_eq!(resolved.resolved_name, "Props");
         assert_eq!(resolved.declaration_id, Some(7));
         assert_eq!(resolved.kind, ResolvedDeclarationKind::Interface);
+    }
+
+    #[test]
+    fn resolve_type_declaration_follows_same_file_local_export_alias_when_span_points_to_alias() {
+        let source = "type RouteLocationRaw = string;\nexport { RouteLocationRaw as Lt };";
+        let alias_start = source.find("Lt").expect("alias should exist") as u32;
+        let alias_end = alias_start + 2;
+        let mut resolver = FakeResolver::default();
+        resolver.spans.insert(
+            ("/inner.ts".to_string(), "Lt".to_string()),
+            verter_span::Span::new(alias_start, alias_end),
+        );
+        resolver
+            .sources
+            .insert("/inner.ts".to_string(), source.to_string());
+        resolver.ids.insert(
+            ("/inner.ts".to_string(), "RouteLocationRaw".to_string()),
+            11,
+        );
+
+        let resolved = resolve_type_declaration(&resolver, "/inner.ts", "Lt");
+
+        assert_eq!(resolved.canonical_source, "/inner.ts");
+        assert_eq!(resolved.resolved_name, "RouteLocationRaw");
+        assert_eq!(resolved.declaration_id, Some(11));
+        assert_eq!(resolved.kind, ResolvedDeclarationKind::TypeAlias);
+        assert_eq!(
+            resolved.text.as_deref(),
+            Some("type RouteLocationRaw = string;")
+        );
     }
 }

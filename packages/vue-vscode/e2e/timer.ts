@@ -99,9 +99,7 @@ export class TestTimer {
     this.report.startup.typeProvider = record.providerKind;
     this.report.startup.providerKind = record.providerKind;
     const segments = computeStartupSegments(record);
-    this.report.startup.activationToReadyMs = toNullable(
-      segments.activationToReadyMs,
-    );
+    this.report.startup.activationToReadyMs = toNullable(segments.activationToReadyMs);
     this.report.startup.activationToFirstTypedCompletionMs = toNullable(
       segments.activationToFirstTypedCompletionMs,
     );
@@ -136,11 +134,7 @@ export class TestTimer {
     this.report.hover.samples.push({ target, latencyMs });
   }
 
-  recordDiagnostics(
-    timeToFirstMs: number,
-    total: number,
-    sources: string[],
-  ): void {
+  recordDiagnostics(timeToFirstMs: number, total: number, sources: string[]): void {
     this.report.diagnostics.timeToFirstDiagnosticMs = timeToFirstMs;
     this.report.diagnostics.totalDiagnostics = total;
     this.report.diagnostics.sources = sources;
@@ -153,14 +147,9 @@ export class TestTimer {
     const samples = this.report.hover.samples;
     if (samples.length > 0) {
       const latencies = samples.map((s) => s.latencyMs).sort((a, b) => a - b);
-      this.report.hover.avgMs = Math.round(
-        latencies.reduce((a, b) => a + b, 0) / latencies.length,
-      );
+      this.report.hover.avgMs = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
       this.report.hover.maxMs = latencies[latencies.length - 1];
-      const p95Index = Math.min(
-        Math.ceil(latencies.length * 0.95) - 1,
-        latencies.length - 1,
-      );
+      const p95Index = Math.min(Math.ceil(latencies.length * 0.95) - 1, latencies.length - 1);
       this.report.hover.p95Ms = latencies[p95Index];
     }
 

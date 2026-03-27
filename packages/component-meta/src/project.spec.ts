@@ -1,11 +1,6 @@
 import { resolve } from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  ComponentMetaSession,
-  MetaProject,
-  evictComponentMetaSession,
-  shutdownMetaRuntime,
-} from "./project.js";
+import { ComponentMetaSession, evictComponentMetaSession, shutdownMetaRuntime } from "./project.js";
 import { getMetaRuntime } from "./runtime/index.js";
 import type { NativeMetaProject, NativeMetaSession } from "./runtime/index.js";
 
@@ -65,6 +60,20 @@ function createMockSession(baseFiles: Map<string, string>): NativeMetaSession {
     delete(id: string) {
       overlays.set(id, null);
       gen++;
+    },
+    reset(id: string) {
+      overlays.delete(id);
+      gen++;
+    },
+    getDeclaredComponentMeta(id: string) {
+      const overlay = overlays.get(id);
+      if (overlay === null) return null;
+      const source = overlay ?? baseFiles.get(id);
+      if (!source) return null;
+      return JSON.stringify(nativeMetaPayload(id));
+    },
+    getProvenance() {
+      return JSON.stringify({});
     },
     getComponentMeta(id: string) {
       const overlay = overlays.get(id);
@@ -133,7 +142,7 @@ function createMockProject(baseFiles: Map<string, string>): NativeMetaProject {
   };
 }
 
-describe("MetaProject public API", () => {
+describe("ComponentMetaSession public API", () => {
   beforeEach(() => {
     shutdownMetaRuntime();
   });
@@ -141,7 +150,7 @@ describe("MetaProject public API", () => {
     shutdownMetaRuntime();
   });
 
-  it("repeated openMetaProject shares one engine", async () => {
+  it("repeated openComponentMetaSession shares one engine", async () => {
     const runtime = getMetaRuntime();
     const baseFiles = new Map<string, string>();
     const bootstrap = async () => ({
@@ -183,8 +192,8 @@ describe("MetaProject public API", () => {
     const s1 = runtime.openSession(engine);
     const s2 = runtime.openSession(engine);
 
-    const p1 = new MetaProject(s1, "/test");
-    const p2 = new MetaProject(s2, "/test");
+    const p1 = new ComponentMetaSession(s1, "/test");
+    const p2 = new ComponentMetaSession(s2, "/test");
 
     p1.close();
     expect(s1.closed).toBe(true);
@@ -211,18 +220,12 @@ describe("MetaProject public API", () => {
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
     const session = runtime.openSession(engine);
-    const project = new MetaProject(session, "/test");
+    const project = new ComponentMetaSession(session, "/test");
 
     project.close();
     project.close(); // idempotent
 
     expect(() => project.updateFile("A.vue", "x")).toThrow("ComponentMetaSession is closed");
-  });
-
-  it("keeps MetaProject as an alias of ComponentMetaSession", () => {
-    expect(MetaProject).toBe(ComponentMetaSession);
-    expect(evictComponentMetaSession).toBeTypeOf("function");
-    expect(evictComponentMetaSession).toBeDefined();
   });
 
   it("shutdownMetaRuntime invalidates all handles", async () => {
@@ -242,7 +245,7 @@ describe("MetaProject public API", () => {
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
     const session = runtime.openSession(engine);
-    const project = new MetaProject(session, "/test");
+    const project = new ComponentMetaSession(session, "/test");
 
     shutdownMetaRuntime();
     expect(() => project.updateFile("A.vue", "x")).toThrow();
@@ -265,7 +268,7 @@ describe("MetaProject public API", () => {
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
     const session = runtime.openSession(engine);
-    const project = new MetaProject(session, "/test");
+    const project = new ComponentMetaSession(session, "/test");
 
     const names = await project.getExportNames("anything.vue");
     expect(names).toEqual(["default"]);
@@ -292,7 +295,7 @@ describe("MetaProject public API", () => {
       },
       close() {},
     };
-    const project = new MetaProject(session as any, "/test");
+    const project = new ComponentMetaSession(session as any, "/test");
 
     const meta = await project.getComponentMeta("Button.vue");
 
@@ -389,7 +392,7 @@ describe("MetaProject public API", () => {
       },
       close() {},
     };
-    const project = new MetaProject(session as any, "/test");
+    const project = new ComponentMetaSession(session as any, "/test");
 
     const nativeMeta = await project.getNativeComponentMeta("Button.vue");
 
@@ -424,7 +427,7 @@ describe("MetaProject public API", () => {
       },
       close() {},
     };
-    const project = new MetaProject(session as any, "/test");
+    const project = new ComponentMetaSession(session as any, "/test");
 
     const nativeMeta = await project.getNativeComponentMeta("NonExistent.vue");
 
@@ -453,7 +456,7 @@ describe("MetaProject public API", () => {
       },
       close() {},
     };
-    const project = new MetaProject(session as any, "/test");
+    const project = new ComponentMetaSession(session as any, "/test");
 
     // First call succeeds
     const firstMeta = await project.getNativeComponentMeta("Button.vue");
@@ -498,7 +501,7 @@ describe("MetaProject public API", () => {
         throw new Error("JS workspace read should not be used for lazy native loading");
       }),
     };
-    const project = new MetaProject(session as any, "/test", {}, workspace as any);
+    const project = new ComponentMetaSession(session as any, "/test", {}, workspace as any);
 
     const meta = await project.getComponentMeta("Button.vue");
 
@@ -525,13 +528,13 @@ describe("MetaProject public API", () => {
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
     const session = runtime.openSession(engine);
-    const project = new MetaProject(session, "/test");
+    const project = new ComponentMetaSession(session, "/test");
 
     await expect(project.reload()).resolves.toBeUndefined();
     project.close();
   });
 
-  it("evictMetaProject invalidates handles for that engine", async () => {
+  it("evictComponentMetaSession invalidates handles for that engine", async () => {
     const runtime = getMetaRuntime();
     const bootstrap = async () => ({
       nativeProject: createMockProject(new Map()),
@@ -548,7 +551,7 @@ describe("MetaProject public API", () => {
 
     const engine = await runtime.getOrCreateEngine(input, bootstrap);
     const session = runtime.openSession(engine);
-    const project = new MetaProject(session, "/test");
+    const project = new ComponentMetaSession(session, "/test");
 
     runtime.evictEngine(engine.key);
     expect(engine.state).toBe("closed");

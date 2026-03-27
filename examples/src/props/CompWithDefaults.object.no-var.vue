@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { withDefaults, defineProps } from 'vue';
+import { withDefaults, defineProps } from "vue";
 
 const props = withDefaults(
   defineProps({
@@ -9,10 +9,8 @@ const props = withDefaults(
 );
 
 const d = defineProps<{
-  a: string
-}>()
-
-
+  a: string;
+}>();
 </script>
 
 <template>

@@ -18,18 +18,19 @@ The benchmark system measures and compares the performance of Vue and Verter com
 
 The benchmark suite includes 8 carefully designed fixtures:
 
-| Fixture | Description | Features | Size |
-|---------|-------------|----------|------|
-| `tiny-template` | Minimal single element | Basic template | ~50 B |
-| `simple-interactive` | Counter with button click | refs, event handlers | ~200 B |
-| `list-rendering` | Todo list with v-for | v-for, v-model, dynamic lists | ~1 KB |
-| `conditional-heavy` | Multiple nested v-if/v-else | Conditional rendering chains | ~2 KB |
-| `form-component` | Registration form | Forms, v-model, validation | ~3 KB |
-| `composition-heavy` | User profile manager | Composition API, watchers, lifecycle hooks | ~8 KB |
-| `template-heavy` | Dashboard layout | Large template structure, many elements | ~10 KB |
-| `kitchen-sink` | Task management app | All features combined | ~25 KB |
+| Fixture              | Description                 | Features                                   | Size   |
+| -------------------- | --------------------------- | ------------------------------------------ | ------ |
+| `tiny-template`      | Minimal single element      | Basic template                             | ~50 B  |
+| `simple-interactive` | Counter with button click   | refs, event handlers                       | ~200 B |
+| `list-rendering`     | Todo list with v-for        | v-for, v-model, dynamic lists              | ~1 KB  |
+| `conditional-heavy`  | Multiple nested v-if/v-else | Conditional rendering chains               | ~2 KB  |
+| `form-component`     | Registration form           | Forms, v-model, validation                 | ~3 KB  |
+| `composition-heavy`  | User profile manager        | Composition API, watchers, lifecycle hooks | ~8 KB  |
+| `template-heavy`     | Dashboard layout            | Large template structure, many elements    | ~10 KB |
+| `kitchen-sink`       | Task management app         | All features combined                      | ~25 KB |
 
 Each fixture tests specific aspects of SFC compilation:
+
 - **Script Compilation**: `<script setup>` processing, TypeScript, composition API
 - **Template Compilation**: Directives (v-for, v-if, v-model, v-bind, v-on), interpolation, events
 - **Style Processing**: Scoped styles detection
@@ -38,12 +39,14 @@ Each fixture tests specific aspects of SFC compilation:
 ## Metrics
 
 ### Time Metrics
+
 - **Mean**: Average compilation time across all iterations
 - **Median (p50)**: 50th percentile - half of compilations are faster
 - **p95/p99**: 95th/99th percentile - measure tail latency
 - **Min/Max**: Best and worst case performance
 
 ### Performance Metrics
+
 - **Operations per Second (ops/sec)**: How many compilations per second
 - **Throughput (MB/s)**: Megabytes of source code processed per second
 - **Speedup Factor**: Ratio of Vue time to Verter time (>1.0 means Verter is faster)
@@ -52,11 +55,11 @@ Each fixture tests specific aspects of SFC compilation:
 
 Results are categorized into three statuses:
 
-| Status | Criteria | Meaning |
-|--------|----------|---------|
-| ✅ **Pass** | Speedup ≥ 1.0x | Verter is at least as fast as Vue |
-| ⚠️ **Warning** | 0.5x ≤ Speedup < 1.0x | Verter is 50-99% of Vue's speed |
-| ❌ **Fail** | Speedup < 0.5x | Verter is less than 50% of Vue's speed |
+| Status         | Criteria              | Meaning                                |
+| -------------- | --------------------- | -------------------------------------- |
+| ✅ **Pass**    | Speedup ≥ 1.0x        | Verter is at least as fast as Vue      |
+| ⚠️ **Warning** | 0.5x ≤ Speedup < 1.0x | Verter is 50-99% of Vue's speed        |
+| ❌ **Fail**    | Speedup < 0.5x        | Verter is less than 50% of Vue's speed |
 
 The overall status is determined by the worst individual fixture status (any failure = overall fail).
 
@@ -73,6 +76,7 @@ pnpm --filter @verter/benchmark bench:json
 ```
 
 Results are saved to:
+
 - `benchmark-results/results.md` - Human-readable markdown report
 - `benchmark-results/results.json` - Machine-readable JSON for CI/CD
 
@@ -90,11 +94,13 @@ Results are saved to:
 Comment `/benchmark` on any pull request to trigger benchmarks on that PR's branch.
 
 **Requirements:**
+
 - Must be a collaborator with write access
 - PR must be open
 - Comment must start with `/benchmark` (can have text after)
 
 **Example:**
+
 ```
 /benchmark
 ```
@@ -133,10 +139,11 @@ or
 
 ### Detailed Results
 
-| Fixture | Size | Vue (ms) | Verter (ms) | Speedup | Throughput | Status |
-|---------|------|----------|-------------|---------|------------|--------|
-| tiny-template | 0.05 KB | 0.12 | 0.08 | 1.50x | 0.64 MB/s | ✅ |
-| simple-interactive | 0.20 KB | 0.25 | 0.18 | 1.39x | 1.11 MB/s | ✅ |
+| Fixture            | Size    | Vue (ms) | Verter (ms) | Speedup | Throughput | Status |
+| ------------------ | ------- | -------- | ----------- | ------- | ---------- | ------ |
+| tiny-template      | 0.05 KB | 0.12     | 0.08        | 1.50x   | 0.64 MB/s  | ✅     |
+| simple-interactive | 0.20 KB | 0.25     | 0.18        | 1.39x   | 1.11 MB/s  | ✅     |
+
 ...
 ```
 
@@ -150,6 +157,7 @@ or
 #### Understanding Throughput
 
 Throughput measures data processing speed:
+
 - Calculated as: `file_size_bytes / compilation_time_seconds / 1_048_576`
 - Higher is better
 - Useful for understanding performance on large files
@@ -187,19 +195,19 @@ packages/benchmark/
 // 2-phase compilation as per Vue's design
 export function compileVue(source: string, filename: string) {
   // Phase 1: Parse SFC
-  const { descriptor } = parse(source, { filename })
-  
+  const { descriptor } = parse(source, { filename });
+
   // Phase 2: Compile script with binding analysis
-  const scriptResult = compileScript(descriptor, { id: filename })
-  const bindingMetadata = scriptResult.bindings
-  
+  const scriptResult = compileScript(descriptor, { id: filename });
+  const bindingMetadata = scriptResult.bindings;
+
   // Phase 3: Compile template with bindings
   const templateResult = compileTemplate({
     source: descriptor.template.content,
-    compilerOptions: { bindingMetadata }
-  })
-  
-  return { code: scriptResult.content + templateResult.code }
+    compilerOptions: { bindingMetadata },
+  });
+
+  return { code: scriptResult.content + templateResult.code };
 }
 ```
 
@@ -208,12 +216,12 @@ export function compileVue(source: string, filename: string) {
 ```typescript
 // Single-pass compilation (timing handled by tinybench)
 export function compileVerter(source: string, filename: string) {
-  const result = compile(source, { filename })
+  const result = compile(source, { filename });
 
   return {
     code: result.code,
-    errors: result.errors || []
-  }
+    errors: result.errors || [],
+  };
 }
 ```
 
@@ -221,16 +229,16 @@ export function compileVerter(source: string, filename: string) {
 
 ```typescript
 const bench = new Bench({
-  time: 1000,           // Run for at least 1 second
+  time: 1000, // Run for at least 1 second
   warmupIterations: 10, // 10 warmup runs before measurement
-  iterations: 50        // Minimum 50 measured iterations
-})
+  iterations: 50, // Minimum 50 measured iterations
+});
 
 // Tinybench handles timing automatically - no manual performance.now()
-bench.add('Vue', () => compileVue(source, filename))
-bench.add('Verter', () => compileVerter(source, filename))
+bench.add("Vue", () => compileVue(source, filename));
+bench.add("Verter", () => compileVerter(source, filename));
 
-await bench.run()
+await bench.run();
 ```
 
 ## Troubleshooting

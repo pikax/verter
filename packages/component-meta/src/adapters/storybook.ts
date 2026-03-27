@@ -108,6 +108,9 @@ function typeToControl(type: TypeDescriptor): StorybookArgType["control"] {
     case "function":
       return false;
 
+    case "typeParameter":
+      return false;
+
     default:
       return { type: "text" };
   }
@@ -131,6 +134,8 @@ function typeToStorybookName(type: TypeDescriptor): string {
       return "object";
     case "function":
       return "function";
+    case "typeParameter":
+      return type.name;
     case "ref":
       return type.name;
     default:
@@ -156,6 +161,8 @@ function typeToSummary(type: TypeDescriptor): string {
       return "object";
     case "function":
       return "function";
+    case "typeParameter":
+      return type.name;
     case "ref":
       return type.typeArguments
         ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`

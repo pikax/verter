@@ -14,9 +14,7 @@ describe("parseVueRequest", () => {
   });
 
   it("parses a .vue file with style query parameters", () => {
-    const result = parseVueRequest(
-      "/path/to/App.vue?vue&type=style&index=0&lang=css&scoped=true",
-    );
+    const result = parseVueRequest("/path/to/App.vue?vue&type=style&index=0&lang=css&scoped=true");
     expect(result.filename).toBe("/path/to/App.vue");
     expect(result.query.vue).toBe(true);
     expect(result.query.type).toBe("style");
@@ -44,9 +42,7 @@ describe("parseVueRequest", () => {
   });
 
   it("parses scss lang correctly", () => {
-    const result = parseVueRequest(
-      "/path/to/App.vue?vue&type=style&index=1&lang=scss",
-    );
+    const result = parseVueRequest("/path/to/App.vue?vue&type=style&index=1&lang=scss");
     expect(result.query.lang).toBe("scss");
     expect(result.query.index).toBe(1);
   });

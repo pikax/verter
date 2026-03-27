@@ -64,7 +64,11 @@ export class UnifiedVirtualFilesProvider
   }
 
   getTreeItem(element: UnifiedVirtualFileItem): TreeItem {
-    const label = element.isTsx ? "IDE (TSX)" : element.kind === "api" ? "API (d.vue.ts)" : element.kind;
+    const label = element.isTsx
+      ? "IDE (TSX)"
+      : element.kind === "api"
+        ? "API (d.vue.ts)"
+        : element.kind;
     const item = new TreeItem(label, TreeItemCollapsibleState.None);
 
     const parts: string[] = [];
@@ -113,10 +117,9 @@ export class UnifiedVirtualFilesProvider
     if (!sourceUri) return [];
 
     try {
-      const response = await this.getClient().sendRequest(
-        RequestType.GetVirtualFiles,
-        { uri: sourceUri },
-      );
+      const response = await this.getClient().sendRequest(RequestType.GetVirtualFiles, {
+        uri: sourceUri,
+      });
 
       if (!response) return [];
 
@@ -187,10 +190,8 @@ export class UnifiedVirtualFilesProvider
       case "template":
         return new ThemeIcon("symbol-snippet");
       default:
-        if (item.kind.startsWith("style"))
-          return new ThemeIcon("paintcan");
-        if (item.kind.startsWith("custom"))
-          return new ThemeIcon("extensions");
+        if (item.kind.startsWith("style")) return new ThemeIcon("paintcan");
+        if (item.kind.startsWith("custom")) return new ThemeIcon("extensions");
         return new ThemeIcon("file");
     }
   }
@@ -199,12 +200,7 @@ export class UnifiedVirtualFilesProvider
    * Open a virtual file via the content provider (no disk writes).
    */
   async openVirtualFile(item: UnifiedVirtualFileItem): Promise<void> {
-    const uri = this.contentProvider.setContent(
-      item.kind,
-      item.lang,
-      item.sourceUri,
-      item.code,
-    );
+    const uri = this.contentProvider.setContent(item.kind, item.lang, item.sourceUri, item.code);
 
     const doc = await workspace.openTextDocument(uri);
     await window.showTextDocument(doc, {

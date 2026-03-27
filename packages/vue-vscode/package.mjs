@@ -18,8 +18,14 @@
  *   node package.mjs --target win32-x64      # platform-specific VSIX
  */
 import {
-  readFileSync, writeFileSync, cpSync, mkdirSync,
-  existsSync, readdirSync, lstatSync, rmSync,
+  readFileSync,
+  writeFileSync,
+  cpSync,
+  mkdirSync,
+  existsSync,
+  readdirSync,
+  lstatSync,
+  rmSync,
 } from "fs";
 import { execSync } from "child_process";
 import path from "path";
@@ -69,10 +75,7 @@ if (existsSync(path.join(nativeSrc, "index.js"))) {
 if (existsSync(path.join(nativeSrc, "dist"))) {
   for (const file of readdirSync(path.join(nativeSrc, "dist"))) {
     if (file.endsWith(".node") && !file.endsWith(".old")) {
-      cpSync(
-        path.join(nativeSrc, "dist", file),
-        path.join(nativeDst, "dist", file),
-      );
+      cpSync(path.join(nativeSrc, "dist", file), path.join(nativeDst, "dist", file));
     }
   }
 }
@@ -107,7 +110,12 @@ try {
 
 /** Replace all workspace:^ dependency values with a real version. */
 function patchWorkspaceDeps(pkgJson, ver) {
-  for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+  for (const field of [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+  ]) {
     const deps = pkgJson[field];
     if (!deps) continue;
     for (const [name, value] of Object.entries(deps)) {
@@ -132,5 +140,9 @@ function removeSafe(p) {
 }
 
 function lstatSafe(p) {
-  try { return lstatSync(p); } catch { return null; }
+  try {
+    return lstatSync(p);
+  } catch {
+    return null;
+  }
 }

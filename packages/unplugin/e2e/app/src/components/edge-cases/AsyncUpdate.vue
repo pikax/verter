@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const status = ref('idle')
+const status = ref("idle");
 
 function triggerAsync() {
-  status.value = 'loading'
+  status.value = "loading";
   setTimeout(() => {
-    status.value = 'done'
-  }, 100)
+    status.value = "done";
+  }, 100);
 }
 </script>
 

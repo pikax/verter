@@ -82,6 +82,7 @@ impl TypeExpander for VerterTypeExpander {
                 .map(|p| ExpandedMember {
                     name: p.name.clone(),
                     type_expr: p.type_expr.clone(),
+                    raw_type: p.raw_type.clone(),
                     optional: !p.required,
                     description: p.description.clone(),
                 })
@@ -115,6 +116,7 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
         members.push(ExpandedMember {
             name: prop.name.clone(),
             type_expr,
+            raw_type: prop.type_annotation.clone(),
             optional: prop.is_optional,
             description: prop.description.clone(),
         });
@@ -129,6 +131,7 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
         members.push(ExpandedMember {
             name: emit.name.clone(),
             type_expr,
+            raw_type: emit.payload_type.clone(),
             optional: false,
             description: emit.description.clone(),
         });
@@ -138,6 +141,7 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
         members.push(ExpandedMember {
             name: slot.name.clone(),
             type_expr: TypeExpr::primitive(PrimitiveName::Unknown),
+            raw_type: slot.return_type.clone(),
             optional: !slot.is_required,
             description: slot.description.clone(),
         });

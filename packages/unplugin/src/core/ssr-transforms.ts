@@ -34,10 +34,7 @@ export function replaceImportMetaSsr(code: string, isSSR: boolean): string {
  * Replaces `_resolveComponent("ComponentName")` calls with a no-op that renders
  * an empty comment node.
  */
-export function stripComponents(
-  code: string,
-  componentNames: string[],
-): string {
+export function stripComponents(code: string, componentNames: string[]): string {
   if (componentNames.length === 0) return code;
 
   let result = code;
@@ -45,10 +42,7 @@ export function stripComponents(
     // Replace _resolveComponent("Name") with a function returning comment VNode
     const pattern = `_resolveComponent("${name}")`;
     if (result.includes(pattern)) {
-      result = result.replaceAll(
-        pattern,
-        `(() => ({ __name: "${name}", render: () => null }))()`,
-      );
+      result = result.replaceAll(pattern, `(() => ({ __name: "${name}", render: () => null }))()`);
     }
   }
   return result;

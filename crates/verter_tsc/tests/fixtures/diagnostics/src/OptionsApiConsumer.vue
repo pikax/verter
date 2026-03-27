@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import OptionsApiAdvanced from './OptionsApiAdvanced.vue'
+import OptionsApiAdvanced from "./OptionsApiAdvanced.vue";
 </script>
 <template>
   <OptionsApiAdvanced :initial-count="42" />

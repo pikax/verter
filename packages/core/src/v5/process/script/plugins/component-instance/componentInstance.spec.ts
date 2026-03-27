@@ -236,9 +236,7 @@ describe("process ComponentInstancePlugin", () => {
     }
 
     it("generates Instance type for options API", () => {
-      const { result } = parse(
-        `export default defineComponent({ props: { foo: String } })`,
-      );
+      const { result } = parse(`export default defineComponent({ props: { foo: String } })`);
 
       // Should export Instance type using InstanceType of default_Component
       expect(result).toContain(`export type ___VERTER___Instance`);
@@ -246,22 +244,20 @@ describe("process ComponentInstancePlugin", () => {
     });
 
     it("generates Component constructor for options API", () => {
-      const { result } = parse(
-        `export default defineComponent({ props: { foo: String } })`,
-      );
+      const { result } = parse(`export default defineComponent({ props: { foo: String } })`);
 
       // Should export Component with constructor
       expect(result).toContain(`export declare const ___VERTER___Component:`);
-      expect(result).toContain(`___VERTER___OmitConstructorSignature<typeof ___VERTER___default_Component>`);
+      expect(result).toContain(
+        `___VERTER___OmitConstructorSignature<typeof ___VERTER___default_Component>`,
+      );
       expect(result).toMatch(
         /new\(props\?:\s*___VERTER___Instance\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance>/,
       );
     });
 
     it("does not include PublicInstanceFromMacro for options API", () => {
-      const { result } = parse(
-        `export default defineComponent({ props: { foo: String } })`,
-      );
+      const { result } = parse(`export default defineComponent({ props: { foo: String } })`);
 
       // Options API should NOT use macro-based instance type
       expect(result).not.toContain(`PublicInstanceFromMacro`);
@@ -276,9 +272,7 @@ describe("process ComponentInstancePlugin", () => {
     });
 
     it("does not generate generic declarations for options API", () => {
-      const { result } = parse(
-        `export default defineComponent({ props: { foo: String } })`,
-      );
+      const { result } = parse(`export default defineComponent({ props: { foo: String } })`);
 
       // No generic parameters in Instance or Component types
       expect(result).not.toMatch(/___VERTER___Instance</);

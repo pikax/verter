@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Branch or commit to benchmark'
+        description: "Branch or commit to benchmark"
         required: false
-        default: 'main'
+        default: "main"
       save-results:
-        description: 'Commit results to benchmark-results branch for tracking'
+        description: "Commit results to benchmark-results branch for tracking"
         required: false
         default: false
         type: boolean
@@ -141,7 +141,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

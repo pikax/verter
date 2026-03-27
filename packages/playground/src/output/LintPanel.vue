@@ -23,7 +23,9 @@ const diagnostics = computed<LintDiagnostic[]>(() => {
 });
 
 const errorCount = computed(() => diagnostics.value.filter((d) => d.severity === "error").length);
-const warningCount = computed(() => diagnostics.value.filter((d) => d.severity === "warning").length);
+const warningCount = computed(
+  () => diagnostics.value.filter((d) => d.severity === "warning").length,
+);
 
 const grouped = computed(() => {
   const map = new Map<string, LintDiagnostic[]>();
@@ -140,9 +142,7 @@ function severityBadgeClass(severity: string): string {
 
     <!-- Issues view -->
     <div v-if="activeView === 'issues'" class="lint-body">
-      <div v-if="diagnostics.length === 0" class="empty-state">
-        No lint issues found
-      </div>
+      <div v-if="diagnostics.length === 0" class="empty-state">No lint issues found</div>
       <div v-else class="lint-content">
         <div class="lint-summary">
           <span v-if="errorCount > 0" class="summary-count summary-error">
@@ -152,22 +152,10 @@ function severityBadgeClass(severity: string): string {
             {{ warningCount }} warning{{ warningCount !== 1 ? "s" : "" }}
           </span>
         </div>
-        <details
-          v-for="[category, items] in grouped"
-          :key="category"
-          class="lint-section"
-          open
-        >
-          <summary class="section-title">
-            {{ category }} ({{ items.length }})
-          </summary>
+        <details v-for="[category, items] in grouped" :key="category" class="lint-section" open>
+          <summary class="section-title">{{ category }} ({{ items.length }})</summary>
           <div class="lint-list">
-            <div
-              v-for="(d, i) in items"
-              :key="i"
-              class="lint-item"
-              :class="'lint-' + d.severity"
-            >
+            <div v-for="(d, i) in items" :key="i" class="lint-item" :class="'lint-' + d.severity">
               <span class="lint-icon">{{ severityIcon(d.severity) }}</span>
               <span class="lint-message">{{ d.message }}</span>
               <code class="lint-rule">{{ d.rule }}</code>
@@ -199,15 +187,16 @@ function severityBadgeClass(severity: string): string {
           class="lint-section"
           open
         >
-          <summary class="section-title">
-            {{ category }} ({{ rules.length }})
-          </summary>
+          <summary class="section-title">{{ category }} ({{ rules.length }})</summary>
           <div class="lint-list">
             <label
               v-for="rule in rules"
               :key="rule.name"
               class="rule-item"
-              :class="{ 'rule-fired': firedRules.has(rule.name), 'rule-disabled': !isRuleEnabled(rule.name) }"
+              :class="{
+                'rule-fired': firedRules.has(rule.name),
+                'rule-disabled': !isRuleEnabled(rule.name),
+              }"
             >
               <input
                 type="checkbox"
@@ -216,10 +205,7 @@ function severityBadgeClass(severity: string): string {
                 @change="toggleRule(rule.name)"
               />
               <code class="rule-name">{{ rule.name }}</code>
-              <span
-                class="severity-badge"
-                :class="severityBadgeClass(rule.defaultSeverity)"
-              >
+              <span class="severity-badge" :class="severityBadgeClass(rule.defaultSeverity)">
                 {{ rule.defaultSeverity.toLowerCase() }}
               </span>
               <span v-if="firedRules.has(rule.name)" class="fired-indicator">active</span>

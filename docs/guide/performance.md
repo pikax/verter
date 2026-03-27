@@ -10,17 +10,17 @@ Verter's template compiler is written in Rust and exposed to Node.js via NAPI-RS
 
 The following benchmarks compare Verter's Rust compiler against Vue's `@vue/compiler-sfc` across 8 real-world-style fixtures of varying size and complexity, plus a 20,000-file stress test.
 
-| Fixture | Size | Vue (ops/s) | Verter (ops/s) | Speedup | Throughput |
-|---|---|---:|---:|---:|---:|
-| tiny-template | 42 B | 21,240 | 112,368 | **5.3x** | 4.50 MB/s |
-| simple-interactive | 242 B | 3,140 | 52,440 | **16.7x** | 12.10 MB/s |
-| list-rendering | 1.3 KB | 1,141 | 15,066 | **13.2x** | 18.85 MB/s |
-| conditional-heavy | 2.0 KB | 1,288 | 14,928 | **11.6x** | 29.27 MB/s |
-| form-component | 4.3 KB | 750 | 7,359 | **9.8x** | 30.58 MB/s |
-| composition-heavy | 9.0 KB | 368 | 3,644 | **9.9x** | 31.86 MB/s |
-| template-heavy | 8.5 KB | 1,077 | 2,914 | **2.7x** | 24.20 MB/s |
-| kitchen-sink | 26.7 KB | 141 | 1,106 | **7.8x** | 28.86 MB/s |
-| 20k files (stress) | 127 MB | 30.8s | 5.0s | **6.1x** | 25.16 MB/s |
+| Fixture            | Size    | Vue (ops/s) | Verter (ops/s) |   Speedup | Throughput |
+| ------------------ | ------- | ----------: | -------------: | --------: | ---------: |
+| tiny-template      | 42 B    |      21,240 |        112,368 |  **5.3x** |  4.50 MB/s |
+| simple-interactive | 242 B   |       3,140 |         52,440 | **16.7x** | 12.10 MB/s |
+| list-rendering     | 1.3 KB  |       1,141 |         15,066 | **13.2x** | 18.85 MB/s |
+| conditional-heavy  | 2.0 KB  |       1,288 |         14,928 | **11.6x** | 29.27 MB/s |
+| form-component     | 4.3 KB  |         750 |          7,359 |  **9.8x** | 30.58 MB/s |
+| composition-heavy  | 9.0 KB  |         368 |          3,644 |  **9.9x** | 31.86 MB/s |
+| template-heavy     | 8.5 KB  |       1,077 |          2,914 |  **2.7x** | 24.20 MB/s |
+| kitchen-sink       | 26.7 KB |         141 |          1,106 |  **7.8x** | 28.86 MB/s |
+| 20k files (stress) | 127 MB  |       30.8s |           5.0s |  **6.1x** | 25.16 MB/s |
 
 **Average speedup: 9.2x.** Throughput scales from ~4.5 MB/s on tiny files to ~32 MB/s on larger components, as the fixed per-file overhead becomes proportionally smaller.
 
@@ -68,8 +68,8 @@ Beyond raw compiler speed, Verter's `@verter/unplugin` supports a `preCompile` o
 
 ```ts
 // vite.config.ts
-import { defineConfig } from 'vite'
-import VerterVite from '@verter/unplugin/vite'
+import { defineConfig } from "vite";
+import VerterVite from "@verter/unplugin/vite";
 
 export default defineConfig({
   plugins: [
@@ -77,7 +77,7 @@ export default defineConfig({
       preCompile: true,
     }),
   ],
-})
+});
 ```
 
 See [Cross-File Optimization](./cross-file-optimization) for how `preCompile` enables whole-program analysis.

@@ -10,7 +10,10 @@ import { tmpdir } from "os";
 import { scanVueFiles } from "./scanner";
 
 function createTempDir(): string {
-  const dir = join(tmpdir(), `verter-scanner-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(
+    tmpdir(),
+    `verter-scanner-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   mkdirSync(dir, { recursive: true });
   return dir;
 }

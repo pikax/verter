@@ -434,13 +434,14 @@ function deriveComponentName(filePath: string): string {
 }
 
 export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResult): ComponentMeta {
+  const nativeRegistry = buildNativeTypeRegistry(meta);
   return {
     filePath: meta.filePath,
     componentName: deriveComponentName(meta.filePath),
     optionsApi: meta.optionsApi,
     props: meta.props.map((prop) => ({
       name: prop.name,
-      type: typeExprToDescriptor(prop.type),
+      type: typeExprToDescriptor(prop.type, nativeRegistry),
       ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
       required: prop.required,
       hasDefault: prop.hasDefault,
@@ -451,7 +452,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     })),
     events: meta.events.map((event) => ({
       name: event.name,
-      payload: typeExprToDescriptor(event.payload),
+      payload: typeExprToDescriptor(event.payload, nativeRegistry),
       ...(event.payloadExpansion !== undefined ? { payloadExpansion: event.payloadExpansion } : {}),
       hasValidator: false,
       isDeclared: true,
@@ -464,7 +465,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       isScoped: slot.isScoped,
       bindings: slot.bindings.map((binding) => ({
         name: binding.name,
-        type: typeExprToDescriptor(binding.type),
+        type: typeExprToDescriptor(binding.type, nativeRegistry),
         ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
         ...(binding.rawType !== undefined ? { rawType: binding.rawType } : {}),
       })),
@@ -474,11 +475,11 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     })),
     models: meta.models.map((model) => ({
       name: model.name,
-      type: typeExprToDescriptor(model.type),
+      type: typeExprToDescriptor(model.type, nativeRegistry),
     })),
     exposed: meta.exposed.map((exposed) => ({
       name: exposed.name,
-      type: typeExprToDescriptor(exposed.type),
+      type: typeExprToDescriptor(exposed.type, nativeRegistry),
       ...(exposed.typeExpansion !== undefined ? { typeExpansion: exposed.typeExpansion } : {}),
       ...(exposed.description !== undefined ? { description: exposed.description } : {}),
     })),
@@ -537,19 +538,22 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
         specificity: selector.specificity,
       })),
     })),
-    acceptedProps: mapNativeAcceptedProps(meta.acceptedProps),
-    acceptedEvents: mapNativeAcceptedEvents(meta.acceptedEvents),
+    acceptedProps: mapNativeAcceptedProps(meta.acceptedProps, nativeRegistry),
+    acceptedEvents: mapNativeAcceptedEvents(meta.acceptedEvents, nativeRegistry),
     acceptedSurfaceCompleteness: meta.acceptedSurfaceCompleteness as AcceptedSurfaceCompleteness,
     rootReachability: meta.rootReachability as RootReachability,
-    fallthroughSurface: mapNativeFallthroughSurface(meta.fallthroughSurface),
+    fallthroughSurface: mapNativeFallthroughSurface(meta.fallthroughSurface, nativeRegistry),
     flags: meta.flags,
   };
 }
 
-function mapNativeAcceptedProps(props: NativeAcceptedPropMeta[]): AcceptedPropMeta[] {
+function mapNativeAcceptedProps(
+  props: NativeAcceptedPropMeta[],
+  nativeRegistry?: Map<string, NativeTypeExpr>,
+): AcceptedPropMeta[] {
   return props.map((p) => ({
     name: p.name,
-    type: typeExprToDescriptor(p.type),
+    type: typeExprToDescriptor(p.type, nativeRegistry),
     ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
     required: p.required,
     provenance: p.provenance,
@@ -558,10 +562,13 @@ function mapNativeAcceptedProps(props: NativeAcceptedPropMeta[]): AcceptedPropMe
   }));
 }
 
-function mapNativeAcceptedEvents(events: NativeAcceptedEventMeta[]): AcceptedEventMeta[] {
+function mapNativeAcceptedEvents(
+  events: NativeAcceptedEventMeta[],
+  nativeRegistry?: Map<string, NativeTypeExpr>,
+): AcceptedEventMeta[] {
   return events.map((e) => ({
     name: e.name,
-    payload: typeExprToDescriptor(e.payload),
+    payload: typeExprToDescriptor(e.payload, nativeRegistry),
     ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
     provenance: e.provenance,
     availability: e.availability,
@@ -569,29 +576,35 @@ function mapNativeAcceptedEvents(events: NativeAcceptedEventMeta[]): AcceptedEve
   }));
 }
 
-function mapNativeFallthroughSurface(surface: NativeFallthroughSurface): FallthroughSurface {
+function mapNativeFallthroughSurface(
+  surface: NativeFallthroughSurface,
+  nativeRegistry?: Map<string, NativeTypeExpr>,
+): FallthroughSurface {
   if (surface.kind === "none") {
     return surface;
   }
   return {
     kind: "branches",
-    branches: surface.branches.map(mapNativeFallthroughBranch),
+    branches: surface.branches.map((branch) => mapNativeFallthroughBranch(branch, nativeRegistry)),
   };
 }
 
-function mapNativeFallthroughBranch(branch: NativeFallthroughBranch): FallthroughBranch {
+function mapNativeFallthroughBranch(
+  branch: NativeFallthroughBranch,
+  nativeRegistry?: Map<string, NativeTypeExpr>,
+): FallthroughBranch {
   return {
     branchKey: branch.branchKey,
     ...(branch.conditionText !== undefined ? { conditionText: branch.conditionText } : {}),
     props: branch.props.map((p) => ({
       name: p.name,
-      type: typeExprToDescriptor(p.type),
+      type: typeExprToDescriptor(p.type, nativeRegistry),
       ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
       sources: p.sources,
     })),
     events: branch.events.map((e) => ({
       name: e.name,
-      payload: typeExprToDescriptor(e.payload),
+      payload: typeExprToDescriptor(e.payload, nativeRegistry),
       ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
       sources: e.sources,
     })),
@@ -603,12 +616,27 @@ function mapNativeFallthroughBranch(branch: NativeFallthroughBranch): Fallthroug
 export function nativeTypeRegistryToMap(
   meta: NativeComponentMetaResult,
 ): Map<string, TypeDescriptor> | undefined {
-  if (!meta.typeRegistry?.length) {
+  const nativeRegistry = buildNativeTypeRegistry(meta);
+  if (!nativeRegistry) {
     return undefined;
   }
   const registry = new Map<string, TypeDescriptor>();
+  for (const entry of meta.typeRegistry ?? []) {
+    registry.set(entry.name, typeExprToDescriptor(entry.type, nativeRegistry));
+  }
+  return registry;
+}
+
+function buildNativeTypeRegistry(
+  meta: NativeComponentMetaResult,
+): Map<string, NativeTypeExpr> | undefined {
+  if (!meta.typeRegistry?.length) {
+    return undefined;
+  }
+
+  const registry = new Map<string, NativeTypeExpr>();
   for (const entry of meta.typeRegistry) {
-    registry.set(entry.name, typeExprToDescriptor(entry.type));
+    registry.set(entry.name, entry.type);
   }
   return registry;
 }

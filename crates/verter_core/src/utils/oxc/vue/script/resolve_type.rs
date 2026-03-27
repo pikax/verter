@@ -565,6 +565,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         if let Some(bound) = self
             .type_param_bindings
             .iter()
+            .rev()
             .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
         {
             return Some(bound.1);

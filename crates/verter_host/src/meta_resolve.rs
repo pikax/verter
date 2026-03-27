@@ -447,6 +447,14 @@ impl VerterHost {
             mode == ResolverMode::Expanded,
             captured,
         );
+        let mut parts = parts;
+        self.append_component_meta_registry_entries(
+            canonical,
+            &mut parts.resolved_type_registry,
+            &mut parts.resolved_type_registry_meta,
+            parts.cached_eval_inputs.as_deref(),
+            store_view,
+        );
         component_meta_trace_event(
             "component_meta_parts",
             format!(
@@ -475,6 +483,89 @@ impl VerterHost {
             fact_versions: parts.fact_versions,
         };
         Some(state)
+    }
+
+    fn append_component_meta_registry_entries(
+        &self,
+        owner_canonical: &str,
+        resolved_type_registry: &mut Vec<verter_analysis::component_meta::ResolvedTypeAnalysis>,
+        resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
+        cached_eval_inputs: Option<&crate::host_manage::ImportedEvalInputs>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) {
+        let mut upsert_entry =
+            |name: String,
+             type_expr: verter_analysis::type_expr::TypeExpr,
+             declaration: ResolvedTypeDeclaration| {
+                if let Some(index) = resolved_type_registry
+                    .iter()
+                    .position(|entry| entry.name == name)
+                {
+                    let existing = resolved_type_registry[index].type_expr.clone();
+                    let preferred = verter_resolver::choose_preferred_imported_type_body(
+                        Some(existing.clone()),
+                        Some(type_expr.clone()),
+                    )
+                    .unwrap_or(existing.clone());
+                    if preferred != existing {
+                        resolved_type_registry[index].type_expr = preferred;
+                        if let Some(meta) = resolved_type_registry_meta.get_mut(index) {
+                            *meta = ResolvedTypeRegistryMeta {
+                                name: name.clone(),
+                                declaration,
+                            };
+                        }
+                    }
+                    return;
+                }
+
+                resolved_type_registry.push(
+                    verter_analysis::component_meta::ResolvedTypeAnalysis {
+                        name: name.clone(),
+                        type_expr,
+                        type_expansion: None,
+                    },
+                );
+                resolved_type_registry_meta.push(ResolvedTypeRegistryMeta { name, declaration });
+            };
+
+        if let Some(inputs) = cached_eval_inputs {
+            for alias in &inputs.type_aliases {
+                upsert_entry(
+                    alias.local_name.clone(),
+                    alias.decl.body.clone(),
+                    resolve_type_declaration_in_view(
+                        self,
+                        alias.source_canonical_id.as_str(),
+                        alias.exported_name.as_str(),
+                        store_view,
+                    ),
+                );
+            }
+        }
+
+        let Some(owner_env) = self.base_eval_env_in_view(owner_canonical, store_view) else {
+            return;
+        };
+
+        let mut local_type_names: Vec<String> = owner_env.type_symbols.keys().cloned().collect();
+        local_type_names.sort();
+
+        for type_name in local_type_names {
+            let Some(decl) = owner_env.type_symbols.get(type_name.as_str()) else {
+                continue;
+            };
+            upsert_entry(
+                type_name.clone(),
+                decl.body.clone(),
+                resolve_type_declaration_in_view(
+                    self,
+                    owner_canonical,
+                    type_name.as_str(),
+                    store_view,
+                ),
+            );
+        }
     }
 
     /// Get a raw analysis snapshot without any enrichment.

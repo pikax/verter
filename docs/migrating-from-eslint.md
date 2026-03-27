@@ -6,11 +6,11 @@ This guide covers how to migrate from `eslint-plugin-vue` to Verter's built-in l
 
 If your ESLint config uses one of the standard `eslint-plugin-vue` presets, the mapping is straightforward:
 
-| ESLint `extends` value | Verter preset |
-|------------------------|---------------|
-| `plugin:vue/vue3-essential` | **Essential** |
+| ESLint `extends` value                 | Verter preset   |
+| -------------------------------------- | --------------- |
+| `plugin:vue/vue3-essential`            | **Essential**   |
 | `plugin:vue/vue3-strongly-recommended` | **Recommended** |
-| `plugin:vue/vue3-recommended` | **Recommended** |
+| `plugin:vue/vue3-recommended`          | **Recommended** |
 
 Verter merges the "strongly recommended" and "recommended" tiers into a single **Recommended** preset. The rules from both tiers are included.
 
@@ -18,24 +18,24 @@ Verter merges the "strongly recommended" and "recommended" tiers into a single *
 
 `eslint-plugin-vue` prefixes all rule names with `vue/`. Verter drops this prefix:
 
-| ESLint rule | Verter rule |
-|-------------|-------------|
-| `vue/no-v-html` | `no-v-html` |
-| `vue/html-self-closing` | `html-self-closing` |
-| `vue/attribute-order` | `attribute-order` |
+| ESLint rule                             | Verter rule                         |
+| --------------------------------------- | ----------------------------------- |
+| `vue/no-v-html`                         | `no-v-html`                         |
+| `vue/html-self-closing`                 | `html-self-closing`                 |
+| `vue/attribute-order`                   | `attribute-order`                   |
 | `vue/no-deprecated-destroyed-lifecycle` | `no-deprecated-destroyed-lifecycle` |
-| `vue/valid-v-if` | `valid-v-if` |
-| `vue/multi-word-component-names` | `multi-word-component-names` |
+| `vue/valid-v-if`                        | `valid-v-if`                        |
+| `vue/multi-word-component-names`        | `multi-word-component-names`        |
 
 The pattern is consistent: strip the `vue/` prefix, and the rest of the name is identical.
 
 ## Severity Mapping
 
-| ESLint severity | ESLint alias | Verter equivalent |
-|-----------------|--------------|-------------------|
-| `0` | `"off"` | `"off"` (or omit the rule) |
-| `1` | `"warn"` | `"warn"` |
-| `2` | `"error"` | `"error"` |
+| ESLint severity | ESLint alias | Verter equivalent          |
+| --------------- | ------------ | -------------------------- |
+| `0`             | `"off"`      | `"off"` (or omit the rule) |
+| `1`             | `"warn"`     | `"warn"`                   |
+| `2`             | `"error"`    | `"error"`                  |
 
 Array form is also supported. ESLint's `["error", { ... }]` maps directly to Verter's `["error", { ... }]`.
 
@@ -45,19 +45,23 @@ Array form is also supported. ESLint's `["error", { ... }]` maps directly to Ver
 
 ```json
 {
-  "extends": [
-    "plugin:vue/vue3-recommended"
-  ],
+  "extends": ["plugin:vue/vue3-recommended"],
   "rules": {
     "vue/no-v-html": "error",
-    "vue/html-self-closing": ["warn", {
-      "html": { "void": "always" }
-    }],
+    "vue/html-self-closing": [
+      "warn",
+      {
+        "html": { "void": "always" }
+      }
+    ],
     "vue/multi-word-component-names": "off",
-    "vue/max-attributes-per-line": ["error", {
-      "singleline": 3,
-      "multiline": 1
-    }]
+    "vue/max-attributes-per-line": [
+      "error",
+      {
+        "singleline": 3,
+        "multiline": 1
+      }
+    ]
   }
 }
 ```
@@ -71,9 +75,12 @@ Array form is also supported. ESLint's `["error", { ... }]` maps directly to Ver
     "preset": "recommended",
     "rules": {
       "no-v-html": "error",
-      "html-self-closing": ["warn", {
-        "html": { "void": "always" }
-      }],
+      "html-self-closing": [
+        "warn",
+        {
+          "html": { "void": "always" }
+        }
+      ],
       "multi-word-component-names": "off"
     }
   }

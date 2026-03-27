@@ -2043,3 +2043,312 @@ fn provider_ide_id_for_source_non_vue_returns_none() {
         "Non-Vue file should still return None for IDE path"
     );
 }
+
+#[test]
+fn type_import_package_with_pnpm_realpath_prefers_types_entry() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/vue-router/package.json",
+        "/workspace/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+    ]);
+    let package_json = r#"{
+        "name": "vue-router",
+        "main": "index.cjs",
+        "module": "dist/vue-router.js",
+        "types": "dist/vue-router.d.ts",
+        "exports": {
+            ".": {
+                "types": "./dist/vue-router.d.ts",
+                "node": {
+                    "import": "./vue-router.node.mjs",
+                    "require": "./index.cjs"
+                },
+                "import": "./dist/vue-router.js",
+                "require": "./index.cjs"
+            }
+        }
+    }"#;
+    reader.add_file(
+        "/workspace/node_modules/vue-router/package.json",
+        package_json,
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+        package_json,
+    );
+    reader.add_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts",
+        "export interface RouterLinkProps { to: string }",
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+        "export interface RouterLinkProps { to: string }",
+    );
+    reader.add_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.js",
+        "export const runtimeOnly = true",
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+        "export const runtimeOnly = true",
+    );
+    reader.add_file(
+        "/workspace/node_modules/vue-router/index.cjs",
+        "module.exports = {}",
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+        "module.exports = {}",
+    );
+    reader.add_realpath(
+        "/workspace/node_modules/vue-router/package.json",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+    );
+    reader.add_realpath(
+        "/workspace/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+    );
+    reader.add_realpath(
+        "/workspace/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+    );
+    reader.add_realpath(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+    );
+
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.vue".to_string(),
+                specifier: "vue-router".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("TypeImport should resolve through the pnpm realpath");
+
+    assert_eq!(
+        result.source_id,
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+        "TypeImport should still prefer the package types entry when package files realpath into pnpm store locations",
+    );
+}
+
+#[test]
+fn type_import_package_with_nested_node_conditions_and_pnpm_realpath_prefers_types_entry() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/vue-router/package.json",
+        "/workspace/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/vue-router/dist/vue-router.cjs",
+        "/workspace/node_modules/vue-router/dist/vue-router.prod.cjs",
+        "/workspace/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts",
+        "/workspace/node_modules/vue-router/vue-router.node.mjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.prod.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/vue-router.node.mjs",
+    ]);
+    let package_json = r#"{
+        "name": "vue-router",
+        "main": "index.cjs",
+        "module": "dist/vue-router.js",
+        "types": "dist/vue-router.d.ts",
+        "exports": {
+            ".": {
+                "types": "./dist/vue-router.d.ts",
+                "node": {
+                    "import": {
+                        "production": "./vue-router.node.mjs",
+                        "development": "./vue-router.node.mjs",
+                        "default": "./vue-router.node.mjs"
+                    },
+                    "require": {
+                        "production": "./dist/vue-router.prod.cjs",
+                        "development": "./dist/vue-router.cjs",
+                        "default": "./index.cjs"
+                    }
+                },
+                "import": "./dist/vue-router.js",
+                "require": "./index.cjs"
+            }
+        }
+    }"#;
+    reader.add_file(
+        "/workspace/node_modules/vue-router/package.json",
+        package_json,
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+        package_json,
+    );
+    for path in [
+        "/workspace/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/vue-router/dist/vue-router.cjs",
+        "/workspace/node_modules/vue-router/dist/vue-router.prod.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.prod.cjs",
+    ] {
+        reader.add_file(path, "module.exports = {}");
+    }
+    for path in [
+        "/workspace/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/vue-router/vue-router.node.mjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/vue-router.node.mjs",
+    ] {
+        reader.add_file(path, "export const runtimeOnly = true");
+    }
+    for path in [
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+    ] {
+        reader.add_file(path, "export interface RouterLinkProps { to: string }");
+    }
+    for (path, realpath) in [
+        (
+            "/workspace/node_modules/vue-router/package.json",
+            "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+        ),
+        (
+            "/workspace/node_modules/vue-router/index.cjs",
+            "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+        ),
+        (
+            "/workspace/node_modules/vue-router/dist/vue-router.cjs",
+            "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.cjs",
+        ),
+        (
+            "/workspace/node_modules/vue-router/dist/vue-router.prod.cjs",
+            "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.prod.cjs",
+        ),
+        (
+            "/workspace/node_modules/vue-router/dist/vue-router.js",
+            "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+        ),
+        (
+            "/workspace/node_modules/vue-router/dist/vue-router.d.ts",
+            "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+        ),
+        (
+            "/workspace/node_modules/vue-router/vue-router.node.mjs",
+            "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/vue-router.node.mjs",
+        ),
+    ] {
+        reader.add_realpath(path, realpath);
+    }
+
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.vue".to_string(),
+                specifier: "vue-router".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("TypeImport should resolve through the pnpm realpath");
+
+    assert_eq!(
+        result.source_id,
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+        "TypeImport should still prefer the package types entry with nested node/import/require conditions",
+    );
+}
+
+#[test]
+fn tsconfig_path_to_package_dir_respects_type_import_context() {
+    let mut project = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    );
+    project.compiler_options = IdeProjectCompilerOptions {
+        base_url: Some("/workspace".to_string()),
+        paths: vec![(
+            "vue-router".to_string(),
+            vec![
+                "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router"
+                    .to_string(),
+            ],
+        )],
+    };
+    let resolver = ProjectResolver::new(vec![project]);
+    let mut reader = TestReader::with_files(&[
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+    ]);
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
+        r#"{
+            "name": "vue-router",
+            "main": "index.cjs",
+            "module": "dist/vue-router.js",
+            "types": "dist/vue-router.d.ts",
+            "exports": {
+                ".": {
+                    "types": "./dist/vue-router.d.ts",
+                    "import": "./dist/vue-router.js",
+                    "require": "./index.cjs"
+                }
+            }
+        }"#,
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
+        "module.exports = {}",
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.js",
+        "export const runtimeOnly = true",
+    );
+    reader.add_file(
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+        "export interface RouterLinkProps { to: string }",
+    );
+
+    let result = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.vue".to_string(),
+                specifier: "vue-router".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("TypeImport should resolve through tsconfig paths");
+
+    assert_eq!(
+        result.source_id,
+        "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/dist/vue-router.d.ts",
+        "TypeImport through tsconfig paths should honor declaration/package types instead of probing runtime index.cjs",
+    );
+}

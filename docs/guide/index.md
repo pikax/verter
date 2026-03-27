@@ -23,14 +23,14 @@ Verter takes a different approach from existing tools:
 
 ## Verter vs Volar
 
-| | Verter | Volar |
-|---|---|---|
-| **Status** | Pre-release (beta) | Production-ready |
-| **Approach** | SFC to real TSX | Virtual file mapping |
-| **Compiler** | Rust + TypeScript | TypeScript only |
-| **Type safety** | Strict (valid TSX output) | General Vue development |
-| **IDE** | VS Code (Rust LSP binary) | VS Code + other editors |
-| **Build integration** | Universal bundler plugin | Separate (Vite plugin) |
+|                       | Verter                    | Volar                   |
+| --------------------- | ------------------------- | ----------------------- |
+| **Status**            | Pre-release (beta)        | Production-ready        |
+| **Approach**          | SFC to real TSX           | Virtual file mapping    |
+| **Compiler**          | Rust + TypeScript         | TypeScript only         |
+| **Type safety**       | Strict (valid TSX output) | General Vue development |
+| **IDE**               | VS Code (Rust LSP binary) | VS Code + other editors |
+| **Build integration** | Universal bundler plugin  | Separate (Vite plugin)  |
 
 Volar is the established, production-ready solution for Vue IDE support. Verter is an experimental alternative exploring whether generating real TSX can provide a better TypeScript experience. If you need stability today, use Volar. If you want to experiment with stricter type checking and faster compilation, try Verter.
 
@@ -97,16 +97,16 @@ Both pipelines share the same Vue SFC input and produce consistent results -- th
 
 ## Key Packages
 
-| Package | Description |
-|---|---|
-| `@verter/unplugin` | Universal bundler plugin for Vite, Rollup, webpack, esbuild, rspack, Rolldown, and Farm |
-| `@verter/core` | SFC parser and TSX transformer (TypeScript) |
-| `@verter/native` | Native Node.js bindings to the Rust compiler via NAPI-RS |
-| `@verter/wasm` | WASM bindings to the Rust compiler for browser use |
-| `@verter/types` | TypeScript utility types for Vue component type inference |
-| `@verter/typescript-plugin` | TypeScript language service plugin for `.vue` import resolution |
-| `@verter/language-shared` | Shared protocol types between the VS Code extension and LSP server |
-| `verter-vscode` | VS Code extension that launches the Rust LSP binary |
+| Package                     | Description                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------------- |
+| `@verter/unplugin`          | Universal bundler plugin for Vite, Rollup, webpack, esbuild, rspack, Rolldown, and Farm |
+| `@verter/core`              | SFC parser and TSX transformer (TypeScript)                                             |
+| `@verter/native`            | Native Node.js bindings to the Rust compiler via NAPI-RS                                |
+| `@verter/wasm`              | WASM bindings to the Rust compiler for browser use                                      |
+| `@verter/types`             | TypeScript utility types for Vue component type inference                               |
+| `@verter/typescript-plugin` | TypeScript language service plugin for `.vue` import resolution                         |
+| `@verter/language-shared`   | Shared protocol types between the VS Code extension and LSP server                      |
+| `verter-vscode`             | VS Code extension that launches the Rust LSP binary                                     |
 
 ## Next Steps
 

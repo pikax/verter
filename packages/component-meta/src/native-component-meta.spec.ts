@@ -514,4 +514,97 @@ describe("nativeComponentMetaToComponentMeta", () => {
       ],
     });
   });
+
+  it("resolves indexed-access prop descriptors through the native type registry", () => {
+    const native = {
+      filePath: "/project/src/Link.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "href",
+          type: {
+            kind: "indexedAccess",
+            object: { kind: "ref", name: "NuxtLinkProps", typeArguments: [] },
+            index: { kind: "literal", literalKind: "string", value: "to" },
+          },
+          rawType: "NuxtLinkProps['to']",
+          required: false,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      typeRegistry: [
+        {
+          name: "NuxtLinkProps",
+          type: {
+            kind: "object",
+            properties: [
+              {
+                memberKind: "property",
+                name: "to",
+                ty: { kind: "ref", name: "RouteLocationRaw", typeArguments: [] },
+                optional: true,
+                readonly: false,
+              },
+            ],
+          },
+        },
+        {
+          name: "RouteLocationRaw",
+          type: {
+            kind: "union",
+            types: [
+              { kind: "primitive", name: "string" },
+              {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "path",
+                    ty: { kind: "primitive", name: "string" },
+                    optional: false,
+                    readonly: false,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      ...defaultFallthroughFields,
+    } as any;
+
+    const compat = nativeComponentMetaToComponentMeta(native);
+    expect(compat.props[0]?.type).toEqual({
+      kind: "union",
+      types: [
+        { kind: "ref", name: "RouteLocationRaw" },
+        { kind: "primitive", name: "undefined" },
+      ],
+    });
+
+    const registry = nativeTypeRegistryToMap(native);
+    expect(registry?.get("NuxtLinkProps")).toBeDefined();
+    expect(registry?.get("RouteLocationRaw")).toBeDefined();
+  });
 });

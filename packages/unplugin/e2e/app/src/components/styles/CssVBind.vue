@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-const themeColor = ref('rgb(255, 0, 0)')
+import { ref } from "vue";
+const themeColor = ref("rgb(255, 0, 0)");
 
 function changeColor() {
-  themeColor.value = themeColor.value === 'rgb(255, 0, 0)' ? 'rgb(0, 0, 255)' : 'rgb(255, 0, 0)'
+  themeColor.value = themeColor.value === "rgb(255, 0, 0)" ? "rgb(0, 0, 255)" : "rgb(255, 0, 0)";
 }
 </script>
 

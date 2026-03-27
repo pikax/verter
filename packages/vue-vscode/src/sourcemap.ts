@@ -30,9 +30,7 @@ function decodeVLQValue(str: string, index: number): [number, number] {
 /**
  * A source map segment: [genCol, sourceIdx, srcLine, srcCol, nameIdx?]
  */
-type Segment =
-  | [number, number, number, number]
-  | [number, number, number, number, number];
+type Segment = [number, number, number, number] | [number, number, number, number, number];
 
 /** Parse a VLQ mappings string into an array of lines, each containing segments. */
 function parseMappings(mappings: string): Segment[][] {
@@ -121,11 +119,7 @@ export function lookupGenerated(
     for (const seg of segments[genLine]!) {
       if (seg[2] === srcLine) {
         const dist = Math.abs(seg[3] - srcCol);
-        if (
-          !best ||
-          dist < best.dist ||
-          (dist === best.dist && genLine < best.line)
-        ) {
+        if (!best || dist < best.dist || (dist === best.dist && genLine < best.line)) {
           best = { line: genLine, col: seg[0], dist };
         }
       }

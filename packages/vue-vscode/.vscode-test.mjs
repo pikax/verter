@@ -9,9 +9,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rawFixture = process.env.E2E_FIXTURE || "single-project";
 const atIndex = rawFixture.indexOf("@");
 const fixture = atIndex === -1 ? rawFixture : rawFixture.slice(0, atIndex);
-const typeProvider = atIndex === -1
-  ? (process.env.E2E_TYPE_PROVIDER || "")
-  : rawFixture.slice(atIndex + 1);
+const typeProvider =
+  atIndex === -1 ? process.env.E2E_TYPE_PROVIDER || "" : rawFixture.slice(atIndex + 1);
 const onlyTest = process.env.VERTER_E2E_ONLY || "";
 const vscodeVersion = process.env.VERTER_E2E_VSCODE_VERSION || "stable";
 const testFiles = onlyTest
@@ -123,7 +122,10 @@ export default defineConfig({
   env: {
     ...process.env,
     VERTER_E2E_TEST: "1",
-    VERTER_E2E_LOG_FILE: path.join(os.tmpdir(), `verter-e2e-${fixture}${typeProvider ? `-${typeProvider}` : ""}.log`),
+    VERTER_E2E_LOG_FILE: path.join(
+      os.tmpdir(),
+      `verter-e2e-${fixture}${typeProvider ? `-${typeProvider}` : ""}.log`,
+    ),
     VERTER_E2E_FIXTURE: fixture,
     VERTER_E2E_TIMING_FILE: path.join(
       os.tmpdir(),

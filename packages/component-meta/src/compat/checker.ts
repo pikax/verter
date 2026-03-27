@@ -58,6 +58,8 @@ const COMPAT_BLOCKED_SLOT_NAMES = new Set([
   "appContext",
 ]);
 
+const COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH = 512;
+
 function isCompatVisibleSlotName(name: string): boolean {
   return !COMPAT_BLOCKED_SLOT_NAMES.has(name);
 }
@@ -112,13 +114,14 @@ export function mapPropMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  const type = preferredCompatPropTypeText(prop, typeRegistry);
   return {
     name: prop.name,
     description: prop.description ?? "",
-    type: normalizeTypeString(prop.rawType ?? typeDescriptorToString(prop.type)),
+    type,
     required: prop.required,
     global: false,
-    default: evaluateDefault(prop.default),
+    default: normalizeDefaultForCompat(type, evaluateDefault(prop.default)),
     tags: (prop.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
@@ -131,9 +134,294 @@ export function mapPropMeta(
  * Normalize Array<T> syntax to T[] for consistency with Volar output.
  */
 function normalizeTypeString(type: string): string {
-  const match = type.match(/^Array<(.+)>$/);
-  if (match) return `${match[1]}[]`;
-  return type;
+  const normalizedIndexedAccess = type.replace(
+    /\['([^'\\]*(?:\\.[^'\\]*)*)'\]/g,
+    (_match, value: string) => `[${JSON.stringify(value)}]`,
+  );
+  const match = normalizedIndexedAccess.match(/^Array<(.+)>$/);
+  const normalized = match ? `${match[1]}[]` : normalizedIndexedAccess;
+  return normalized.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_match, value: string) =>
+    JSON.stringify(value),
+  );
+}
+
+function preferredCompatPropTypeText(
+  prop: PropMeta,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): string {
+  const descriptorText = normalizeOptionalCompatTypeText(
+    normalizeTypeString(typeDescriptorToCompatDisplay(prop.type, typeRegistry)),
+    prop.required,
+  );
+  const rawType = prop.rawType
+    ? normalizeOptionalCompatTypeText(normalizeTypeString(prop.rawType), prop.required)
+    : undefined;
+
+  if (!rawType || compatRawTypeLooksLossy(rawType)) {
+    return descriptorText;
+  }
+
+  if (shouldPreferDescriptorForProp(rawType, descriptorText)) {
+    return descriptorText;
+  }
+
+  return rawType;
+}
+
+function preferredCompatTypeText(rawType: string | undefined, descriptor: TypeDescriptor): string {
+  if (rawType && !compatRawTypeLooksLossy(rawType)) {
+    return normalizeTypeString(rawType);
+  }
+  return normalizeTypeString(typeDescriptorToCompatDisplay(descriptor));
+}
+
+function compatRawTypeLooksLossy(rawType: string): boolean {
+  const normalized = rawType.trim();
+  return normalized.startsWith("```") || normalized.includes("...") || normalized === "object";
+}
+
+function normalizeOptionalCompatTypeText(type: string, required: boolean): string {
+  if (required) return type;
+  const stripped = stripTopLevelUndefinedFromTypeString(type).trim();
+  if (stripped === "any") {
+    return "any";
+  }
+  const parts = splitTopLevelTypeUnion(type);
+  if (parts.some((part) => part.replace(/\s+/g, "") === "undefined")) {
+    return type;
+  }
+  return `${type} | undefined`;
+}
+
+function stripTopLevelUndefinedFromTypeString(type: string): string {
+  const parts = splitTopLevelTypeUnion(type);
+  const kept = parts.filter((part) => part.replace(/\s+/g, "") !== "undefined");
+  if (kept.length === parts.length || kept.length === 0) {
+    return type;
+  }
+  return kept.join(" | ");
+}
+
+function splitTopLevelTypeUnion(type: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+
+  for (let index = 0; index < type.length; index++) {
+    const ch = type[index];
+    switch (ch) {
+      case "(":
+        parenDepth++;
+        break;
+      case ")":
+        parenDepth--;
+        break;
+      case "[":
+        bracketDepth++;
+        break;
+      case "]":
+        bracketDepth--;
+        break;
+      case "{":
+        braceDepth++;
+        break;
+      case "}":
+        braceDepth--;
+        break;
+      case "<":
+        angleDepth++;
+        break;
+      case ">":
+        angleDepth--;
+        break;
+      case "|":
+        if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
+          parts.push(type.slice(start, index).trim());
+          start = index + 1;
+        }
+        break;
+    }
+  }
+
+  parts.push(type.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+function shouldPreferDescriptorForProp(rawType: string, descriptorText: string): boolean {
+  const normalizedRawType = stripTopLevelUndefinedFromTypeString(rawType);
+  return (
+    rawType !== descriptorText &&
+    !compatDescriptorLooksLossy(descriptorText) &&
+    !compatDescriptorLooksOverexpanded(descriptorText) &&
+    (looksLikeBareTypeReference(normalizedRawType) || looksLikeIndexedAccessType(normalizedRawType))
+  );
+}
+
+function compatDescriptorLooksLossy(descriptorText: string): boolean {
+  const normalized = stripTopLevelUndefinedFromTypeString(descriptorText).trim();
+  return (
+    compatRawTypeLooksLossy(normalized) ||
+    splitTopLevelTypeUnion(normalized).some((part) => part.trim() === "any") ||
+    /^(indexedAccess|unknown|object|function|intersection|union|conditional)$/.test(normalized)
+  );
+}
+
+function compatDescriptorLooksOverexpanded(descriptorText: string): boolean {
+  return descriptorText.length > COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH;
+}
+
+function looksLikeBareTypeReference(type: string): boolean {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(type);
+}
+
+function looksLikeIndexedAccessType(type: string): boolean {
+  return /^[A-Za-z_$][A-Za-z0-9_$.<>, ]*\[[^\]]+\]$/.test(type.trim());
+}
+
+function normalizeDefaultForCompat(type: string, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (
+    trimmed === "" ||
+    trimmed === "null" ||
+    trimmed === "undefined" ||
+    trimmed === "true" ||
+    trimmed === "false" ||
+    /^-?\d+(\.\d+)?$/.test(trimmed) ||
+    trimmed.startsWith('"') ||
+    trimmed.startsWith("'") ||
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[") ||
+    trimmed.startsWith("(")
+  ) {
+    return value;
+  }
+  if (looksLikeStringCompatibleType(type)) {
+    return JSON.stringify(trimmed);
+  }
+  return value;
+}
+
+function looksLikeStringCompatibleType(type: string): boolean {
+  return (
+    type === "any" ||
+    type.includes("string") ||
+    type.includes('"') ||
+    type.includes("(string & {})")
+  );
+}
+
+function typeDescriptorToCompatDisplay(
+  descriptor: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+): string {
+  switch (descriptor.kind) {
+    case "primitive":
+    case "literal":
+    case "enum":
+    case "unknown":
+      return typeDescriptorToString(descriptor);
+    case "union":
+      return descriptor.types
+        .map((type) => typeDescriptorToCompatDisplay(type, typeRegistry, visited))
+        .join(" | ");
+    case "intersection":
+      return descriptor.types
+        .map((type) => typeDescriptorToCompatDisplay(type, typeRegistry, visited))
+        .join(" & ");
+    case "array":
+      return `${typeDescriptorToCompatDisplay(descriptor.element, typeRegistry, visited)}[]`;
+    case "tuple":
+      return `[${descriptor.elements.map((type) => typeDescriptorToCompatDisplay(type, typeRegistry, visited)).join(", ")}]`;
+    case "function":
+      return compatFunctionTypeToString(descriptor, typeRegistry, visited);
+    case "object":
+      return compatObjectTypeToString(descriptor, typeRegistry, visited);
+    case "typeParameter":
+      return descriptor.name;
+    case "ref": {
+      if (typeRegistry && !descriptor.typeArguments?.length && !visited.has(descriptor.name)) {
+        const resolved = typeRegistry.get(descriptor.name);
+        if (resolved) {
+          visited.add(descriptor.name);
+          const rendered = typeDescriptorToCompatDisplay(resolved, typeRegistry, visited);
+          visited.delete(descriptor.name);
+          return rendered;
+        }
+      }
+      return typeDescriptorToString(descriptor);
+    }
+  }
+}
+
+function compatObjectTypeToString(
+  descriptor: Extract<TypeDescriptor, { kind: "object" }>,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+): string {
+  const members: string[] = [];
+
+  for (const prop of descriptor.properties) {
+    members.push(
+      `${prop.name}${prop.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(prop.type, typeRegistry, visited)}`,
+    );
+  }
+
+  for (const indexSignature of descriptor.indexSignatures ?? []) {
+    members.push(
+      `${indexSignature.readonly ? "readonly " : ""}[${indexSignature.keyName}: ${typeDescriptorToCompatDisplay(indexSignature.keyType, typeRegistry, visited)}]: ${typeDescriptorToCompatDisplay(indexSignature.valueType, typeRegistry, visited)}`,
+    );
+  }
+
+  for (const signature of descriptor.callSignatures ?? []) {
+    members.push(compatFunctionTypeToString(signature, typeRegistry, visited));
+  }
+
+  for (const signature of descriptor.constructSignatures ?? []) {
+    members.push(`new ${compatFunctionTypeToString(signature, typeRegistry, visited)}`);
+  }
+
+  if (members.length === 0) {
+    return "object";
+  }
+
+  return `{ ${members.join("; ")}; }`;
+}
+
+function compatFunctionTypeToString(
+  descriptor: Extract<TypeDescriptor, { kind: "function" }>,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+): string {
+  const typeParams = descriptor.typeParameters?.length
+    ? `<${descriptor.typeParameters.map((param) => compatTypeParameterToString(param, typeRegistry, visited)).join(", ")}>`
+    : "";
+  const params = descriptor.parameters
+    .map(
+      (param) =>
+        `${param.name}${param.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(param.type, typeRegistry, visited)}`,
+    )
+    .join(", ");
+  return `${typeParams}(${params}): ${typeDescriptorToCompatDisplay(descriptor.returnType, typeRegistry, visited)}`;
+}
+
+function compatTypeParameterToString(
+  descriptor: Extract<TypeDescriptor, { kind: "typeParameter" }>,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+): string {
+  let rendered = descriptor.name;
+  if (descriptor.constraint) {
+    rendered += ` extends ${typeDescriptorToCompatDisplay(descriptor.constraint, typeRegistry, visited)}`;
+  }
+  if (descriptor.default) {
+    rendered += ` = ${typeDescriptorToCompatDisplay(descriptor.default, typeRegistry, visited)}`;
+  }
+  return rendered;
 }
 
 /**
@@ -149,6 +437,10 @@ function evaluateDefault(val: string | undefined): string | undefined {
   // Arrow function returning array literal: () => ['a', 'b']
   const arrowArrMatch = val.match(/^\(\)\s*=>\s*(\[.*\])$/);
   if (arrowArrMatch) return arrowArrMatch[1];
+  const stringLiteralMatch = val.match(/^'([^'\\]*(?:\\.[^'\\]*)*)'$/);
+  if (stringLiteralMatch) {
+    return JSON.stringify(stringLiteralMatch[1]);
+  }
   return val;
 }
 
@@ -159,7 +451,7 @@ export function mapEventMeta(event: EventMeta, options?: MetaCheckerOptions): Pr
   return {
     name: event.name,
     description: event.description ?? "",
-    type: event.rawSignature ?? typeDescriptorToString(event.payload),
+    type: preferredCompatTypeText(event.rawSignature, event.payload),
     required: false,
     global: false,
     tags: (event.tags ?? []).map((t) => ({
@@ -176,7 +468,7 @@ export function mapEventMeta(event: EventMeta, options?: MetaCheckerOptions): Pr
 export function mapSlotMeta(slot: SlotMeta, options?: MetaCheckerOptions): PropertyMeta {
   const type =
     slot.bindings.length > 0
-      ? `{ ${slot.bindings.map((b) => `${b.name}: ${b.rawType ?? typeDescriptorToString(b.type)}`).join("; ")} }`
+      ? `{ ${slot.bindings.map((b) => `${b.name}: ${preferredCompatTypeText(b.rawType, b.type)}`).join("; ")}; }`
       : "{}";
   return {
     name: slot.name,
@@ -270,13 +562,19 @@ export class ComponentMetaChecker {
     const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
     await this.ensureFile(absPath);
     if (this._session) {
-      const session = this._session as ProjectSession & {
-        getDeclaredComponentMeta?: (canonicalId: string) => unknown | null;
-      };
-      const nativeMeta =
-        typeof session.getDeclaredComponentMeta === "function"
-          ? session.getDeclaredComponentMeta(absPath)
-          : this._session.getComponentMeta(absPath);
+      const useDeclaredFastPath = this.shouldUseDeclaredNativeMeta();
+      let nativeMeta = useDeclaredFastPath
+        ? this._session.getDeclaredComponentMeta(absPath)
+        : this._session.getComponentMeta(absPath);
+      if (!useDeclaredFastPath && nativeMeta && this.shouldRetryFullNativeMeta()) {
+        const retriedMeta = this._session.getComponentMeta(absPath);
+        if (
+          retriedMeta &&
+          nativeMetaSurfaceScore(retriedMeta) > nativeMetaSurfaceScore(nativeMeta)
+        ) {
+          nativeMeta = retriedMeta;
+        }
+      }
       if (!nativeMeta) {
         return {
           type: 0,
@@ -297,7 +595,7 @@ export class ComponentMetaChecker {
         ),
       );
 
-      if (typeof session.getDeclaredComponentMeta === "function") {
+      if (useDeclaredFastPath) {
         let fullMeta: ComponentMeta | null | undefined;
         Object.defineProperty(result, "_verter", {
           configurable: true,
@@ -374,6 +672,29 @@ export class ComponentMetaChecker {
   }
 
   /**
+   * Clear a session-local overlay and reveal the workspace-backed base file
+   * again. Useful for temporary transformed sources in long-lived checkers.
+   */
+  restoreBaseFile(filePath: string): void {
+    this.ensureActive();
+    if (!this._session) {
+      throw new Error("restoreBaseFile requires a runtime session-backed checker.");
+    }
+    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
+    this.overlayFiles.delete(absPath);
+    this.deletedFiles.delete(absPath);
+    this._session.restoreBaseFile(absPath);
+    const content = this._session.getEffectiveSource(absPath);
+    if (content !== undefined) {
+      this.baseFiles.add(absPath);
+      this.trackedFiles.set(absPath, content);
+      return;
+    }
+    this.baseFiles.delete(absPath);
+    this.trackedFiles.delete(absPath);
+  }
+
+  /**
    * Reload all tracked files from disk.
    */
   async reload(): Promise<void> {
@@ -425,7 +746,7 @@ export class ComponentMetaChecker {
 
   /**
    * Release the session and clear tracked in-memory state.
-   * Optional — resources are pooled and will be reclaimed automatically.
+   * Resources are pooled and will be reclaimed automatically.
    *
    * After close, further checker operations throw.
    */
@@ -449,13 +770,6 @@ export class ComponentMetaChecker {
       }
     }
     this.adapter.close?.();
-  }
-
-  /**
-   * Alias for `close()`. Kept for backward compatibility.
-   */
-  dispose(): void {
-    this.close();
   }
 
   /** @internal */
@@ -503,20 +817,6 @@ export class ComponentMetaChecker {
             return;
           }
         }
-
-        if (this.workspace) {
-          const content = await readFileSafe(absPath, this.workspace);
-          this.ensureActive();
-          if (content !== null) {
-            // Native pooled projects can occasionally decline ensureLoaded() for a
-            // workspace-backed file that is otherwise readable. Fall back to a
-            // session-local overlay so the checker still returns metadata instead
-            // of silently degrading to an empty surface.
-            this.overlayFiles.add(absPath);
-            this.trackedFiles.set(absPath, content);
-            this._session.upsert(absPath, content);
-          }
-        }
       }
     }
   }
@@ -529,6 +829,25 @@ export class ComponentMetaChecker {
       throw new Error("ComponentMetaChecker is closed.");
     }
   }
+
+  private shouldUseDeclaredNativeMeta(): boolean {
+    const backend = this.options.typeExpansionBackend;
+    return backend === undefined || backend === "verter";
+  }
+
+  private shouldRetryFullNativeMeta(): boolean {
+    const backend = this.options.typeExpansionBackend;
+    return backend === "tsserver" || backend === "auto";
+  }
+}
+
+function nativeMetaSurfaceScore(meta: any): number {
+  return (
+    (Array.isArray(meta?.props) ? meta.props.length : 0) * 1000 +
+    (Array.isArray(meta?.slots) ? meta.slots.length : 0) * 100 +
+    (Array.isArray(meta?.events) ? meta.events.length : 0) * 10 +
+    (Array.isArray(meta?.exposed) ? meta.exposed.length : 0)
+  );
 }
 
 /**

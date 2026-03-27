@@ -23,19 +23,19 @@ wasm-pack --version   # only needed for WASM builds
 
 All Rust crates are in the `crates/` directory:
 
-| Crate | Purpose |
-|-------|---------|
-| `verter_core` | Template compiler -- tokenizer, parser, AST, script processing, template codegen (VDOM + Vapor), TSX generation, CSS processing |
-| `verter_analysis` | Static analysis -- imports, exports, bindings, type resolution, CSS selector parsing, template element analysis |
-| `verter_host` | File host -- in-memory caching, dependency tracking, multi-file compilation |
-| `verter_scheduler` | Async file scheduler -- per-file Source→Analysis→Artifact stages, priority queue, blocker registry |
-| `verter_diagnostics` | Diagnostic engine -- Vue SFC lint rules, rule trait, visitor, diagnostic set |
-| `verter_actions` | Code actions engine -- quick fixes, refactoring (depends on `verter_diagnostics` + `verter_analysis`) |
-| `verter_lsp` | LSP server binary -- stdio transport, feature handlers, document synchronization, TypeProvider integration (TSGO + tsserver) |
-| `verter_ffi` | FFI types -- shared serializable structs for NAPI and WASM boundaries |
-| `verter_napi` | NAPI-RS bindings -- Node.js native addon (cdylib) |
-| `verter_wasm` | wasm-bindgen bindings -- browser WASM module (cdylib) |
-| `verter_bench` | Benchmarks and profiling -- comparison examples, host-level profiling across real projects |
+| Crate                | Purpose                                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `verter_core`        | Template compiler -- tokenizer, parser, AST, script processing, template codegen (VDOM + Vapor), TSX generation, CSS processing |
+| `verter_analysis`    | Static analysis -- imports, exports, bindings, type resolution, CSS selector parsing, template element analysis                 |
+| `verter_host`        | File host -- in-memory caching, dependency tracking, multi-file compilation                                                     |
+| `verter_scheduler`   | Async file scheduler -- per-file Source→Analysis→Artifact stages, priority queue, blocker registry                              |
+| `verter_diagnostics` | Diagnostic engine -- Vue SFC lint rules, rule trait, visitor, diagnostic set                                                    |
+| `verter_actions`     | Code actions engine -- quick fixes, refactoring (depends on `verter_diagnostics` + `verter_analysis`)                           |
+| `verter_lsp`         | LSP server binary -- stdio transport, feature handlers, document synchronization, TypeProvider integration (TSGO + tsserver)    |
+| `verter_ffi`         | FFI types -- shared serializable structs for NAPI and WASM boundaries                                                           |
+| `verter_napi`        | NAPI-RS bindings -- Node.js native addon (cdylib)                                                                               |
+| `verter_wasm`        | wasm-bindgen bindings -- browser WASM module (cdylib)                                                                           |
+| `verter_bench`       | Benchmarks and profiling -- comparison examples, host-level profiling across real projects                                      |
 
 ### Dependency Graph
 
@@ -171,29 +171,29 @@ cargo fmt --all
 
 When working on specific areas, these are the primary entry points:
 
-| Area | Entry Point |
-|------|-------------|
-| Compilation pipeline | `crates/verter_core/src/compile.rs` |
-| SFC tokenizer | `crates/verter_core/src/tokenizer/byte.rs` |
-| Template AST | `crates/verter_core/src/ast/types.rs` |
-| VDOM codegen | `crates/verter_core/src/template/code_gen/vdom/` |
-| Vapor codegen | `crates/verter_core/src/template/code_gen/vapor/` |
-| TSX codegen (LSP) | `crates/verter_core/src/ide/template/mod.rs` |
-| Script processing | `crates/verter_core/src/script/process.rs` |
-| CSS processing | `crates/verter_core/src/css/mod.rs` |
-| Static analysis | `crates/verter_analysis/src/lib.rs` |
-| LSP server | `crates/verter_lsp/src/server.rs` |
-| TSGO type provider | `crates/verter_lsp/src/tsgo/ipc.rs` |
-| tsserver type provider | `crates/verter_lsp/src/tsserver/ipc.rs` |
-| Diagnostics | `crates/verter_diagnostics/src/lib.rs` |
+| Area                   | Entry Point                                       |
+| ---------------------- | ------------------------------------------------- |
+| Compilation pipeline   | `crates/verter_core/src/compile.rs`               |
+| SFC tokenizer          | `crates/verter_core/src/tokenizer/byte.rs`        |
+| Template AST           | `crates/verter_core/src/ast/types.rs`             |
+| VDOM codegen           | `crates/verter_core/src/template/code_gen/vdom/`  |
+| Vapor codegen          | `crates/verter_core/src/template/code_gen/vapor/` |
+| TSX codegen (LSP)      | `crates/verter_core/src/ide/template/mod.rs`      |
+| Script processing      | `crates/verter_core/src/script/process.rs`        |
+| CSS processing         | `crates/verter_core/src/css/mod.rs`               |
+| Static analysis        | `crates/verter_analysis/src/lib.rs`               |
+| LSP server             | `crates/verter_lsp/src/server.rs`                 |
+| TSGO type provider     | `crates/verter_lsp/src/tsgo/ipc.rs`               |
+| tsserver type provider | `crates/verter_lsp/src/tsserver/ipc.rs`           |
+| Diagnostics            | `crates/verter_diagnostics/src/lib.rs`            |
 
 ## Two Template Codegen Paths
 
 The Rust compiler has two separate template codegen paths. Modifying one does NOT affect the other:
 
-| Path | Module | Purpose | Output |
-|------|--------|---------|--------|
+| Path       | Module                    | Purpose                                     | Output                           |
+| ---------- | ------------------------- | ------------------------------------------- | -------------------------------- |
 | VDOM/Vapor | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
-| IDE | `ide/template/` | Valid JSX/TSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
+| IDE        | `ide/template/`           | Valid JSX/TSX for LSP/TSGO type checking    | `<div prop={expr}>` JSX elements |
 
 The LSP uses the TSX path. Changes to VDOM codegen do not affect LSP hover, completions, or diagnostics.

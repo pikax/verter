@@ -23,12 +23,7 @@ import { basename, dirname, resolve } from "path";
 
 // ── Node types for the component tree ──────────────────────────
 
-export type ComponentTreeItem =
-  | SectionNode
-  | ComponentNode
-  | ParentFileNode
-  | PropNode
-  | SlotNode;
+export type ComponentTreeItem = SectionNode | ComponentNode | ParentFileNode | PropNode | SlotNode;
 
 export interface SectionNode {
   type: "section";
@@ -62,9 +57,7 @@ export interface SlotNode {
 
 // ── Tree data provider ─────────────────────────────────────────
 
-export class ComponentTreeProvider
-  implements TreeDataProvider<ComponentTreeItem>, Disposable
-{
+export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem>, Disposable {
   private _onDidChangeTreeData = new EventEmitter<ComponentTreeItem | undefined>();
   readonly onDidChangeTreeData: Event<ComponentTreeItem | undefined> =
     this._onDidChangeTreeData.event;
@@ -117,9 +110,7 @@ export class ComponentTreeProvider
     }
   }
 
-  async getChildren(
-    element?: ComponentTreeItem,
-  ): Promise<ComponentTreeItem[]> {
+  async getChildren(element?: ComponentTreeItem): Promise<ComponentTreeItem[]> {
     // Root: fetch analysis and return two section nodes
     if (!element) {
       return this.getRootChildren();
@@ -153,9 +144,7 @@ export class ComponentTreeProvider
       const count = this.cachedParents.length;
       const item = new TreeItem(
         "Parents",
-        count > 0
-          ? TreeItemCollapsibleState.Collapsed
-          : TreeItemCollapsibleState.None,
+        count > 0 ? TreeItemCollapsibleState.Collapsed : TreeItemCollapsibleState.None,
       );
       item.description =
         count > 0
@@ -168,13 +157,10 @@ export class ComponentTreeProvider
     }
 
     // Children section
-    const childCount =
-      this.cachedAnalysis?.template?.components?.length ?? 0;
+    const childCount = this.cachedAnalysis?.template?.components?.length ?? 0;
     const item = new TreeItem(
       "Children",
-      childCount > 0
-        ? TreeItemCollapsibleState.Expanded
-        : TreeItemCollapsibleState.None,
+      childCount > 0 ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.None,
     );
     item.description =
       childCount > 0
@@ -188,14 +174,10 @@ export class ComponentTreeProvider
 
   private getComponentTreeItem(element: ComponentNode): TreeItem {
     const comp = element.component;
-    const label = comp.isDynamic
-      ? `<component :is="..."> (dynamic)`
-      : comp.name;
+    const label = comp.isDynamic ? `<component :is="..."> (dynamic)` : comp.name;
     const item = new TreeItem(label, TreeItemCollapsibleState.Collapsed);
 
-    item.description = comp.importSource
-      ? `from "${comp.importSource}"`
-      : "(global)";
+    item.description = comp.importSource ? `from "${comp.importSource}"` : "(global)";
     item.iconPath = new ThemeIcon("symbol-class");
     item.tooltip = [
       `Component: ${comp.name}`,
@@ -237,9 +219,10 @@ export class ComponentTreeProvider
     const detailParts: string[] = [];
     if (propCount > 0) detailParts.push(`${propCount} prop${propCount !== 1 ? "s" : ""}`);
     if (slotCount > 0) detailParts.push(`${slotCount} slot${slotCount !== 1 ? "s" : ""}`);
-    item.description = detailParts.length > 0
-      ? `as <${parent.componentName}> (${detailParts.join(", ")})`
-      : `as <${parent.componentName}>`;
+    item.description =
+      detailParts.length > 0
+        ? `as <${parent.componentName}> (${detailParts.join(", ")})`
+        : `as <${parent.componentName}>`;
 
     item.iconPath = new ThemeIcon("file-code");
     item.tooltip = [
@@ -263,11 +246,7 @@ export class ComponentTreeProvider
   private getPropTreeItem(element: PropNode): TreeItem {
     const prop = element.prop;
     const constness =
-      prop.constness === "Const"
-        ? "const"
-        : prop.constness === "Dynamic"
-          ? "dynamic"
-          : "";
+      prop.constness === "Const" ? "const" : prop.constness === "Dynamic" ? "dynamic" : "";
 
     // Resolve type from referenced bindings if available
     const resolvedTypes: string[] = [];
@@ -278,10 +257,7 @@ export class ComponentTreeProvider
     const typeStr = resolvedTypes.length > 0 ? resolvedTypes[0] : null;
 
     const descParts = [typeStr, constness].filter(Boolean);
-    const item = new TreeItem(
-      `prop: ${prop.name}`,
-      TreeItemCollapsibleState.None,
-    );
+    const item = new TreeItem(`prop: ${prop.name}`, TreeItemCollapsibleState.None);
     item.description = descParts.length > 0 ? `(${descParts.join(", ")})` : "";
     item.iconPath = new ThemeIcon("symbol-property");
     item.tooltip = [
@@ -289,9 +265,7 @@ export class ComponentTreeProvider
       `Bound: ${prop.isBound}`,
       `Constness: ${prop.constness}`,
       typeStr ? `Type: ${typeStr}` : "",
-      prop.referencedBindings?.length
-        ? `Bindings: ${prop.referencedBindings.join(", ")}`
-        : "",
+      prop.referencedBindings?.length ? `Bindings: ${prop.referencedBindings.join(", ")}` : "",
       prop.fromSpread ? "From v-bind spread" : "",
     ]
       .filter(Boolean)
@@ -300,10 +274,7 @@ export class ComponentTreeProvider
   }
 
   private getSlotTreeItem(element: SlotNode): TreeItem {
-    const item = new TreeItem(
-      `slot: ${element.slotName}`,
-      TreeItemCollapsibleState.None,
-    );
+    const item = new TreeItem(`slot: ${element.slotName}`, TreeItemCollapsibleState.None);
     item.iconPath = new ThemeIcon("symbol-interface");
     return item;
   }

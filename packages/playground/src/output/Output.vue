@@ -161,7 +161,12 @@ function isEditedMode(_mode: OutputMode): boolean {
       <TemplateAstPanel v-else-if="store.outputMode === 'templateAst'" :store="store" />
       <CssVarFlowPanel v-else-if="store.outputMode === 'cssVarFlow'" :store="store" />
       <DependencyGraphPanel v-else-if="store.outputMode === 'depGraph'" :store="store" />
-      <CodeOutput v-else :store="store" :mode="store.outputMode" :editable="isEditableMode(store.outputMode)" />
+      <CodeOutput
+        v-else
+        :store="store"
+        :mode="store.outputMode"
+        :editable="isEditableMode(store.outputMode)"
+      />
     </div>
   </div>
 </template>

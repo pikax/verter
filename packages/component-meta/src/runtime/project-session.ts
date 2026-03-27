@@ -60,6 +60,20 @@ export class ProjectSession {
     this.engine.markActivity();
   }
 
+  restoreBaseFile(canonicalId: string): void {
+    this.ensureOpen();
+    const hadOverlay = this._overlays.delete(canonicalId);
+    if (hadOverlay) {
+      this._overlayGeneration++;
+    }
+    this._localMemo.clear();
+    this._nativeSession.reset(canonicalId);
+    if (this._nativeSession.getEffectiveSource(canonicalId) === null) {
+      this.engine.nativeProject.ensureLoaded(canonicalId);
+    }
+    this.engine.markActivity();
+  }
+
   getEffectiveSource(canonicalId: string): string | undefined {
     this.ensureOpen();
     // Check session overlay first (in-memory)
@@ -118,15 +132,11 @@ export class ProjectSession {
 
   /**
    * Declared-surface native component-meta query for Volar-compatible callers.
-   * Falls back to the full query if the native binding does not support it.
    */
   getDeclaredComponentMeta(canonicalId: string): unknown | null {
     this.ensureOpen();
     this.engine.markActivity();
-    const json =
-      typeof this._nativeSession.getDeclaredComponentMeta === "function"
-        ? this._nativeSession.getDeclaredComponentMeta(canonicalId)
-        : this._nativeSession.getComponentMeta(canonicalId);
+    const json = this._nativeSession.getDeclaredComponentMeta(canonicalId);
     if (json === null || json === undefined) return null;
     return JSON.parse(json);
   }
@@ -134,11 +144,9 @@ export class ProjectSession {
   /**
    * Provenance counters for observability. Returns parsed JSON or null.
    */
-  getProvenance(): Record<string, number> | null {
+  getProvenance(): Record<string, number> {
     this.ensureOpen();
-    if (typeof this._nativeSession.getProvenance !== "function") return null;
     const json = this._nativeSession.getProvenance();
-    if (!json) return null;
     return JSON.parse(json);
   }
 

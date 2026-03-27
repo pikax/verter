@@ -637,7 +637,9 @@ describe("components helpers", () => {
       type MockInstance = { $props: { msg: string }; $emit: () => void };
       type MockConstructor = { new (): MockInstance };
 
-      type Result = ReturnType<typeof import("./components").instantiateComponent<MockConstructor, { msg: string }>>;
+      type Result = ReturnType<
+        typeof import("./components").instantiateComponent<MockConstructor, { msg: string }>
+      >;
       assertType<Result>({} as MockInstance);
       assertType<MockInstance>({} as Result);
 
@@ -648,7 +650,9 @@ describe("components helpers", () => {
     it("returns return type for functional component", () => {
       type FnComp = (props: { label: string }) => VNode;
 
-      type Result = ReturnType<typeof import("./components").instantiateComponent<FnComp, { label: string }>>;
+      type Result = ReturnType<
+        typeof import("./components").instantiateComponent<FnComp, { label: string }>
+      >;
       assertType<Result>({} as VNode);
       assertType<VNode>({} as Result);
 
@@ -659,7 +663,9 @@ describe("components helpers", () => {
     it("returns return type for functional component returning void (Comment)", () => {
       type FnComp = (props: { hidden?: boolean }) => void;
 
-      type Result = ReturnType<typeof import("./components").instantiateComponent<FnComp, { hidden?: boolean }>>;
+      type Result = ReturnType<
+        typeof import("./components").instantiateComponent<FnComp, { hidden?: boolean }>
+      >;
       assertType<Result>(undefined as void);
       assertType<void>(undefined as Result);
 
@@ -668,7 +674,9 @@ describe("components helpers", () => {
     });
 
     it("returns T for non-component types", () => {
-      type Result = ReturnType<typeof import("./components").instantiateComponent<HTMLDivElement, {}>>;
+      type Result = ReturnType<
+        typeof import("./components").instantiateComponent<HTMLDivElement, {}>
+      >;
       assertType<Result>({} as HTMLDivElement);
       assertType<HTMLDivElement>({} as Result);
     });
@@ -678,7 +686,9 @@ describe("components helpers", () => {
         props: { title: String },
       });
 
-      type Result = ReturnType<typeof import("./components").instantiateComponent<typeof Comp, { title?: string }>>;
+      type Result = ReturnType<
+        typeof import("./components").instantiateComponent<typeof Comp, { title?: string }>
+      >;
       type Expected = InstanceType<typeof Comp>;
       assertType<Result>({} as Expected);
       assertType<Expected>({} as Result);

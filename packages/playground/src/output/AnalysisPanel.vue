@@ -35,12 +35,18 @@ const bindingUsageGroups = computed<Map<string, { kind: string; count: number }[
   const map = new Map<string, Map<string, number>>();
   for (const occ of tpl.bindingOccurrences) {
     let kindMap = map.get(occ.name);
-    if (!kindMap) { kindMap = new Map(); map.set(occ.name, kindMap); }
+    if (!kindMap) {
+      kindMap = new Map();
+      map.set(occ.name, kindMap);
+    }
     kindMap.set(occ.usageKind, (kindMap.get(occ.usageKind) ?? 0) + 1);
   }
   const result = new Map<string, { kind: string; count: number }[]>();
   for (const [name, kindMap] of map) {
-    result.set(name, [...kindMap.entries()].map(([kind, count]) => ({ kind, count })));
+    result.set(
+      name,
+      [...kindMap.entries()].map(([kind, count]) => ({ kind, count })),
+    );
   }
   return result;
 });
@@ -64,7 +70,14 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
 }
 
 // SSR readiness scoring (matches MCP compute_ssr_readiness logic)
-const CLIENT_ONLY_HOOKS = new Set(["onMounted", "onUpdated", "onBeforeMount", "onBeforeUnmount", "onActivated", "onDeactivated"]);
+const CLIENT_ONLY_HOOKS = new Set([
+  "onMounted",
+  "onUpdated",
+  "onBeforeMount",
+  "onBeforeUnmount",
+  "onActivated",
+  "onDeactivated",
+]);
 
 const ssrReadiness = computed(() => {
   if (!analysis.value) return null;
@@ -74,27 +87,49 @@ const ssrReadiness = computed(() => {
   for (const call of analysis.value.vueApiCalls ?? []) {
     if (CLIENT_ONLY_HOOKS.has(call.api)) {
       score -= 15;
-      issues.push({ severity: "error", type: "client-only-lifecycle", detail: `\`${call.api}\` never fires during SSR` });
+      issues.push({
+        severity: "error",
+        type: "client-only-lifecycle",
+        detail: `\`${call.api}\` never fires during SSR`,
+      });
     }
   }
   for (const q of analysis.value.domQueryCalls ?? []) {
     score -= 20;
-    issues.push({ severity: "error", type: "dom-query", detail: `\`${q.kind}\` has no DOM on server` });
+    issues.push({
+      severity: "error",
+      type: "dom-query",
+      detail: `\`${q.kind}\` has no DOM on server`,
+    });
   }
   for (const m of analysis.value.cssVarManipulations ?? []) {
     score -= 10;
-    issues.push({ severity: "warning", type: "css-var-manipulation", detail: `\`${m.kind}\` requires DOM access` });
+    issues.push({
+      severity: "warning",
+      type: "css-var-manipulation",
+      detail: `\`${m.kind}\` requires DOM access`,
+    });
   }
   const hasAsyncSetup = (analysis.value.scriptFlags & AnalysisFlags.ASYNC_SETUP) !== 0;
-  const hasServerPrefetch = (analysis.value.vueApiCalls ?? []).some(c => c.api === "onServerPrefetch");
+  const hasServerPrefetch = (analysis.value.vueApiCalls ?? []).some(
+    (c) => c.api === "onServerPrefetch",
+  );
   if (hasAsyncSetup && !hasServerPrefetch) {
     score -= 5;
-    issues.push({ severity: "info", type: "missing-server-prefetch", detail: "Async setup without `onServerPrefetch`" });
+    issues.push({
+      severity: "info",
+      type: "missing-server-prefetch",
+      detail: "Async setup without `onServerPrefetch`",
+    });
   }
   for (const call of analysis.value.vueApiCalls ?? []) {
     if (call.api === "useTemplateRef") {
       score -= 5;
-      issues.push({ severity: "warning", type: "template-ref", detail: "Template refs are `null` during SSR" });
+      issues.push({
+        severity: "warning",
+        type: "template-ref",
+        detail: "Template refs are `null` during SSR",
+      });
     }
   }
   if (hasServerPrefetch) score += 5;
@@ -111,48 +146,72 @@ function ssrScoreClass(score: number): string {
 
 <template>
   <div class="analysis-panel">
-    <div v-if="!analysis" class="empty-state">
-      Analysis not available
-    </div>
+    <div v-if="!analysis" class="empty-state">Analysis not available</div>
     <div v-else class="analysis-content">
       <!-- Timing -->
       <section class="analysis-section">
         <div class="timing-row">
           <span class="timing-label">Total:</span>
           <span class="timing-value timing-total">
-            {{ store.compileTiming.verterNewJs !== null
-              ? store.compileTiming.verterNewJs.toFixed(2) + 'ms'
-              : '—' }}
+            {{
+              store.compileTiming.verterNewJs !== null
+                ? store.compileTiming.verterNewJs.toFixed(2) + "ms"
+                : "—"
+            }}
           </span>
         </div>
         <div class="timing-breakdown">
           <span class="timing-step">
             <span class="timing-label">Parse</span>
-            <span class="timing-value">{{ store.compileTiming.parseDurationMs !== null ? store.compileTiming.parseDurationMs.toFixed(2) + 'ms' : '—' }}</span>
+            <span class="timing-value">{{
+              store.compileTiming.parseDurationMs !== null
+                ? store.compileTiming.parseDurationMs.toFixed(2) + "ms"
+                : "—"
+            }}</span>
           </span>
           <span class="timing-step">
             <span class="timing-label">Script</span>
-            <span class="timing-value">{{ store.compileTiming.scriptMs !== null ? store.compileTiming.scriptMs.toFixed(2) + 'ms' : '—' }}</span>
+            <span class="timing-value">{{
+              store.compileTiming.scriptMs !== null
+                ? store.compileTiming.scriptMs.toFixed(2) + "ms"
+                : "—"
+            }}</span>
           </span>
           <span class="timing-step">
             <span class="timing-label">Template</span>
-            <span class="timing-value">{{ store.compileTiming.templateMs !== null ? store.compileTiming.templateMs.toFixed(2) + 'ms' : '—' }}</span>
+            <span class="timing-value">{{
+              store.compileTiming.templateMs !== null
+                ? store.compileTiming.templateMs.toFixed(2) + "ms"
+                : "—"
+            }}</span>
           </span>
           <span class="timing-step">
             <span class="timing-label">Style</span>
-            <span class="timing-value">{{ store.compileTiming.styleMs !== null ? store.compileTiming.styleMs.toFixed(2) + 'ms' : '—' }}</span>
+            <span class="timing-value">{{
+              store.compileTiming.styleMs !== null
+                ? store.compileTiming.styleMs.toFixed(2) + "ms"
+                : "—"
+            }}</span>
           </span>
           <span class="timing-step">
             <span class="timing-label">TSX</span>
-            <span class="timing-value">{{ store.compileTiming.tsxMs !== null ? store.compileTiming.tsxMs.toFixed(2) + 'ms' : '—' }}</span>
+            <span class="timing-value">{{
+              store.compileTiming.tsxMs !== null ? store.compileTiming.tsxMs.toFixed(2) + "ms" : "—"
+            }}</span>
           </span>
           <span class="timing-step">
             <span class="timing-label">TSC</span>
-            <span class="timing-value">{{ store.compileTiming.tscMs !== null ? store.compileTiming.tscMs.toFixed(2) + 'ms' : '—' }}</span>
+            <span class="timing-value">{{
+              store.compileTiming.tscMs !== null ? store.compileTiming.tscMs.toFixed(2) + "ms" : "—"
+            }}</span>
           </span>
           <span class="timing-step">
             <span class="timing-label">Lint</span>
-            <span class="timing-value">{{ store.compileTiming.lintMs !== null ? store.compileTiming.lintMs.toFixed(2) + 'ms' : '—' }}</span>
+            <span class="timing-value">{{
+              store.compileTiming.lintMs !== null
+                ? store.compileTiming.lintMs.toFixed(2) + "ms"
+                : "—"
+            }}</span>
           </span>
         </div>
       </section>
@@ -192,7 +251,10 @@ function ssrScoreClass(score: number): string {
           <div v-for="(b, i) in analysis.bindings" :key="i" class="binding-item">
             <code class="binding-name">{{ b.name }}</code>
             <span class="badge badge-kind">{{ b.kind }}</span>
-            <span v-if="b.reactivityKind && b.reactivityKind !== 'none'" class="badge badge-reactive">
+            <span
+              v-if="b.reactivityKind && b.reactivityKind !== 'none'"
+              class="badge badge-reactive"
+            >
               {{ b.reactivityKind }}
             </span>
             <span v-else-if="b.isReactive" class="badge badge-reactive">reactive</span>
@@ -234,15 +296,21 @@ function ssrScoreClass(score: number): string {
           <div v-if="style.css" class="style-details">
             <div v-if="style.css.classes?.length > 0" class="style-sub">
               <span class="sub-label">Classes:</span>
-              <code v-for="(c, j) in style.css.classes" :key="j" class="style-tag">.{{ c.name }}</code>
+              <code v-for="(c, j) in style.css.classes" :key="j" class="style-tag"
+                >.{{ c.name }}</code
+              >
             </div>
             <div v-if="style.css.ids?.length > 0" class="style-sub">
               <span class="sub-label">IDs:</span>
-              <code v-for="(id, j) in style.css.ids" :key="j" class="style-tag">#{{ id.name }}</code>
+              <code v-for="(id, j) in style.css.ids" :key="j" class="style-tag"
+                >#{{ id.name }}</code
+              >
             </div>
             <div v-if="style.css.customProperties?.length > 0" class="style-sub">
               <span class="sub-label">Custom Props:</span>
-              <code v-for="(cp, j) in style.css.customProperties" :key="j" class="style-tag">{{ cp.name }}</code>
+              <code v-for="(cp, j) in style.css.customProperties" :key="j" class="style-tag">{{
+                cp.name
+              }}</code>
             </div>
             <div v-if="style.css.atRules?.length > 0" class="style-sub">
               <span class="sub-label">At-rules:</span>
@@ -253,13 +321,15 @@ function ssrScoreClass(score: number): string {
             <div class="style-sub">
               <span class="sub-label">Rules:</span>
               <span>{{ style.css.ruleCount }}</span>
-              <span class="sub-label" style="margin-left: 12px;">Selectors:</span>
+              <span class="sub-label" style="margin-left: 12px">Selectors:</span>
               <span>{{ style.css.selectors.length }}</span>
             </div>
           </div>
           <div v-if="style.vBinds?.length > 0" class="style-sub">
             <span class="sub-label">v-bind:</span>
-            <code v-for="(vb, j) in style.vBinds" :key="j" class="style-tag">{{ vb.expression }}</code>
+            <code v-for="(vb, j) in style.vBinds" :key="j" class="style-tag">{{
+              vb.expression
+            }}</code>
           </div>
           <div v-if="style.specialPseudos?.length > 0" class="style-sub">
             <span class="sub-label">Pseudos:</span>
@@ -272,7 +342,9 @@ function ssrScoreClass(score: number): string {
 
       <!-- Template Components -->
       <details v-if="analysis.template?.components?.length" class="analysis-section">
-        <summary class="section-title">Components ({{ analysis.template.components.length }})</summary>
+        <summary class="section-title">
+          Components ({{ analysis.template.components.length }})
+        </summary>
         <div class="import-list">
           <div v-for="(comp, i) in analysis.template.components" :key="i" class="import-item">
             <code class="binding-name">{{ comp.name }}</code>
@@ -282,8 +354,17 @@ function ssrScoreClass(score: number): string {
             </span>
             <div v-if="comp.props?.length" class="import-bindings">
               <span v-for="(p, j) in comp.props" :key="j" class="binding-tag">
-                <code>{{ p.isBound ? ':' : '' }}{{ p.name }}</code>
-                <span :class="['badge', p.constness === 'Const' ? 'badge-vue' : p.constness === 'Dynamic' ? 'badge-reactive' : 'badge-kind']">
+                <code>{{ p.isBound ? ":" : "" }}{{ p.name }}</code>
+                <span
+                  :class="[
+                    'badge',
+                    p.constness === 'Const'
+                      ? 'badge-vue'
+                      : p.constness === 'Dynamic'
+                        ? 'badge-reactive'
+                        : 'badge-kind',
+                  ]"
+                >
                   {{ p.constness.toLowerCase() }}
                 </span>
               </span>
@@ -294,7 +375,9 @@ function ssrScoreClass(score: number): string {
             </div>
             <div v-if="comp.vModels?.length" class="import-bindings">
               <span class="sub-label">v-model:</span>
-              <code v-for="(m, j) in comp.vModels" :key="j" class="style-tag">{{ m.bindingName }}</code>
+              <code v-for="(m, j) in comp.vModels" :key="j" class="style-tag">{{
+                m.bindingName
+              }}</code>
             </div>
           </div>
         </div>
@@ -307,13 +390,17 @@ function ssrScoreClass(score: number): string {
           <div v-for="[name, kinds] in bindingUsageGroups" :key="name" class="binding-item">
             <code class="binding-name">{{ name }}</code>
             <span class="badge badge-kind">{{ kinds.reduce((s, k) => s + k.count, 0) }}x</span>
-            <span v-for="k in kinds" :key="k.kind" class="badge badge-type" style="font-size: 9px;">
+            <span v-for="k in kinds" :key="k.kind" class="badge badge-type" style="font-size: 9px">
               {{ k.kind }}: {{ k.count }}
             </span>
           </div>
           <div v-if="analysis.template?.unresolvedBindings?.length" class="unresolved-section">
             <span class="sub-label warning-label">Unresolved:</span>
-            <span v-for="(u, i) in analysis.template.unresolvedBindings" :key="i" class="badge badge-warning">
+            <span
+              v-for="(u, i) in analysis.template.unresolvedBindings"
+              :key="i"
+              class="badge badge-warning"
+            >
               {{ u.name }}
             </span>
           </div>
@@ -322,7 +409,9 @@ function ssrScoreClass(score: number): string {
 
       <!-- Event Handlers -->
       <details v-if="analysis.template?.eventHandlers?.length" class="analysis-section">
-        <summary class="section-title">Events ({{ analysis.template.eventHandlers.length }})</summary>
+        <summary class="section-title">
+          Events ({{ analysis.template.eventHandlers.length }})
+        </summary>
         <div class="import-list">
           <div v-for="(ev, i) in analysis.template.eventHandlers" :key="i" class="binding-item">
             <code class="binding-name">@{{ ev.eventName }}</code>
@@ -336,23 +425,40 @@ function ssrScoreClass(score: number): string {
       </details>
 
       <!-- Slots & Refs -->
-      <details v-if="(analysis.template?.definedSlots?.length ?? 0) + (analysis.template?.templateRefs?.length ?? 0) > 0" class="analysis-section">
+      <details
+        v-if="
+          (analysis.template?.definedSlots?.length ?? 0) +
+            (analysis.template?.templateRefs?.length ?? 0) >
+          0
+        "
+        class="analysis-section"
+      >
         <summary class="section-title">Slots & Refs</summary>
         <div class="import-list">
           <div v-if="analysis.template?.definedSlots?.length">
-            <div class="sub-label" style="padding: 4px 0;">Defined Slots</div>
-            <div v-for="(slot, i) in analysis.template.definedSlots" :key="'s' + i" class="binding-item">
+            <div class="sub-label" style="padding: 4px 0">Defined Slots</div>
+            <div
+              v-for="(slot, i) in analysis.template.definedSlots"
+              :key="'s' + i"
+              class="binding-item"
+            >
               <code class="binding-name">#{{ slot.name }}</code>
               <span v-if="slot.hasBindings && slot.bindingNames?.length" class="import-bindings">
                 <span class="sub-label">scoped:</span>
-                <code v-for="(bn, j) in slot.bindingNames" :key="j" class="style-tag">{{ bn }}</code>
+                <code v-for="(bn, j) in slot.bindingNames" :key="j" class="style-tag">{{
+                  bn
+                }}</code>
               </span>
               <span v-else-if="!slot.hasBindings" class="badge badge-kind">no bindings</span>
             </div>
           </div>
           <div v-if="analysis.template?.templateRefs?.length">
-            <div class="sub-label" style="padding: 4px 0;">Template Refs</div>
-            <div v-for="(ref, i) in analysis.template.templateRefs" :key="'r' + i" class="binding-item">
+            <div class="sub-label" style="padding: 4px 0">Template Refs</div>
+            <div
+              v-for="(ref, i) in analysis.template.templateRefs"
+              :key="'r' + i"
+              class="binding-item"
+            >
               <code class="binding-name">{{ ref.name }}</code>
               <span class="badge badge-kind">{{ ref.targetTag }}</span>
               <span v-if="ref.isDynamic" class="badge badge-reactive">dynamic</span>
@@ -362,7 +468,10 @@ function ssrScoreClass(score: number): string {
       </details>
 
       <!-- Directives Summary -->
-      <details v-if="analysis.template && analysis.template.maxNestingDepth > 0" class="analysis-section">
+      <details
+        v-if="analysis.template && analysis.template.maxNestingDepth > 0"
+        class="analysis-section"
+      >
         <summary class="section-title">Template Summary</summary>
         <div class="import-list">
           <div class="binding-item">
@@ -372,47 +481,77 @@ function ssrScoreClass(score: number): string {
           <div v-if="analysis.template.elements?.length" class="binding-item">
             <span class="sub-label">Elements:</span>
             <span class="badge badge-kind">{{ analysis.template.elements.length }}</span>
-            <span class="sub-label" style="margin-left: 8px;">Components:</span>
-            <span class="badge badge-vue">{{ analysis.template.elements.filter(e => e.isComponent).length }}</span>
+            <span class="sub-label" style="margin-left: 8px">Components:</span>
+            <span class="badge badge-vue">{{
+              analysis.template.elements.filter((e) => e.isComponent).length
+            }}</span>
           </div>
           <div v-if="analysis.template.vIfVForConflicts?.length" class="binding-item">
-            <span class="badge badge-warning">v-if + v-for conflicts: {{ analysis.template.vIfVForConflicts.length }}</span>
+            <span class="badge badge-warning"
+              >v-if + v-for conflicts: {{ analysis.template.vIfVForConflicts.length }}</span
+            >
           </div>
           <div v-if="analysis.template.ifChains?.length" class="binding-item">
             <span class="sub-label">If chains:</span>
             <span class="badge badge-kind">{{ analysis.template.ifChains.length }}</span>
-            <span class="sub-label" style="margin-left: 8px;">Longest:</span>
-            <span class="badge badge-kind">{{ Math.max(...analysis.template.ifChains.map(c => c.conditions.length)) }} branches</span>
+            <span class="sub-label" style="margin-left: 8px">Longest:</span>
+            <span class="badge badge-kind"
+              >{{
+                Math.max(...analysis.template.ifChains.map((c) => c.conditions.length))
+              }}
+              branches</span
+            >
           </div>
           <div v-if="analysis.template.cssVarNames?.length" class="binding-item">
             <span class="sub-label">CSS vars (template):</span>
-            <code v-for="(v, i) in analysis.template.cssVarNames" :key="i" class="style-tag">{{ v }}</code>
+            <code v-for="(v, i) in analysis.template.cssVarNames" :key="i" class="style-tag">{{
+              v
+            }}</code>
           </div>
         </div>
       </details>
 
       <!-- Prop & Emit Definitions -->
-      <details v-if="(analysis.template?.propDefinitions?.length ?? 0) + (analysis.template?.emitDefinitions?.length ?? 0) > 0" class="analysis-section">
+      <details
+        v-if="
+          (analysis.template?.propDefinitions?.length ?? 0) +
+            (analysis.template?.emitDefinitions?.length ?? 0) >
+          0
+        "
+        class="analysis-section"
+      >
         <summary class="section-title">Props & Emits</summary>
         <div class="import-list">
           <div v-if="analysis.template?.propDefinitions?.length">
-            <div class="sub-label" style="padding: 4px 0;">Props</div>
-            <div v-for="(p, i) in analysis.template.propDefinitions" :key="'p' + i" class="binding-item">
+            <div class="sub-label" style="padding: 4px 0">Props</div>
+            <div
+              v-for="(p, i) in analysis.template.propDefinitions"
+              :key="'p' + i"
+              class="binding-item"
+            >
               <code class="binding-name">{{ p.name }}</code>
               <span v-if="p.typeAnnotation" class="badge badge-type">{{ p.typeAnnotation }}</span>
               <span v-if="p.isRequired" class="badge badge-reactive">required</span>
               <span v-if="p.hasDefault" class="badge badge-vue">default</span>
               <span v-if="p.isBoolean" class="badge badge-kind">boolean</span>
-              <span v-if="!p.usedInTemplate && !p.usedInScript" class="badge badge-warning">unused</span>
+              <span v-if="!p.usedInTemplate && !p.usedInScript" class="badge badge-warning"
+                >unused</span
+              >
             </div>
           </div>
           <div v-if="analysis.template?.emitDefinitions?.length">
-            <div class="sub-label" style="padding: 4px 0;">Emits</div>
-            <div v-for="(e, i) in analysis.template.emitDefinitions" :key="'e' + i" class="binding-item">
+            <div class="sub-label" style="padding: 4px 0">Emits</div>
+            <div
+              v-for="(e, i) in analysis.template.emitDefinitions"
+              :key="'e' + i"
+              class="binding-item"
+            >
               <code class="binding-name">{{ e.eventName }}</code>
               <span v-if="e.isDeclared" class="badge badge-vue">declared</span>
               <span v-if="e.hasValidator" class="badge badge-reactive">validator</span>
-              <span v-if="e.emitLocations?.length" class="badge badge-kind">{{ e.emitLocations.length }} emit sites</span>
+              <span v-if="e.emitLocations?.length" class="badge badge-kind"
+                >{{ e.emitLocations.length }} emit sites</span
+              >
             </div>
           </div>
         </div>
@@ -443,7 +582,9 @@ function ssrScoreClass(score: number): string {
 
       <!-- CSS Variable Manipulations -->
       <details v-if="analysis.cssVarManipulations?.length" class="analysis-section">
-        <summary class="section-title">CSS Var Manipulations ({{ analysis.cssVarManipulations.length }})</summary>
+        <summary class="section-title">
+          CSS Var Manipulations ({{ analysis.cssVarManipulations.length }})
+        </summary>
         <div class="import-list">
           <div v-for="(m, i) in analysis.cssVarManipulations" :key="i" class="binding-item">
             <code class="binding-name">{{ m.kind }}</code>
@@ -457,7 +598,7 @@ function ssrScoreClass(score: number): string {
       <details v-if="ssrReadiness" class="analysis-section">
         <summary class="section-title">
           SSR Readiness
-          <span :class="['badge', ssrScoreClass(ssrReadiness.score)]" style="margin-left: 6px;">
+          <span :class="['badge', ssrScoreClass(ssrReadiness.score)]" style="margin-left: 6px">
             {{ ssrReadiness.score }}/100
           </span>
         </summary>
@@ -466,7 +607,16 @@ function ssrScoreClass(score: number): string {
             <span class="badge badge-vue">No issues detected</span>
           </div>
           <div v-for="(issue, i) in ssrReadiness.issues" :key="i" class="binding-item">
-            <span :class="['badge', issue.severity === 'error' ? 'badge-warning' : issue.severity === 'warning' ? 'badge-reactive' : 'badge-kind']">
+            <span
+              :class="[
+                'badge',
+                issue.severity === 'error'
+                  ? 'badge-warning'
+                  : issue.severity === 'warning'
+                    ? 'badge-reactive'
+                    : 'badge-kind',
+              ]"
+            >
               {{ issue.severity }}
             </span>
             <span class="binding-init">{{ issue.detail }}</span>
@@ -490,7 +640,9 @@ function ssrScoreClass(score: number): string {
 
       <!-- Store Definitions -->
       <details v-if="analysis.storeDefinitions?.length" class="analysis-section">
-        <summary class="section-title">Store Definitions ({{ analysis.storeDefinitions.length }})</summary>
+        <summary class="section-title">
+          Store Definitions ({{ analysis.storeDefinitions.length }})
+        </summary>
         <div class="import-list">
           <div v-for="(d, i) in analysis.storeDefinitions" :key="i" class="binding-item">
             <code class="binding-name">{{ d.exportName }}</code>

@@ -89,10 +89,18 @@ export interface FunctionParameter {
   optional: boolean;
 }
 
+export interface TypeParameterType {
+  kind: "typeParameter";
+  name: string;
+  constraint?: TypeDescriptor;
+  default?: TypeDescriptor;
+}
+
 export interface FunctionType {
   kind: "function";
   parameters: FunctionParameter[];
   returnType: TypeDescriptor;
+  typeParameters?: TypeParameterType[];
 }
 
 // ── Enum ─────────────────────────────────────────────────────────
@@ -134,6 +142,7 @@ export type TypeDescriptor =
   | TupleType
   | ObjectType
   | FunctionType
+  | TypeParameterType
   | EnumType
   | RefType
   | UnknownType;
@@ -185,8 +194,34 @@ export function object(
   };
 }
 
-export function func(parameters: FunctionParameter[], returnType: TypeDescriptor): FunctionType {
-  return { kind: "function", parameters, returnType };
+export function typeParameter(
+  name: string,
+  options?: {
+    constraint?: TypeDescriptor;
+    default?: TypeDescriptor;
+  },
+): TypeParameterType {
+  return {
+    kind: "typeParameter",
+    name,
+    ...(options?.constraint ? { constraint: options.constraint } : {}),
+    ...(options?.default ? { default: options.default } : {}),
+  };
+}
+
+export function func(
+  parameters: FunctionParameter[],
+  returnType: TypeDescriptor,
+  options?: {
+    typeParameters?: TypeParameterType[];
+  },
+): FunctionType {
+  return {
+    kind: "function",
+    parameters,
+    returnType,
+    ...(options?.typeParameters?.length ? { typeParameters: options.typeParameters } : {}),
+  };
 }
 
 export function ref(name: string, typeArguments?: TypeDescriptor[]): RefType {

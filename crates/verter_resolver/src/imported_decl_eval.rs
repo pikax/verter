@@ -108,11 +108,15 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
             &context,
             &imported_inputs,
         )?;
-        let decl = dep_env.type_symbols.get(exported_name)?.clone();
+        let decl = dep_env
+            .type_symbols
+            .get(context.decl.name.as_str())
+            .or_else(|| dep_env.type_symbols.get(exported_name))?
+            .clone();
         for param in &decl.type_parameters {
             dep_env.type_bindings.insert(
                 param.name.clone(),
-                std::sync::Arc::new(TypeExpr::named(param.name.clone())),
+                std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
         Some(verter_analysis::type_eval::evaluate(
@@ -136,7 +140,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeSet;
     use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
-    use verter_analysis::type_expr::{PrimitiveName, TypeExpr};
+    use verter_analysis::type_expr::{PrimitiveName, TypeExpr, TypeParam};
 
     struct TestResolver {
         exhausted: bool,
@@ -209,6 +213,18 @@ mod tests {
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body,
+        }
+    }
+
+    fn generic_type_param(name: &str) -> TypeParam {
+        TypeParam {
+            name: name.to_string(),
+            constraint: Some(std::sync::Arc::new(TypeExpr::Primitive(
+                PrimitiveName::Number,
+            ))),
+            default: Some(std::sync::Arc::new(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))),
         }
     }
 
@@ -303,5 +319,182 @@ mod tests {
 
         assert!(actual.is_none());
         assert_eq!(resolver.left.borrow().as_slice(), ["/src/types.ts"]);
+    }
+
+    #[test]
+    fn evaluate_imported_decl_with_owner_env_preserves_generic_parameter_metadata() {
+        let generic = generic_type_param("T");
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Props".to_string(),
+            declaration_id: 1,
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![generic.clone()],
+            body: TypeExpr::named("T"),
+        });
+        let mut contexts = std::collections::BTreeMap::new();
+        contexts.insert(
+            ("/src/types.ts".to_string(), "Props".to_string()),
+            PreparedImportedDeclContext {
+                imports: Vec::new(),
+                macros: Vec::new(),
+                bindings: Vec::new(),
+                macro_type_deps: Vec::new(),
+                eval_source: "export type Props<T extends number = string> = T".to_string(),
+                env,
+                decl: TypeDeclInfo {
+                    name: "Props".to_string(),
+                    declaration_id: 1,
+                    kind: TypeDeclKind::Alias,
+                    type_parameters: vec![generic.clone()],
+                    body: TypeExpr::named("T"),
+                },
+            },
+        );
+        let mut resolver = TestResolver {
+            exhausted: false,
+            allow_alias_enter: true,
+            contexts,
+            entered: RefCell::new(Vec::new()),
+            left: RefCell::new(Vec::new()),
+            built_inputs: ImportedEvalInputs {
+                sources: Vec::new(),
+                type_aliases: Vec::new(),
+                canonical_dependencies: BTreeSet::new(),
+                overflow: None,
+            },
+        };
+
+        let actual = evaluate_imported_decl_with_owner_env(
+            &mut resolver,
+            "/src/types.ts",
+            "Props",
+            &mut BTreeSet::new(),
+        );
+
+        assert_eq!(actual, Some(TypeExpr::TypeParameter(generic)));
+    }
+
+    #[test]
+    fn evaluate_imported_decl_with_owner_env_uses_resolved_decl_name_for_re_exports() {
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Lt".to_string(),
+            declaration_id: 1,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: TypeExpr::union(vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::named("St"),
+                TypeExpr::named("vt"),
+            ]),
+        });
+        env.add_type(TypeDeclInfo {
+            name: "St".to_string(),
+            declaration_id: 2,
+            kind: TypeDeclKind::Interface,
+            type_parameters: Vec::new(),
+            body: TypeExpr::Object(std::sync::Arc::new(
+                verter_analysis::type_expr::ObjectExpr {
+                    properties: vec![verter_analysis::type_expr::ObjectMember::Property(
+                        verter_analysis::type_expr::ObjectProperty {
+                            name: "path".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                },
+            )),
+        });
+        env.add_type(TypeDeclInfo {
+            name: "vt".to_string(),
+            declaration_id: 3,
+            kind: TypeDeclKind::Interface,
+            type_parameters: Vec::new(),
+            body: TypeExpr::Object(std::sync::Arc::new(
+                verter_analysis::type_expr::ObjectExpr {
+                    properties: vec![verter_analysis::type_expr::ObjectMember::Property(
+                        verter_analysis::type_expr::ObjectProperty {
+                            name: "name".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                },
+            )),
+        });
+        let mut contexts = std::collections::BTreeMap::new();
+        contexts.insert(
+            (
+                "/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+                "RouteLocationRaw".to_string(),
+            ),
+            PreparedImportedDeclContext {
+                imports: Vec::new(),
+                macros: Vec::new(),
+                bindings: Vec::new(),
+                macro_type_deps: Vec::new(),
+                eval_source: "export type Lt = string | St | vt".to_string(),
+                env,
+                decl: decl(
+                    "Lt",
+                    TypeExpr::union(vec![
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        TypeExpr::named("St"),
+                        TypeExpr::named("vt"),
+                    ]),
+                ),
+            },
+        );
+        let mut resolver = TestResolver {
+            exhausted: false,
+            allow_alias_enter: true,
+            contexts,
+            entered: RefCell::new(Vec::new()),
+            left: RefCell::new(Vec::new()),
+            built_inputs: ImportedEvalInputs {
+                sources: Vec::new(),
+                type_aliases: Vec::new(),
+                canonical_dependencies: BTreeSet::new(),
+                overflow: None,
+            },
+        };
+
+        let actual = evaluate_imported_decl_with_owner_env(
+            &mut resolver,
+            "/node_modules/vue-router/dist/index-typed.d.ts",
+            "RouteLocationRaw",
+            &mut BTreeSet::new(),
+        );
+
+        let Some(TypeExpr::Union(types)) = actual else {
+            panic!("expected union route surface");
+        };
+        assert_eq!(types.len(), 3);
+        assert!(types
+            .iter()
+            .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))));
+        assert!(types.iter().any(|ty| match ty {
+            TypeExpr::Object(obj) => obj.properties.iter().any(|member| {
+                matches!(
+                    member,
+                    verter_analysis::type_expr::ObjectMember::Property(prop)
+                        if prop.name == "path"
+                )
+            }),
+            _ => false,
+        }));
+        assert!(types.iter().any(|ty| match ty {
+            TypeExpr::Object(obj) => obj.properties.iter().any(|member| {
+                matches!(
+                    member,
+                    verter_analysis::type_expr::ObjectMember::Property(prop)
+                        if prop.name == "name"
+                )
+            }),
+            _ => false,
+        }));
     }
 }

@@ -29,16 +29,12 @@ test.describe("Analysis tab", () => {
 
     // Must not have the "Cannot read properties of undefined" crash
     const criticalErrors = errors.filter(
-      (e) =>
-        e.includes("Cannot read properties of undefined") ||
-        e.includes("reading 'length'"),
+      (e) => e.includes("Cannot read properties of undefined") || e.includes("reading 'length'"),
     );
     expect(criticalErrors).toEqual([]);
   });
 
-  test("Analysis tab shows analysis content for default App.vue", async ({
-    page,
-  }) => {
+  test("Analysis tab shows analysis content for default App.vue", async ({ page }) => {
     const analysisTab = page.locator(".output-tabs button", {
       hasText: "Analysis",
     });
@@ -66,9 +62,7 @@ test.describe("Analysis tab", () => {
     await expect(timingRow).toBeVisible({ timeout: 5000 });
   });
 
-  test("Analysis tab shows imports section for default App.vue", async ({
-    page,
-  }) => {
+  test("Analysis tab shows imports section for default App.vue", async ({ page }) => {
     const analysisTab = page.locator(".output-tabs button", {
       hasText: "Analysis",
     });
@@ -82,9 +76,7 @@ test.describe("Analysis tab", () => {
     await expect(importsSection).toBeVisible({ timeout: 5000 });
   });
 
-  test("Analysis tab shows bindings section for default App.vue", async ({
-    page,
-  }) => {
+  test("Analysis tab shows bindings section for default App.vue", async ({ page }) => {
     const analysisTab = page.locator(".output-tabs button", {
       hasText: "Analysis",
     });
@@ -99,9 +91,7 @@ test.describe("Analysis tab", () => {
     await expect(bindingsSection).toBeVisible({ timeout: 5000 });
   });
 
-  test("Analysis tab shows styles section for default App.vue", async ({
-    page,
-  }) => {
+  test("Analysis tab shows styles section for default App.vue", async ({ page }) => {
     const analysisTab = page.locator(".output-tabs button", {
       hasText: "Analysis",
     });

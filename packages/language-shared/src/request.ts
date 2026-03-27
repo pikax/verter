@@ -1,5 +1,10 @@
 import type { StatisticsRequestParams, StatisticsSnapshot } from "./statistics";
-import type { ComponentParentsResponse, FileAnalysisSnapshot, ProjectOverview, VirtualFilesResponse } from "./analysis";
+import type {
+  ComponentParentsResponse,
+  FileAnalysisSnapshot,
+  ProjectOverview,
+  VirtualFilesResponse,
+} from "./analysis";
 import type { RouteAnalysisSnapshot } from "./routes";
 
 // fluff

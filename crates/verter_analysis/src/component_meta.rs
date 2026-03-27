@@ -11,7 +11,7 @@
 //! - [`ComponentMetaAnalysis`] is the analysis-domain result (no serde)
 //! - Conversion to FFI/binding DTOs happens at the `verter_ffi` boundary
 
-use crate::type_expr::TypeExpr;
+use crate::type_expr::{PrimitiveName, TypeExpr};
 use crate::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedEmitField, AnalyzedImport, AnalyzedMacro,
     AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
@@ -1085,6 +1085,8 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         );
     }
 
+    reconcile_update_events_with_props(&props, input.macros, &mut events);
+
     let type_registry = input.resolved_type_registry.to_vec();
     let components = extract_components(input.template);
     let template_refs = extract_template_refs(input.template);
@@ -1135,20 +1137,36 @@ fn extract_props_from_macro(
         if !eval_fields.is_empty() {
             for field in eval_fields {
                 let source_field = prop_fields.iter().find(|prop| prop.name == field.name);
+                let evaluated_field = evaluated.and_then(|eval| {
+                    eval.props
+                        .iter()
+                        .find(|candidate| candidate.name == field.name)
+                });
                 let has_default = default_keys.contains(field.name.as_str());
                 let default_value = default_values
                     .get(field.name.as_str())
                     .map(|v| v.to_string());
+                let type_expansion = define_props_property_expansion_metadata(
+                    evaluated,
+                    macro_index,
+                    field.name.as_str(),
+                );
+                let raw_type = prop_raw_type_from_evaluated_and_source(
+                    evaluated_field.and_then(|candidate| candidate.raw_type.as_deref()),
+                    source_field.and_then(|prop| prop.type_annotation.as_deref()),
+                    field.optional,
+                );
+                let type_expr = prefer_symbolic_prop_type_expr(
+                    &field.ty,
+                    raw_type.as_deref(),
+                    type_expansion.as_ref(),
+                );
 
                 out.push(PropAnalysis {
                     name: field.name.clone(),
-                    type_expr: field.ty.clone(),
-                    type_expansion: define_props_property_expansion_metadata(
-                        evaluated,
-                        macro_index,
-                        field.name.as_str(),
-                    ),
-                    raw_type: source_field.and_then(|prop| prop.type_annotation.clone()),
+                    type_expr,
+                    type_expansion,
+                    raw_type,
                     required: !field.optional && !has_default,
                     has_default,
                     default_value,
@@ -1177,7 +1195,16 @@ fn extract_props_from_macro(
             name: field.name.clone(),
             type_expr,
             type_expansion,
-            raw_type: field.type_annotation.clone(),
+            raw_type: prop_raw_type_from_evaluated_and_source(
+                evaluated.and_then(|eval| {
+                    eval.props
+                        .iter()
+                        .find(|candidate| candidate.name == field.name)
+                        .and_then(|candidate| candidate.raw_type.as_deref())
+                }),
+                field.type_annotation.as_deref(),
+                field.is_optional,
+            ),
             required: !field.is_optional && !has_default,
             has_default,
             default_value,
@@ -1198,16 +1225,28 @@ fn extract_props_from_macro(
             let default_value = default_values
                 .get(field.name.as_str())
                 .map(|v| v.to_string());
+            let type_expansion = define_props_property_expansion_metadata(
+                evaluated,
+                macro_index,
+                field.name.as_str(),
+            );
+            let raw_type = evaluated.and_then(|eval| {
+                eval.props
+                    .iter()
+                    .find(|candidate| candidate.name == field.name)
+                    .and_then(|candidate| candidate.raw_type.clone())
+            });
+            let type_expr = prefer_symbolic_prop_type_expr(
+                &field.ty,
+                raw_type.as_deref(),
+                type_expansion.as_ref(),
+            );
 
             out.push(PropAnalysis {
                 name: field.name.clone(),
-                type_expr: field.ty.clone(),
-                type_expansion: define_props_property_expansion_metadata(
-                    evaluated,
-                    macro_index,
-                    field.name.as_str(),
-                ),
-                raw_type: None,
+                type_expr,
+                type_expansion,
+                raw_type,
                 required: !field.optional && !has_default,
                 has_default,
                 default_value,
@@ -1355,7 +1394,17 @@ fn resolve_prop_type(
 ) -> (TypeExpr, Option<crate::type_expand::ExpansionMetadata>) {
     if let Some(eval) = evaluated {
         if let Some(ef) = eval.props.iter().find(|f| f.name == field.name) {
-            return (ef.r#type.clone(), Some(field_expansion_metadata(ef)));
+            let metadata = field_expansion_metadata(ef);
+            let preferred_raw_type = symbolic_type_from_evaluated_and_source(
+                ef.raw_type.as_deref(),
+                field.type_annotation.as_deref(),
+            );
+            let type_expr = prefer_symbolic_prop_type_expr(
+                &ef.r#type,
+                preferred_raw_type.as_deref(),
+                Some(&metadata),
+            );
+            return (type_expr, Some(metadata));
         }
     }
     match &field.type_annotation {
@@ -1365,6 +1414,337 @@ fn resolve_prop_type(
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
+
+fn prop_raw_type_from_evaluated_and_source(
+    evaluated_raw_type: Option<&str>,
+    source_annotation: Option<&str>,
+    _is_optional: bool,
+) -> Option<String> {
+    symbolic_type_from_evaluated_and_source(evaluated_raw_type, source_annotation)
+}
+
+fn symbolic_type_from_evaluated_and_source(
+    evaluated_raw_type: Option<&str>,
+    source_annotation: Option<&str>,
+) -> Option<String> {
+    let evaluated_raw_type = evaluated_raw_type
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let source_annotation = source_annotation
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match (evaluated_raw_type, source_annotation) {
+        (Some(raw_type), Some(source_annotation))
+            if source_annotation_beats_backend_prop_display(raw_type, source_annotation) =>
+        {
+            Some(source_annotation.to_string())
+        }
+        (Some(raw_type), _) => Some(raw_type.to_string()),
+        (None, Some(source_annotation)) => Some(source_annotation.to_string()),
+        (None, None) => None,
+    }
+}
+
+const LARGE_PARTIAL_PROP_TYPE_NODE_LIMIT: usize = 256;
+
+fn prefer_symbolic_prop_type_expr(
+    evaluated_type: &TypeExpr,
+    preferred_raw_type: Option<&str>,
+    metadata: Option<&crate::type_expand::ExpansionMetadata>,
+) -> TypeExpr {
+    if !should_prefer_symbolic_prop_type_expr(evaluated_type, preferred_raw_type, metadata) {
+        return evaluated_type.clone();
+    }
+
+    preferred_raw_type
+        .map(parse_annotation_or_unknown)
+        .unwrap_or_else(|| evaluated_type.clone())
+}
+
+fn should_prefer_symbolic_prop_type_expr(
+    evaluated_type: &TypeExpr,
+    preferred_raw_type: Option<&str>,
+    metadata: Option<&crate::type_expand::ExpansionMetadata>,
+) -> bool {
+    let Some(raw_type) = preferred_raw_type
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    else {
+        return false;
+    };
+
+    let Some(metadata) = metadata else {
+        return false;
+    };
+
+    metadata.completeness == crate::type_expand::ExpansionCompleteness::Partial
+        && source_annotation_beats_placeholder_backend_type(raw_type)
+        && (type_expr_exceeds_node_limit(evaluated_type, LARGE_PARTIAL_PROP_TYPE_NODE_LIMIT)
+            || type_expr_is_placeholder_for_symbolic_fallback(evaluated_type))
+}
+
+fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
+    fn visit(type_expr: &TypeExpr, seen: &mut usize, limit: usize) -> bool {
+        *seen += 1;
+        if *seen > limit {
+            return true;
+        }
+
+        match type_expr {
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::TypeParameter(_) => false,
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                types.iter().any(|inner| visit(inner, seen, limit))
+            }
+            TypeExpr::Array { element, .. }
+            | TypeExpr::KeyOf(element)
+            | TypeExpr::Rest(element)
+            | TypeExpr::Parenthesized(element) => visit(element, seen, limit),
+            TypeExpr::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| visit(&element.ty, seen, limit)),
+            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                crate::type_expr::ObjectMember::Property(property) => {
+                    visit(&property.ty, seen, limit)
+                }
+                crate::type_expr::ObjectMember::IndexSignature(signature) => {
+                    visit(&signature.key_type, seen, limit)
+                        || visit(&signature.value_type, seen, limit)
+                }
+                crate::type_expr::ObjectMember::CallSignature(function)
+                | crate::type_expr::ObjectMember::ConstructSignature(function) => {
+                    type_expr_function_exceeds_node_limit(function, seen, limit)
+                }
+                crate::type_expr::ObjectMember::Method(method) => {
+                    type_expr_function_exceeds_node_limit(&method.function, seen, limit)
+                }
+            }),
+            TypeExpr::Function(function) => {
+                type_expr_function_exceeds_node_limit(function, seen, limit)
+            }
+            TypeExpr::Ref { type_arguments, .. } => {
+                type_arguments.iter().any(|inner| visit(inner, seen, limit))
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                visit(object, seen, limit) || visit(index, seen, limit)
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                visit(check, seen, limit)
+                    || visit(extends, seen, limit)
+                    || visit(true_type, seen, limit)
+                    || visit(false_type, seen, limit)
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                visit(source, seen, limit)
+                    || visit(value, seen, limit)
+                    || name_type
+                        .as_deref()
+                        .is_some_and(|inner| visit(inner, seen, limit))
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                expressions.iter().any(|inner| visit(inner, seen, limit))
+            }
+        }
+    }
+
+    fn type_expr_function_exceeds_node_limit(
+        function: &crate::type_expr::FunctionExpr,
+        seen: &mut usize,
+        limit: usize,
+    ) -> bool {
+        function
+            .parameters
+            .iter()
+            .any(|param| visit(&param.ty, seen, limit))
+            || function
+                .return_type
+                .as_deref()
+                .is_some_and(|return_type| visit(return_type, seen, limit))
+            || function.type_parameters.iter().any(|type_param| {
+                type_param
+                    .constraint
+                    .as_deref()
+                    .is_some_and(|constraint| visit(constraint, seen, limit))
+                    || type_param
+                        .default
+                        .as_deref()
+                        .is_some_and(|default| visit(default, seen, limit))
+            })
+    }
+
+    let mut seen = 0;
+    visit(type_expr, &mut seen, limit)
+}
+
+fn type_expr_is_placeholder_for_symbolic_fallback(type_expr: &TypeExpr) -> bool {
+    match type_expr {
+        TypeExpr::Primitive(PrimitiveName::Any | PrimitiveName::Unknown) => true,
+        TypeExpr::Unknown { .. } => true,
+        TypeExpr::Parenthesized(inner) => type_expr_is_placeholder_for_symbolic_fallback(inner),
+        TypeExpr::Object(object) => object.properties.is_empty(),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            !types.is_empty()
+                && types
+                    .iter()
+                    .all(type_expr_is_placeholder_for_symbolic_fallback)
+        }
+        _ => false,
+    }
+}
+
+fn prop_raw_type_is_placeholder(raw_type: &str) -> bool {
+    matches!(raw_type.trim(), "" | "any" | "unknown")
+}
+
+fn source_annotation_beats_placeholder_backend_type(annotation: &str) -> bool {
+    let annotation = annotation.trim();
+    !annotation.is_empty() && !matches!(annotation, "any" | "unknown")
+}
+
+fn source_annotation_beats_backend_prop_display(raw_type: &str, source_annotation: &str) -> bool {
+    if !source_annotation_beats_placeholder_backend_type(source_annotation) {
+        return false;
+    }
+
+    prop_raw_type_is_placeholder(raw_type)
+        || backend_optionalizes_source_annotation(raw_type, source_annotation)
+        || (source_annotation_contains_conditional(source_annotation)
+            && !source_annotation_contains_conditional(raw_type))
+        || (source_annotation_contains_indexed_access(source_annotation)
+            && backend_raw_type_is_expanded_display(raw_type))
+}
+
+fn backend_optionalizes_source_annotation(raw_type: &str, source_annotation: &str) -> bool {
+    let Some(stripped) = strip_top_level_undefined_from_union(raw_type) else {
+        return false;
+    };
+    normalize_type_text_for_compare(&stripped) == normalize_type_text_for_compare(source_annotation)
+}
+
+fn strip_top_level_undefined_from_union(text: &str) -> Option<String> {
+    let mut parts = split_top_level_union(text);
+    let original_len = parts.len();
+    parts.retain(|part| normalize_type_text_for_compare(part) != "undefined");
+    if parts.len() == original_len {
+        return None;
+    }
+    Some(parts.join(" | "))
+}
+
+fn split_top_level_union(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0i32;
+    let mut bracket_depth = 0i32;
+    let mut brace_depth = 0i32;
+    let chars: Vec<_> = text.char_indices().collect();
+
+    for (index, ch) in chars {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth -= 1,
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            '|' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                let part = text[start..index].trim();
+                if !part.is_empty() {
+                    parts.push(part.to_string());
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail.to_string());
+    }
+    parts
+}
+
+fn normalize_type_text_for_compare(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+fn source_annotation_contains_conditional(text: &str) -> bool {
+    text.contains(" extends ")
+}
+
+fn source_annotation_contains_indexed_access(text: &str) -> bool {
+    text.contains('[') && text.contains(']')
+}
+
+fn backend_raw_type_is_expanded_display(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with('{') || text.contains('\n')
+}
+
+fn event_raw_signature_from_evaluated_and_source(
+    evaluated_raw_type: Option<&str>,
+    source_payload: Option<&str>,
+) -> Option<String> {
+    let evaluated_raw_type = evaluated_raw_type
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let source_payload = source_payload
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match (evaluated_raw_type, source_payload) {
+        (Some(raw_type), Some(source_payload))
+            if source_payload_beats_backend_event_display(raw_type, source_payload) =>
+        {
+            Some(source_payload.to_string())
+        }
+        (Some(raw_type), _) => Some(preserve_or_wrap_event_payload(raw_type)),
+        (None, Some(source_payload)) => Some(source_payload.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn preserve_or_wrap_event_payload(raw_type: &str) -> String {
+    let trimmed = raw_type.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        trimmed.to_string()
+    } else {
+        format!("[value: {trimmed}]")
+    }
+}
+
+fn source_payload_beats_backend_event_display(raw_type: &str, source_payload: &str) -> bool {
+    let source_inner = strip_event_tuple_wrapper(source_payload).unwrap_or(source_payload);
+    source_annotation_beats_placeholder_backend_type(source_inner)
+        && (prop_raw_type_is_placeholder(raw_type)
+            || (source_annotation_contains_conditional(source_inner)
+                && !source_annotation_contains_conditional(raw_type))
+            || (source_annotation_contains_indexed_access(source_inner)
+                && backend_raw_type_is_expanded_display(raw_type)))
+}
+
+fn strip_event_tuple_wrapper(source_payload: &str) -> Option<&str> {
+    let payload = source_payload.trim();
+    let payload = payload.strip_prefix("[value:")?;
+    let payload = payload.strip_suffix(']')?;
+    Some(payload.trim())
+}
 
 fn extract_events_from_macro(
     macro_index: usize,
@@ -1382,11 +1762,19 @@ fn extract_events_from_macro(
 
         if emit_fields.is_empty() {
             for event in expanded_events {
+                let evaluated_field = evaluated.and_then(|eval| {
+                    eval.emits
+                        .iter()
+                        .find(|candidate| candidate.name == event.name)
+                });
                 out.push(EventAnalysis {
                     name: event.name,
                     payload: event.payload,
                     payload_expansion: event.payload_expansion,
-                    raw_signature: None,
+                    raw_signature: event_raw_signature_from_evaluated_and_source(
+                        evaluated_field.and_then(|candidate| candidate.raw_type.as_deref()),
+                        None,
+                    ),
                     description: None,
                     tags: Vec::new(),
                 });
@@ -1415,7 +1803,15 @@ fn extract_events_from_macro(
                 name: field.name.clone(),
                 payload,
                 payload_expansion,
-                raw_signature: field.payload_type.clone(),
+                raw_signature: event_raw_signature_from_evaluated_and_source(
+                    evaluated.and_then(|eval| {
+                        eval.emits
+                            .iter()
+                            .find(|candidate| candidate.name == field.name)
+                            .and_then(|candidate| candidate.raw_type.as_deref())
+                    }),
+                    field.payload_type.as_deref(),
+                ),
                 description: field.description.clone(),
                 tags: field.tags.clone(),
             });
@@ -1444,7 +1840,15 @@ fn extract_events_from_macro(
             name: field.name.clone(),
             payload,
             payload_expansion,
-            raw_signature: field.payload_type.clone(),
+            raw_signature: event_raw_signature_from_evaluated_and_source(
+                evaluated.and_then(|eval| {
+                    eval.emits
+                        .iter()
+                        .find(|candidate| candidate.name == field.name)
+                        .and_then(|candidate| candidate.raw_type.as_deref())
+                }),
+                field.payload_type.as_deref(),
+            ),
             description: field.description.clone(),
             tags: field.tags.clone(),
         });
@@ -1467,7 +1871,8 @@ fn extract_slots_from_macro(
             let Some(slot_index) = remaining.iter().position(|slot| slot.name == field.name) else {
                 continue;
             };
-            let slot = remaining.remove(slot_index);
+            let mut slot = remaining.remove(slot_index);
+            slot.bindings = merge_slot_bindings_with_source(field, slot.bindings);
             out.push(SlotAnalysis {
                 name: slot.name,
                 is_scoped: !slot.bindings.is_empty(),
@@ -1505,7 +1910,21 @@ fn extract_slots_from_macro(
                     eval.slot_bindings
                         .iter()
                         .find(|f| f.name == key)
-                        .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
+                        .map(|f| {
+                            let type_expansion = field_expansion_metadata(f);
+                            let raw_type = symbolic_type_from_evaluated_and_source(
+                                f.raw_type.as_deref(),
+                                b.type_annotation.as_deref(),
+                            );
+                            (
+                                prefer_symbolic_prop_type_expr(
+                                    &f.r#type,
+                                    raw_type.as_deref(),
+                                    Some(&type_expansion),
+                                ),
+                                Some(type_expansion),
+                            )
+                        })
                         .unwrap_or_else(|| match &b.type_annotation {
                             Some(raw) => (parse_annotation_or_unknown(raw), None),
                             None => (unknown_type("unknown".to_string()), None),
@@ -1520,7 +1939,15 @@ fn extract_slots_from_macro(
                     name: b.name.clone(),
                     type_expr,
                     type_expansion,
-                    raw_type: b.type_annotation.clone(),
+                    raw_type: evaluated
+                        .and_then(|eval| {
+                            let key = format!("{}.{}", field.name, b.name);
+                            eval.slot_bindings
+                                .iter()
+                                .find(|candidate| candidate.name == key)
+                                .and_then(|candidate| candidate.raw_type.clone())
+                        })
+                        .or_else(|| b.type_annotation.clone()),
                 }
             })
             .collect();
@@ -1674,15 +2101,22 @@ fn expanded_slot_bindings(
         .slot_bindings
         .iter()
         .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
-        .map(|field| SlotBindingAnalysis {
-            name: field
-                .name
-                .split_once('.')
-                .map(|(_, binding)| binding.to_string())
-                .unwrap_or_else(|| field.name.clone()),
-            type_expr: field.r#type.clone(),
-            type_expansion: Some(field_expansion_metadata(field)),
-            raw_type: None,
+        .map(|field| {
+            let type_expansion = field_expansion_metadata(field);
+            SlotBindingAnalysis {
+                name: field
+                    .name
+                    .split_once('.')
+                    .map(|(_, binding)| binding.to_string())
+                    .unwrap_or_else(|| field.name.clone()),
+                type_expr: prefer_symbolic_prop_type_expr(
+                    &field.r#type,
+                    field.raw_type.as_deref(),
+                    Some(&type_expansion),
+                ),
+                type_expansion: Some(type_expansion),
+                raw_type: field.raw_type.clone(),
+            }
         })
         .collect();
     if !bindings.is_empty() {
@@ -1692,22 +2126,79 @@ fn expanded_slot_bindings(
     Vec::new()
 }
 
+fn merge_slot_bindings_with_source(
+    source_field: &crate::types::AnalyzedSlotField,
+    expanded_bindings: Vec<SlotBindingAnalysis>,
+) -> Vec<SlotBindingAnalysis> {
+    if source_field.bindings.is_empty() || expanded_bindings.is_empty() {
+        return expanded_bindings;
+    }
+
+    let mut expanded_by_name: rustc_hash::FxHashMap<String, SlotBindingAnalysis> =
+        expanded_bindings
+            .into_iter()
+            .map(|binding| (binding.name.clone(), binding))
+            .collect();
+    let mut merged = Vec::new();
+
+    for source_binding in &source_field.bindings {
+        if let Some(mut binding) = expanded_by_name.remove(&source_binding.name) {
+            let raw_type = symbolic_type_from_evaluated_and_source(
+                binding.raw_type.as_deref(),
+                source_binding.type_annotation.as_deref(),
+            );
+            binding.type_expr = prefer_symbolic_prop_type_expr(
+                &binding.type_expr,
+                raw_type.as_deref(),
+                binding.type_expansion.as_ref(),
+            );
+            binding.raw_type = raw_type;
+            merged.push(binding);
+        }
+    }
+
+    merged.extend(expanded_by_name.into_values());
+    merged
+}
+
 fn slot_bindings_from_type_expr(
     ty: &TypeExpr,
     type_expansion: Option<crate::type_expand::ExpansionMetadata>,
 ) -> Vec<SlotBindingAnalysis> {
-    let bindings_ty = match ty {
-        TypeExpr::Function(func) => func.parameters.first().map(|param| &param.ty),
-        _ => None,
-    };
-    let Some(bindings_ty) = bindings_ty else {
+    let mut binding_param_types = Vec::new();
+    collect_slot_binding_param_types(ty, &mut binding_param_types);
+    if binding_param_types.is_empty() {
         return Vec::new();
-    };
+    }
 
     let mut seen = rustc_hash::FxHashSet::default();
     let mut bindings = Vec::new();
-    collect_slot_bindings_from_object_type(bindings_ty, &type_expansion, &mut seen, &mut bindings);
+    for binding_param_ty in binding_param_types {
+        collect_slot_bindings_from_object_type(
+            binding_param_ty,
+            &type_expansion,
+            &mut seen,
+            &mut bindings,
+        );
+    }
     bindings
+}
+
+fn collect_slot_binding_param_types<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a TypeExpr>) {
+    match ty {
+        TypeExpr::Parenthesized(inner) => collect_slot_binding_param_types(inner, out),
+        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+            for inner in types.iter() {
+                collect_slot_binding_param_types(inner, out);
+            }
+        }
+        TypeExpr::Function(func) => {
+            if let Some(first) = func.parameters.first() {
+                out.push(&first.ty);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_slot_bindings_from_object_type(
@@ -1744,6 +2235,51 @@ fn collect_slot_bindings_from_object_type(
             }
         }
         _ => {}
+    }
+}
+
+fn reconcile_update_events_with_props(
+    props: &[PropAnalysis],
+    macros: &[AnalyzedMacro],
+    events: &mut [EventAnalysis],
+) {
+    let props_by_name: rustc_hash::FxHashMap<&str, &PropAnalysis> = props
+        .iter()
+        .map(|prop| (prop.name.as_str(), prop))
+        .collect();
+    let source_backed_events: rustc_hash::FxHashSet<&str> = macros
+        .iter()
+        .flat_map(|mac| mac.emit_fields.iter())
+        .filter(|field| field.payload_type.is_some())
+        .map(|field| field.name.as_str())
+        .collect();
+
+    for event in events {
+        if source_backed_events.contains(event.name.as_str()) {
+            continue;
+        }
+        let Some(prop_name) = event.name.strip_prefix("update:") else {
+            continue;
+        };
+        let Some(prop) = props_by_name.get(prop_name) else {
+            continue;
+        };
+        let Some(prop_raw_type) = prop
+            .raw_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        let should_prefer_prop = event
+            .raw_signature
+            .as_deref()
+            .map(|raw| raw.contains(" extends ") || raw.contains("unknown"))
+            .unwrap_or(true);
+        if should_prefer_prop {
+            event.raw_signature = Some(format!("[value: {prop_raw_type}]"));
+        }
     }
 }
 

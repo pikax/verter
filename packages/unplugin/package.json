@@ -3,22 +3,19 @@
   "version": "0.0.1-beta.1",
   "description": "Universal Vue SFC compiler plugin for all bundlers (Vite, Rollup, webpack, esbuild, etc.)",
   "keywords": [
-    "vue",
     "compiler",
+    "rollup",
     "unplugin",
     "vite",
-    "webpack",
-    "rollup"
+    "vue",
+    "webpack"
   ],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
+  "author": "pikax",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
-  },
-  "author": "pikax",
-  "homepage": "https://verterjs.dev/",
-  "engines": {
-    "node": ">=18"
   },
   "files": [
     "dist"
@@ -177,5 +174,8 @@
     "rolldown": {
       "optional": true
     }
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

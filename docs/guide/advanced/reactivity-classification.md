@@ -8,17 +8,17 @@ Verter statically classifies every top-level binding in a Vue SFC's `<script set
 
 ## ReactivityKind Enum
 
-| Kind | Description | Example |
-|------|-------------|---------|
-| `Ref` | Single-value reactive container (.value access) | `const x = ref(0)` |
-| `ShallowRef` | Same as Ref, shallow reactivity | `const x = shallowRef(obj)` |
-| `Reactive` | Deeply reactive proxy (no .value needed) | `const state = reactive({})` |
-| `Computed` | Derived reactive value (.value, readonly) | `const doubled = computed(() => x.value * 2)` |
-| `ComputedWritable` | Writable computed (.value, get/set) | `computed({ get, set })` |
-| `TemplateRef` | Template element reference (.value) | `const el = useTemplateRef('el')` |
-| `Composable` | Composable function return | `const { data } = useFetch()` |
-| `Literal` | Non-reactive constant | `const PI = 3.14` |
-| `Prop` | Component prop (reactive, readonly) | `const props = defineProps<{}>()` |
+| Kind               | Description                                     | Example                                       |
+| ------------------ | ----------------------------------------------- | --------------------------------------------- |
+| `Ref`              | Single-value reactive container (.value access) | `const x = ref(0)`                            |
+| `ShallowRef`       | Same as Ref, shallow reactivity                 | `const x = shallowRef(obj)`                   |
+| `Reactive`         | Deeply reactive proxy (no .value needed)        | `const state = reactive({})`                  |
+| `Computed`         | Derived reactive value (.value, readonly)       | `const doubled = computed(() => x.value * 2)` |
+| `ComputedWritable` | Writable computed (.value, get/set)             | `computed({ get, set })`                      |
+| `TemplateRef`      | Template element reference (.value)             | `const el = useTemplateRef('el')`             |
+| `Composable`       | Composable function return                      | `const { data } = useFetch()`                 |
+| `Literal`          | Non-reactive constant                           | `const PI = 3.14`                             |
+| `Prop`             | Component prop (reactive, readonly)             | `const props = defineProps<{}>()`             |
 
 ## How It Works
 

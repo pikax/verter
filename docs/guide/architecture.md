@@ -74,31 +74,32 @@ Both pipelines share the same Vue SFC input and produce consistent results -- th
 
 ## Repository Structure
 
-| Directory | Purpose |
-|-----------|---------|
-| `crates/verter_core/` | Rust template compiler |
-| `crates/verter_vfs/` | Virtual filesystem: sole authority for file access and import resolution |
-| `crates/verter_analysis/` | Static analysis: imports, exports, bindings, types |
-| `crates/verter_host/` | In-memory file host: caching, dependencies, multi-file compilation |
-| `crates/verter_diagnostics/` | Diagnostic engine: 22+ lint rules, visitor, DiagnosticSet |
-| `crates/verter_actions/` | Code actions engine: quick fixes, refactoring |
-| `crates/verter_lsp/` | Rust LSP server binary (stdio) |
-| `crates/verter_ffi/` | FFI types for NAPI/WASM boundaries |
-| `crates/verter_napi/` | Native Node.js bindings (NAPI-RS) |
-| `crates/verter_wasm/` | WASM bindings (wasm-bindgen) |
-| `packages/core/` | `@verter/core` -- SFC parser & TSX transformer |
-| `packages/types/` | `@verter/types` -- TypeScript utility types |
-| `packages/native/` | `@verter/native` -- Native binding loader |
-| `packages/wasm/` | `@verter/wasm` -- WASM binding wrapper |
-| `packages/unplugin/` | `@verter/unplugin` -- Universal bundler plugin |
-| `packages/component-meta/` | `@verter/component-meta` -- Component metadata extraction + Type IR |
-| `packages/vue-vscode/` | VS Code extension |
+| Directory                    | Purpose                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `crates/verter_core/`        | Rust template compiler                                                   |
+| `crates/verter_vfs/`         | Virtual filesystem: sole authority for file access and import resolution |
+| `crates/verter_analysis/`    | Static analysis: imports, exports, bindings, types                       |
+| `crates/verter_host/`        | In-memory file host: caching, dependencies, multi-file compilation       |
+| `crates/verter_diagnostics/` | Diagnostic engine: 22+ lint rules, visitor, DiagnosticSet                |
+| `crates/verter_actions/`     | Code actions engine: quick fixes, refactoring                            |
+| `crates/verter_lsp/`         | Rust LSP server binary (stdio)                                           |
+| `crates/verter_ffi/`         | FFI types for NAPI/WASM boundaries                                       |
+| `crates/verter_napi/`        | Native Node.js bindings (NAPI-RS)                                        |
+| `crates/verter_wasm/`        | WASM bindings (wasm-bindgen)                                             |
+| `packages/core/`             | `@verter/core` -- SFC parser & TSX transformer                           |
+| `packages/types/`            | `@verter/types` -- TypeScript utility types                              |
+| `packages/native/`           | `@verter/native` -- Native binding loader                                |
+| `packages/wasm/`             | `@verter/wasm` -- WASM binding wrapper                                   |
+| `packages/unplugin/`         | `@verter/unplugin` -- Universal bundler plugin                           |
+| `packages/component-meta/`   | `@verter/component-meta` -- Component metadata extraction + Type IR      |
+| `packages/vue-vscode/`       | VS Code extension                                                        |
 
 ## Async File Scheduler
 
 The `verter_scheduler` crate provides per-file async staging with a priority queue. Files progress independently through **Source → Analysis → Artifact** stages. Cross-file blocking (macro type deps, external `src` attributes) is declarative — the scheduler manages wakeups via its `BlockerRegistry`.
 
 Key concepts:
+
 - **FileNode**: per-file state with ArcSwap snapshots and an atomic generation counter
 - **Priority tiers**: Critical (hover/completion) > Interactive (did_open) > Background (workspace scan) > Maintenance
 - **Generation fencing**: stale snapshots are invisible — `current_analysis()` returns `None` if the generation doesn't match
@@ -211,12 +212,12 @@ graph TB
 
 Import resolution is context-sensitive. The same specifier can resolve to different files depending on the resolution context:
 
-| Context | Export Conditions | Legacy Fields |
-|---------|-----------------|---------------|
-| `(CodegenBlocker, EsmImport)` | `["import", "default"]` | `["module", "main"]` |
+| Context                        | Export Conditions                | Legacy Fields                  |
+| ------------------------------ | -------------------------------- | ------------------------------ |
+| `(CodegenBlocker, EsmImport)`  | `["import", "default"]`          | `["module", "main"]`           |
 | `(CodegenBlocker, TypeImport)` | `["types", "import", "default"]` | `["types", "typings", "main"]` |
-| `(ProviderGraph, *)` | `["types", "import", "default"]` | `["types", "typings", "main"]` |
-| `(*, RequireCall)` | `["require", "default"]` | `["main"]` |
+| `(ProviderGraph, *)`           | `["types", "import", "default"]` | `["types", "typings", "main"]` |
+| `(*, RequireCall)`             | `["require", "default"]`         | `["main"]`                     |
 
 For example, `import { Foo } from 'pkg'` during codegen resolves to `pkg/index.js` (runtime entry), while `import type { Foo } from 'pkg'` resolves to `pkg/index.d.ts` (type entry).
 
@@ -225,28 +226,30 @@ For example, `import { Foo } from 'pkg'` during codegen resolves to `pkg/index.j
 JS consumers access the filesystem exclusively through the `Workspace` class from `@verter/native`. All methods are **async** (Promise-based, runs on libuv thread pool):
 
 ```ts
-import { Workspace, VerterHost } from '@verter/native'
+import { Workspace, VerterHost } from "@verter/native";
 
-const ws = new Workspace(['/path/to/project'])
+const ws = new Workspace(["/path/to/project"]);
 
 // File access — all async
-const content = await ws.readFile('/path/to/file.vue')
-const exists = await ws.fileExists('/path/to/file.ts')
-const entries = await ws.readDir('/path/to/dir')
-const files = await ws.walk('/path', ['node_modules'], ['.vue', '.ts'])
+const content = await ws.readFile("/path/to/file.vue");
+const exists = await ws.fileExists("/path/to/file.ts");
+const entries = await ws.readDir("/path/to/dir");
+const files = await ws.walk("/path", ["node_modules"], [".vue", ".ts"]);
 
 // Resolution
-const resolved = await ws.resolveImport('/src/App.vue', './Child.vue')
+const resolved = await ws.resolveImport("/src/App.vue", "./Child.vue");
 
 // Project configuration
-ws.configureProjects([{
-  root: '/path/to/project',
-  workspaceRoot: '/path/to/project',
-  compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } },
-}])
+ws.configureProjects([
+  {
+    root: "/path/to/project",
+    workspaceRoot: "/path/to/project",
+    compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+  },
+]);
 
 // Create host backed by workspace
-const host = VerterHost.withWorkspace({}, ws)
+const host = VerterHost.withWorkspace({}, ws);
 ```
 
 No `node:fs` imports are used in any JS package. The `Workspace` object is the sole filesystem authority from JavaScript.

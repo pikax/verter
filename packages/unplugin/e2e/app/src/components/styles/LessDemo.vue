@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-const variant = ref<'primary' | 'secondary'>('primary')
+import { ref } from "vue";
+const variant = ref<"primary" | "secondary">("primary");
 
 function toggleVariant() {
-  variant.value = variant.value === 'primary' ? 'secondary' : 'primary'
+  variant.value = variant.value === "primary" ? "secondary" : "primary";
 }
 </script>
 

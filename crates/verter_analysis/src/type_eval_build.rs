@@ -7,6 +7,12 @@ use std::io::Write;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use crate::type_eval::*;
+use crate::type_expr::{
+    self, FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
+    PrimitiveName, TypeExpr, TypeParam, ValueRef,
+};
+use crate::type_expr_lower::{lower_ts_type, property_key_name};
 use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement,
     Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters, Function,
@@ -14,14 +20,6 @@ use oxc_ast::ast::{
     TSAccessibility, TSInterfaceDeclaration, TSSignature, TSTypeAliasDeclaration,
     TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
 };
-use oxc_span::GetSpan;
-
-use crate::type_eval::*;
-use crate::type_expr::{
-    self, FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-    PrimitiveName, TypeExpr, TypeParam, ValueRef,
-};
-use crate::type_expr_lower::{has_immediate_vue_ignore_comment, lower_ts_type, property_key_name};
 
 fn type_expand_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -166,9 +164,6 @@ fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut 
     if !decl.extends.is_empty() {
         let mut parts = Vec::new();
         for heritage in &decl.extends {
-            if has_immediate_vue_ignore_comment(source, heritage.span().start) {
-                continue;
-            }
             let base_name = match &heritage.expression {
                 Expression::Identifier(id) => id.name.to_string(),
                 _ => continue,
@@ -749,6 +744,25 @@ fn lower_type_param_decls(
         .collect()
 }
 
+pub fn parse_type_parameter_clause(clause: &str) -> Vec<TypeParam> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Statement;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let wrapped = format!("type __VerterGeneric__<{clause}> = void");
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, &wrapped, SourceType::ts()).parse();
+    let Some(Statement::TSTypeAliasDeclaration(alias)) = ret.program.body.first() else {
+        return Vec::new();
+    };
+    alias
+        .type_parameters
+        .as_ref()
+        .map(|params| lower_type_param_decls(params, &wrapped))
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot evaluation: evaluate type annotations from an analysis snapshot
 // ---------------------------------------------------------------------------
@@ -835,6 +849,7 @@ pub fn expand_macro_types_with_lookup(
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
+                        raw_type: Some(type_ann.clone()),
                         optional: field.is_optional,
                         completeness: expanded.completeness,
                         diagnostics: expanded.diagnostics,
@@ -893,6 +908,7 @@ pub fn expand_macro_types_with_lookup(
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
+                        raw_type: Some(payload.clone()),
                         optional: false,
                         completeness: expanded.completeness,
                         diagnostics: expanded.diagnostics,
@@ -931,6 +947,7 @@ pub fn expand_macro_types_with_lookup(
                         result.slot_bindings.push(ExpandedField {
                             name: format!("{}.{}", slot.name, binding.name),
                             r#type: expanded.value.expr,
+                            raw_type: Some(type_ann.clone()),
                             optional: false,
                             completeness: expanded.completeness,
                             diagnostics: expanded.diagnostics,
@@ -961,6 +978,7 @@ pub fn expand_macro_types_with_lookup(
         result.bindings.push(ExpandedField {
             name,
             r#type: expanded.value.expr,
+            raw_type: None,
             optional: false,
             completeness: expanded.completeness,
             diagnostics: expanded.diagnostics,

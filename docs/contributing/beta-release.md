@@ -76,6 +76,7 @@ git push origin v0.0.1-beta.1
 ```
 
 The `release.yml` workflow runs automatically on tag push:
+
 1. **validate** — clippy, fmt, test
 2. **build-native** — 7 platform targets (parallel)
 3. **build-wasm** — WASM binary (parallel)
@@ -107,15 +108,15 @@ npm install @verter/unplugin@beta
 
 ## Files That Need Version Bumps
 
-| File | Count |
-|------|-------|
-| `Cargo.toml` (workspace) | 1 |
-| `package.json` (root) | 1 |
-| `packages/*/package.json` | 16 |
-| `packages/native/npm/*/package.json` | 7 |
-| `packages/verter-tsc/npm/*/package.json` | 4 |
-| `extensions/vscode/package.json` | 1 |
-| **Total** | ~30 files |
+| File                                     | Count     |
+| ---------------------------------------- | --------- |
+| `Cargo.toml` (workspace)                 | 1         |
+| `package.json` (root)                    | 1         |
+| `packages/*/package.json`                | 16        |
+| `packages/native/npm/*/package.json`     | 7         |
+| `packages/verter-tsc/npm/*/package.json` | 4         |
+| `extensions/vscode/package.json`         | 1         |
+| **Total**                                | ~30 files |
 
 ## Dry Run
 

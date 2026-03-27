@@ -32,7 +32,13 @@ function compileVue(source, filename) {
     ssr: true,
     compilerOptions: { mode: "module", bindingMetadata: bm },
   });
-  if (result.errors?.length) { console.log("Vue errors:", result.errors.map(e => e.message)); return null; }
+  if (result.errors?.length) {
+    console.log(
+      "Vue errors:",
+      result.errors.map((e) => e.message),
+    );
+    return null;
+  }
   return result.code;
 }
 
@@ -41,13 +47,21 @@ function compileVerter(source, filePath) {
   const result = host.getVirtualFile({
     canonicalId: upsertResult.canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: { filename: path.basename(filePath), ssr: true, forceJs: true, sourceMap: false },
+    compileProfile: {
+      filename: path.basename(filePath),
+      ssr: true,
+      forceJs: true,
+      sourceMap: false,
+    },
   });
   return result?.code;
 }
 
 const VERTER_TEST_REPOS = process.env.VERTER_TEST_REPOS;
-if (!VERTER_TEST_REPOS) { console.error('Set VERTER_TEST_REPOS env var'); process.exit(1); }
+if (!VERTER_TEST_REPOS) {
+  console.error("Set VERTER_TEST_REPOS env var");
+  process.exit(1);
+}
 const file = path.join(VERTER_TEST_REPOS, "element-plus/packages/components/alert/src/alert.vue");
 const source = fs.readFileSync(file, "utf8");
 

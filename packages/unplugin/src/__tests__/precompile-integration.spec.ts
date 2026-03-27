@@ -43,10 +43,10 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
   it("preCompile compiles all .vue files without errors", async () => {
     const origCwd = process.cwd;
     process.cwd = () => join(COREUI_ROOT, "src");
-    const plugin = unpluginFactory(
-      { preCompile: true },
-      { framework: "rollup", versions: { unplugin: "0.0.0", rollup: "0.0.0" } } as any,
-    ) as any;
+    const plugin = unpluginFactory({ preCompile: true }, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
 
     // buildStart should complete without throwing
     await plugin.buildStart();
@@ -71,10 +71,10 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     resetHost();
     const origCwd = process.cwd;
     process.cwd = () => join(COREUI_ROOT, "src");
-    const pluginPre = unpluginFactory(
-      { preCompile: true },
-      { framework: "rollup", versions: { unplugin: "0.0.0", rollup: "0.0.0" } } as any,
-    ) as any;
+    const pluginPre = unpluginFactory({ preCompile: true }, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
     await pluginPre.buildStart();
     const preResult = await pluginPre.transform(appVueSource, appVuePath);
     process.cwd = origCwd;
@@ -89,10 +89,10 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
   it("benchmark: preCompile timing for coreui src", async () => {
     const origCwd = process.cwd;
     process.cwd = () => join(COREUI_ROOT, "src");
-    const plugin = unpluginFactory(
-      { preCompile: true },
-      { framework: "rollup", versions: { unplugin: "0.0.0", rollup: "0.0.0" } } as any,
-    ) as any;
+    const plugin = unpluginFactory({ preCompile: true }, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
 
     const start = performance.now();
     await plugin.buildStart();
@@ -103,7 +103,9 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     const srcRoot = join(COREUI_ROOT, "src");
     const files = await scanVueFiles(srcRoot, (f) => f.endsWith(".vue"));
 
-    console.log(`[benchmark] preCompile coreui (${files.size} .vue files): ${elapsed.toFixed(1)}ms (${(elapsed / files.size).toFixed(2)}ms/file)`);
+    console.log(
+      `[benchmark] preCompile coreui (${files.size} .vue files): ${elapsed.toFixed(1)}ms (${(elapsed / files.size).toFixed(2)}ms/file)`,
+    );
     expect(elapsed).toBeGreaterThan(0);
   });
 });

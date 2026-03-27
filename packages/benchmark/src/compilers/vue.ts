@@ -1,8 +1,8 @@
-import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
+import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
 
 export interface VueCompileResult {
-  code: string
-  errors: string[]
+  code: string;
+  errors: string[];
 }
 
 /**
@@ -12,62 +12,61 @@ export interface VueCompileResult {
  * 2. Compile script setup
  * 3. Compile template with binding metadata from script
  */
-export function compileVue(source: string, filename: string = 'anonymous.vue'): VueCompileResult {
-  const errors: string[] = []
-  
+export function compileVue(source: string, filename: string = "anonymous.vue"): VueCompileResult {
+  const errors: string[] = [];
+
   try {
     // Phase 1: Parse the SFC
     const { descriptor, errors: parseErrors } = parse(source, {
-      filename
-    })
-    
+      filename,
+    });
+
     if (parseErrors.length > 0) {
-      errors.push(...parseErrors.map(e => e.message))
-      return { code: '', errors }
+      errors.push(...parseErrors.map((e) => e.message));
+      return { code: "", errors };
     }
-    
+
     // Phase 2: Compile script (if present)
-    let scriptCode = ''
-    let bindingMetadata: any = undefined
-    
+    let scriptCode = "";
+    let bindingMetadata: any = undefined;
+
     if (descriptor.script || descriptor.scriptSetup) {
       const scriptResult = compileScript(descriptor, {
         id: filename,
-        inlineTemplate: false
-      })
-      scriptCode = scriptResult.content
-      bindingMetadata = scriptResult.bindings
+        inlineTemplate: false,
+      });
+      scriptCode = scriptResult.content;
+      bindingMetadata = scriptResult.bindings;
     }
-    
+
     // Phase 3: Compile template with binding metadata
-    let templateCode = ''
-    
+    let templateCode = "";
+
     if (descriptor.template) {
       const templateResult = compileTemplate({
         source: descriptor.template.content,
         filename,
         id: filename,
-        scoped: descriptor.styles.some(s => s.scoped),
+        scoped: descriptor.styles.some((s) => s.scoped),
         compilerOptions: {
-          mode: 'module',
-          bindingMetadata
-        }
-      })
-      
+          mode: "module",
+          bindingMetadata,
+        },
+      });
+
       if (templateResult.errors.length > 0) {
-        errors.push(...templateResult.errors.map(e => typeof e === 'string' ? e : e.message))
+        errors.push(...templateResult.errors.map((e) => (typeof e === "string" ? e : e.message)));
       }
-      
-      templateCode = templateResult.code
+
+      templateCode = templateResult.code;
     }
-    
+
     // Combine script and template
-    const code = [scriptCode, templateCode].filter(Boolean).join('\n\n')
-    
-    return { code, errors }
-    
+    const code = [scriptCode, templateCode].filter(Boolean).join("\n\n");
+
+    return { code, errors };
   } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error))
-    return { code: '', errors }
+    errors.push(error instanceof Error ? error.message : String(error));
+    return { code: "", errors };
   }
 }

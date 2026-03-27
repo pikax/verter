@@ -213,19 +213,13 @@ describe("formatBindingHover", () => {
 
 describe("formatImportHover", () => {
   it("shows type-only import", () => {
-    const result = formatImportHover(
-      { name: "Props", isTypeOnly: true, vueApi: null },
-      "./types",
-    );
+    const result = formatImportHover({ name: "Props", isTypeOnly: true, vueApi: null }, "./types");
     expect(result).toContain("import type { Props }");
     expect(result).toContain("'./types'");
   });
 
   it("shows Vue API classification", () => {
-    const result = formatImportHover(
-      { name: "ref", isTypeOnly: false, vueApi: "Ref" },
-      "vue",
-    );
+    const result = formatImportHover({ name: "ref", isTypeOnly: false, vueApi: "Ref" }, "vue");
     expect(result).toContain("Vue API: `Ref`");
   });
 });

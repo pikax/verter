@@ -20,7 +20,7 @@ Each bundler has a dedicated entry point that exports a default plugin factory f
 
 ```ts
 // vite.config.ts
-import Verter from '@verter/unplugin/vite'
+import Verter from "@verter/unplugin/vite";
 
 export default defineConfig({
   plugins: [
@@ -28,7 +28,7 @@ export default defineConfig({
       // options
     }),
   ],
-})
+});
 ```
 
 The Vite plugin registers as `vite:vue`, matching `@vitejs/plugin-vue`, so downstream plugins that discover the Vue plugin by name (e.g., `unplugin-vue-macros`, `unplugin-vue-i18n`) work correctly.
@@ -37,7 +37,7 @@ The Vite plugin registers as `vite:vue`, matching `@vitejs/plugin-vue`, so downs
 
 ```ts
 // rollup.config.js
-import Verter from '@verter/unplugin/rollup'
+import Verter from "@verter/unplugin/rollup";
 
 export default {
   plugins: [
@@ -45,14 +45,14 @@ export default {
       // options
     }),
   ],
-}
+};
 ```
 
 ### webpack
 
 ```ts
 // webpack.config.js
-import Verter from '@verter/unplugin/webpack'
+import Verter from "@verter/unplugin/webpack";
 
 export default {
   plugins: [
@@ -60,14 +60,14 @@ export default {
       // options
     }),
   ],
-}
+};
 ```
 
 ### esbuild
 
 ```ts
-import { build } from 'esbuild'
-import Verter from '@verter/unplugin/esbuild'
+import { build } from "esbuild";
+import Verter from "@verter/unplugin/esbuild";
 
 build({
   plugins: [
@@ -75,14 +75,14 @@ build({
       // options
     }),
   ],
-})
+});
 ```
 
 ### Rspack
 
 ```ts
 // rspack.config.js
-import Verter from '@verter/unplugin/rspack'
+import Verter from "@verter/unplugin/rspack";
 
 export default {
   plugins: [
@@ -90,14 +90,14 @@ export default {
       // options
     }),
   ],
-}
+};
 ```
 
 ### Rolldown
 
 ```ts
 // rolldown.config.js
-import Verter from '@verter/unplugin/rolldown'
+import Verter from "@verter/unplugin/rolldown";
 
 export default {
   plugins: [
@@ -105,14 +105,14 @@ export default {
       // options
     }),
   ],
-}
+};
 ```
 
 ### Farm
 
 ```ts
 // farm.config.ts
-import Verter from '@verter/unplugin/farm'
+import Verter from "@verter/unplugin/farm";
 
 export default defineConfig({
   plugins: [
@@ -120,7 +120,7 @@ export default defineConfig({
       // options
     }),
   ],
-})
+});
 ```
 
 ## Options
@@ -128,16 +128,16 @@ export default defineConfig({
 ### `VerterPluginOptions`
 
 ```ts
-import type { VerterPluginOptions } from '@verter/unplugin'
+import type { VerterPluginOptions } from "@verter/unplugin";
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `include` | `string \| RegExp \| (string \| RegExp)[]` | `[/\.vue$/]` | File patterns to include |
-| `componentId` | `(filename: string, source: string, isProd: boolean) => string` | hash-based | Custom component ID generator |
-| `preCompile` | `boolean` | `false` | Pre-compile all `.vue` files during `buildStart` for cache warming |
-| `crossFileOptimize` | `boolean` | `false` | Cross-file prop constness optimization. Requires `preCompile: true` |
-| `template` | `object` | -- | Template compiler options (compat with `@vitejs/plugin-vue`) |
+| Option              | Type                                                            | Default      | Description                                                         |
+| ------------------- | --------------------------------------------------------------- | ------------ | ------------------------------------------------------------------- |
+| `include`           | `string \| RegExp \| (string \| RegExp)[]`                      | `[/\.vue$/]` | File patterns to include                                            |
+| `componentId`       | `(filename: string, source: string, isProd: boolean) => string` | hash-based   | Custom component ID generator                                       |
+| `preCompile`        | `boolean`                                                       | `false`      | Pre-compile all `.vue` files during `buildStart` for cache warming  |
+| `crossFileOptimize` | `boolean`                                                       | `false`      | Cross-file prop constness optimization. Requires `preCompile: true` |
+| `template`          | `object`                                                        | --           | Template compiler options (compat with `@vitejs/plugin-vue`)        |
 
 An `Options` type alias is also exported for compatibility with code importing `Options` from `@vitejs/plugin-vue`.
 
@@ -149,7 +149,7 @@ Controls which files the plugin processes. Defaults to matching all `.vue` files
 Verter({
   // Only process .vue files in src/
   include: [/src\/.*\.vue$/],
-})
+});
 ```
 
 When a string is provided, it matches via `filename.endsWith(pattern)`. When a `RegExp` is provided, it matches via `pattern.test(filename)`. An array applies "any match" (OR) logic.
@@ -162,15 +162,13 @@ Overrides the default hash-based component ID generation. The component ID is us
 Verter({
   componentId(filename, source, isProd) {
     // Custom ID based on filename
-    return createHash('sha256')
-      .update(filename)
-      .digest('hex')
-      .slice(0, 8)
+    return createHash("sha256").update(filename).digest("hex").slice(0, 8);
   },
-})
+});
 ```
 
 **Parameters:**
+
 - `filename` -- Absolute path to the `.vue` file
 - `source` -- The raw SFC source text
 - `isProd` -- Whether this is a production build
@@ -184,7 +182,7 @@ When enabled, scans the project root for all `.vue` files during `buildStart()` 
 ```ts
 Verter({
   preCompile: true,
-})
+});
 ```
 
 **Architecture details:**
@@ -205,7 +203,7 @@ After all files are pre-compiled, analyzes the render tree to determine which pr
 Verter({
   preCompile: true,
   crossFileOptimize: true,
-})
+});
 ```
 
 ### `template`
@@ -216,10 +214,10 @@ Template compiler options, accepted for compatibility with `@vitejs/plugin-vue`.
 Verter({
   template: {
     compilerOptions: {
-      isCustomElement: (tag) => tag.startsWith('my-'),
+      isCustomElement: (tag) => tag.startsWith("my-"),
     },
   },
-})
+});
 ```
 
 ## Vite-Specific Behavior
@@ -237,11 +235,11 @@ For non-Vite bundlers (webpack, Rspack, esbuild, Rollup, Rolldown, Farm), the pl
 
 Hot Module Replacement strategy is auto-detected from the bundler framework:
 
-| Framework | HMR Strategy |
-|-----------|-------------|
-| Vite, Rolldown | `"vite"` |
-| webpack, Rspack | `"webpack"` |
-| esbuild, Rollup, Farm | `"none"` |
+| Framework             | HMR Strategy |
+| --------------------- | ------------ |
+| Vite, Rolldown        | `"vite"`     |
+| webpack, Rspack       | `"webpack"`  |
+| esbuild, Rollup, Farm | `"none"`     |
 
 In production builds, HMR is always disabled regardless of the bundler.
 

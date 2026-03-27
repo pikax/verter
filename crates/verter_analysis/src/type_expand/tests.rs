@@ -141,6 +141,121 @@ fn expand_object_shape_generic_instantiation() {
 }
 
 #[test]
+fn expand_object_shape_normalizes_nested_script_generic_bindings() {
+    let item = TypeDeclInfo {
+        name: "Item".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "id".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::String),
+                optional: false,
+                readonly: false,
+            })],
+        })),
+    };
+    let props = TypeDeclInfo {
+        name: "Props".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![TypeParam {
+            name: "U".to_string(),
+            constraint: Some(Arc::new(TypeExpr::named("Item"))),
+            default: Some(Arc::new(TypeExpr::named("Item"))),
+        }],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "items".to_string(),
+                    ty: TypeExpr::Array {
+                        element: Arc::new(TypeExpr::named("U")),
+                        readonly: false,
+                    },
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "selected".to_string(),
+                    ty: TypeExpr::Conditional {
+                        check: Arc::new(TypeExpr::named("U")),
+                        extends: Arc::new(TypeExpr::Infer {
+                            name: "Selected".to_string(),
+                        }),
+                        true_type: Arc::new(TypeExpr::named("Selected")),
+                        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+                    },
+                    optional: true,
+                    readonly: false,
+                }),
+            ],
+        })),
+    };
+    let mut env = env_with_types(vec![item, props]);
+    let script_generic = TypeParam {
+        name: "T".to_string(),
+        constraint: Some(Arc::new(TypeExpr::named("Item"))),
+        default: Some(Arc::new(TypeExpr::named("Item"))),
+    };
+    env.type_bindings.insert(
+        "T".to_string(),
+        Arc::new(TypeExpr::type_parameter(script_generic.clone())),
+    );
+
+    let result = expand_object_shape(
+        &TypeExpr::named_with_args("Props", vec![TypeExpr::named("T")]),
+        &mut env,
+        &default_budget(),
+    );
+
+    let items = result
+        .value
+        .properties
+        .iter()
+        .find(|prop| prop.name == "items")
+        .expect("items property should exist");
+    match &items.ty {
+        TypeExpr::Array { element, .. } => match element.as_ref() {
+            TypeExpr::TypeParameter(param) => {
+                assert_eq!(param.name, "T");
+                assert!(matches!(
+                    param.constraint.as_deref(),
+                    Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                ));
+                assert!(matches!(
+                    param.default.as_deref(),
+                    Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                ));
+            }
+            other => {
+                panic!("expected array element to preserve script generic metadata, got {other:?}")
+            }
+        },
+        other => panic!("expected items prop to be an array, got {other:?}"),
+    }
+
+    let selected = result
+        .value
+        .properties
+        .iter()
+        .find(|prop| prop.name == "selected")
+        .expect("selected property should exist");
+    match &selected.ty {
+        TypeExpr::TypeParameter(param) => {
+            assert_eq!(param.name, "T");
+            assert!(matches!(
+                param.constraint.as_deref(),
+                Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+            ));
+        }
+        other => panic!(
+            "expected infer conditional to collapse to the bound type parameter, got {other:?}"
+        ),
+    }
+}
+
+#[test]
 fn expand_object_shape_mapped_type() {
     // type Flags = { [K in "a" | "b" | "c"]: boolean }
     let flags = TypeDeclInfo {

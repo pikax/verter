@@ -87,10 +87,7 @@ async function main() {
 
     const report = JSON.parse(fs.readFileSync(timingFile, "utf8"));
     reports.push(report);
-    fs.writeFileSync(
-      path.join(resultsDir, `${label}.json`),
-      JSON.stringify(report, null, 2),
-    );
+    fs.writeFileSync(path.join(resultsDir, `${label}.json`), JSON.stringify(report, null, 2));
   }
 
   const summary = summarizeReports(reports);
@@ -193,13 +190,9 @@ function summarizeReports(reports) {
 
   return {
     activationToReadyMs: summarizeMetric(activationToReadyMs),
-    activationToFirstTypedCompletionMs: summarizeMetric(
-      activationToFirstTypedCompletionMs,
-    ),
+    activationToFirstTypedCompletionMs: summarizeMetric(activationToFirstTypedCompletionMs),
     readyToFirstTypedCompletionMs: summarizeMetric(readyToFirstTypedCompletionMs),
-    activationToTypeProviderStartedMs: summarizeMetric(
-      activationToTypeProviderStartedMs,
-    ),
+    activationToTypeProviderStartedMs: summarizeMetric(activationToTypeProviderStartedMs),
     typeProviderStartedToFirstTypedCompletionMs: summarizeMetric(
       typeProviderStartedToFirstTypedCompletionMs,
     ),

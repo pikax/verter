@@ -1,4 +1,5 @@
 use super::type_eval::*;
+use super::type_eval_build::parse_and_build_env;
 use super::type_expr::*;
 use super::type_expr_lower::parse_type_annotation;
 use rustc_hash::FxHashMap;
@@ -606,7 +607,14 @@ fn eval_generic_with_default() {
     match &result {
         TypeExpr::Object(obj) => {
             if let ObjectMember::Property(p) = &obj.properties[0] {
-                assert_eq!(p.ty, TypeExpr::Primitive(PrimitiveName::Number));
+                assert_eq!(
+                    p.ty,
+                    TypeExpr::type_parameter(TypeParam {
+                        name: "T".to_string(),
+                        constraint: None,
+                        default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+                    })
+                );
             }
         }
         _ => panic!("expected object, got {result:?}"),
@@ -1431,6 +1439,44 @@ fn eval_indexed_access_union_keys() {
         }
         _ => panic!("expected union, got {result:?}"),
     }
+}
+
+#[test]
+fn eval_indexed_access_can_project_other_member_from_active_local_decl() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "Props".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: Vec::new(),
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "type".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "mirror".to_string(),
+                    ty: TypeExpr::IndexedAccess {
+                        object: Arc::new(TypeExpr::named("Props")),
+                        index: Arc::new(TypeExpr::string_literal("type")),
+                    },
+                    optional: true,
+                    readonly: false,
+                }),
+            ],
+        })),
+    });
+
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Props")),
+        index: Arc::new(TypeExpr::string_literal("mirror")),
+    };
+    let result = evaluate(&expr, &mut env);
+
+    assert_eq!(result, TypeExpr::Primitive(PrimitiveName::String));
 }
 
 // =============================================================================
@@ -2303,6 +2349,130 @@ fn lazy_indexed_access_through_required_wrapper_skips_unrelated_members() {
     );
 }
 
+/// Generic-bound indexed access should still use the lazy path when the
+/// binding is an intersection and only one branch contributes the target key.
+#[test]
+fn lazy_indexed_access_through_bound_intersection_skips_unrelated_expensive_branches() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "ExpensiveBoundLayer", 512);
+
+    env.type_bindings.insert(
+        "T".to_string(),
+        Arc::new(TypeExpr::Intersection(Arc::from(vec![
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "padding".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "side".to_string(),
+                    ty: TypeExpr::named(&expensive_name),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+        ]))),
+    );
+
+    let result = evaluate(
+        &TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("T")),
+            index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+                "padding".to_string(),
+            ))),
+        },
+        &mut env,
+    );
+
+    assert!(
+        matches!(result, TypeExpr::Primitive(PrimitiveName::String)),
+        "bound-intersection indexed access should resolve to string, got: {:?}",
+        result
+    );
+    assert!(
+        env.steps() < 120,
+        "bound-intersection lazy indexed access should skip unrelated expensive branches (steps={})",
+        env.steps()
+    );
+}
+
+/// Pick/Omit projection should project directly from a bound generic surface
+/// instead of eagerly evaluating omitted branches first.
+#[test]
+fn pick_from_bound_intersection_skips_unrelated_expensive_branches() {
+    let mut env = EvalEnv::new();
+    env.limits.max_depth = 2048;
+    env.limits.max_steps = 20_000;
+    let expensive_name = add_deep_alias_chain(&mut env, "ExpensiveProjectedLayer", 512);
+
+    env.type_bindings.insert(
+        "T".to_string(),
+        Arc::new(TypeExpr::Intersection(Arc::from(vec![
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![
+                    ObjectMember::Property(ObjectProperty {
+                        name: "keep".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    }),
+                    ObjectMember::Property(ObjectProperty {
+                        name: "omit".to_string(),
+                        ty: TypeExpr::named(&expensive_name),
+                        optional: false,
+                        readonly: false,
+                    }),
+                ],
+            })),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "extra".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+        ]))),
+    );
+
+    let result = evaluate(
+        &TypeExpr::named_with_args(
+            "Pick",
+            vec![
+                TypeExpr::named("T"),
+                TypeExpr::Literal(LiteralValue::String("keep".to_string())),
+            ],
+        ),
+        &mut env,
+    );
+
+    match &result {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(names, vec!["keep"]);
+        }
+        _ => panic!("expected object, got {result:?}"),
+    }
+    assert!(
+        env.steps() < 120,
+        "Pick from bound intersection should skip unrelated expensive branches (steps={})",
+        env.steps()
+    );
+}
+
 /// Pick should project from the raw object/ref surface and avoid evaluating
 /// omitted siblings.
 #[test]
@@ -2698,5 +2868,64 @@ fn omit_projection_keeps_nested_utility_members() {
     assert!(
         !names.contains(&"replace"),
         "nested utility-derived omitted keys should stay omitted, got {names:?}"
+    );
+}
+
+#[test]
+fn self_bound_generic_reference_stays_symbolic() {
+    let mut env = EvalEnv::new();
+    env.type_bindings
+        .insert("T".to_string(), Arc::new(TypeExpr::named("T")));
+
+    let result = evaluate(&TypeExpr::named("T"), &mut env);
+
+    assert_eq!(result, TypeExpr::named("T"));
+    assert!(
+        env.steps() < 8,
+        "self-bound generic references should not recurse indefinitely (steps={})",
+        env.steps()
+    );
+}
+
+#[test]
+fn self_bound_generic_component_config_body_keeps_slots_surface() {
+    let mut env = parse_and_build_env(
+        r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: string
+}>
+type ComponentConfig<T extends { slots?: Record<string, any> }> = {
+  slots: ComponentSlots<T>
+}
+"#,
+    );
+    let decl = env
+        .type_symbols
+        .get("ComponentConfig")
+        .expect("ComponentConfig decl should exist")
+        .clone();
+    env.type_bindings
+        .insert("T".to_string(), Arc::new(TypeExpr::named("T")));
+
+    let result = evaluate(&decl.body, &mut env);
+
+    match result {
+        TypeExpr::Object(obj) => {
+            let slots = obj.properties.iter().find_map(|member| match member {
+                ObjectMember::Property(prop) if prop.name == "slots" => Some(prop.ty.clone()),
+                _ => None,
+            });
+            assert!(
+                slots.is_some(),
+                "expected slots property on ComponentConfig"
+            );
+        }
+        _ => panic!("expected object result, got {result:?}"),
+    }
+    assert!(
+        env.steps() < 256,
+        "symbolic generic component config evaluation should remain bounded (steps={})",
+        env.steps()
     );
 }

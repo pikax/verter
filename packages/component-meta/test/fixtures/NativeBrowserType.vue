@@ -1,15 +1,15 @@
 <script lang="ts">
-import type { PropType } from 'vue'
-import { defineComponent } from 'vue'
+import type { PropType } from "vue";
+import { defineComponent } from "vue";
 
 export default defineComponent({
   props: {
     canvas: {
       type: Object as PropType<HTMLCanvasElement>,
-      required: true
-    }
-  }
-})
+      required: true,
+    },
+  },
+});
 </script>
 
 <template><div /></template>

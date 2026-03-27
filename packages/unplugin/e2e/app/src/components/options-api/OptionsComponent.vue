@@ -1,17 +1,17 @@
 <script lang="ts">
-import { defineComponent } from 'vue'
+import { defineComponent } from "vue";
 
 export default defineComponent({
   props: {
     label: { type: String, required: true },
   },
-  emits: ['action'],
+  emits: ["action"],
   methods: {
     doAction() {
-      this.$emit('action', 'options-action')
+      this.$emit("action", "options-action");
     },
   },
-})
+});
 </script>
 
 <template>

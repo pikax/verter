@@ -339,7 +339,11 @@ function collectComponentCandidates(
 
   for (const file of openFilenames) {
     if (!file.endsWith(".vue") || file === activeFilename) continue;
-    const base = file.split("/").pop()?.replace(/\.vue$/i, "") ?? "";
+    const base =
+      file
+        .split("/")
+        .pop()
+        ?.replace(/\.vue$/i, "") ?? "";
     if (!base) continue;
     const name = toPascalCase(base);
     if (!name || seen.has(name)) continue;

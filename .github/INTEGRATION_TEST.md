@@ -17,7 +17,6 @@ The workflow currently tests against 4 major Vue projects:
 
 For each test project, the workflow:
 
-
 1. **Baseline Testing (Vue)**
    - Clones the project repository
    - Installs dependencies
@@ -45,13 +44,15 @@ For each test project, the workflow:
 Go to **Actions** → **Integration Test** → **Run workflow**
 
 **Parameters:**
-- `source`: 
+
+- `source`:
   - `artifact` (default) - Build Verter from current branch
   - `npm` - Use published version from npm
 - `dist-tag`: NPM distribution tag (default: `alpha`)
 - `projects`: Comma-separated list or `all` (default)
 
 **Use cases:**
+
 - Testing PR changes before merging
 - Validating compatibility after code changes
 - Debugging specific project failures
@@ -61,11 +62,13 @@ Go to **Actions** → **Integration Test** → **Run workflow**
 Automatically triggered after successful npm publish in release workflow.
 
 **When it runs:**
+
 - After pushing a version tag (e.g., `v0.0.1-alpha.2`)
 - After npm packages are published
 - Uses the published npm package for testing
 
 **Purpose:**
+
 - Validate released version works correctly
 - Catch integration issues before users do
 - Build confidence in releases
@@ -73,11 +76,13 @@ Automatically triggered after successful npm publish in release workflow.
 ### 3. PR Comment Trigger (/integration)
 
 **How to trigger:**
+
 1. Comment `/integration` on any pull request
 2. Must have write permission to repository
 3. Workflow builds and tests PR changes
 
 **Response:**
+
 - 👀 reaction - Acknowledged, starting tests
 - 💬 comment - Results posted when complete
 - ✓ check - Pass/Warning/Fail status set on PR:
@@ -87,6 +92,7 @@ Automatically triggered after successful npm publish in release workflow.
 - ❌ reaction - No permission (if unauthorized)
 
 **Use cases:**
+
 - Quick validation of PR changes
 - On-demand testing before review
 - Comparing PR behavior against baseline
@@ -98,21 +104,25 @@ Automatically triggered after successful npm publish in release workflow.
 Each test project receives one of three statuses:
 
 **✅ Pass (Green)**
+
 - Verter build succeeds
 - Verter tests pass (or no tests defined)
 - Verter build time ≤ Vue build time
 - Verter test time ≤ Vue test time
 
 **⚠️ Warning (Yellow)**
+
 - Verter build succeeds
 - Verter tests pass
 - BUT: Verter is slower than Vue (build or tests or both)
 
 **❌ Fail (Red)**
+
 - Verter build fails, OR
 - Verter tests fail
 
 When triggered from a PR (`/integration`), these statuses are reflected in:
+
 1. **PR comment** - Detailed results with color-coded status
 2. **Check run** - Green checkmark (pass), yellow dot (warning), or red X (fail)
 
@@ -122,8 +132,9 @@ The workflow creates a comprehensive summary showing:
 
 ```markdown
 ## Overview
+
 - ✅ **vuetify** - Passed (faster or equal)
-- ⚠️ **primevue** - Warning (slower than Vue)  
+- ⚠️ **primevue** - Warning (slower than Vue)
 - ❌ **element-plus** - Failed (build or tests failed)
 - ✅ **shadcn-vue** - Passed (faster or equal)
 
@@ -136,16 +147,19 @@ The workflow creates a comprehensive summary showing:
 Each project gets a detailed report with:
 
 **Build Comparison Table**
+
 - Build times (Vue vs Verter)
 - Status (success/failed)
 - Performance delta (±seconds and %)
 
 **Test Comparison**
+
 - Test times (Vue vs Verter)
 - Pass/fail status
 - Test count comparisons
 
 **Build Logs**
+
 - Expandable logs for debugging
 - Last 100 lines of output
 - Separate logs for Vue and Verter builds
@@ -171,6 +185,7 @@ Download from: **Actions** → Workflow Run → **Artifacts** section
 - Suitable for alpha/beta stages
 
 **Why?**
+
 - Verter is in early stages (alpha)
 - Some incompatibilities are expected
 - Focus is on tracking progress, not blocking releases
@@ -178,6 +193,7 @@ Download from: **Actions** → Workflow Run → **Artifacts** section
 ### Future: Strict Mode
 
 When Verter matures, we can switch to strict mode:
+
 - Test failures block releases
 - Enforce 100% compatibility
 - Gate for production readiness
@@ -195,13 +211,14 @@ To add more projects to the test matrix:
   branch: main
   build-cmd: npm run build
   test-cmd: npm run test
-  vite-config-path: .  # or subdirectory path
-  package-manager: pnpm  # or npm/yarn
+  vite-config-path: . # or subdirectory path
+  package-manager: pnpm # or npm/yarn
 ```
 
 3. Test the addition with manual trigger
 
 **Good candidates:**
+
 - Popular Vue libraries/frameworks
 - Projects with comprehensive test suites
 - Diverse use cases (SSR, SPA, component libs)
@@ -232,6 +249,7 @@ To add more projects to the test matrix:
 **Expected behavior during alpha stage**
 
 **Actions:**
+
 1. Review project-specific logs in artifacts
 2. Identify failing compilation patterns
 3. Create issues for Verter core fixes
@@ -245,7 +263,7 @@ To add more projects to the test matrix:
 
 ```yaml
 test-project:
-  timeout-minutes: 120  # 2 hours
+  timeout-minutes: 120 # 2 hours
 ```
 
 ## Performance Tips
@@ -259,6 +277,7 @@ test-project:
 ### Caching
 
 The workflow caches:
+
 - Cargo dependencies
 - pnpm store
 - Node modules (per project)
@@ -268,12 +287,13 @@ The workflow caches:
 Run specific projects:
 
 ```yaml
-projects: 'vuetify,primevue'  # Only these two
+projects: "vuetify,primevue" # Only these two
 ```
 
 ## Monitoring & Metrics
 
 Track over time:
+
 - **Compatibility rate** - % of projects passing
 - **Build time delta** - Performance vs Vue
 - **Failure patterns** - Common issues

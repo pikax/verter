@@ -71,6 +71,7 @@ export type {
   ObjectIndexSignature,
   FunctionType,
   FunctionParameter,
+  TypeParameterType,
   EnumType,
   EnumMember,
   RefType,
@@ -86,6 +87,7 @@ export {
   tuple,
   object,
   func,
+  typeParameter,
   ref,
   unknown,
 } from "./type-ir.js";
@@ -165,8 +167,4 @@ export {
   evictComponentMetaSession,
   shutdownMetaRuntime,
 } from "./project.js";
-export type {
-  MetaProjectConfig,
-  ComponentMetaSessionConfig,
-  TypeExpansionBackend,
-} from "./project.js";
+export type { ComponentMetaSessionConfig, TypeExpansionBackend } from "./project.js";

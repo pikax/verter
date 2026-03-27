@@ -1,4 +1,7 @@
-const { normalizeForComparison, extractSsrRenderBody } = require('./scripts/ssr-baseline/normalize.mjs');
+const {
+  normalizeForComparison,
+  extractSsrRenderBody,
+} = require("./scripts/ssr-baseline/normalize.mjs");
 
 // Simulate the raw Vue mergeProps section
 const raw = `_mergeProps({
@@ -13,15 +16,15 @@ const raw = `_mergeProps({
     }
   })`;
 
-console.log('=== Raw ===');
+console.log("=== Raw ===");
 console.log(raw);
 
 // Now normalize just this piece
 const result = normalizeForComparison(raw);
-console.log('\n=== Normalized ===');
+console.log("\n=== Normalized ===");
 console.log(result);
 
-console.log('\nHas label:', result.includes('label'));
-console.log('Has rules:', result.includes('rules'));
-console.log('Has Domains:', result.includes('Domains'));
-console.log('Has _mergeProps:', result.includes('_mergeProps'));
+console.log("\nHas label:", result.includes("label"));
+console.log("Has rules:", result.includes("rules"));
+console.log("Has Domains:", result.includes("Domains"));
+console.log("Has _mergeProps:", result.includes("_mergeProps"));

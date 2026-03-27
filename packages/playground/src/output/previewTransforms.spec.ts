@@ -24,9 +24,7 @@ describe("transformImportList", () => {
   });
 
   it("handles mixed aliased and non-aliased", () => {
-    expect(transformImportList("ref, computed as comp, watch")).toBe(
-      "ref, computed: comp, watch",
-    );
+    expect(transformImportList("ref, computed as comp, watch")).toBe("ref, computed: comp, watch");
   });
 });
 
@@ -63,33 +61,25 @@ describe("transformForPreview", () => {
     it("transforms named import from .vue file", () => {
       const code = `import { helper } from './Utils.vue'`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `const { helper } = window.__modules__["./Utils.js"]`,
-      );
+      expect(result).toBe(`const { helper } = window.__modules__["./Utils.js"]`);
     });
 
     it("transforms named import from .ts file", () => {
       const code = `import { helper } from './utils.ts'`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `const { helper } = window.__modules__["./utils.js"]`,
-      );
+      expect(result).toBe(`const { helper } = window.__modules__["./utils.js"]`);
     });
 
     it("keeps .js extension unchanged", () => {
       const code = `import { helper } from './utils.js'`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `const { helper } = window.__modules__["./utils.js"]`,
-      );
+      expect(result).toBe(`const { helper } = window.__modules__["./utils.js"]`);
     });
 
     it("transforms named import with alias from local file", () => {
       const code = `import { foo as bar } from './Utils.vue'`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `const { foo: bar } = window.__modules__["./Utils.js"]`,
-      );
+      expect(result).toBe(`const { foo: bar } = window.__modules__["./Utils.js"]`);
     });
   });
 
@@ -97,17 +87,13 @@ describe("transformForPreview", () => {
     it("transforms default import from .vue file", () => {
       const code = `import Child from './Child.vue'`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `const Child = window.__modules__["./Child.js"].default`,
-      );
+      expect(result).toBe(`const Child = window.__modules__["./Child.js"].default`);
     });
 
     it("transforms default import from .ts file", () => {
       const code = `import Utils from './utils.ts'`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `const Utils = window.__modules__["./utils.js"].default`,
-      );
+      expect(result).toBe(`const Utils = window.__modules__["./utils.js"].default`);
     });
   });
 
@@ -121,9 +107,7 @@ describe("transformForPreview", () => {
     it("transforms export function", () => {
       const code = `export function greet() { return "hi" }`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `window.__modules__["${mod}"].greet = function greet() { return "hi" }`,
-      );
+      expect(result).toBe(`window.__modules__["${mod}"].greet = function greet() { return "hi" }`);
     });
 
     it("transforms export const", () => {
@@ -147,9 +131,7 @@ describe("transformForPreview", () => {
     it("transforms export { x, y }", () => {
       const code = `export { foo, bar }`;
       const result = transformForPreview(code, mod);
-      expect(result).toBe(
-        `Object.assign(window.__modules__["${mod}"], { foo: foo, bar: bar })`,
-      );
+      expect(result).toBe(`Object.assign(window.__modules__["${mod}"], { foo: foo, bar: bar })`);
     });
 
     it("transforms export { x as y }", () => {

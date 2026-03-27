@@ -1,19 +1,19 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed } from "vue";
 
-const color = ref('blue')
-const fontSize = ref(16)
+const color = ref("blue");
+const fontSize = ref(16);
 const styleObj = computed(() => ({
   color: color.value,
-  fontSize: fontSize.value + 'px',
-}))
+  fontSize: fontSize.value + "px",
+}));
 
 function toggleColor() {
-  color.value = color.value === 'blue' ? 'red' : 'blue'
+  color.value = color.value === "blue" ? "red" : "blue";
 }
 
 function bigger() {
-  fontSize.value += 2
+  fontSize.value += 2;
 }
 </script>
 

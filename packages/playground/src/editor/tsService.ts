@@ -105,8 +105,8 @@ const TS_KIND_TO_MONACO: Record<string, number> = {
   function: 2, // Function
   "local function": 2,
   method: 1, // Method
-  "getter": 9, // Property
-  "setter": 9,
+  getter: 9, // Property
+  setter: 9,
   property: 9,
   constructor: 3, // Constructor
   parameter: 11,
@@ -248,7 +248,10 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     return this.initPromise;
   }
 
-  private async _init(options?: { verterTypesContent?: string; vueVersion?: string }): Promise<void> {
+  private async _init(options?: {
+    verterTypesContent?: string;
+    vueVersion?: string;
+  }): Promise<void> {
     this.worker = new Worker(new URL("./tsWorker.ts", import.meta.url), {
       type: "module",
     });
@@ -319,7 +322,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       if (typeof console !== "undefined") {
         console.debug(
           "[verter] TSX source map unavailable — hover/completions disabled. " +
-          `sourceMap length: ${sourceMapJson?.length ?? 0}, tsx length: ${tsxCode.length}`,
+            `sourceMap length: ${sourceMapJson?.length ?? 0}, tsx length: ${tsxCode.length}`,
         );
       }
     }
@@ -336,7 +339,11 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       // Expand TS6198 ("All destructured elements are unused") inside the
       // verter-destructured block into individual TS6133-like diagnostics for
       // each binding, using structured metadata.
-      if (d.code === 6198 && tsxCode && isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart)) {
+      if (
+        d.code === 6198 &&
+        tsxCode &&
+        isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart)
+      ) {
         const expanded = expandTs6198ToIndividualDiagnostics(
           this.currentDestructuredBlock,
           tsxCode,
@@ -353,7 +360,8 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
       // For positions inside the destructured block, skip the source map —
       // it can't properly map synthetic code. Use structured metadata instead.
-      const inDestructuredBlock = tsxCode && isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart);
+      const inDestructuredBlock =
+        tsxCode && isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart);
 
       if (!inDestructuredBlock && this.currentMapper) {
         vueStart = this.currentMapper.tsxOffsetToVueOffset(tsxStart);
@@ -362,7 +370,11 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
       // Fall back to structured metadata when source map fails or was skipped
       if (vueStart == null && this.currentTsxCode) {
-        const resolved = resolveDestructuredBinding(this.currentDestructuredBlock, this.currentTsxCode, tsxStart);
+        const resolved = resolveDestructuredBinding(
+          this.currentDestructuredBlock,
+          this.currentTsxCode,
+          tsxStart,
+        );
         if (resolved) {
           vueStart = resolved.start;
           vueEnd = resolved.end;
@@ -649,7 +661,11 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
     // Source map failed — try structured metadata fallback
     if (this.currentTsxCode && this.currentDestructuredBlock) {
-      const resolved = resolveDestructuredBinding(this.currentDestructuredBlock, this.currentTsxCode, start);
+      const resolved = resolveDestructuredBinding(
+        this.currentDestructuredBlock,
+        this.currentTsxCode,
+        start,
+      );
       if (resolved) return resolved;
     }
 

@@ -36,6 +36,7 @@ export interface NativeMetaProject {
 export interface NativeMetaSession {
   upsert(canonicalId: string, source: string | Buffer): void;
   delete(canonicalId: string): void;
+  reset(canonicalId: string): void;
   getEffectiveSource(canonicalId: string): string | null;
   hasFile(canonicalId: string): boolean;
   trackedFileIds(): string[];
@@ -45,9 +46,9 @@ export interface NativeMetaSession {
   /** Single native component-meta query. Returns JSON with complete metadata. */
   getComponentMeta(canonicalOrAlias: string): string | null;
   /** Declared-surface native query for Volar-compatible callers. Returns JSON. */
-  getDeclaredComponentMeta?(canonicalOrAlias: string): string | null;
+  getDeclaredComponentMeta(canonicalOrAlias: string): string | null;
   /** Provenance counters for observability. Returns JSON. */
-  getProvenance?(): string;
+  getProvenance(): string;
 }
 
 export class ProjectEngine {

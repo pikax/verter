@@ -23,12 +23,12 @@ The MCP server is **enabled by default**. When the VS Code extension starts the 
 
 ### Settings
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `verter.mcp.enabled` | `true` | Start the MCP HTTP endpoint alongside the LSP |
-| `verter.mcp.port` | `6772` | Port for the MCP HTTP endpoint (0 for auto-assign) |
-| `verter.mcp.lintPreset` | `"recommended"` | Lint preset for MCP diagnostic tools |
-| `verter.mcp.claudeCodeNotification` | `true` | Show notification when Claude Code is detected |
+| Setting                             | Default         | Description                                        |
+| ----------------------------------- | --------------- | -------------------------------------------------- |
+| `verter.mcp.enabled`                | `true`          | Start the MCP HTTP endpoint alongside the LSP      |
+| `verter.mcp.port`                   | `6772`          | Port for the MCP HTTP endpoint (0 for auto-assign) |
+| `verter.mcp.lintPreset`             | `"recommended"` | Lint preset for MCP diagnostic tools               |
+| `verter.mcp.claudeCodeNotification` | `true`          | Show notification when Claude Code is detected     |
 
 To disable:
 
@@ -64,8 +64,8 @@ After configuring, restart Claude Code to activate the MCP connection.
 
 ### Command
 
-| Command | ID |
-|---------|----|
+| Command                   | ID                             |
+| ------------------------- | ------------------------------ |
 | Setup MCP for Claude Code | `verter.setupMcpForClaudeCode` |
 
 ## Standalone Usage
@@ -87,32 +87,38 @@ The standalone binary creates its own `VerterHost` and does not share data with 
 The MCP server exposes 36+ tools organized by category:
 
 ### Project Management
+
 - `scan_project` — Load all `.vue` files from a directory
 - `upsert_file` — Add or update a single file
 
 ### Analysis
+
 - `analyze_file` — Full SFC analysis (imports, exports, bindings, macros)
 - `get_template_analysis` — Template-level analysis (elements, directives, slots)
 - `get_component_api` — Props, emits, slots, and exposed members
 - `get_binding_types` — Reactivity classification for all bindings
 
 ### Diagnostics
+
 - `lint_file` — Run lint rules on a file
 - `lint_project` — Lint all loaded files
 - `get_fix_suggestions` — Get auto-fix suggestions for diagnostics
 
 ### Compilation
+
 - `compile_tsx` — Compile SFC to TSX (IDE output)
 - `compile_vdom` — Compile template to VDOM render function
 - `compile_vapor` — Compile template to Vapor render function
 
 ### Cross-File Intelligence
+
 - `find_component_usage` — Find where a component is used across the project
 - `get_import_graph` — Dependency graph for loaded files
 - `get_type_deps` — Cross-file type dependencies for a component
 - `css_var_flow` — Track CSS variable definitions, `var()` references, template `:style` bindings, and script DOM API manipulations across all loaded files
 
 ### Scoring & Quality
+
 - `score_file` — Quality score for a single file
 - `score_project` — Aggregate quality scores across the project
 

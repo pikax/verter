@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-const countA = ref(0)
-const countB = ref(0)
+import { ref } from "vue";
+const countA = ref(0);
+const countB = ref(0);
 </script>
 
 <template>

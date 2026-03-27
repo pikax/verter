@@ -29,9 +29,7 @@ function simulateLspResponse(): FileAnalysisSnapshot {
         {
           source: "vue",
           isTypeOnly: false,
-          bindings: [
-            { name: "ref", isTypeOnly: false, vueApi: "Ref", spanStart: 9, spanEnd: 12 },
-          ],
+          bindings: [{ name: "ref", isTypeOnly: false, vueApi: "Ref", spanStart: 9, spanEnd: 12 }],
           spanStart: 0,
           spanEnd: 30,
         },
@@ -206,7 +204,11 @@ describe("Analysis response resilience to skip_serializing_if", () => {
 
   it("builds ComponentTreeProvider tooltip without crashing when props is undefined", () => {
     // Simulate a component with props omitted (e.g., serde skip or malformed response)
-    const comp = { name: "NoPropsComp", isDynamic: false, hasSpread: false } as TemplateComponentUsage;
+    const comp = {
+      name: "NoPropsComp",
+      isDynamic: false,
+      hasSpread: false,
+    } as TemplateComponentUsage;
     // This is the exact pattern from ComponentTreeProvider.ts line 205
     // Before the fix: `comp.props.length` would crash with "Cannot read properties of undefined"
     // After the fix: `(comp.props ?? []).length` returns 0

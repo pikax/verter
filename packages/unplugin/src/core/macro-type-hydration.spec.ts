@@ -30,16 +30,12 @@ describe("macro-type-hydration export signature integration", () => {
     expect(analysis.exportSignatures).toBeDefined();
     expect(Array.isArray(analysis.exportSignatures)).toBe(true);
 
-    const buttonSig = analysis.exportSignatures.find(
-      (s: any) => s.name === "Button",
-    );
+    const buttonSig = analysis.exportSignatures.find((s: any) => s.name === "Button");
     expect(buttonSig).toBeDefined();
     expect(buttonSig.reexportSource).toBe("./Button.vue");
     expect(buttonSig.reexportLocal).toBe("default");
 
-    const helperSig = analysis.exportSignatures.find(
-      (s: any) => s.name === "helper",
-    );
+    const helperSig = analysis.exportSignatures.find((s: any) => s.name === "helper");
     expect(helperSig).toBeDefined();
     expect(helperSig.reexportSource).toBe("./utils");
   });
@@ -56,16 +52,12 @@ describe("macro-type-hydration export signature integration", () => {
     const json = host.getAnalysis("/lib/barrel.ts");
     const analysis = JSON.parse(json!);
 
-    const typeSig = analysis.exportSignatures.find(
-      (s: any) => s.name === "AnimationOptions",
-    );
+    const typeSig = analysis.exportSignatures.find((s: any) => s.name === "AnimationOptions");
     expect(typeSig).toBeDefined();
     expect(typeSig.isType).toBe(true);
     expect(typeSig.reexportSource).toBe("./types");
 
-    const valueSig = analysis.exportSignatures.find(
-      (s: any) => s.name === "animate",
-    );
+    const valueSig = analysis.exportSignatures.find((s: any) => s.name === "animate");
     expect(valueSig).toBeDefined();
     // Negative: value re-export is not type-only
     expect(valueSig.isType).toBe(false);
@@ -84,9 +76,7 @@ describe("macro-type-hydration export signature integration", () => {
 
     expect(analysis.exportSignatures).toBeDefined();
     // Wildcard re-export should produce a "*" signature
-    const starSig = analysis.exportSignatures.find(
-      (s: any) => s.name === "*",
-    );
+    const starSig = analysis.exportSignatures.find((s: any) => s.name === "*");
     expect(starSig).toBeDefined();
     expect(starSig.reexportSource).toBe("./types");
   });
@@ -95,8 +85,7 @@ describe("macro-type-hydration export signature integration", () => {
     const host = loadHost();
     host.upsert({
       inputId: "/lib/local.ts",
-      source:
-        "export const VALUE = 1;\nexport interface Config { key: string }",
+      source: "export const VALUE = 1;\nexport interface Config { key: string }",
       fileKind: "non_sfc",
     });
 
@@ -141,9 +130,7 @@ describe("macro-type-hydration export signature integration", () => {
     expect(unique).toHaveLength(2);
 
     // Negative: LOCAL is not a re-export
-    const localSig = analysis.exportSignatures.find(
-      (s: any) => s.name === "LOCAL",
-    );
+    const localSig = analysis.exportSignatures.find((s: any) => s.name === "LOCAL");
     expect(localSig).toBeDefined();
     expect(localSig.reexportSource).toBeUndefined();
   });

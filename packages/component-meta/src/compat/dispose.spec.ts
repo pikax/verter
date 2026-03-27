@@ -1,5 +1,5 @@
 /**
- * @ai-generated - Verifies compat checker disposal semantics for host-backed usage.
+ * @ai-generated - Verifies compat checker close semantics for host-backed usage.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -13,7 +13,7 @@ function createCheckerAdapterStub(overrides: Partial<VerterHostAdapter> = {}): V
   };
 }
 
-describe("ComponentMetaChecker.dispose", () => {
+describe("ComponentMetaChecker.close", () => {
   it("closes the adapter once and prevents further use", async () => {
     const upsert = vi.fn();
     const close = vi.fn();
@@ -25,8 +25,8 @@ describe("ComponentMetaChecker.dispose", () => {
     checker.updateFile("Component.vue", "<template />");
     expect(upsert).toHaveBeenCalledTimes(1);
 
-    checker.dispose();
-    checker.dispose();
+    checker.close();
+    checker.close();
 
     expect(close).toHaveBeenCalledTimes(1);
     expect(() => checker.updateFile("Component.vue", "<template><div /></template>")).toThrow(
@@ -38,7 +38,7 @@ describe("ComponentMetaChecker.dispose", () => {
   it("is safe when the adapter does not expose close()", () => {
     const checker = new ComponentMetaChecker(createCheckerAdapterStub(), "/project");
 
-    expect(() => checker.dispose()).not.toThrow();
-    expect(() => checker.dispose()).not.toThrow();
+    expect(() => checker.close()).not.toThrow();
+    expect(() => checker.close()).not.toThrow();
   });
 });

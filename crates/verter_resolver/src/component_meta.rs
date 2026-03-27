@@ -10,6 +10,9 @@ use verter_core::utils::oxc::vue::resolve_type::ResolvedElements;
 
 use crate::{
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
+    surface_projector::{
+        project_macro_surfaces_from_expanded_text, project_macro_surfaces_from_source_type_name,
+    },
     DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp, ResolvedTypeDeclaration,
 };
 
@@ -178,9 +181,9 @@ fn raw_macro_surface_is_authoritative(mac: &AnalyzedMacro) -> bool {
     match mac.kind {
         AnalyzedMacroKind::DefineProps
         | AnalyzedMacroKind::WithDefaults
-        | AnalyzedMacroKind::DefineModel => !mac.prop_fields.is_empty(),
+        | AnalyzedMacroKind::DefineModel => false,
         AnalyzedMacroKind::DefineEmits => false,
-        AnalyzedMacroKind::DefineSlots => !mac.slot_fields.is_empty(),
+        AnalyzedMacroKind::DefineSlots => false,
         AnalyzedMacroKind::DefineExpose => !mac.expose_fields.is_empty(),
         AnalyzedMacroKind::DefineOptions => false,
     }
@@ -325,8 +328,62 @@ where
     }
 
     if expanded {
-        for mac in host.snapshot_macros(snapshot) {
+        for (macro_index, mac) in host.snapshot_macros(snapshot).iter().enumerate() {
+            let owner_source = host.read_source(owner_canonical);
             for resolved in &mac.resolved_local_types {
+                if !resolved_macros
+                    .iter()
+                    .any(|meta| meta.macro_index == macro_index && meta.type_name == resolved.name)
+                {
+                    if let Some(projected) = owner_source
+                        .as_deref()
+                        .and_then(|source| {
+                            let projection_source = source_for_local_type_projection(source);
+                            project_macro_surfaces_from_source_type_name(
+                                projection_source.as_ref(),
+                                mac.kind,
+                                resolved.name.as_str(),
+                            )
+                        })
+                        .or_else(|| {
+                            project_macro_surfaces_from_expanded_text(mac.kind, &resolved.expanded)
+                        })
+                    {
+                        if !projected.props.is_empty()
+                            || !projected.emits.is_empty()
+                            || !projected.slots.is_empty()
+                            || !projected.native_props.is_empty()
+                        {
+                            let declaration = resolve_local_type_declaration(
+                                host,
+                                owner_canonical,
+                                resolved.name.as_str(),
+                                resolved.span,
+                            );
+                            let jsdoc = host.resolve_jsdoc_block(
+                                owner_canonical,
+                                resolved.span,
+                                true,
+                                &mut tracked_deps,
+                                &mut cache,
+                                &mut visiting,
+                            );
+                            resolved_macros.push(ResolvedMacroMeta {
+                                macro_index,
+                                macro_kind: mac.kind,
+                                type_name: resolved.name.clone(),
+                                import_source: String::new(),
+                                declaration,
+                                native_props: projected.native_props,
+                                props: projected.props,
+                                emits: projected.emits,
+                                slots: projected.slots,
+                                jsdoc,
+                            });
+                        }
+                    }
+                }
+
                 if seen_registry_names.insert(resolved.name.clone()) {
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: resolved.name.clone(),
@@ -360,6 +417,252 @@ where
         evaluated_types: eval_outputs.evaluated_types,
         cached_eval_inputs: eval_outputs.cached_eval_inputs,
         fact_versions,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::declaration_metadata::ResolvedExportTarget;
+    use verter_analysis::type_eval::DeclarationId;
+    use verter_analysis::types::{
+        AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, ResolvedLocalType,
+    };
+    use verter_span::Span;
+
+    #[derive(Clone)]
+    struct TestSnapshot {
+        imports: Vec<AnalyzedImport>,
+        macros: Vec<AnalyzedMacro>,
+        macro_type_deps: Vec<verter_analysis::types::MacroTypeDep>,
+    }
+
+    struct TestHost {
+        source: String,
+    }
+
+    impl crate::DeclarationMetadataResolver for TestHost {
+        fn resolve_export_target(
+            &self,
+            _dep_canonical: &str,
+            _requested_name: &str,
+        ) -> Option<ResolvedExportTarget> {
+            None
+        }
+
+        fn get_export_span_follow_reexports(
+            &self,
+            _dep_canonical: &str,
+            _requested_name: &str,
+        ) -> Option<Span> {
+            None
+        }
+
+        fn read_source(&self, _canonical_source: &str) -> Option<String> {
+            Some(self.source.clone())
+        }
+
+        fn type_declaration_id(
+            &self,
+            _canonical_source: &str,
+            _resolved_name: &str,
+        ) -> Option<DeclarationId> {
+            None
+        }
+
+        fn resolve_type_dependency_canonical(
+            &self,
+            _from_canonical: &str,
+            _import_source: &str,
+        ) -> Option<String> {
+            None
+        }
+    }
+
+    impl ComponentMetaResolverHost for TestHost {
+        type Snapshot = TestSnapshot;
+        type EvalContext = ();
+        type ImportedInputs = ();
+
+        fn snapshot_imports<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedImport] {
+            &snapshot.imports
+        }
+
+        fn snapshot_macros<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedMacro] {
+            &snapshot.macros
+        }
+
+        fn snapshot_macro_type_deps<'a>(
+            &self,
+            snapshot: &'a Self::Snapshot,
+        ) -> &'a [verter_analysis::types::MacroTypeDep] {
+            &snapshot.macro_type_deps
+        }
+
+        fn build_eval_outputs(
+            &self,
+            _owner_canonical: &str,
+            _snapshot: &Self::Snapshot,
+            _eval_context: Option<&Self::EvalContext>,
+        ) -> ComponentMetaEvalOutputs<Self::ImportedInputs> {
+            ComponentMetaEvalOutputs::default()
+        }
+
+        fn resolve_macro_elements(
+            &self,
+            _owner_canonical: &str,
+            _import_source: &str,
+            _exported_name: &str,
+            _tracked_deps: &mut BTreeSet<String>,
+            _resolution_deps: &mut BTreeSet<String>,
+            _cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+            _visiting: &mut FxHashSet<(String, String)>,
+        ) -> Option<ResolvedElements> {
+            None
+        }
+
+        fn resolve_jsdoc_block(
+            &self,
+            _canonical_source: &str,
+            _span: Span,
+            _expanded: bool,
+            _tracked_deps: &mut BTreeSet<String>,
+            _cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+            _visiting: &mut FxHashSet<(String, String)>,
+        ) -> Option<ResolvedJsdocBlock> {
+            None
+        }
+
+        fn sync_transitive_macro_type_dependencies(
+            &self,
+            _canonical_id: &str,
+            _tracked_deps: &BTreeSet<String>,
+        ) {
+        }
+
+        fn current_dependency_fact_versions(
+            &self,
+            _canonical: &str,
+            _tracked_deps: &BTreeSet<String>,
+        ) -> Vec<FactVersionRef> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
+        let source =
+            "type AccordionEmits = { 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }";
+        let host = TestHost {
+            source: source.to_string(),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineEmits,
+                is_type_based: true,
+                type_references: vec!["AccordionEmits".to_string()],
+                binding_name: Some("emit".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "AccordionEmits".to_string(),
+                    expanded:
+                        "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
+                            .to_string(),
+                    type_expr: None,
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: Vec::new(),
+        };
+
+        let resolved =
+            resolve_component_meta_parts(&host, "/src/Accordion.vue", &snapshot, true, None);
+
+        assert_eq!(resolved.resolved_macros.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].macro_index, 0);
+        assert_eq!(
+            resolved.resolved_macros[0].macro_kind,
+            AnalyzedMacroKind::DefineEmits
+        );
+        assert_eq!(resolved.resolved_macros[0].type_name, "AccordionEmits");
+        assert_eq!(
+            resolved.resolved_macros[0].declaration.resolved_name,
+            "AccordionEmits"
+        );
+        assert_eq!(resolved.resolved_macros[0].emits.len(), 1);
+        assert_eq!(
+            resolved.resolved_macros[0].emits[0].name,
+            "update:modelValue"
+        );
+        assert_eq!(
+            resolved.resolved_macros[0].emits[0].payload_type.as_deref(),
+            Some("[value: (T extends 'single' ? string : string[]) | undefined]")
+        );
+    }
+
+    #[test]
+    fn local_resolved_slot_types_project_symbolic_pick_bindings() {
+        let source = r#"
+interface CalendarCellTriggerProps {
+  day: Date
+  month: number
+}
+
+interface CalendarSlots {
+  day?: (props: Pick<CalendarCellTriggerProps, 'day'>) => any
+}
+
+defineSlots<CalendarSlots>()
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineSlots,
+                is_type_based: true,
+                type_references: vec!["CalendarSlots".to_string()],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "CalendarSlots".to_string(),
+                    expanded: "{ day?: (props: { day: Date }) => any }".to_string(),
+                    type_expr: None,
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: Vec::new(),
+        };
+
+        let resolved = resolve_component_meta_parts(&host, "/src/App.vue", &snapshot, true, None);
+
+        assert_eq!(resolved.resolved_macros.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].slots.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].slots[0].bindings.len(), 1);
+        assert_eq!(
+            resolved.resolved_macros[0].slots[0].bindings[0]
+                .type_annotation
+                .as_deref(),
+            Some("CalendarCellTriggerProps['day']")
+        );
     }
 }
 
@@ -429,4 +732,39 @@ fn macro_dep_exported_type_name<'a>(
     }
 
     Cow::Borrowed(dep.type_name.as_str())
+}
+
+fn source_for_local_type_projection(source: &str) -> Cow<'_, str> {
+    if !source.contains("<script") {
+        return Cow::Borrowed(source);
+    }
+
+    let mut cursor = 0usize;
+    let mut extracted = String::new();
+    while let Some(start_rel) = source[cursor..].find("<script") {
+        let tag_start = cursor + start_rel;
+        let Some(tag_end_rel) = source[tag_start..].find('>') else {
+            break;
+        };
+        let content_start = tag_start + tag_end_rel + 1;
+        let Some(close_rel) = source[content_start..].find("</script>") else {
+            break;
+        };
+        let content_end = content_start + close_rel;
+        let content = source[content_start..content_end].trim();
+        if !content.is_empty() {
+            if !extracted.is_empty() {
+                extracted.push('\n');
+            }
+            extracted.push_str(content);
+            extracted.push('\n');
+        }
+        cursor = content_end + "</script>".len();
+    }
+
+    if extracted.is_empty() {
+        Cow::Borrowed(source)
+    } else {
+        Cow::Owned(extracted)
+    }
 }

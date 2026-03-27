@@ -196,6 +196,34 @@ pub trait ImportedEvalOwnerContextResolver: ImportedEvalOwnerResolver {
     ) -> EvalEnv;
 }
 
+fn normalized_imported_type_root<R: ImportedEvalSourceMergeResolver>(
+    resolver: &R,
+    dep_canonical: &str,
+    imported_name: &str,
+) -> (String, String) {
+    let declaration = resolver.resolve_imported_type_declaration(dep_canonical, imported_name);
+    let mut canonical = if declaration.canonical_source.is_empty() {
+        dep_canonical.to_string()
+    } else {
+        declaration.canonical_source
+    };
+    let mut exported_name = if declaration.resolved_name.is_empty() {
+        imported_name.to_string()
+    } else {
+        declaration.resolved_name
+    };
+
+    let declaration = resolver.resolve_imported_type_declaration(&canonical, &exported_name);
+    if !declaration.canonical_source.is_empty() {
+        canonical = declaration.canonical_source;
+    }
+    if !declaration.resolved_name.is_empty() {
+        exported_name = declaration.resolved_name;
+    }
+
+    (canonical, exported_name)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn record_required_source_merge_inputs_recursive<R: ImportedEvalSourceMergeResolver>(
     resolver: &mut R,
@@ -273,18 +301,8 @@ pub fn record_required_source_merge_inputs_recursive<R: ImportedEvalSourceMergeR
                 continue;
             };
 
-            let declaration =
-                resolver.resolve_imported_type_declaration(&dep_canonical, &imported_name);
-            let next_canonical = if declaration.canonical_source.is_empty() {
-                dep_canonical.clone()
-            } else {
-                declaration.canonical_source
-            };
-            let next_exported_name = if declaration.resolved_name.is_empty() {
-                imported_name
-            } else {
-                declaration.resolved_name
-            };
+            let (next_canonical, next_exported_name) =
+                normalized_imported_type_root(resolver, &dep_canonical, &imported_name);
 
             record_required_source_merge_inputs_recursive(
                 resolver,
@@ -349,18 +367,8 @@ pub fn collect_imported_eval_inputs<R: ImportedEvalCollectorResolver>(
                     continue;
                 };
 
-                let declaration =
-                    resolver.resolve_imported_type_declaration(&dep_canonical, &imported_name);
-                let source_canonical_id = if declaration.canonical_source.is_empty() {
-                    dep_canonical.clone()
-                } else {
-                    declaration.canonical_source
-                };
-                let exported_name = if declaration.resolved_name.is_empty() {
-                    imported_name.clone()
-                } else {
-                    declaration.resolved_name
-                };
+                let (source_canonical_id, exported_name) =
+                    normalized_imported_type_root(resolver, &dep_canonical, &imported_name);
 
                 if alias_names.insert(required_alias_name.clone()) {
                     if let Some(alias) = resolver.collect_imported_type_alias(

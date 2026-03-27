@@ -662,6 +662,40 @@ fn bind_type_parameters_store_arc_bindings() {
 }
 
 #[test]
+fn bind_type_parameters_without_args_preserve_generic_metadata() {
+    let mut env = EvalEnv::new();
+    let decl = TypeDeclInfo {
+        name: "Wrapper".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![TypeParam {
+            name: "T".to_string(),
+            constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+            default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+        }],
+        body: TypeExpr::named("T"),
+    };
+
+    let saved = bind_type_parameters(&decl, &[], &mut env);
+
+    let binding = env.type_bindings.get("T").expect("binding should exist");
+    assert_eq!(
+        binding.as_ref(),
+        &TypeExpr::type_parameter(TypeParam {
+            name: "T".to_string(),
+            constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+            default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+        })
+    );
+
+    restore_type_parameters(saved, &mut env);
+    assert!(
+        !env.type_bindings.contains_key("T"),
+        "restore should remove bindings introduced by the call"
+    );
+}
+
+#[test]
 fn cache_key_ptr_eq_fast_path_stays_fast() {
     let mut env = EvalEnv::new();
     env.add_type(TypeDeclInfo {

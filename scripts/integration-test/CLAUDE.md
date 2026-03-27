@@ -9,16 +9,16 @@ Instructions for AI agents working on Verter's integration test infrastructure.
 When adding, removing, or modifying a project in **either** file, you **MUST** update the other file to match. The fields map as follows:
 
 | JS (`projects.mjs`) | YAML (`integration-test.yml`) |
-|---------------------|-------------------------------|
-| `name` | `name` |
-| `repo` | `repo` |
-| `branch` | `branch` |
-| `buildCmd` | `build-cmd` |
-| `testCmd` | `test-cmd` |
-| `e2eCmd` | `e2e-cmd` |
-| `packageManager` | `package-manager` |
-| `bundler` | `bundler` |
-| `shallow` | `shallow` |
+| ------------------- | ----------------------------- |
+| `name`              | `name`                        |
+| `repo`              | `repo`                        |
+| `branch`            | `branch`                      |
+| `buildCmd`          | `build-cmd`                   |
+| `testCmd`           | `test-cmd`                    |
+| `e2eCmd`            | `e2e-cmd`                     |
+| `packageManager`    | `package-manager`             |
+| `bundler`           | `bundler`                     |
+| `shallow`           | `shallow`                     |
 
 ## Running Integration Tests
 
@@ -58,6 +58,7 @@ pnpm integration-test:local
 ### CI
 
 Triggered by:
+
 - PR comment: `/integration`
 - Manual dispatch on GitHub Actions
 - Release workflow
@@ -81,6 +82,7 @@ Triggered by:
 ### Test regression
 
 If Verter has **more** test failures than baseline (`TEST REGR` status):
+
 1. Check `.integration-tests/logs/<project>/verter-test.log`
 2. Diff against `baseline-test.log` to find which tests regressed
 3. These failures indicate Verter's compiler generates incorrect code for some Vue patterns
@@ -89,6 +91,7 @@ If Verter has **more** test failures than baseline (`TEST REGR` status):
 ### Replacement verification failed
 
 If "No files contain @verter/unplugin after replacement":
+
 1. The project may use a non-standard import style
 2. Check how the project imports its Vue plugin (grep for `@vitejs/plugin-vue` or `rollup-plugin-vue`)
 3. The replacement patterns may need to be extended in both `run.mjs` (Node.js `String.replace`) and `integration-test.yml` (bash `sed`)
@@ -100,12 +103,15 @@ If "No files contain @verter/unplugin after replacement":
 **Cause**: pnpm's content-addressable store retains old `.node` binaries via hardlinks. `copyRecursive()` may fail silently on locked/hardlinked files (the `catch {}` swallows the error), leaving a stale binary in `.pnpm/` even after the overwrite step reports success.
 
 **Diagnosis**: Run from the project's `node_modules/`:
+
 ```bash
 node -e "const r = require('@verter/native'); const h = new r.VerterHost({}); console.log(Object.getOwnPropertyNames(Object.getPrototypeOf(h)))"
 ```
+
 Check that the listed methods include the one reported missing (e.g., `close`).
 
 **Fix**:
+
 1. Rebuild native bindings: `pnpm run build:native`
 2. Delete the project's checkout: `rm -rf .integration-tests/repos/<project>/`
 3. Re-run: `pnpm integration-test --skip-build --no-clone <project>`
@@ -115,6 +121,7 @@ Check that the listed methods include the one reported missing (e.g., `close`).
 ### Type-check review queue
 
 `vue-tsc` is the baseline. Extra `verter-tsc` diagnostics are persisted, not auto-dismissed:
+
 - `diagnostics.normalized.json` stores parsed raw output for cold/warm runs
 - `diagnostics.diff.json` groups shared, Vue-only, and Verter-only diagnostics
 - `review-queue.json` stores Verter-only items with statuses like `pending`, `likely_legit`, `verter_bug`, and `env_issue`
@@ -151,13 +158,17 @@ Check that the listed methods include the one reported missing (e.g., `close`).
 The runner automatically handles several common project setup issues:
 
 ### `packageManager` stripping
+
 Projects with a `packageManager` field in `package.json` (e.g., `"pnpm@10.28.0"`) trigger corepack version switching, which fails if the exact version isn't installed. The runner strips this field before installing deps. `COREPACK_ENABLE_STRICT=0` alone is not sufficient.
 
 ### `ensureVerterAccessible()` — native binding hoisting fix
+
 Some pnpm monorepos don't properly hoist `@verter/native` into the repo's `node_modules/`. The packages end up at the parent workspace level without the `dist/` directory containing the native `.node` binary. After installing tarballs, the runner checks if `@verter/native/index.js` and `@verter/native/dist/` exist in the repo's `node_modules/`. If not, it copies from source (`packages/native/` and `packages/unplugin/`).
 
 ### E2E tests
+
 Projects can define an optional `e2eCmd` field. E2E tests run only on the Verter build (not baseline) after the unit tests complete. E2E logs are saved as `verter-e2e.log`. E2E frameworks used:
+
 - **Playwright** (VitePress, vue-vben-admin): Auto-starts dev server via playwright config
 - **Cypress** (slidev): Must start fixture dev server manually before running Cypress
 
@@ -165,23 +176,23 @@ Projects can define an optional `e2eCmd` field. E2E tests run only on the Verter
 
 When a project's build fails or tests regress, these are the most common root cause patterns:
 
-| Symptom | Root Cause | Example Fix |
-|---------|-----------|-------------|
-| Garbled prop names in component definition | Span extraction using wrong source for cross-file types | P0: use `key_name` in `macros.rs` |
-| Raw HTML in JS output (`<!-- -->`, `&amp;`, etc.) | Template node not overwritten during codegen | P1: emit removal overwrite in `visit_comment` |
-| TS syntax in JS output (`: string`, `<T>`) | `forceJs` not set for the bundler framework | P2: check `meta.framework` in unplugin |
-| `_ctx.` prefix on globals (`_ctx.String`) | Missing entry in `is_global()` allowlist | Add to globals list in binding resolver |
-| Props missing from runtime declaration | Type resolution failed for external types | Check `resolve_external_type` and `key_name` population |
-| Build hangs indefinitely | CSS preprocessor deadlock in transform hook | Move preprocessing to style sub-request |
-| Template expressions at wrong positions | HTML entity decode shifts byte offsets | Pass original source to binding resolver |
+| Symptom                                           | Root Cause                                              | Example Fix                                             |
+| ------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------- |
+| Garbled prop names in component definition        | Span extraction using wrong source for cross-file types | P0: use `key_name` in `macros.rs`                       |
+| Raw HTML in JS output (`<!-- -->`, `&amp;`, etc.) | Template node not overwritten during codegen            | P1: emit removal overwrite in `visit_comment`           |
+| TS syntax in JS output (`: string`, `<T>`)        | `forceJs` not set for the bundler framework             | P2: check `meta.framework` in unplugin                  |
+| `_ctx.` prefix on globals (`_ctx.String`)         | Missing entry in `is_global()` allowlist                | Add to globals list in binding resolver                 |
+| Props missing from runtime declaration            | Type resolution failed for external types               | Check `resolve_external_type` and `key_name` population |
+| Build hangs indefinitely                          | CSS preprocessor deadlock in transform hook             | Move preprocessing to style sub-request                 |
+| Template expressions at wrong positions           | HTML entity decode shifts byte offsets                  | Pass original source to binding resolver                |
 
 ## Common Patterns and Gotchas
 
 ### VueMacros wrapping (zyronon-douyin)
 
 ```js
-import Vue from '@vitejs/plugin-vue'
-VueMacros({ plugins: { vue: Vue() } })
+import Vue from "@vitejs/plugin-vue";
+VueMacros({ plugins: { vue: Vue() } });
 ```
 
 After replacement: `Vue(` → `verter(` correctly changes the function call. The object key `vue:` stays as-is.
@@ -199,6 +210,7 @@ This is NOT in a `vite.config.*` file. The CI grep and local `findFiles` must se
 ### Monorepo build commands
 
 Some projects have complex build chains. Use the most targeted command:
+
 - `pnpm --filter <pkg> build` for specific workspace packages
 - `pnpm run build:packages` to skip non-essential steps (linting, type checking)
 - Avoid `npm run build` if it has problematic `prebuild` hooks (check package.json)
@@ -211,28 +223,29 @@ Some projects have complex build chains. Use the most targeted command:
 ### @vitejs/plugin-vue-jsx
 
 The replacement patterns do NOT modify `@vitejs/plugin-vue-jsx` because:
+
 - The import source replacement uses exact match: `'@vitejs/plugin-vue'` (closing quote prevents matching `-jsx`)
 - The function rename `Vue(` does not match `VueJsx(` (different characters after `Vue`)
 
 ## File Locations
 
-| File | Purpose |
-|------|---------|
-| `scripts/integration-test/run.mjs` | Local runner script |
-| `scripts/integration-test/projects.mjs` | Project definitions (source of truth) |
-| `scripts/integration-test/README.md` | Human documentation |
-| `scripts/integration-test/CLAUDE.md` | This file (agent documentation) |
-| `.github/workflows/integration-test.yml` | CI workflow (MUST stay in sync with projects.mjs) |
-| `.integration-tests/` | Gitignored directory for cloned repos, tarballs, logs |
+| File                                     | Purpose                                               |
+| ---------------------------------------- | ----------------------------------------------------- |
+| `scripts/integration-test/run.mjs`       | Local runner script                                   |
+| `scripts/integration-test/projects.mjs`  | Project definitions (source of truth)                 |
+| `scripts/integration-test/README.md`     | Human documentation                                   |
+| `scripts/integration-test/CLAUDE.md`     | This file (agent documentation)                       |
+| `.github/workflows/integration-test.yml` | CI workflow (MUST stay in sync with projects.mjs)     |
+| `.integration-tests/`                    | Gitignored directory for cloned repos, tarballs, logs |
 
 ## Test Result Interpretation
 
 Test results are the primary quality signal for Verter's compiler:
 
-| Scenario | Meaning | Action |
-|----------|---------|--------|
-| Verter tests = baseline tests | Verter compiles correctly for this project | None needed |
-| Verter has fewer failures | Verter fixed something upstream Vue got wrong (unlikely) | Investigate |
-| Verter has more failures | **Compiler regression** — Verter generates incorrect code | Fix the compiler |
-| Verter build fails, baseline passes | Verter cannot compile some pattern in this project | Add support or document limitation |
-| Both fail identically | Project setup issue, not Verter | Check project compatibility |
+| Scenario                            | Meaning                                                   | Action                             |
+| ----------------------------------- | --------------------------------------------------------- | ---------------------------------- |
+| Verter tests = baseline tests       | Verter compiles correctly for this project                | None needed                        |
+| Verter has fewer failures           | Verter fixed something upstream Vue got wrong (unlikely)  | Investigate                        |
+| Verter has more failures            | **Compiler regression** — Verter generates incorrect code | Fix the compiler                   |
+| Verter build fails, baseline passes | Verter cannot compile some pattern in this project        | Add support or document limitation |
+| Both fail identically               | Project setup issue, not Verter                           | Check project compatibility        |

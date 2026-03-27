@@ -1,9 +1,12 @@
 <script setup lang="ts">
-const props = withDefaults(defineProps<{
-  label?: string;
-}>(), {
-  label: "Exit regression fixture",
-});
+const props = withDefaults(
+  defineProps<{
+    label?: string;
+  }>(),
+  {
+    label: "Exit regression fixture",
+  },
+);
 
 defineEmits<{
   click: [];

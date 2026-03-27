@@ -2,21 +2,24 @@
   "name": "@verter/core",
   "version": "0.0.1-beta.1",
   "description": "Vue SFC parser and TSX transformer",
-  "keywords": ["vue", "compiler", "sfc", "typescript", "tsx"],
+  "keywords": [
+    "compiler",
+    "sfc",
+    "tsx",
+    "typescript",
+    "vue"
+  ],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
+  "author": "pikax",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "pikax",
-  "homepage": "https://verterjs.dev/",
-  "type": "commonjs",
-  "engines": {
-    "node": ">=18"
-  },
   "files": [
     "dist"
   ],
+  "type": "commonjs",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -71,6 +74,9 @@
     "vite-plugin-dts": "^4.5.4",
     "vitest": "^4.1.0",
     "vue": "^3.5.30"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "typeX": "module"
 }

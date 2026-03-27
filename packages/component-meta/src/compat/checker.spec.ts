@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, it, expect, vi } from "vitest";
@@ -12,13 +12,13 @@ import {
   mapExposedMeta,
   mapComponentMeta,
 } from "./checker.js";
-import { openMetaProject } from "../project.js";
+import { openComponentMetaSession } from "../project.js";
 import {
   getMetaRuntime,
   normalizePath as runtimeNormalizePath,
   shutdownMetaRuntime,
 } from "../runtime/index.js";
-import { primitive, unknown } from "../type-ir.js";
+import { array, func, literal, object, primitive, ref, union, unknown } from "../type-ir.js";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 
 let nextProjectRootId = 1;
@@ -110,6 +110,135 @@ describe("mapPropMeta", () => {
     expect(result.description).toBe("");
     expect(result.tags).toEqual([]);
   });
+
+  it("normalizes simple string defaults to JSON-style quoted strings", () => {
+    const prop: PropMeta = {
+      name: "type",
+      type: union([primitive("string"), primitive("undefined")]),
+      required: false,
+      hasDefault: true,
+      default: "'single'",
+      rawType: "string | undefined",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.default).toBe('"single"');
+  });
+
+  it("keeps top-level undefined in optional prop display text", () => {
+    const prop: PropMeta = {
+      name: "modelValue",
+      type: union([primitive("string"), array(primitive("string")), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+      rawType: "string | string[] | undefined",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("string | string[] | undefined");
+  });
+
+  it("adds undefined to optional prop display text when raw type omits it", () => {
+    const prop: PropMeta = {
+      name: "active",
+      type: primitive("boolean"),
+      required: false,
+      hasDefault: false,
+      rawType: "boolean",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("boolean | undefined");
+  });
+
+  it("resolves simple ref aliases through the type registry when that is more concrete", () => {
+    const prop: PropMeta = {
+      name: "type",
+      type: union([ref("SingleOrMultipleType"), primitive("undefined")]),
+      required: false,
+      hasDefault: true,
+      default: "single",
+      rawType: "SingleOrMultipleType | undefined",
+    };
+    const typeRegistry = new Map<string, any>([
+      ["SingleOrMultipleType", union([literal("single"), literal("multiple")])],
+    ]);
+
+    const result = mapPropMeta(prop, undefined, typeRegistry);
+
+    expect(result.type).toBe('"single" | "multiple" | undefined');
+  });
+
+  it("prefers descriptor text over indexed-access raw prop types", () => {
+    const prop: PropMeta = {
+      name: "href",
+      type: union([primitive("string"), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+      rawType: "NuxtLinkProps['to'] | undefined",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("string | undefined");
+  });
+
+  it("keeps symbolic indexed-access raw prop types when the descriptor degrades to any", () => {
+    const prop: PropMeta = {
+      name: "icon",
+      type: union([primitive("string"), primitive("any"), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+      rawType: "IconProps['name']",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe('IconProps["name"] | undefined');
+  });
+
+  it("keeps symbolic ref raw prop types when the resolved descriptor is overexpanded", () => {
+    const prop: PropMeta = {
+      name: "value",
+      type: union([ref("DateValue"), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+      rawType: "DateValue",
+    };
+    const typeRegistry = new Map<string, any>([
+      [
+        "DateValue",
+        object(
+          Array.from({ length: 64 }, (_, index) => ({
+            name: `field${index}`,
+            type: primitive("string"),
+            optional: false,
+          })),
+        ),
+      ],
+    ]);
+
+    const result = mapPropMeta(prop, undefined, typeRegistry);
+
+    expect(result.type).toBe("DateValue | undefined");
+  });
+
+  it("normalizes chained indexed-access raw prop types without corrupting the key quotes", () => {
+    const prop: PropMeta = {
+      name: "color",
+      type: unknown("indexedAccess"),
+      required: false,
+      hasDefault: false,
+      rawType: "Calendar['variants']['color']",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe('Calendar["variants"]["color"] | undefined');
+  });
 });
 
 describe("mapEventMeta", () => {
@@ -146,8 +275,65 @@ describe("mapSlotMeta", () => {
 
     expect(result.name).toBe("default");
     expect(result.description).toBe("Main content");
-    expect(result.type).toBe("{ item: string }");
+    expect(result.type).toBe("{ item: string; }");
     expect(result.required).toBe(true);
+  });
+
+  it("renders detailed object bindings when raw binding text is lossy", () => {
+    const slot: SlotMeta = {
+      name: "leading",
+      isScoped: true,
+      bindings: [
+        {
+          name: "ui",
+          rawType:
+            "{ root: (props?: Record<string, any> | undefined) => string; ... 5 more ...; label: (props?: Record<string, any> | undefined) => string; }",
+          type: object([
+            {
+              name: "root",
+              type: func(
+                [
+                  {
+                    name: "props",
+                    optional: true,
+                    type: union([
+                      ref("Record", [primitive("string"), primitive("any")]),
+                      primitive("undefined"),
+                    ]),
+                  },
+                ],
+                primitive("string"),
+              ),
+              optional: false,
+            },
+            {
+              name: "label",
+              type: func(
+                [
+                  {
+                    name: "props",
+                    optional: true,
+                    type: union([
+                      ref("Record", [primitive("string"), primitive("any")]),
+                      primitive("undefined"),
+                    ]),
+                  },
+                ],
+                primitive("string"),
+              ),
+              optional: false,
+            },
+          ]),
+        },
+      ],
+      isRequired: false,
+    };
+
+    const result = mapSlotMeta(slot);
+
+    expect(result.type).toContain(
+      "ui: { root: (props?: Record<string, any> | undefined): string; label: (props?: Record<string, any> | undefined): string; }",
+    );
   });
 });
 
@@ -265,13 +451,18 @@ describe("mapComponentMeta", () => {
 
 describe("ComponentMetaChecker", () => {
   it("uses the native component-meta query instead of rebuilding from analysis snapshots", async () => {
+    const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const session = {
       closed: false,
       engine: { state: "active" as const },
       upsert() {},
       delete() {},
+      getDeclaredComponentMeta,
       getComponentMeta,
+      getProvenance() {
+        return "{}";
+      },
       getEffectiveSource() {
         return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
       },
@@ -299,7 +490,8 @@ describe("ComponentMetaChecker", () => {
     const meta = await checker.getComponentMeta("Single.vue");
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
-    expect(getComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).not.toHaveBeenCalled();
   });
 
   it("createCheckerByJson reuses one pooled engine across include differences in selective-loading mode", async () => {
@@ -427,7 +619,7 @@ describe("ComponentMetaChecker", () => {
     shutdownMetaRuntime();
   });
 
-  it("createChecker and openMetaProject share one pooled engine for the same tsconfig", async () => {
+  it("createChecker and openComponentMetaSession share one pooled engine for the same tsconfig", async () => {
     shutdownMetaRuntime();
     const runtime = getMetaRuntime();
     const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-project-shared-"));
@@ -447,7 +639,7 @@ describe("ComponentMetaChecker", () => {
     );
 
     const checker = await createChecker(resolve(projectRoot, "tsconfig.json"));
-    const project = await openMetaProject({
+    const project = await openComponentMetaSession({
       root: projectRoot,
       tsconfig: resolve(projectRoot, "tsconfig.json"),
     });
@@ -494,6 +686,7 @@ describe("ComponentMetaChecker", () => {
       .replace(/\\/g, "/")
       .replace(/^([A-Z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
     const ensureBaseFile = vi.fn(() => true);
+    const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const workspace = {
       readFile: vi.fn(async () => {
@@ -517,7 +710,11 @@ describe("ComponentMetaChecker", () => {
         upsert: vi.fn(),
         delete: vi.fn(),
         ensureBaseFile,
+        getDeclaredComponentMeta,
         getComponentMeta,
+        getProvenance() {
+          return "{}";
+        },
         getEffectiveSource(id: string) {
           if (id === canonicalId && ensureBaseFile.mock.calls.length > 0) {
             return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
@@ -539,7 +736,8 @@ describe("ComponentMetaChecker", () => {
 
     expect(ensureBaseFile).toHaveBeenCalledWith(canonicalId);
     expect(workspace.readFile).not.toHaveBeenCalled();
-    expect(getComponentMeta).toHaveBeenCalledWith(canonicalId);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(canonicalId);
+    expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
 
@@ -603,16 +801,21 @@ defineEmits<{
 
   it("uses the full native query even when a compat query exists", async () => {
     const canonicalId = "Fast.vue";
-    const getComponentMetaCompat = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
+    const getDeclaredComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const checker = new ComponentMetaChecker(
       {} as any,
       "/project",
-      undefined,
+      { typeExpansionBackend: "tsgo" },
       {
         engine: { state: "active" as const },
-        getComponentMetaCompat,
+        upsert() {},
+        delete() {},
+        getDeclaredComponentMeta,
         getComponentMeta,
+        getProvenance() {
+          return "{}";
+        },
         close() {},
         getEffectiveSource() {
           return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
@@ -638,7 +841,7 @@ defineEmits<{
 
     const meta = await checker.getComponentMeta(canonicalId);
 
-    expect(getComponentMetaCompat).not.toHaveBeenCalled();
+    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
     expect(getComponentMeta).toHaveBeenCalledWith(
       runtimeNormalizePath(resolve("/project", canonicalId)),
     );
@@ -667,6 +870,35 @@ defineEmits<{
     meta = await checker.getComponentMeta("Test.vue");
     expect(meta.props.some((p) => p.name === "b")).toBe(true);
     expect(meta.props.some((p) => p.name === "a")).toBe(false);
+  });
+
+  it("restoreBaseFile clears a temporary overlay and reveals the disk-backed file", async () => {
+    const projectRoot = resolve(tmpdir(), `checker-restore-file-${nextProjectRootId++}`);
+    mkdirSync(projectRoot, { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "Test.vue"),
+      `<script setup lang="ts">defineProps<{ base: string }>()</script><template><div /></template>`,
+      "utf8",
+    );
+
+    const checker = await createCheckerByJson(projectRoot, {});
+    try {
+      checker.updateFile(
+        "Test.vue",
+        `<script setup lang="ts">defineProps<{ temp: number }>()</script><template><div /></template>`,
+      );
+      let meta = await checker.getComponentMeta("Test.vue");
+      expect(meta.props.some((p) => p.name === "temp")).toBe(true);
+      expect(meta.props.some((p) => p.name === "base")).toBe(false);
+
+      checker.restoreBaseFile("Test.vue");
+      meta = await checker.getComponentMeta("Test.vue");
+      expect(meta.props.some((p) => p.name === "base")).toBe(true);
+      expect(meta.props.some((p) => p.name === "temp")).toBe(false);
+    } finally {
+      checker.close();
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it("deleteFile clears metadata", async () => {
@@ -699,8 +931,14 @@ defineEmits<{
       engine: { state: "active" as const },
       upsert() {},
       delete() {},
+      getDeclaredComponentMeta() {
+        return null;
+      },
       getComponentMeta() {
         return null;
+      },
+      getProvenance() {
+        return "{}";
       },
       getEffectiveSource() {
         return undefined;

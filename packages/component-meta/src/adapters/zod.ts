@@ -107,6 +107,9 @@ export function typeToZodString(type: TypeDescriptor): string {
     case "function":
       return "z.function()";
 
+    case "typeParameter":
+      return "z.unknown()";
+
     case "ref":
       // Named types we can't resolve — fall back to unknown
       return "z.unknown()";
@@ -269,6 +272,9 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
 
     case "function":
       return z.function();
+
+    case "typeParameter":
+      return z.unknown();
 
     case "ref":
       return z.unknown();

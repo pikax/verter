@@ -34,7 +34,18 @@ axum = "0.8"
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net", "signal"] }
+tokio = { version = "1", features = [
+  "rt",
+  "rt-multi-thread",
+  "macros",
+  "io-std",
+  "io-util",
+  "sync",
+  "process",
+  "time",
+  "net",
+  "signal",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"

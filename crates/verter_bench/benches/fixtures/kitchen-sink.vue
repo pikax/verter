@@ -1,322 +1,324 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, provide, watchEffect } from 'vue'
+import { ref, computed, watch, onMounted, provide, watchEffect } from "vue";
 
 // Types
 interface User {
-  id: number
-  name: string
-  email: string
-  role: 'admin' | 'editor' | 'viewer'
-  avatar?: string
-  status: 'online' | 'offline' | 'away'
+  id: number;
+  name: string;
+  email: string;
+  role: "admin" | "editor" | "viewer";
+  avatar?: string;
+  status: "online" | "offline" | "away";
 }
 
 interface Task {
-  id: string
-  title: string
-  description: string
-  assignee: number
-  priority: 'low' | 'medium' | 'high' | 'critical'
-  status: 'todo' | 'in-progress' | 'review' | 'done'
-  dueDate: Date
-  tags: string[]
-  comments: Comment[]
-  attachments: Attachment[]
+  id: string;
+  title: string;
+  description: string;
+  assignee: number;
+  priority: "low" | "medium" | "high" | "critical";
+  status: "todo" | "in-progress" | "review" | "done";
+  dueDate: Date;
+  tags: string[];
+  comments: Comment[];
+  attachments: Attachment[];
 }
 
 interface Comment {
-  id: string
-  userId: number
-  text: string
-  timestamp: Date
+  id: string;
+  userId: number;
+  text: string;
+  timestamp: Date;
 }
 
 interface Attachment {
-  id: string
-  name: string
-  url: string
-  size: number
+  id: string;
+  name: string;
+  url: string;
+  size: number;
 }
 
 interface Filter {
-  status: string[]
-  priority: string[]
-  assignee: number[]
-  tags: string[]
-  search: string
+  status: string[];
+  priority: string[];
+  assignee: number[];
+  tags: string[];
+  search: string;
 }
 
 // Props & Emits
-const props = withDefaults(defineProps<{
-  projectId?: number
-  initialView?: 'list' | 'board' | 'calendar'
-}>(), {
-  initialView: 'list'
-})
+const props = withDefaults(
+  defineProps<{
+    projectId?: number;
+    initialView?: "list" | "board" | "calendar";
+  }>(),
+  {
+    initialView: "list",
+  },
+);
 
 const emit = defineEmits<{
-  taskCreated: [task: Task]
-  taskUpdated: [task: Task]
-  taskDeleted: [taskId: string]
-  filterChanged: [filter: Filter]
-}>()
+  taskCreated: [task: Task];
+  taskUpdated: [task: Task];
+  taskDeleted: [taskId: string];
+  filterChanged: [filter: Filter];
+}>();
 
 // State
-const users = ref<User[]>([])
-const tasks = ref<Task[]>([])
-const selectedTask = ref<Task | null>(null)
-const currentView = ref(props.initialView)
-const isLoading = ref(false)
-const error = ref<string | null>(null)
-const showTaskModal = ref(false)
-const showFilterPanel = ref(false)
+const users = ref<User[]>([]);
+const tasks = ref<Task[]>([]);
+const selectedTask = ref<Task | null>(null);
+const currentView = ref(props.initialView);
+const isLoading = ref(false);
+const error = ref<string | null>(null);
+const showTaskModal = ref(false);
+const showFilterPanel = ref(false);
 
 const filter = ref<Filter>({
   status: [],
   priority: [],
   assignee: [],
   tags: [],
-  search: ''
-})
+  search: "",
+});
 
 const newTask = ref<Partial<Task>>({
-  title: '',
-  description: '',
-  priority: 'medium',
-  status: 'todo',
+  title: "",
+  description: "",
+  priority: "medium",
+  status: "todo",
   tags: [],
   comments: [],
-  attachments: []
-})
+  attachments: [],
+});
 
-const sortBy = ref<'dueDate' | 'priority' | 'status' | 'title'>('dueDate')
-const sortOrder = ref<'asc' | 'desc'>('asc')
-const groupBy = ref<'status' | 'priority' | 'assignee' | 'none'>('status')
+const sortBy = ref<"dueDate" | "priority" | "status" | "title">("dueDate");
+const sortOrder = ref<"asc" | "desc">("asc");
+const groupBy = ref<"status" | "priority" | "assignee" | "none">("status");
 
 // Computed
 const filteredTasks = computed(() => {
-  let result = tasks.value
+  let result = tasks.value;
 
   if (filter.value.search) {
-    const search = filter.value.search.toLowerCase()
-    result = result.filter(task =>
-      task.title.toLowerCase().includes(search) ||
-      task.description.toLowerCase().includes(search)
-    )
+    const search = filter.value.search.toLowerCase();
+    result = result.filter(
+      (task) =>
+        task.title.toLowerCase().includes(search) ||
+        task.description.toLowerCase().includes(search),
+    );
   }
 
   if (filter.value.status.length > 0) {
-    result = result.filter(task => filter.value.status.includes(task.status))
+    result = result.filter((task) => filter.value.status.includes(task.status));
   }
 
   if (filter.value.priority.length > 0) {
-    result = result.filter(task => filter.value.priority.includes(task.priority))
+    result = result.filter((task) => filter.value.priority.includes(task.priority));
   }
 
   if (filter.value.assignee.length > 0) {
-    result = result.filter(task => filter.value.assignee.includes(task.assignee))
+    result = result.filter((task) => filter.value.assignee.includes(task.assignee));
   }
 
   if (filter.value.tags.length > 0) {
-    result = result.filter(task =>
-      filter.value.tags.some(tag => task.tags.includes(tag))
-    )
+    result = result.filter((task) => filter.value.tags.some((tag) => task.tags.includes(tag)));
   }
 
-  return result
-})
+  return result;
+});
 
 const sortedTasks = computed(() => {
-  const sorted = [...filteredTasks.value]
-  
+  const sorted = [...filteredTasks.value];
+
   sorted.sort((a, b) => {
-    let compareValue = 0
-    
+    let compareValue = 0;
+
     switch (sortBy.value) {
-      case 'title':
-        compareValue = a.title.localeCompare(b.title)
-        break
-      case 'dueDate':
-        compareValue = a.dueDate.getTime() - b.dueDate.getTime()
-        break
-      case 'priority':
-        const priorityOrder = { low: 0, medium: 1, high: 2, critical: 3 }
-        compareValue = priorityOrder[a.priority] - priorityOrder[b.priority]
-        break
-      case 'status':
-        const statusOrder = { todo: 0, 'in-progress': 1, review: 2, done: 3 }
-        compareValue = statusOrder[a.status] - statusOrder[b.status]
-        break
+      case "title":
+        compareValue = a.title.localeCompare(b.title);
+        break;
+      case "dueDate":
+        compareValue = a.dueDate.getTime() - b.dueDate.getTime();
+        break;
+      case "priority":
+        const priorityOrder = { low: 0, medium: 1, high: 2, critical: 3 };
+        compareValue = priorityOrder[a.priority] - priorityOrder[b.priority];
+        break;
+      case "status":
+        const statusOrder = { todo: 0, "in-progress": 1, review: 2, done: 3 };
+        compareValue = statusOrder[a.status] - statusOrder[b.status];
+        break;
     }
-    
-    return sortOrder.value === 'asc' ? compareValue : -compareValue
-  })
-  
-  return sorted
-})
+
+    return sortOrder.value === "asc" ? compareValue : -compareValue;
+  });
+
+  return sorted;
+});
 
 const groupedTasks = computed(() => {
-  if (groupBy.value === 'none') {
-    return { 'All Tasks': sortedTasks.value }
+  if (groupBy.value === "none") {
+    return { "All Tasks": sortedTasks.value };
   }
 
-  const groups: Record<string, Task[]> = {}
-  
-  sortedTasks.value.forEach(task => {
-    let key: string
-    
+  const groups: Record<string, Task[]> = {};
+
+  sortedTasks.value.forEach((task) => {
+    let key: string;
+
     switch (groupBy.value) {
-      case 'status':
-        key = task.status
-        break
-      case 'priority':
-        key = task.priority
-        break
-      case 'assignee':
-        const user = users.value.find(u => u.id === task.assignee)
-        key = user?.name || 'Unassigned'
-        break
+      case "status":
+        key = task.status;
+        break;
+      case "priority":
+        key = task.priority;
+        break;
+      case "assignee":
+        const user = users.value.find((u) => u.id === task.assignee);
+        key = user?.name || "Unassigned";
+        break;
       default:
-        key = 'Other'
+        key = "Other";
     }
-    
+
     if (!groups[key]) {
-      groups[key] = []
+      groups[key] = [];
     }
-    groups[key].push(task)
-  })
-  
-  return groups
-})
+    groups[key].push(task);
+  });
+
+  return groups;
+});
 
 const stats = computed(() => ({
   total: tasks.value.length,
-  todo: tasks.value.filter(t => t.status === 'todo').length,
-  inProgress: tasks.value.filter(t => t.status === 'in-progress').length,
-  review: tasks.value.filter(t => t.status === 'review').length,
-  done: tasks.value.filter(t => t.status === 'done').length,
-  overdue: tasks.value.filter(t => 
-    t.status !== 'done' && t.dueDate < new Date()
-  ).length,
-  critical: tasks.value.filter(t => t.priority === 'critical').length
-}))
+  todo: tasks.value.filter((t) => t.status === "todo").length,
+  inProgress: tasks.value.filter((t) => t.status === "in-progress").length,
+  review: tasks.value.filter((t) => t.status === "review").length,
+  done: tasks.value.filter((t) => t.status === "done").length,
+  overdue: tasks.value.filter((t) => t.status !== "done" && t.dueDate < new Date()).length,
+  critical: tasks.value.filter((t) => t.priority === "critical").length,
+}));
 
 const allTags = computed(() => {
-  const tagSet = new Set<string>()
-  tasks.value.forEach(task => {
-    task.tags.forEach(tag => tagSet.add(tag))
-  })
-  return Array.from(tagSet).sort()
-})
+  const tagSet = new Set<string>();
+  tasks.value.forEach((task) => {
+    task.tags.forEach((tag) => tagSet.add(tag));
+  });
+  return Array.from(tagSet).sort();
+});
 
 const hasActiveFilters = computed(() => {
-  return filter.value.status.length > 0 ||
-         filter.value.priority.length > 0 ||
-         filter.value.assignee.length > 0 ||
-         filter.value.tags.length > 0 ||
-         filter.value.search.length > 0
-})
+  return (
+    filter.value.status.length > 0 ||
+    filter.value.priority.length > 0 ||
+    filter.value.assignee.length > 0 ||
+    filter.value.tags.length > 0 ||
+    filter.value.search.length > 0
+  );
+});
 
 // Methods
 async function loadTasks() {
-  isLoading.value = true
-  error.value = null
-  
+  isLoading.value = true;
+  error.value = null;
+
   try {
     // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 800))
-    
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
     tasks.value = [
       {
-        id: '1',
-        title: 'Implement authentication',
-        description: 'Add JWT-based authentication',
+        id: "1",
+        title: "Implement authentication",
+        description: "Add JWT-based authentication",
         assignee: 1,
-        priority: 'high',
-        status: 'in-progress',
-        dueDate: new Date('2026-02-20'),
-        tags: ['backend', 'security'],
+        priority: "high",
+        status: "in-progress",
+        dueDate: new Date("2026-02-20"),
+        tags: ["backend", "security"],
         comments: [],
-        attachments: []
+        attachments: [],
       },
       {
-        id: '2',
-        title: 'Design dashboard UI',
-        description: 'Create mockups for admin dashboard',
+        id: "2",
+        title: "Design dashboard UI",
+        description: "Create mockups for admin dashboard",
         assignee: 2,
-        priority: 'medium',
-        status: 'todo',
-        dueDate: new Date('2026-02-25'),
-        tags: ['frontend', 'design'],
+        priority: "medium",
+        status: "todo",
+        dueDate: new Date("2026-02-25"),
+        tags: ["frontend", "design"],
         comments: [],
-        attachments: []
-      }
-    ]
-    
+        attachments: [],
+      },
+    ];
+
     users.value = [
-      { id: 1, name: 'Alice', email: 'alice@example.com', role: 'admin', status: 'online' },
-      { id: 2, name: 'Bob', email: 'bob@example.com', role: 'editor', status: 'online' }
-    ]
+      { id: 1, name: "Alice", email: "alice@example.com", role: "admin", status: "online" },
+      { id: 2, name: "Bob", email: "bob@example.com", role: "editor", status: "online" },
+    ];
   } catch (e) {
-    error.value = 'Failed to load tasks'
+    error.value = "Failed to load tasks";
   } finally {
-    isLoading.value = false
+    isLoading.value = false;
   }
 }
 
 function createTask() {
-  if (!newTask.value.title) return
-  
+  if (!newTask.value.title) return;
+
   const task: Task = {
     id: Date.now().toString(),
     title: newTask.value.title,
-    description: newTask.value.description || '',
+    description: newTask.value.description || "",
     assignee: newTask.value.assignee || users.value[0]?.id,
-    priority: newTask.value.priority || 'medium',
-    status: newTask.value.status || 'todo',
+    priority: newTask.value.priority || "medium",
+    status: newTask.value.status || "todo",
     dueDate: newTask.value.dueDate || new Date(),
     tags: newTask.value.tags || [],
     comments: [],
-    attachments: []
-  }
-  
-  tasks.value.push(task)
-  emit('taskCreated', task)
-  
-  showTaskModal.value = false
-  resetNewTask()
+    attachments: [],
+  };
+
+  tasks.value.push(task);
+  emit("taskCreated", task);
+
+  showTaskModal.value = false;
+  resetNewTask();
 }
 
 function updateTask(task: Task) {
-  const index = tasks.value.findIndex(t => t.id === task.id)
+  const index = tasks.value.findIndex((t) => t.id === task.id);
   if (index !== -1) {
-    tasks.value[index] = task
-    emit('taskUpdated', task)
+    tasks.value[index] = task;
+    emit("taskUpdated", task);
   }
 }
 
 function deleteTask(taskId: string) {
-  tasks.value = tasks.value.filter(t => t.id !== taskId)
-  emit('taskDeleted', taskId)
+  tasks.value = tasks.value.filter((t) => t.id !== taskId);
+  emit("taskDeleted", taskId);
   if (selectedTask.value?.id === taskId) {
-    selectedTask.value = null
+    selectedTask.value = null;
   }
 }
 
 function selectTask(task: Task) {
-  selectedTask.value = task
+  selectedTask.value = task;
 }
 
 function resetNewTask() {
   newTask.value = {
-    title: '',
-    description: '',
-    priority: 'medium',
-    status: 'todo',
+    title: "",
+    description: "",
+    priority: "medium",
+    status: "todo",
     tags: [],
     comments: [],
-    attachments: []
-  }
+    attachments: [],
+  };
 }
 
 function clearFilters() {
@@ -325,81 +327,88 @@ function clearFilters() {
     priority: [],
     assignee: [],
     tags: [],
-    search: ''
-  }
+    search: "",
+  };
 }
 
 function toggleFilterValue(filterType: keyof Filter, value: any) {
-  const filterArray = filter.value[filterType] as any[]
-  const index = filterArray.indexOf(value)
-  
+  const filterArray = filter.value[filterType] as any[];
+  const index = filterArray.indexOf(value);
+
   if (index === -1) {
-    filterArray.push(value)
+    filterArray.push(value);
   } else {
-    filterArray.splice(index, 1)
+    filterArray.splice(index, 1);
   }
 }
 
 function getUserById(id: number) {
-  return users.value.find(u => u.id === id)
+  return users.value.find((u) => u.id === id);
 }
 
 function formatDate(date: Date) {
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric'
-  }).format(date)
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
 }
 
 function isOverdue(task: Task) {
-  return task.status !== 'done' && task.dueDate < new Date()
+  return task.status !== "done" && task.dueDate < new Date();
 }
 
-function getPriorityColor(priority: Task['priority']) {
+function getPriorityColor(priority: Task["priority"]) {
   const colors = {
-    low: '#4CAF50',
-    medium: '#2196F3',
-    high: '#FF9800',
-    critical: '#F44336'
-  }
-  return colors[priority]
+    low: "#4CAF50",
+    medium: "#2196F3",
+    high: "#FF9800",
+    critical: "#F44336",
+  };
+  return colors[priority];
 }
 
-function getStatusColor(status: Task['status']) {
+function getStatusColor(status: Task["status"]) {
   const colors = {
-    todo: '#9E9E9E',
-    'in-progress': '#2196F3',
-    review: '#FF9800',
-    done: '#4CAF50'
-  }
-  return colors[status]
+    todo: "#9E9E9E",
+    "in-progress": "#2196F3",
+    review: "#FF9800",
+    done: "#4CAF50",
+  };
+  return colors[status];
 }
 
 // Watchers
-watch(filter, (newFilter) => {
-  emit('filterChanged', newFilter)
-}, { deep: true })
+watch(
+  filter,
+  (newFilter) => {
+    emit("filterChanged", newFilter);
+  },
+  { deep: true },
+);
 
-watch(() => props.projectId, () => {
-  loadTasks()
-})
+watch(
+  () => props.projectId,
+  () => {
+    loadTasks();
+  },
+);
 
 watchEffect(() => {
   if (hasActiveFilters.value) {
-    console.log('Active filters:', filter.value)
+    console.log("Active filters:", filter.value);
   }
-})
+});
 
 // Lifecycle
 onMounted(() => {
-  loadTasks()
-})
+  loadTasks();
+});
 
 // Provide
-provide('users', users)
-provide('updateTask', updateTask)
-provide('deleteTask', deleteTask)
+provide("users", users);
+provide("updateTask", updateTask);
+provide("deleteTask", deleteTask);
 </script>
 
 <template>
@@ -419,11 +428,11 @@ provide('deleteTask', deleteTask)
       <div class="header-actions">
         <button @click="showFilterPanel = !showFilterPanel" class="btn-secondary">
           <span>🔍</span> Filters
-          <span v-if="hasActiveFilters" class="badge">{{ filter.status.length + filter.priority.length + filter.assignee.length }}</span>
+          <span v-if="hasActiveFilters" class="badge">{{
+            filter.status.length + filter.priority.length + filter.assignee.length
+          }}</span>
         </button>
-        <button @click="showTaskModal = true" class="btn-primary">
-          <span>+</span> New Task
-        </button>
+        <button @click="showTaskModal = true" class="btn-primary"><span>+</span> New Task</button>
       </div>
     </header>
 
@@ -431,22 +440,22 @@ provide('deleteTask', deleteTask)
     <aside v-if="showFilterPanel" class="filter-panel">
       <div class="filter-section">
         <h3>Search</h3>
-        <input 
-          v-model="filter.search" 
-          type="text" 
+        <input
+          v-model="filter.search"
+          type="text"
           placeholder="Search tasks..."
           class="search-input"
-        >
+        />
       </div>
 
       <div class="filter-section">
         <h3>Status</h3>
         <label v-for="status in ['todo', 'in-progress', 'review', 'done']" :key="status">
-          <input 
-            type="checkbox" 
+          <input
+            type="checkbox"
             :checked="filter.status.includes(status)"
             @change="toggleFilterValue('status', status)"
-          >
+          />
           {{ status }}
         </label>
       </div>
@@ -454,11 +463,11 @@ provide('deleteTask', deleteTask)
       <div class="filter-section">
         <h3>Priority</h3>
         <label v-for="priority in ['low', 'medium', 'high', 'critical']" :key="priority">
-          <input 
-            type="checkbox" 
+          <input
+            type="checkbox"
             :checked="filter.priority.includes(priority)"
             @change="toggleFilterValue('priority', priority)"
-          >
+          />
           {{ priority }}
         </label>
       </div>
@@ -466,11 +475,11 @@ provide('deleteTask', deleteTask)
       <div class="filter-section">
         <h3>Assignee</h3>
         <label v-for="user in users" :key="user.id">
-          <input 
-            type="checkbox" 
+          <input
+            type="checkbox"
             :checked="filter.assignee.includes(user.id)"
             @change="toggleFilterValue('assignee', user.id)"
-          >
+          />
           {{ user.name }}
         </label>
       </div>
@@ -478,11 +487,11 @@ provide('deleteTask', deleteTask)
       <div class="filter-section">
         <h3>Tags</h3>
         <label v-for="tag in allTags" :key="tag">
-          <input 
-            type="checkbox" 
+          <input
+            type="checkbox"
             :checked="filter.tags.includes(tag)"
             @change="toggleFilterValue('tags', tag)"
-          >
+          />
           {{ tag }}
         </label>
       </div>
@@ -497,22 +506,13 @@ provide('deleteTask', deleteTask)
       <!-- Toolbar -->
       <div class="toolbar">
         <div class="view-switcher">
-          <button 
-            :class="{ active: currentView === 'list' }"
-            @click="currentView = 'list'"
-          >
+          <button :class="{ active: currentView === 'list' }" @click="currentView = 'list'">
             List
           </button>
-          <button 
-            :class="{ active: currentView === 'board' }"
-            @click="currentView = 'board'"
-          >
+          <button :class="{ active: currentView === 'board' }" @click="currentView = 'board'">
             Board
           </button>
-          <button 
-            :class="{ active: currentView === 'calendar' }"
-            @click="currentView = 'calendar'"
-          >
+          <button :class="{ active: currentView === 'calendar' }" @click="currentView = 'calendar'">
             Calendar
           </button>
         </div>
@@ -528,7 +528,7 @@ provide('deleteTask', deleteTask)
             </select>
           </label>
           <button @click="sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'">
-            {{ sortOrder === 'asc' ? '↑' : '↓' }}
+            {{ sortOrder === "asc" ? "↑" : "↓" }}
           </button>
         </div>
 
@@ -564,9 +564,7 @@ provide('deleteTask', deleteTask)
         <button v-if="hasActiveFilters" @click="clearFilters" class="btn-secondary">
           Clear Filters
         </button>
-        <button v-else @click="showTaskModal = true" class="btn-primary">
-          Create Task
-        </button>
+        <button v-else @click="showTaskModal = true" class="btn-primary">Create Task</button>
       </div>
 
       <!-- List View -->
@@ -574,26 +572,26 @@ provide('deleteTask', deleteTask)
         <div v-for="(groupTasks, groupName) in groupedTasks" :key="groupName" class="task-group">
           <h2 class="group-header">{{ groupName }} ({{ groupTasks.length }})</h2>
           <div class="task-list">
-            <div 
-              v-for="task in groupTasks" 
+            <div
+              v-for="task in groupTasks"
               :key="task.id"
               class="task-item"
-              :class="{ 
+              :class="{
                 selected: selectedTask?.id === task.id,
-                overdue: isOverdue(task)
+                overdue: isOverdue(task),
               }"
               @click="selectTask(task)"
             >
               <div class="task-header">
                 <h3>{{ task.title }}</h3>
                 <div class="task-badges">
-                  <span 
+                  <span
                     class="badge priority"
                     :style="{ backgroundColor: getPriorityColor(task.priority) }"
                   >
                     {{ task.priority }}
                   </span>
-                  <span 
+                  <span
                     class="badge status"
                     :style="{ backgroundColor: getStatusColor(task.status) }"
                   >
@@ -601,9 +599,9 @@ provide('deleteTask', deleteTask)
                   </span>
                 </div>
               </div>
-              
+
               <p class="task-description">{{ task.description }}</p>
-              
+
               <div class="task-meta">
                 <div class="assignee">
                   <span class="avatar">{{ getUserById(task.assignee)?.name.charAt(0) }}</span>
@@ -621,9 +619,7 @@ provide('deleteTask', deleteTask)
                 <button @click.stop="updateTask({ ...task, status: 'done' })" class="btn-sm">
                   Mark Done
                 </button>
-                <button @click.stop="deleteTask(task.id)" class="btn-sm btn-danger">
-                  Delete
-                </button>
+                <button @click.stop="deleteTask(task.id)" class="btn-sm btn-danger">Delete</button>
               </div>
             </div>
           </div>
@@ -632,18 +628,18 @@ provide('deleteTask', deleteTask)
 
       <!-- Board View -->
       <div v-else-if="currentView === 'board'" class="board-view">
-        <div 
-          v-for="status in ['todo', 'in-progress', 'review', 'done']" 
+        <div
+          v-for="status in ['todo', 'in-progress', 'review', 'done']"
           :key="status"
           class="board-column"
         >
           <h3 class="column-header">
             {{ status }}
-            <span class="count">{{ sortedTasks.filter(t => t.status === status).length }}</span>
+            <span class="count">{{ sortedTasks.filter((t) => t.status === status).length }}</span>
           </h3>
           <div class="board-cards">
-            <div 
-              v-for="task in sortedTasks.filter(t => t.status === status)"
+            <div
+              v-for="task in sortedTasks.filter((t) => t.status === status)"
               :key="task.id"
               class="board-card"
               :class="{ overdue: isOverdue(task) }"
@@ -651,11 +647,13 @@ provide('deleteTask', deleteTask)
               <h4>{{ task.title }}</h4>
               <p>{{ task.description }}</p>
               <div class="card-footer">
-                <span 
+                <span
                   class="priority-indicator"
                   :style="{ backgroundColor: getPriorityColor(task.priority) }"
                 ></span>
-                <span class="assignee-avatar">{{ getUserById(task.assignee)?.name.charAt(0) }}</span>
+                <span class="assignee-avatar">{{
+                  getUserById(task.assignee)?.name.charAt(0)
+                }}</span>
               </div>
             </div>
           </div>
@@ -674,11 +672,11 @@ provide('deleteTask', deleteTask)
         <h2>Task Details</h2>
         <button @click="selectedTask = null" class="btn-close">×</button>
       </div>
-      
+
       <div class="detail-content">
         <h3>{{ selectedTask.title }}</h3>
         <p>{{ selectedTask.description }}</p>
-        
+
         <div class="detail-field">
           <label>Status</label>
           <select v-model="selectedTask.status" @change="updateTask(selectedTask)">
@@ -722,9 +720,7 @@ provide('deleteTask', deleteTask)
 
         <div class="detail-section">
           <h4>Comments ({{ selectedTask.comments.length }})</h4>
-          <div v-if="selectedTask.comments.length === 0" class="empty">
-            No comments yet
-          </div>
+          <div v-if="selectedTask.comments.length === 0" class="empty">No comments yet</div>
           <div v-else class="comments-list">
             <div v-for="comment in selectedTask.comments" :key="comment.id" class="comment">
               <div class="comment-header">
@@ -738,11 +734,13 @@ provide('deleteTask', deleteTask)
 
         <div class="detail-section">
           <h4>Attachments ({{ selectedTask.attachments.length }})</h4>
-          <div v-if="selectedTask.attachments.length === 0" class="empty">
-            No attachments
-          </div>
+          <div v-if="selectedTask.attachments.length === 0" class="empty">No attachments</div>
           <div v-else class="attachments-list">
-            <div v-for="attachment in selectedTask.attachments" :key="attachment.id" class="attachment">
+            <div
+              v-for="attachment in selectedTask.attachments"
+              :key="attachment.id"
+              class="attachment"
+            >
               <span>📎 {{ attachment.name }}</span>
               <span class="file-size">{{ (attachment.size / 1024).toFixed(1) }} KB</span>
             </div>
@@ -758,11 +756,11 @@ provide('deleteTask', deleteTask)
           <h2>Create New Task</h2>
           <button @click="showTaskModal = false" class="btn-close">×</button>
         </div>
-        
+
         <div class="modal-body">
           <div class="form-field">
             <label>Title *</label>
-            <input v-model="newTask.title" type="text" placeholder="Task title">
+            <input v-model="newTask.title" type="text" placeholder="Task title" />
           </div>
 
           <div class="form-field">
@@ -873,10 +871,19 @@ provide('deleteTask', deleteTask)
   background: #e1e8ed;
 }
 
-.pill.todo { background: #e3f2fd; }
-.pill.in-progress { background: #fff3e0; }
-.pill.done { background: #e8f5e9; }
-.pill.overdue { background: #ffebee; color: #c62828; }
+.pill.todo {
+  background: #e3f2fd;
+}
+.pill.in-progress {
+  background: #fff3e0;
+}
+.pill.done {
+  background: #e8f5e9;
+}
+.pill.overdue {
+  background: #ffebee;
+  color: #c62828;
+}
 
 .btn-primary {
   padding: 0.5rem 1rem;
@@ -919,7 +926,7 @@ provide('deleteTask', deleteTask)
 }
 
 .task-item:hover {
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .task-item.selected {
@@ -1051,6 +1058,8 @@ provide('deleteTask', deleteTask)
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

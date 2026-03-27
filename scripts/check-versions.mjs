@@ -245,7 +245,9 @@ if (jsonMode) {
   console.log("\n=== Rust crates ===");
   for (const r of rustCrates) {
     const rStatus = r.needsPublish ? "PUBLISH" : "skip";
-    console.log(`  [${rStatus}] ${r.crate}: ${r.publishedVersion || "(none)"} -> ${r.localVersion}`);
+    console.log(
+      `  [${rStatus}] ${r.crate}: ${r.publishedVersion || "(none)"} -> ${r.localVersion}`,
+    );
   }
 
   if (vscodeWarnings.length > 0) {

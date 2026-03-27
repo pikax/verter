@@ -22,7 +22,10 @@ function compileVue(source, filename) {
     } catch {}
   }
   const result = compileTemplate({
-    source: descriptor.template.content, filename, id: filename, ssr: true,
+    source: descriptor.template.content,
+    filename,
+    id: filename,
+    ssr: true,
     compilerOptions: { mode: "module", bindingMetadata: bm },
   });
   if (result.errors?.length) return null;
@@ -34,7 +37,12 @@ function compileVerter(source, filePath) {
   const result = host.getVirtualFile({
     canonicalId: upsertResult.canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: { filename: path.basename(filePath), ssr: true, forceJs: true, sourceMap: false },
+    compileProfile: {
+      filename: path.basename(filePath),
+      ssr: true,
+      forceJs: true,
+      sourceMap: false,
+    },
   });
   return result?.code;
 }
@@ -50,28 +58,39 @@ function showDiff(label, source) {
 }
 
 // Test 1: v-show + :style on same element
-showDiff("v-show + :style", `<template>
+showDiff(
+  "v-show + :style",
+  `<template>
   <div>
     <span v-show="visible" :style="customStyle">text</span>
   </div>
-</template>`);
+</template>`,
+);
 
 // Test 2: v-show + static style on same element
-showDiff("v-show + static style", `<template>
+showDiff(
+  "v-show + static style",
+  `<template>
   <div>
     <span v-show="visible" style="color: red">text</span>
   </div>
-</template>`);
+</template>`,
+);
 
 // Test 3: v-show + :style array + static style
-showDiff("v-show + :style + static style", `<template>
+showDiff(
+  "v-show + :style + static style",
+  `<template>
   <div>
     <span v-show="visible" :style="[customStyle, anotherStyle]" style="color: red">text</span>
   </div>
-</template>`);
+</template>`,
+);
 
 // Test 4: element-plus badge pattern — :style + conditional v-show
-showDiff("badge pattern", `<script setup>
+showDiff(
+  "badge pattern",
+  `<script setup>
 const hidden = ref(false)
 const content = ref(5)
 const isDot = ref(false)
@@ -82,4 +101,5 @@ const badgeClass = ref('')
   <div>
     <sup v-show="!hidden && (content || isDot)" :style="style" :class="['badge', badgeClass]">text</sup>
   </div>
-</template>`);
+</template>`,
+);

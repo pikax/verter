@@ -1,10 +1,4 @@
-import {
-  WebviewPanel,
-  window,
-  ViewColumn,
-  Uri,
-  Disposable,
-} from "vscode";
+import { WebviewPanel, window, ViewColumn, Uri, Disposable } from "vscode";
 import type { UnifiedVirtualFileItem } from "./UnifiedVirtualFilesProvider";
 
 /**
@@ -46,10 +40,7 @@ export class SourceMapWebviewPanel implements Disposable {
 
     const filesWithMaps = virtualFiles.filter((vf) => vf.sourceMap);
     // Clamp selectedTab
-    const clampedTab = Math.max(
-      0,
-      Math.min(selectedTab, filesWithMaps.length - 1),
-    );
+    const clampedTab = Math.max(0, Math.min(selectedTab, filesWithMaps.length - 1));
 
     const data = {
       sourceCode,
@@ -636,7 +627,6 @@ function generateSegmentColors(count: number): string {
   const hueStep = 360 / count;
   return Array.from(
     { length: count },
-    (_, i) =>
-      `.seg-color-${i} { background: hsla(${Math.round(i * hueStep)}, 70%, 50%, 0.25); }`,
+    (_, i) => `.seg-color-${i} { background: hsla(${Math.round(i * hueStep)}, 70%, 50%, 0.25); }`,
   ).join("\n    ");
 }

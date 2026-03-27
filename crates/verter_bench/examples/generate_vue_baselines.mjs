@@ -106,7 +106,10 @@ const cases = [
   { name: "event_modifier_self", template: `<div @click.self="handler">click</div>` },
   { name: "event_modifier_once", template: `<button @click.once="handler">click</button>` },
   { name: "event_modifier_passive", template: `<div @scroll.passive="onScroll">scroll</div>` },
-  { name: "event_modifier_chain", template: `<button @click.stop.prevent="handler">click</button>` },
+  {
+    name: "event_modifier_chain",
+    template: `<button @click.stop.prevent="handler">click</button>`,
+  },
   { name: "event_key_modifier", template: `<input @keyup.enter="submit">` },
   { name: "event_key_chain", template: `<input @keydown.ctrl.enter="submit">` },
   { name: "event_mouse_modifier", template: `<button @click.right="handler">click</button>` },
@@ -317,10 +320,16 @@ const cases = [
   { name: "slot_named_usage", template: `<MyComp><template #header>Header</template></MyComp>` },
   { name: "slot_v_slot", template: `<MyComp><template v-slot:header>Header</template></MyComp>` },
   { name: "slot_scoped", template: `<MyComp v-slot="{ item }">{{ item }}</MyComp>` },
-  { name: "slot_scoped_named", template: `<MyComp><template #default="{ item }">{{ item }}</template></MyComp>` },
+  {
+    name: "slot_scoped_named",
+    template: `<MyComp><template #default="{ item }">{{ item }}</template></MyComp>`,
+  },
   { name: "slot_destructure", template: `<MyComp v-slot="{ user: { name } }">{{ name }}</MyComp>` },
   { name: "slot_shorthand", template: `<MyComp #header>Header</MyComp>` },
-  { name: "slot_dynamic", template: `<MyComp><template #[dynamicSlot]>Content</template></MyComp>` },
+  {
+    name: "slot_dynamic",
+    template: `<MyComp><template #[dynamicSlot]>Content</template></MyComp>`,
+  },
 
   // === Mixed children ===
   {
@@ -359,28 +368,55 @@ const cases = [
 
   // === Transition ===
   { name: "transition", template: `<transition><div v-if="show">content</div></transition>` },
-  { name: "transition_name", template: `<transition name="fade"><div v-if="show">content</div></transition>` },
-  { name: "transition_mode", template: `<transition mode="out-in"><div v-if="show">content</div></transition>` },
-  { name: "transition_group", template: `<transition-group><div v-for="i in items" :key="i">{{ i }}</div></transition-group>` },
-  { name: "transition_events", template: `<transition @enter="onEnter"><div v-if="show">content</div></transition>` },
+  {
+    name: "transition_name",
+    template: `<transition name="fade"><div v-if="show">content</div></transition>`,
+  },
+  {
+    name: "transition_mode",
+    template: `<transition mode="out-in"><div v-if="show">content</div></transition>`,
+  },
+  {
+    name: "transition_group",
+    template: `<transition-group><div v-for="i in items" :key="i">{{ i }}</div></transition-group>`,
+  },
+  {
+    name: "transition_events",
+    template: `<transition @enter="onEnter"><div v-if="show">content</div></transition>`,
+  },
 
   // === KeepAlive ===
   { name: "keep_alive", template: `<keep-alive><component :is="current"/></keep-alive>` },
-  { name: "keep_alive_include", template: `<keep-alive :include="['a', 'b']"><component :is="current"/></keep-alive>` },
-  { name: "keep_alive_max", template: `<keep-alive :max="10"><component :is="current"/></keep-alive>` },
+  {
+    name: "keep_alive_include",
+    template: `<keep-alive :include="['a', 'b']"><component :is="current"/></keep-alive>`,
+  },
+  {
+    name: "keep_alive_max",
+    template: `<keep-alive :max="10"><component :is="current"/></keep-alive>`,
+  },
 
   // === Teleport ===
   { name: "teleport", template: `<teleport to="body"><div>modal</div></teleport>` },
-  { name: "teleport_disabled", template: `<teleport to="body" :disabled="disabled"><div>modal</div></teleport>` },
+  {
+    name: "teleport_disabled",
+    template: `<teleport to="body" :disabled="disabled"><div>modal</div></teleport>`,
+  },
 
   // === Suspense ===
   { name: "suspense", template: `<suspense><AsyncComp/></suspense>` },
-  { name: "suspense_fallback", template: `<suspense><AsyncComp/><template #fallback>Loading...</template></suspense>` },
+  {
+    name: "suspense_fallback",
+    template: `<suspense><AsyncComp/><template #fallback>Loading...</template></suspense>`,
+  },
 
   // === Template ===
   { name: "template_wrapper", template: `<template><div>a</div><div>b</div></template>` },
   { name: "template_v_if", template: `<template v-if="show"><div>content</div></template>` },
-  { name: "template_v_for", template: `<template v-for="i in items"><div>{{ i }}</div></template>` },
+  {
+    name: "template_v_for",
+    template: `<template v-for="i in items"><div>{{ i }}</div></template>`,
+  },
 
   // === Multiple roots ===
   {
@@ -405,7 +441,10 @@ const cases = [
   // === Special attributes ===
   { name: "attr_key", template: `<div :key="id">content</div>` },
   { name: "attr_ref", template: `<div ref="myDiv">content</div>` },
-  { name: "attr_ref_for", template: `<div v-for="i in items" :ref="el => refs[i] = el">{{ i }}</div>` },
+  {
+    name: "attr_ref_for",
+    template: `<div v-for="i in items" :ref="el => refs[i] = el">{{ i }}</div>`,
+  },
   { name: "attr_is", template: `<div :is="component">content</div>` },
 
   // === Dynamic arguments ===
@@ -425,16 +464,25 @@ const cases = [
   { name: "adjacent_text_nodes", template: `<div>a{{ b }}c{{ d }}e</div>` },
   { name: "deeply_nested_interpolation", template: `<div><span><em>{{ msg }}</em></span></div>` },
   { name: "complex_expression", template: `<div>{{ (a || b) && (c ? d : e) }}</div>` },
-  { name: "array_destructure_rest", template: `<div v-for="[first, ...rest] in items">{{ first }}</div>` },
-  { name: "object_destructure_rest", template: `<div v-for="{ id, ...rest } in items">{{ id }}</div>` },
+  {
+    name: "array_destructure_rest",
+    template: `<div v-for="[first, ...rest] in items">{{ first }}</div>`,
+  },
+  {
+    name: "object_destructure_rest",
+    template: `<div v-for="{ id, ...rest } in items">{{ id }}</div>`,
+  },
   { name: "v_for_v_if_warning", template: `<div v-if="show" v-for="i in items">{{ i }}</div>` },
-  { name: "special_chars_in_text", template: `<div>&lt;script&gt;alert('xss')&lt;/script&gt;</div>` },
+  {
+    name: "special_chars_in_text",
+    template: `<div>&lt;script&gt;alert('xss')&lt;/script&gt;</div>`,
+  },
   { name: "quote_escaping", template: `<div title='it\\'s'>content</div>` },
   { name: "attribute_no_value", template: `<input disabled>` },
   { name: "attribute_empty_value", template: `<input value="">` },
   { name: "multiple_v_model", template: `<input v-model="a" v-model="b">` },
   { name: "v_bind_after_v_for", template: `<div v-for="i in items" v-bind="i">{{ i }}</div>` },
-  
+
   // === Real-world patterns ===
   {
     name: "form_complex",
@@ -599,9 +647,7 @@ for (const [name, data] of Object.entries(output)) {
   } else {
     // Print just the render function body (skip imports)
     const lines = data.dev.split("\n");
-    const renderStart = lines.findIndex((l) =>
-      l.includes("export function render")
-    );
+    const renderStart = lines.findIndex((l) => l.includes("export function render"));
     if (renderStart >= 0) {
       console.log("Dev render:");
       for (let i = renderStart; i < lines.length; i++) {

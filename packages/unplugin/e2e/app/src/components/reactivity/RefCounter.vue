@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch } from "vue";
 
-const count = ref(0)
-const doubled = computed(() => count.value * 2)
-const watchLog = ref<string[]>([])
+const count = ref(0);
+const doubled = computed(() => count.value * 2);
+const watchLog = ref<string[]>([]);
 
 watch(count, (newVal, oldVal) => {
-  watchLog.value.push(`${oldVal} → ${newVal}`)
-})
+  watchLog.value.push(`${oldVal} → ${newVal}`);
+});
 
 function increment() {
-  count.value++
+  count.value++;
 }
 </script>
 

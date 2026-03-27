@@ -25,9 +25,7 @@ describe("shouldRestartLanguageServerForConfigurationChange", () => {
 
   it("does not restart for unrelated settings", () => {
     expect(
-      shouldRestartLanguageServerForConfigurationChange(
-        makeEvent(["verter.analysis.enabled"]),
-      ),
+      shouldRestartLanguageServerForConfigurationChange(makeEvent(["verter.analysis.enabled"])),
     ).toBe(false);
   });
 });

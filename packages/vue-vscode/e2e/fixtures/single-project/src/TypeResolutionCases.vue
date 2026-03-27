@@ -1,28 +1,32 @@
 <script setup lang="ts">
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive } from "vue";
 
 // Union types
-const mixed = ref<string | number>(0)
+const mixed = ref<string | number>(0);
 
 // Nested object types
 interface DeepNested {
-  deep: { value: string; count: number }
+  deep: { value: string; count: number };
 }
-const nested = reactive<DeepNested>({ deep: { value: 'hello', count: 1 } })
+const nested = reactive<DeepNested>({ deep: { value: "hello", count: 1 } });
 
 // Enum-like const objects
-const Status = { Active: 'active', Inactive: 'inactive' } as const
-type StatusType = typeof Status[keyof typeof Status]
-const currentStatus = ref<StatusType>('active')
+const Status = { Active: "active", Inactive: "inactive" } as const;
+type StatusType = (typeof Status)[keyof typeof Status];
+const currentStatus = ref<StatusType>("active");
 
 // Intersection types
-interface HasName { name: string }
-interface HasAge { age: number }
-type Person = HasName & HasAge
-const person = ref<Person>({ name: 'Alice', age: 30 })
+interface HasName {
+  name: string;
+}
+interface HasAge {
+  age: number;
+}
+type Person = HasName & HasAge;
+const person = ref<Person>({ name: "Alice", age: 30 });
 
 // Computed with complex return
-const summary = computed(() => `${person.value.name}: ${person.value.age}`)
+const summary = computed(() => `${person.value.name}: ${person.value.age}`);
 </script>
 <template>
   <div>

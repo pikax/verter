@@ -65,10 +65,7 @@ export function readStartupProbeConfig(): StartupProbeConfig | undefined {
   }
 }
 
-export function writeTimingMarker(
-  name: string,
-  ...parts: Array<string | number>
-): void {
+export function writeTimingMarker(name: string, ...parts: Array<string | number>): void {
   const testLogFile = process.env.VERTER_E2E_LOG_FILE;
   if (!process.env.VERTER_E2E_TEST || !testLogFile) {
     return;
@@ -105,11 +102,7 @@ export class StartupProbe {
   }
 
   maybeTrackDiagnostics(uri: Uri): void {
-    if (
-      this.firstDiagnosticLogged ||
-      !this.targetUri ||
-      uri.toString() !== this.targetUri
-    ) {
+    if (this.firstDiagnosticLogged || !this.targetUri || uri.toString() !== this.targetUri) {
       return;
     }
 
@@ -143,9 +136,7 @@ export class StartupProbe {
       return false;
     }
 
-    const relativePath = normalizePath(
-      workspace.asRelativePath(document.uri, false),
-    );
+    const relativePath = normalizePath(workspace.asRelativePath(document.uri, false));
 
     return relativePath === this.config.relativePath;
   }
@@ -156,9 +147,7 @@ export class StartupProbe {
       return undefined;
     }
 
-    const labelOffset = this.config.completionAnchor.indexOf(
-      this.config.completionLabel,
-    );
+    const labelOffset = this.config.completionAnchor.indexOf(this.config.completionLabel);
     if (labelOffset === -1) {
       return anchorOffset;
     }
@@ -177,21 +166,17 @@ export class StartupProbe {
 
     const position = document.positionAt(probeOffset);
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const pollIntervalMs =
-      this.config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const pollIntervalMs = this.config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const start = Date.now();
 
     while (!this.disposed && Date.now() - start < timeoutMs) {
-      const completions =
-        await commands.executeCommand<CompletionList | undefined>(
-          "vscode.executeCompletionItemProvider",
-          document.uri,
-          position,
-        );
-
-      const match = completions?.items.find(
-        (item) => item.label === this.config.completionLabel,
+      const completions = await commands.executeCommand<CompletionList | undefined>(
+        "vscode.executeCompletionItemProvider",
+        document.uri,
+        position,
       );
+
+      const match = completions?.items.find((item) => item.label === this.config.completionLabel);
       if (
         match &&
         match.kind !== undefined &&

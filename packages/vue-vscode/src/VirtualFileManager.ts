@@ -1,10 +1,4 @@
-import {
-  TextDocumentContentProvider,
-  EventEmitter,
-  Uri,
-  Event,
-  Disposable,
-} from "vscode";
+import { TextDocumentContentProvider, EventEmitter, Uri, Event, Disposable } from "vscode";
 
 /**
  * Content provider for virtual files using a custom `verter-virtual://` URI scheme.

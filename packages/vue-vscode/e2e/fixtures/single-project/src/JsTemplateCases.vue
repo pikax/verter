@@ -1,14 +1,14 @@
 <script setup>
-import { ref } from 'vue'
+import { ref } from "vue";
 
 /** @type {import('vue').Ref<number>} */
-const count = ref(0)
+const count = ref(0);
 
 /** @type {{ label: string, done: boolean }} */
-const state = { label: 'ready', done: false }
+const state = { label: "ready", done: false };
 
 function increment() {
-  count.value++
+  count.value++;
 }
 </script>
 

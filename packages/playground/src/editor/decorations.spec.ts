@@ -29,7 +29,17 @@ describe("computeBindingDecorations", () => {
   it("decorates ref binding at span position", () => {
     const source = '<script setup lang="ts">\nconst count = ref(0)\n</script>';
     const analysis = makeAnalysis({
-      bindings: [{ name: "count", kind: "Const", isReactive: true, reactivityKind: "Ref", initializer: null, spanStart: 31, spanEnd: 36 }],
+      bindings: [
+        {
+          name: "count",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          initializer: null,
+          spanStart: 31,
+          spanEnd: 36,
+        },
+      ],
     });
     const result = computeBindingDecorations(source, analysis);
     expect(result.length).toBe(1);
@@ -42,7 +52,17 @@ describe("computeBindingDecorations", () => {
   it("decorates computed binding", () => {
     const source = '<script setup lang="ts">\nconst doubled = computed(() => 0)\n</script>';
     const analysis = makeAnalysis({
-      bindings: [{ name: "doubled", kind: "Const", isReactive: true, reactivityKind: "Computed", initializer: null, spanStart: 31, spanEnd: 38 }],
+      bindings: [
+        {
+          name: "doubled",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Computed",
+          initializer: null,
+          spanStart: 31,
+          spanEnd: 38,
+        },
+      ],
     });
     const result = computeBindingDecorations(source, analysis);
     expect(result.length).toBe(1);
@@ -52,7 +72,16 @@ describe("computeBindingDecorations", () => {
   it("decorates function binding", () => {
     const source = '<script setup lang="ts">\nfunction increment() {}\n</script>';
     const analysis = makeAnalysis({
-      bindings: [{ name: "increment", kind: "Function", isReactive: false, initializer: null, spanStart: 34, spanEnd: 43 }],
+      bindings: [
+        {
+          name: "increment",
+          kind: "Function",
+          isReactive: false,
+          initializer: null,
+          spanStart: 34,
+          spanEnd: 43,
+        },
+      ],
     });
     const result = computeBindingDecorations(source, analysis);
     expect(result.length).toBe(1);
@@ -60,12 +89,25 @@ describe("computeBindingDecorations", () => {
   });
 
   it("also decorates template binding occurrences", () => {
-    const source = '<script setup lang="ts">\nconst count = ref(0)\n</script>\n<template>{{ count }}</template>';
+    const source =
+      '<script setup lang="ts">\nconst count = ref(0)\n</script>\n<template>{{ count }}</template>';
     const analysis = makeAnalysis({
-      bindings: [{ name: "count", kind: "Const", isReactive: true, reactivityKind: "Ref", initializer: null, spanStart: 31, spanEnd: 36 }],
+      bindings: [
+        {
+          name: "count",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          initializer: null,
+          spanStart: 31,
+          spanEnd: 36,
+        },
+      ],
       template: {
         components: [],
-        bindingOccurrences: [{ name: "count", spanStart: 70, spanEnd: 75, usageKind: "Interpolation" }],
+        bindingOccurrences: [
+          { name: "count", spanStart: 70, spanEnd: 75, usageKind: "Interpolation" },
+        ],
         definedSlots: [],
       },
     });
@@ -80,7 +122,16 @@ describe("computeBindingDecorations", () => {
   it("skips ___VERTER___ prefixed bindings", () => {
     const source = '<script setup lang="ts">\nconst ___VERTER___internal = 1\n</script>';
     const analysis = makeAnalysis({
-      bindings: [{ name: "___VERTER___internal", kind: "Const", isReactive: false, initializer: null, spanStart: 31, spanEnd: 51 }],
+      bindings: [
+        {
+          name: "___VERTER___internal",
+          kind: "Const",
+          isReactive: false,
+          initializer: null,
+          spanStart: 31,
+          spanEnd: 51,
+        },
+      ],
     });
     const result = computeBindingDecorations(source, analysis);
     expect(result).toEqual([]);
@@ -89,7 +140,16 @@ describe("computeBindingDecorations", () => {
   it("skips bindings with no reactivity or kind style", () => {
     const source = '<script setup lang="ts">\nconst x = 1\n</script>';
     const analysis = makeAnalysis({
-      bindings: [{ name: "x", kind: "Const", isReactive: false, initializer: null, spanStart: 31, spanEnd: 32 }],
+      bindings: [
+        {
+          name: "x",
+          kind: "Const",
+          isReactive: false,
+          initializer: null,
+          spanStart: 31,
+          spanEnd: 32,
+        },
+      ],
     });
     const result = computeBindingDecorations(source, analysis);
     expect(result).toEqual([]);
@@ -99,11 +159,19 @@ describe("computeBindingDecorations", () => {
 describe("computeBindingInlayHints", () => {
   it("produces type hint for ref binding", () => {
     const analysis = makeAnalysis({
-      bindings: [{
-        name: "count", kind: "Const", isReactive: true, reactivityKind: "Ref",
-        initializer: { FunctionCall: { callee: "ref", calleeImportSource: "vue", vueApi: "Ref" } },
-        spanStart: 31, spanEnd: 36,
-      }],
+      bindings: [
+        {
+          name: "count",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          initializer: {
+            FunctionCall: { callee: "ref", calleeImportSource: "vue", vueApi: "Ref" },
+          },
+          spanStart: 31,
+          spanEnd: 36,
+        },
+      ],
     });
     const hints = computeBindingInlayHints(analysis);
     expect(hints.length).toBe(1);
@@ -114,12 +182,20 @@ describe("computeBindingInlayHints", () => {
 
   it("no hint for explicitly typed binding", () => {
     const analysis = makeAnalysis({
-      bindings: [{
-        name: "count", kind: "Const", isReactive: true, reactivityKind: "Ref",
-        typeAnnotation: "Ref<number>",
-        initializer: { FunctionCall: { callee: "ref", calleeImportSource: "vue", vueApi: "Ref" } },
-        spanStart: 31, spanEnd: 36,
-      }],
+      bindings: [
+        {
+          name: "count",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Ref",
+          typeAnnotation: "Ref<number>",
+          initializer: {
+            FunctionCall: { callee: "ref", calleeImportSource: "vue", vueApi: "Ref" },
+          },
+          spanStart: 31,
+          spanEnd: 36,
+        },
+      ],
     });
     const hints = computeBindingInlayHints(analysis);
     expect(hints).toEqual([]);
@@ -127,11 +203,17 @@ describe("computeBindingInlayHints", () => {
 
   it("no hint for plain const", () => {
     const analysis = makeAnalysis({
-      bindings: [{
-        name: "x", kind: "Const", isReactive: false, reactivityKind: "None",
-        initializer: { Literal: { kind: "Number" } },
-        spanStart: 31, spanEnd: 32,
-      }],
+      bindings: [
+        {
+          name: "x",
+          kind: "Const",
+          isReactive: false,
+          reactivityKind: "None",
+          initializer: { Literal: { kind: "Number" } },
+          spanStart: 31,
+          spanEnd: 32,
+        },
+      ],
     });
     const hints = computeBindingInlayHints(analysis);
     expect(hints).toEqual([]);
@@ -139,11 +221,19 @@ describe("computeBindingInlayHints", () => {
 
   it("produces ComputedRef hint for computed binding", () => {
     const analysis = makeAnalysis({
-      bindings: [{
-        name: "doubled", kind: "Const", isReactive: true, reactivityKind: "Computed",
-        initializer: { FunctionCall: { callee: "computed", calleeImportSource: "vue", vueApi: "Computed" } },
-        spanStart: 31, spanEnd: 38,
-      }],
+      bindings: [
+        {
+          name: "doubled",
+          kind: "Const",
+          isReactive: true,
+          reactivityKind: "Computed",
+          initializer: {
+            FunctionCall: { callee: "computed", calleeImportSource: "vue", vueApi: "Computed" },
+          },
+          spanStart: 31,
+          spanEnd: 38,
+        },
+      ],
     });
     const hints = computeBindingInlayHints(analysis);
     expect(hints.length).toBe(1);
@@ -193,10 +283,17 @@ describe("computeCssClassDecorations", () => {
 
 describe("computeCodeLenses", () => {
   it("creates lens for script setup block", () => {
-    const source = '<script setup lang="ts">\nconst x = 1\n</script>\n<template><div></div></template>';
+    const source =
+      '<script setup lang="ts">\nconst x = 1\n</script>\n<template><div></div></template>';
     const analysis = makeAnalysis({
       bindings: [{ name: "x", kind: "Const", isReactive: false, initializer: null }],
-      imports: [{ source: "vue", isTypeOnly: false, bindings: [{ name: "ref", isTypeOnly: false, vueApi: "ref" }] }],
+      imports: [
+        {
+          source: "vue",
+          isTypeOnly: false,
+          bindings: [{ name: "ref", isTypeOnly: false, vueApi: "ref" }],
+        },
+      ],
     });
     const lenses = computeCodeLenses(source, analysis);
     // Should have at least a script lens and a template lens
@@ -208,7 +305,8 @@ describe("computeCodeLenses", () => {
   });
 
   it("creates lens for style block with scoped info", () => {
-    const source = '<script setup lang="ts"></script>\n<template><div></div></template>\n<style scoped>\n.app { color: red; }\n</style>';
+    const source =
+      '<script setup lang="ts"></script>\n<template><div></div></template>\n<style scoped>\n.app { color: red; }\n</style>';
     const analysis = makeAnalysis({
       styles: [
         {

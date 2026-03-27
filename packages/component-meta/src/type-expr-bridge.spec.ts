@@ -263,6 +263,63 @@ describe("typeExprToDescriptor", () => {
     expect(fn.returnType.kind).toBe("primitive");
   });
 
+  it("preserves generic parameter nodes and function type parameters", () => {
+    const result = typeExprToDescriptor({
+      kind: "function",
+      parameters: [
+        {
+          name: "value",
+          ty: {
+            kind: "typeParameter",
+            name: "T",
+          },
+          optional: false,
+          rest: false,
+        },
+      ],
+      returnType: {
+        kind: "typeParameter",
+        name: "T",
+        constraint: { kind: "primitive", name: "number" },
+        default: { kind: "primitive", name: "string" },
+      },
+      typeParameters: [
+        {
+          name: "T",
+          constraint: { kind: "primitive", name: "number" },
+          default: { kind: "primitive", name: "string" },
+        },
+      ],
+    } as NativeTypeExpr);
+    expect(result).toEqual({
+      kind: "function",
+      parameters: [
+        {
+          name: "value",
+          type: {
+            kind: "typeParameter",
+            name: "T",
+          },
+          optional: false,
+        },
+      ],
+      returnType: {
+        kind: "typeParameter",
+        name: "T",
+        constraint: { kind: "primitive", name: "number" },
+        default: { kind: "primitive", name: "string" },
+      },
+      typeParameters: [
+        {
+          kind: "typeParameter",
+          name: "T",
+          constraint: { kind: "primitive", name: "number" },
+          default: { kind: "primitive", name: "string" },
+        },
+      ],
+    });
+  });
+
   // =============================================================================
   // Ref
   // =============================================================================

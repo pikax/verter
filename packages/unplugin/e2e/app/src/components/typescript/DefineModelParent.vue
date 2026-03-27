@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import DefineModelDemo from './DefineModelDemo.vue'
+import { ref } from "vue";
+import DefineModelDemo from "./DefineModelDemo.vue";
 
-const parentValue = ref('initial')
+const parentValue = ref("initial");
 
 function reset() {
-  parentValue.value = ''
+  parentValue.value = "";
 }
 </script>
 

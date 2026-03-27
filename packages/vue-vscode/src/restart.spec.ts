@@ -55,9 +55,7 @@ describe("restartLanguageServer", () => {
 
   it("start failure: error logged, returns false", async () => {
     const deps = makeDeps({
-      createAndStart: vi
-        .fn()
-        .mockRejectedValue(new Error("Failed to start")),
+      createAndStart: vi.fn().mockRejectedValue(new Error("Failed to start")),
     });
 
     const result = await restartLanguageServer(deps);
@@ -74,9 +72,7 @@ describe("restartLanguageServer", () => {
   it("stop timeout + start failure: TSGO killed, error logged", async () => {
     const deps = makeDeps({
       stop: vi.fn().mockRejectedValue(new Error("timeout")),
-      createAndStart: vi
-        .fn()
-        .mockRejectedValue(new Error("Failed to start")),
+      createAndStart: vi.fn().mockRejectedValue(new Error("Failed to start")),
     });
 
     const result = await restartLanguageServer(deps);

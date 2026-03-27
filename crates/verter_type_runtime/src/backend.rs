@@ -87,6 +87,8 @@ pub enum ArtifactProfile {
 pub enum BackendTypeQuery {
     /// Get the type text at the given offset.
     TypeAtOffset,
+    /// Get the type text at the resolved definition site for the symbol at the given offset.
+    DefinitionTypeAtOffset,
     /// Get the members (properties) of the type at the given offset.
     MembersAtOffset,
     /// Get the documentation text at the given offset.

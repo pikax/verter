@@ -7,7 +7,9 @@ import { TypeScriptService } from "./tsService";
 import type { DestructuredBlockMeta } from "./tsService";
 import { SourceMapMapper } from "./sourceMapMapper";
 
-async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string; destructuredBlock: DestructuredBlockMeta | null }> {
+async function generateRealTsxOutput(
+  vueSource: string,
+): Promise<{ code: string; sourceMap: string; destructuredBlock: DestructuredBlockMeta | null }> {
   const thisDir = dirname(fileURLToPath(import.meta.url));
   const wasmJs = resolve(thisDir, "../../../wasm/wasm/verter_wasm.js");
   const wasmBin = resolve(thisDir, "../../../wasm/wasm/verter_wasm_bg.wasm");
@@ -41,7 +43,11 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     throw new Error("expected host.getIde() to return code + sourceMap");
   }
 
-  return { code: tsx.code, sourceMap: tsx.sourceMap, destructuredBlock: tsx.destructuredBlock ?? null };
+  return {
+    code: tsx.code,
+    sourceMap: tsx.sourceMap,
+    destructuredBlock: tsx.destructuredBlock ?? null,
+  };
 }
 
 describe("TypeScriptService mapping", () => {
@@ -205,7 +211,12 @@ describe("TypeScriptService mapping", () => {
     service.currentMapper = mapper;
     service.send = vi.fn(async () => [
       { fileName: "/App.vue.tsx", start: tsxUseStart, length: 3, isDefinition: false },
-      { fileName: "/App.vue.tsx", start: tsxCode.indexOf("msg: string"), length: 3, isDefinition: true },
+      {
+        fileName: "/App.vue.tsx",
+        start: tsxCode.indexOf("msg: string"),
+        length: 3,
+        isDefinition: true,
+      },
     ]);
 
     const refs = await service.getReferences("App.vue", vueOffset);
@@ -612,12 +623,7 @@ count.
     await service.syncTsx("App.vue", oldResult.code, oldVueCode, oldResult.sourceMap);
 
     // Now simulate what ensureTsxSynced does: call ensureTsxCurrent with NEW tsx
-    await service.ensureTsxCurrent(
-      "App.vue",
-      newResult.code,
-      newVueCode,
-      newResult.sourceMap,
-    );
+    await service.ensureTsxCurrent("App.vue", newResult.code, newVueCode, newResult.sourceMap);
 
     // Now mapping should work correctly with the fresh mapper
     const vueDotOffset = newVueCode.indexOf("count.\n") + 6;
@@ -650,8 +656,14 @@ describe("multi-file support", () => {
     ]);
 
     expect(sendCalls).toEqual([
-      { type: "updateFile", payload: { path: "/Comp.vue.d.ts", content: "export default {} as any;" } },
-      { type: "updateFile", payload: { path: "/Utils.vue.d.ts", content: "export default {} as any;" } },
+      {
+        type: "updateFile",
+        payload: { path: "/Comp.vue.d.ts", content: "export default {} as any;" },
+      },
+      {
+        type: "updateFile",
+        payload: { path: "/Utils.vue.d.ts", content: "export default {} as any;" },
+      },
     ]);
     // Must NOT use .tsx paths
     expect(sendCalls.some((c) => c.payload.path.endsWith(".tsx"))).toBe(false);
@@ -688,9 +700,7 @@ describe("multi-file support", () => {
     const send = vi.fn();
     service.send = send;
 
-    await service.syncDtsFiles([
-      { filename: "Comp.vue", dtsCode: "export default {} as any;" },
-    ]);
+    await service.syncDtsFiles([{ filename: "Comp.vue", dtsCode: "export default {} as any;" }]);
 
     expect(send).not.toHaveBeenCalled();
   });
@@ -707,9 +717,7 @@ describe("multi-file support", () => {
 
     await service.closeFile("Comp.vue");
 
-    expect(sendCalls).toEqual([
-      { type: "closeFile", payload: { path: "/Comp.vue.tsx" } },
-    ]);
+    expect(sendCalls).toEqual([{ type: "closeFile", payload: { path: "/Comp.vue.tsx" } }]);
   });
 
   it("closeFile is no-op when not initialized", async () => {
@@ -762,8 +770,12 @@ const count = ref(0)
     // The block range should contain the boundary markers
     const blockSlice = tsxCode.slice(destructuredBlock!.blockStart, destructuredBlock!.blockEnd);
     // The block range starts near the start marker and ends at the end marker
-    expect(tsxCode.indexOf("/* verter-destructured-start */")).toBeLessThanOrEqual(destructuredBlock!.blockStart);
-    expect(tsxCode.indexOf("/* verter-destructured-end */")).toBeLessThan(destructuredBlock!.blockEnd);
+    expect(tsxCode.indexOf("/* verter-destructured-start */")).toBeLessThanOrEqual(
+      destructuredBlock!.blockStart,
+    );
+    expect(tsxCode.indexOf("/* verter-destructured-end */")).toBeLessThan(
+      destructuredBlock!.blockEnd,
+    );
   });
 
   it("no offset comments in TSX output", async () => {
@@ -795,7 +807,9 @@ function increment() {
 
     const incrementBinding = destructuredBlock!.bindings.find((b) => b.name === "increment");
     expect(incrementBinding).toBeDefined();
-    expect(vueCode.slice(incrementBinding!.sourceStart, incrementBinding!.sourceEnd)).toBe("increment");
+    expect(vueCode.slice(incrementBinding!.sourceStart, incrementBinding!.sourceEnd)).toBe(
+      "increment",
+    );
 
     // Find "increment" position in the destructuring block
     const destructBlock = tsxCode.indexOf("___VERTER___unwrapped;");
@@ -1006,7 +1020,13 @@ const count: number = "wrong"
       }
     });
 
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap, destructuredBlock);
+    const diagnostics = await service.syncTsx(
+      "App.vue",
+      tsxCode,
+      vueCode,
+      sourceMap,
+      destructuredBlock,
+    );
 
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe(2322);
@@ -1056,7 +1076,13 @@ function increment() {
       }
     });
 
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap, destructuredBlock);
+    const diagnostics = await service.syncTsx(
+      "App.vue",
+      tsxCode,
+      vueCode,
+      sourceMap,
+      destructuredBlock,
+    );
 
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe(6133);

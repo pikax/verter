@@ -118,11 +118,17 @@ function convertType(
     }
 
     case "function": {
+      const typeParams = td.typeParameters?.length
+        ? `<${td.typeParameters.map(typeParameterToString).join(", ")}>`
+        : "";
       const params = td.parameters
         .map((p) => `${p.name}${p.optional ? "?" : ""}: ${typeDescriptorToString(p.type)}`)
         .join(", ");
-      return `(${params}) => ${typeDescriptorToString(td.returnType)}`;
+      return `${typeParams}(${params}) => ${typeDescriptorToString(td.returnType)}`;
     }
+
+    case "typeParameter":
+      return td.name;
 
     case "enum": {
       if (ignore?.(td.name)) return td.name;
@@ -187,6 +193,8 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return objectDescriptorToString(td, false);
     case "function":
       return "function";
+    case "typeParameter":
+      return td.name;
     case "ref":
       return td.typeArguments
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
@@ -261,11 +269,25 @@ function functionSignatureToString(
   td: Extract<TypeDescriptor, { kind: "function" }>,
   mode: "call" | "construct",
 ): string {
+  const typeParams = td.typeParameters?.length
+    ? `<${td.typeParameters.map(typeParameterToString).join(", ")}>`
+    : "";
   const params = td.parameters
     .map((p) => `${p.name}${p.optional ? "?" : ""}: ${typeDescriptorToString(p.type)}`)
     .join(", ");
   const prefix = mode === "construct" ? "new " : "";
-  return `${prefix}(${params}): ${typeDescriptorToString(td.returnType)}`;
+  return `${prefix}${typeParams}(${params}): ${typeDescriptorToString(td.returnType)}`;
+}
+
+function typeParameterToString(td: Extract<TypeDescriptor, { kind: "typeParameter" }>): string {
+  let rendered = td.name;
+  if (td.constraint) {
+    rendered += ` extends ${typeDescriptorToString(td.constraint)}`;
+  }
+  if (td.default) {
+    rendered += ` = ${typeDescriptorToString(td.default)}`;
+  }
+  return rendered;
 }
 
 /**

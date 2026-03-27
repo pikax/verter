@@ -59,7 +59,7 @@ function merge<T extends object, U extends object>(a: T, b: U): T & U {
 }
 
 // Generic arrow function
-const wrap = <T,>(value: T): { wrapped: T } => ({ wrapped: value });
+const wrap = <T>(value: T): { wrapped: T } => ({ wrapped: value });
 
 // Generic class (for reference)
 class Container<T> {

@@ -31,9 +31,7 @@ describe("replaceImportMetaSsr", () => {
         "const c = import.meta.env.SSR",
       ].join("\n");
       const result = replaceImportMetaSsr(code, true);
-      expect(result).toBe(
-        ["const a = true", "const b = false", "const c = true"].join("\n"),
-      );
+      expect(result).toBe(["const a = true", "const b = false", "const c = true"].join("\n"));
     });
   });
 

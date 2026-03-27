@@ -203,9 +203,7 @@ export function combineSourceMaps(opts: CombineOptions): string {
 
   // Determine how many SFC prefix lines (before <template>) are in the template source map.
   const tplIdx = vueSource.indexOf("<template");
-  const sfcPrefixLines = tplIdx !== -1
-    ? vueSource.slice(0, tplIdx).split("\n").length - 1
-    : 0;
+  const sfcPrefixLines = tplIdx !== -1 ? vueSource.slice(0, tplIdx).split("\n").length - 1 : 0;
 
   // Determine if the host prepended an import line to the template code.
   // The host prepends "import { ... } from \"vue\"\n" when the template needs vue imports.
@@ -268,7 +266,8 @@ export function combineSourceMaps(opts: CombineOptions): string {
       // Skip lines before the template region in the full-SFC source map
       if (genLine < sfcPrefixLines) continue;
 
-      const adjustedLine = genLine - sfcPrefixLines + scriptLineCount + hostImportOffset + mergeLineOffset;
+      const adjustedLine =
+        genLine - sfcPrefixLines + scriptLineCount + hostImportOffset + mergeLineOffset;
       if (adjustedLine < 0 || adjustedLine >= finalLineCount) continue;
       for (const seg of templateSegments[genLine]) {
         const newSeg: Segment = [seg[0], 0, seg[2], seg[3]];
@@ -298,7 +297,7 @@ export function combineSourceMaps(opts: CombineOptions): string {
 
 interface MappedPosition {
   line: number; // 0-based
-  col: number;  // 0-based
+  col: number; // 0-based
 }
 
 /** Forward lookup: given a source position, find the generated position. */
@@ -376,7 +375,10 @@ function tryParseMap(json: string): SourceMapJson | null {
 function computeMergeLineOffset(scriptCode: string, finalJs: string): number {
   // If there's a script block producing `export default` or `const __sfc__`,
   // mergeRenderIntoComponent doesn't prepend any lines.
-  if (scriptCode && (/^export default /m.test(scriptCode) || /^const __sfc__ = /m.test(scriptCode))) {
+  if (
+    scriptCode &&
+    (/^export default /m.test(scriptCode) || /^const __sfc__ = /m.test(scriptCode))
+  ) {
     return 0;
   }
   // Template-only: mergeRenderIntoComponent prepends "const __sfc__ = {};\n"

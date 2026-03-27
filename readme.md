@@ -95,17 +95,17 @@ const vColor: Directive<HTMLElement, string, "red" | "blue"> = (el, binding) => 
 
 Verter's Rust-powered compiler is significantly faster than Vue's JavaScript-based compiler. Benchmarks compare template compilation of real-world Vue SFCs using Verter's native NAPI-RS bindings against `@vue/compiler-sfc`. On average, Verter compiles templates **~9x faster** than Vue.
 
-| Fixture | Size | Vue (ops/s) | Verter (ops/s) | Speedup | Throughput |
-|---|---|---:|---:|---:|---:|
-| tiny-template | 42 B | 21,240 | 112,368 | **5.3x** | 4.50 MB/s |
-| simple-interactive | 242 B | 3,140 | 52,440 | **16.7x** | 12.10 MB/s |
-| list-rendering | 1.3 KB | 1,141 | 15,066 | **13.2x** | 18.85 MB/s |
-| conditional-heavy | 2.0 KB | 1,288 | 14,928 | **11.6x** | 29.27 MB/s |
-| form-component | 4.3 KB | 750 | 7,359 | **9.8x** | 30.58 MB/s |
-| composition-heavy | 9.0 KB | 368 | 3,644 | **9.9x** | 31.86 MB/s |
-| template-heavy | 8.5 KB | 1,077 | 2,914 | **2.7x** | 24.20 MB/s |
-| kitchen-sink | 26.7 KB | 141 | 1,106 | **7.8x** | 28.86 MB/s |
-| **20k files (stress test)** | 127 MB | 30.8s | 5.0s | **6.1x** | 25.16 MB/s |
+| Fixture                     | Size    | Vue (ops/s) | Verter (ops/s) |   Speedup | Throughput |
+| --------------------------- | ------- | ----------: | -------------: | --------: | ---------: |
+| tiny-template               | 42 B    |      21,240 |        112,368 |  **5.3x** |  4.50 MB/s |
+| simple-interactive          | 242 B   |       3,140 |         52,440 | **16.7x** | 12.10 MB/s |
+| list-rendering              | 1.3 KB  |       1,141 |         15,066 | **13.2x** | 18.85 MB/s |
+| conditional-heavy           | 2.0 KB  |       1,288 |         14,928 | **11.6x** | 29.27 MB/s |
+| form-component              | 4.3 KB  |         750 |          7,359 |  **9.8x** | 30.58 MB/s |
+| composition-heavy           | 9.0 KB  |         368 |          3,644 |  **9.9x** | 31.86 MB/s |
+| template-heavy              | 8.5 KB  |       1,077 |          2,914 |  **2.7x** | 24.20 MB/s |
+| kitchen-sink                | 26.7 KB |         141 |          1,106 |  **7.8x** | 28.86 MB/s |
+| **20k files (stress test)** | 127 MB  |       30.8s |           5.0s |  **6.1x** | 25.16 MB/s |
 
 > **Average speedup: 9.2x** across all fixtures. Throughput scales from ~4.5 MB/s on tiny files to ~32 MB/s on larger components, with memory usage significantly lower than Vue's compiler.
 
@@ -124,15 +124,15 @@ Verter is a ground-up reimagining of Vue tooling — a single Rust-powered toolc
 
 ### Verter vs Volar
 
-| Aspect | Verter | Volar |
-| --- | --- | --- |
-| Maturity | Alpha (tested against 15+ real-world projects) | Production-ready |
-| Language | Rust compiler + TypeScript IDE glue | TypeScript only |
-| IDE approach | SFC → valid typed TSX for direct TS analysis | Virtual file mapping |
-| Template compilation | Built-in (VDOM + Vapor output) | Delegates to `@vue/compiler-sfc` |
-| Linting | ~169 built-in rules (no ESLint needed) | Relies on eslint-plugin-vue |
-| Type provider | TSGO (fast) or tsserver (compatible) | TypeScript language service |
-| AI integration | Built-in MCP server | — |
+| Aspect               | Verter                                         | Volar                            |
+| -------------------- | ---------------------------------------------- | -------------------------------- |
+| Maturity             | Alpha (tested against 15+ real-world projects) | Production-ready                 |
+| Language             | Rust compiler + TypeScript IDE glue            | TypeScript only                  |
+| IDE approach         | SFC → valid typed TSX for direct TS analysis   | Virtual file mapping             |
+| Template compilation | Built-in (VDOM + Vapor output)                 | Delegates to `@vue/compiler-sfc` |
+| Linting              | ~169 built-in rules (no ESLint needed)         | Relies on eslint-plugin-vue      |
+| Type provider        | TSGO (fast) or tsserver (compatible)           | TypeScript language service      |
+| AI integration       | Built-in MCP server                            | —                                |
 
 > [!NOTE]
 > If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who want a faster, more integrated Vue toolchain and are comfortable with alpha software.
@@ -141,9 +141,9 @@ Verter is a ground-up reimagining of Vue tooling — a single Rust-powered toolc
 
 The LSP delegates TypeScript type checking to an external process. Two backends are supported:
 
-| Backend | Protocol | Use Case |
-|---------|----------|----------|
-| **TSGO** (Go binary) | LSP over stdio | Fast, native TS checking (preview) |
+| Backend                | Protocol               | Use Case                             |
+| ---------------------- | ---------------------- | ------------------------------------ |
+| **TSGO** (Go binary)   | LSP over stdio         | Fast, native TS checking (preview)   |
 | **tsserver** (Node.js) | Newline-delimited JSON | Workspace TS version, plugin support |
 
 Set `verter.typeProvider` in VS Code settings to `auto` (default), `tsgo`, `tsserver`, or `off`.
@@ -441,30 +441,30 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 <details>
 <summary>Internal packages (not intended for direct use)</summary>
 
-| Package              | Description                                              |
-| -------------------- | -------------------------------------------------------- |
-| `@verter/core`       | Legacy SFC→TSX transformer (predates Rust IDE codegen)   |
-| `@verter/types`      | TypeScript utility types used by the compilation pipeline |
-| `@verter/oxc-bindings` | OXC parser binary download helper                      |
+| Package                | Description                                               |
+| ---------------------- | --------------------------------------------------------- |
+| `@verter/core`         | Legacy SFC→TSX transformer (predates Rust IDE codegen)    |
+| `@verter/types`        | TypeScript utility types used by the compilation pipeline |
+| `@verter/oxc-bindings` | OXC parser binary download helper                         |
 
 </details>
 
 ### Rust Crates
 
-| Crate                | Description                                      |
-| -------------------- | ------------------------------------------------ |
-| `verter_core`        | Core template compiler                           |
+| Crate                | Description                                       |
+| -------------------- | ------------------------------------------------- |
+| `verter_core`        | Core template compiler                            |
 | `verter_analysis`    | Static analysis: imports, exports, bindings       |
 | `verter_host`        | In-memory file host: caching, dependency tracking |
 | `verter_diagnostics` | Diagnostic engine: ~169 lint rules                |
 | `verter_actions`     | Code actions: quick fixes, refactoring            |
-| `verter_lsp`         | Rust LSP server binary (stdio)                   |
-| `verter_mcp`         | MCP server binary (stdio + HTTP)                 |
-| `verter_ffi`         | FFI types for NAPI/WASM boundaries               |
-| `verter_span`        | Typed span types (Span, RelativeSpan, etc.)      |
-| `verter_bench`       | Benchmarks and comparison examples               |
-| `verter_napi`        | NAPI-RS Node.js bindings                         |
-| `verter_wasm`        | WASM bindings (wasm-bindgen)                     |
+| `verter_lsp`         | Rust LSP server binary (stdio)                    |
+| `verter_mcp`         | MCP server binary (stdio + HTTP)                  |
+| `verter_ffi`         | FFI types for NAPI/WASM boundaries                |
+| `verter_span`        | Typed span types (Span, RelativeSpan, etc.)       |
+| `verter_bench`       | Benchmarks and comparison examples                |
+| `verter_napi`        | NAPI-RS Node.js bindings                          |
+| `verter_wasm`        | WASM bindings (wasm-bindgen)                      |
 
 ## Credits
 

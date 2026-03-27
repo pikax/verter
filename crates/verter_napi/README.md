@@ -76,11 +76,13 @@ const resolved = await ws.resolveImport("/src/App.vue", "./Child.vue");
 const types = await ws.resolveImport("/src/App.vue", "pkg", "provider", "type");
 
 // Project configuration (replaces auto-discovered graph)
-ws.configureProjects([{
-  root: "/project",
-  workspaceRoot: "/project",
-  compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
-}]);
+ws.configureProjects([
+  {
+    root: "/project",
+    workspaceRoot: "/project",
+    compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+  },
+]);
 
 // Create host backed by workspace
 const host = VerterHost.withWorkspace({}, ws);

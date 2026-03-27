@@ -95,14 +95,14 @@ const vBindEntries = computed<VBindEntry[]>(() => {
   return entries.sort((a, b) => a.expression.localeCompare(b.expression));
 });
 
-const isEmpty = computed(() => cssPropEntries.value.length === 0 && vBindEntries.value.length === 0);
+const isEmpty = computed(
+  () => cssPropEntries.value.length === 0 && vBindEntries.value.length === 0,
+);
 </script>
 
 <template>
   <div class="flow-panel">
-    <div v-if="isEmpty" class="empty-state">
-      No CSS variables detected
-    </div>
+    <div v-if="isEmpty" class="empty-state">No CSS variables detected</div>
 
     <template v-else>
       <!-- CSS Custom Properties section -->
@@ -119,14 +119,10 @@ const isEmpty = computed(() => cssPropEntries.value.length === 0 && vBindEntries
                 style="border-left-color: #22c55e"
               >
                 <span class="flow-badge" style="background: #22c55e">CSS</span>
-                Defined in &lt;style{{ def.styleIndex > 0 ? ` #${def.styleIndex}` : '' }}&gt;
+                Defined in &lt;style{{ def.styleIndex > 0 ? ` #${def.styleIndex}` : "" }}&gt;
               </div>
 
-              <div
-                v-if="entry.templateUsage"
-                class="flow-item"
-                style="border-left-color: #a855f7"
-              >
+              <div v-if="entry.templateUsage" class="flow-item" style="border-left-color: #a855f7">
                 <span class="flow-badge" style="background: #a855f7">Template</span>
                 Used in inline style
               </div>
@@ -153,7 +149,9 @@ const isEmpty = computed(() => cssPropEntries.value.length === 0 && vBindEntries
           <div v-for="entry in vBindEntries" :key="entry.expression" class="flow-card">
             <div class="var-name">
               <code class="expression">v-bind({{ entry.expression }})</code>
-              <span v-if="entry.generatedVarName" class="generated-name">→ {{ entry.generatedVarName }}</span>
+              <span v-if="entry.generatedVarName" class="generated-name"
+                >→ {{ entry.generatedVarName }}</span
+              >
             </div>
             <div class="flow-items">
               <div
@@ -163,7 +161,7 @@ const isEmpty = computed(() => cssPropEntries.value.length === 0 && vBindEntries
                 style="border-left-color: #3b82f6"
               >
                 <span class="flow-badge" style="background: #3b82f6">v-bind</span>
-                Bound in &lt;style{{ idx > 0 ? ` #${idx}` : '' }}&gt;
+                Bound in &lt;style{{ idx > 0 ? ` #${idx}` : "" }}&gt;
               </div>
             </div>
           </div>

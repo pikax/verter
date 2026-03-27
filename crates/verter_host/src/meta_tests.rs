@@ -1,9 +1,10 @@
 use super::*;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use verter_analysis::type_expand::ExpandedComponentTypes;
-use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+use verter_analysis::type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 use verter_resolver::{ResolverStore, StoreView};
 
 fn make_project() -> Arc<MetaProject> {
@@ -69,6 +70,111 @@ fn evaluated_define_props_type<'a>(types: &'a ExpandedComponentTypes, name: &str
         .find(|prop| prop.name == name)
         .unwrap_or_else(|| panic!("missing defineProps property {name}"))
         .ty
+}
+
+fn assert_union_string_literals(expr: &TypeExpr, expected: &[&str]) {
+    let mut actual = BTreeSet::new();
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(value)) => {
+            actual.insert(value.as_str());
+        }
+        TypeExpr::Union(types) => {
+            for ty in types.iter() {
+                match ty {
+                    TypeExpr::Literal(LiteralValue::String(value)) => {
+                        actual.insert(value.as_str());
+                    }
+                    TypeExpr::Primitive(PrimitiveName::Undefined) => {}
+                    other => panic!(
+                        "expected only string literal members (plus optional undefined), got {other:?}"
+                    ),
+                }
+            }
+        }
+        other => panic!("expected string literal union, got {other:?}"),
+    }
+
+    assert_eq!(
+        actual,
+        BTreeSet::from_iter(expected.iter().copied()),
+        "unexpected literal union members for {expr:?}"
+    );
+}
+
+fn assert_route_union_surface(expr: &TypeExpr) {
+    let mut saw_string = false;
+    let mut saw_path_variant = false;
+    let mut saw_name_variant = false;
+    let mut variant_count = 0usize;
+
+    let members: Vec<&TypeExpr> = match expr {
+        TypeExpr::Primitive(PrimitiveName::String) => {
+            saw_string = true;
+            Vec::new()
+        }
+        TypeExpr::Union(types) => types.iter().collect(),
+        other => panic!("expected route union, got {other:?}"),
+    };
+
+    for ty in members {
+        match ty {
+            TypeExpr::Primitive(PrimitiveName::String) => {
+                saw_string = true;
+                variant_count += 1;
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                assert!(
+                    type_arguments.is_empty(),
+                    "expected plain symbolic refs in route union, got generic ref {ty:?}"
+                );
+                match name.as_ref() {
+                    "St" => saw_path_variant = true,
+                    "vt" => saw_name_variant = true,
+                    other => panic!("unexpected symbolic route variant {other} in {expr:?}"),
+                }
+                variant_count += 1;
+            }
+            TypeExpr::Object(obj) => {
+                let has_path = obj.properties.iter().any(
+                    |member| matches!(member, ObjectMember::Property(prop) if prop.name == "path"),
+                );
+                let has_name = obj.properties.iter().any(
+                    |member| matches!(member, ObjectMember::Property(prop) if prop.name == "name"),
+                );
+                assert!(
+                    has_path || has_name,
+                    "expected object route variant to contain path or name, got {ty:?}"
+                );
+                saw_path_variant |= has_path;
+                saw_name_variant |= has_name;
+                variant_count += 1;
+            }
+            TypeExpr::Primitive(PrimitiveName::Undefined) => {}
+            other => {
+                panic!("expected route union to contain string plus route variants, got {other:?}")
+            }
+        }
+    }
+
+    assert!(
+        saw_string,
+        "expected route union to include string, got {expr:?}"
+    );
+    assert!(
+        saw_path_variant,
+        "expected route union to include a path-like variant, got {expr:?}"
+    );
+    assert!(
+        saw_name_variant,
+        "expected route union to include a name-like variant, got {expr:?}"
+    );
+    assert!(
+        variant_count >= 3,
+        "expected route union to keep distinct string/path/name variants, got {expr:?}"
+    );
 }
 
 fn cached_resolved_state(
@@ -987,6 +1093,65 @@ fn overlay_generation_bumps_on_mutations() {
     assert_eq!(s.overlay_generation(), 1);
     s.delete("B.vue").unwrap();
     assert_eq!(s.overlay_generation(), 2);
+}
+
+#[test]
+fn reset_restores_base_state_and_drops_overlay_only_files() {
+    let project = make_project();
+    let base = sfc("label: string");
+    let modified = sfc("count: number");
+    project.upsert_base("A.vue", &base).unwrap();
+
+    let s = project.open_session().unwrap();
+    s.upsert("A.vue", modified.clone()).unwrap();
+    s.upsert("Temp.vue", sfc("temp: boolean")).unwrap();
+
+    assert!(s
+        .get_effective_source("A.vue")
+        .unwrap()
+        .unwrap()
+        .contains("count: number"));
+    assert!(s.has_file("Temp.vue").unwrap());
+
+    s.reset("A.vue").unwrap();
+    s.reset("Temp.vue").unwrap();
+
+    let restored = s.get_effective_source("A.vue").unwrap().unwrap();
+    assert!(restored.contains("label: string"));
+    assert!(!restored.contains("count: number"));
+    assert!(!s.has_file("Temp.vue").unwrap());
+    assert!(s.get_effective_source("Temp.vue").unwrap().is_none());
+    assert_eq!(s.overlay_generation(), 4);
+}
+
+#[test]
+fn reset_reverts_an_active_overlay_from_the_shared_host() {
+    let project = make_project();
+    let base = sfc("label: string");
+    let modified = sfc("count: number");
+    project.upsert_base("A.vue", &base).unwrap();
+
+    let s = project.open_session().unwrap();
+    s.upsert("A.vue", modified).unwrap();
+
+    let analysis = s.get_analysis("A.vue").unwrap().unwrap();
+    assert!(
+        prop_names(&analysis).contains(&"count".to_string()),
+        "active overlay should be visible before reset"
+    );
+
+    s.reset("A.vue").unwrap();
+
+    let analysis = s.get_analysis("A.vue").unwrap().unwrap();
+    let names = prop_names(&analysis);
+    assert!(
+        names.contains(&"label".to_string()),
+        "base props should be visible after reset, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"count".to_string()),
+        "overlay props must be removed after reset, got: {names:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1995,6 +2160,67 @@ defineProps<Props>()
         inputs.canonical_dependencies.contains("/base.ts"),
         "relevant transitive heritage dependency should be tracked"
     );
+}
+
+#[test]
+fn evaluate_types_preserve_script_setup_generic_metadata_in_define_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Generic.vue",
+            r#"<script lang="ts">
+export interface Item {
+  id: string
+}
+
+export interface Props<U extends Item = Item> {
+  items?: U[]
+  selected?: U extends infer Selected ? Selected : never
+}
+</script>
+
+<script setup lang="ts" generic="T extends Item = Item">
+defineProps<Props<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("/Generic.vue").unwrap().unwrap();
+
+    match evaluated_define_props_type(&evaluated, "items") {
+        TypeExpr::Array { element, .. } => match element.as_ref() {
+            TypeExpr::TypeParameter(param) => {
+                assert_eq!(param.name, "T");
+                assert!(matches!(
+                    param.constraint.as_deref(),
+                    Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                ));
+                assert!(matches!(
+                    param.default.as_deref(),
+                    Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                ));
+            }
+            other => {
+                panic!("expected items element to preserve the script setup generic, got {other:?}")
+            }
+        },
+        other => panic!("expected items prop to be an array, got {other:?}"),
+    }
+
+    match evaluated_define_props_type(&evaluated, "selected") {
+        TypeExpr::TypeParameter(param) => {
+            assert_eq!(param.name, "T");
+            assert!(matches!(
+                param.constraint.as_deref(),
+                Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+            ));
+        }
+        other => panic!(
+            "expected infer conditional to resolve to the script setup generic, got {other:?}"
+        ),
+    }
 }
 
 #[test]
@@ -3782,6 +4008,453 @@ defineProps<FancyProps>()
 }
 
 #[test]
+fn get_component_meta_materializes_imported_pick_indexed_access_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/vue-dom.ts",
+            r#"
+export interface VueButtonHTMLAttributes {
+  type?: 'button' | 'submit' | 'reset'
+  disabled?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/html.ts",
+            r#"
+import type { VueButtonHTMLAttributes } from './vue-dom'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'type' | 'disabled'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { ButtonHTMLAttributes } from './html'
+
+export interface Props {
+  type?: ButtonHTMLAttributes['type']
+  mirror?: Props['type']
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let inputs = resolved
+        .cached_eval_inputs
+        .as_ref()
+        .expect("resolved state should retain cached imported eval inputs");
+    let alias = inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "ButtonHTMLAttributes")
+        .expect("ButtonHTMLAttributes should be prepared as an imported alias");
+    assert!(
+        matches!(alias.decl.body, TypeExpr::Object(_)),
+        "prepared imported alias body should already be materialized, got {:?}",
+        alias.decl.body
+    );
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+
+    assert_union_string_literals(
+        evaluated_define_props_type(&evaluated, "type"),
+        &["button", "submit", "reset"],
+    );
+    assert_union_string_literals(
+        evaluated_define_props_type(&evaluated, "mirror"),
+        &["button", "submit", "reset"],
+    );
+
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+    let type_prop = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "type")
+        .expect("type prop should exist");
+    let mirror_prop = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "mirror")
+        .expect("mirror prop should exist");
+
+    assert!(
+        !matches!(
+            type_prop.type_expr,
+            TypeExpr::Unknown { .. } | TypeExpr::IndexedAccess { .. }
+        ),
+        "imported Pick indexed access should not stay symbolic for type: {:?}",
+        type_prop.type_expr
+    );
+    assert!(
+        !matches!(
+            mirror_prop.type_expr,
+            TypeExpr::Unknown { .. } | TypeExpr::IndexedAccess { .. }
+        ),
+        "self indexed access should inherit the resolved imported surface: {:?}",
+        mirror_prop.type_expr
+    );
+    assert_union_string_literals(&type_prop.type_expr, &["button", "submit", "reset"]);
+    assert_union_string_literals(&mirror_prop.type_expr, &["button", "submit", "reset"]);
+}
+
+#[test]
+fn evaluate_types_materializes_package_reexported_route_aliases_for_component_props() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from(r#"export { Lt as RouteLocationRaw } from "./index-typed.js";"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface St { path: string }
+export interface vt { name: string }
+export type Lt = string | St | vt
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    let project = MetaProject::new(host);
+    project
+        .upsert_base(
+            "/workspace/src/Link.vue",
+            r#"<script lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
+export interface Props {
+  to?: RouteLocationRaw
+  href?: Props['to']
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta(
+            "/workspace/src/Link.vue",
+            crate::types::ResolverMode::Expanded,
+        )
+        .expect("resolved component meta should exist");
+    let inputs = resolved
+        .cached_eval_inputs
+        .as_ref()
+        .expect("resolved state should retain cached imported eval inputs");
+    let alias = inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "RouteLocationRaw")
+        .expect("RouteLocationRaw should be prepared as an imported alias");
+    assert_eq!(
+        alias.source_canonical_id,
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
+    );
+    assert_eq!(alias.exported_name, "RouteLocationRaw");
+    assert_route_union_surface(&alias.decl.body);
+    let registry_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "RouteLocationRaw")
+        .expect("RouteLocationRaw should be published in the resolved type registry");
+    assert_route_union_surface(&registry_entry.type_expr);
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/workspace/src/Link.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+
+    assert_route_union_surface(evaluated_define_props_type(&evaluated, "to"));
+    assert_route_union_surface(evaluated_define_props_type(&evaluated, "href"));
+
+    let meta = session
+        .get_component_meta("/workspace/src/Link.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+    let to_prop = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "to")
+        .expect("to prop should exist");
+    let href_prop = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "href")
+        .expect("href prop should exist");
+
+    assert!(
+        !matches!(to_prop.type_expr, TypeExpr::Ref { .. }),
+        "package re-exported route alias should not stay as a bare ref: {:?}",
+        to_prop.type_expr
+    );
+    assert!(
+        !matches!(
+            href_prop.type_expr,
+            TypeExpr::Unknown { .. } | TypeExpr::IndexedAccess { .. }
+        ),
+        "self indexed access through a package alias should not stay symbolic: {:?}",
+        href_prop.type_expr
+    );
+    assert_route_union_surface(&to_prop.type_expr);
+    assert_route_union_surface(&href_prop.type_expr);
+}
+
+#[test]
+fn evaluate_types_materializes_package_import_then_exported_route_aliases_for_component_props() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
+        Arc::from(
+            r#"import { Lt as RouteLocationRaw, St, vt } from "./index-typed.js";
+export { RouteLocationRaw, St, vt };"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface St { path: string }
+export interface vt { name: string }
+type RouteLocationRaw = string | St | vt
+export { RouteLocationRaw as Lt, St, vt }
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    let project = MetaProject::new(host);
+    project
+        .upsert_base(
+            "/workspace/src/Link.vue",
+            r#"<script lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
+export interface Props {
+  to?: RouteLocationRaw
+  href?: Props['to']
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta(
+            "/workspace/src/Link.vue",
+            crate::types::ResolverMode::Expanded,
+        )
+        .expect("resolved component meta should exist");
+    let inputs = resolved
+        .cached_eval_inputs
+        .as_ref()
+        .expect("resolved state should retain cached imported eval inputs");
+    let alias = inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "RouteLocationRaw")
+        .expect("RouteLocationRaw should be prepared as an imported alias");
+    assert_route_union_surface(&alias.decl.body);
+    let registry_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "RouteLocationRaw")
+        .expect("RouteLocationRaw should be published in the resolved type registry");
+    assert_route_union_surface(&registry_entry.type_expr);
+}
+
+#[test]
+fn resolve_component_meta_includes_owner_local_helper_types_in_registry() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+interface RouteLocationObject {
+  path: string
+}
+
+type RouteLocationRaw = string | RouteLocationObject
+
+interface NuxtLinkProps {
+  to?: RouteLocationRaw
+  href?: NuxtLinkProps['to']
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  external?: boolean
+}
+</script>
+<script setup lang="ts">
+defineProps<LinkProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let route = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "RouteLocationRaw")
+        .expect("owner-local route helper should be published in the type registry");
+    let TypeExpr::Union(route_variants) = &route.type_expr else {
+        panic!(
+            "owner-local route helper should remain a route union, got {:?}",
+            route.type_expr
+        );
+    };
+    assert!(
+        route_variants
+            .iter()
+            .any(|variant| matches!(variant, TypeExpr::Primitive(PrimitiveName::String))),
+        "owner-local route helper should preserve its string branch, got {:?}",
+        route.type_expr
+    );
+    assert!(
+        route_variants.iter().any(|variant| {
+            matches!(variant, TypeExpr::Ref { name, type_arguments } if name.as_ref() == "RouteLocationObject" && type_arguments.is_empty())
+                || matches!(
+                    variant,
+                    TypeExpr::Object(shape)
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path"))
+                )
+        }),
+        "owner-local route helper should preserve its object branch, got {:?}",
+        route.type_expr
+    );
+    let route_object = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "RouteLocationObject")
+        .expect("owner-local route object helper should also be published in the type registry");
+    let TypeExpr::Object(route_object_shape) = &route_object.type_expr else {
+        panic!(
+            "RouteLocationObject should project as an object type, got {:?}",
+            route_object.type_expr
+        );
+    };
+    assert!(
+        route_object_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "path")
+        ),
+        "RouteLocationObject should keep its path member, got {:?}",
+        route_object.type_expr
+    );
+
+    let nuxt_link = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "NuxtLinkProps")
+        .expect("owner-local helper interface should be published in the type registry");
+    let TypeExpr::Object(shape) = &nuxt_link.type_expr else {
+        panic!(
+            "NuxtLinkProps should project as an object type, got {:?}",
+            nuxt_link.type_expr
+        );
+    };
+    let member_names: Vec<&str> = shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        member_names.contains(&"to") && member_names.contains(&"href"),
+        "NuxtLinkProps registry entry should preserve helper members, got {:?}",
+        member_names
+    );
+}
+
+#[test]
 fn get_component_meta_returns_full_native_metadata_contract() {
     let project = make_project();
     project
@@ -4735,6 +5408,669 @@ defineProps<ChildProps>()
         button.props.iter().any(|prop| prop.name == "label"),
         "resolved ButtonProps should include button props, got: {:?}",
         button.props
+    );
+}
+
+#[test]
+fn imported_pick_slot_bindings_keep_symbolic_raw_type() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/reka-ui.ts",
+            r#"
+export interface CalendarCellTriggerProps {
+  day: Date
+  month: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/slots.ts",
+            r#"
+import type { CalendarCellTriggerProps } from './reka-ui'
+
+export interface CalendarSlots {
+  day?: (props: Pick<CalendarCellTriggerProps, 'day'>) => any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { CalendarSlots } from './slots'
+
+defineSlots<CalendarSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+
+    let day_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "day")
+        .expect("should extract imported day slot");
+    let day_binding = day_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "day")
+        .expect("day slot should expose the day binding");
+
+    assert_eq!(
+        day_binding.raw_type.as_deref(),
+        Some("CalendarCellTriggerProps['day']"),
+        "imported Pick slot bindings should keep the symbolic source contract"
+    );
+}
+
+#[test]
+fn local_pick_slot_bindings_keep_symbolic_raw_type() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+interface CalendarCellTriggerProps {
+  day: Date
+  month: number
+}
+
+export interface CalendarSlots {
+  day?: (props: Pick<CalendarCellTriggerProps, 'day'>) => any
+}
+</script>
+<script setup lang="ts">
+defineSlots<CalendarSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+
+    let day_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "day")
+        .expect("should extract local day slot");
+    let day_binding = day_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "day")
+        .expect("day slot should expose the day binding");
+
+    assert_eq!(
+        day_binding.raw_type.as_deref(),
+        Some("CalendarCellTriggerProps['day']"),
+        "local Pick slot bindings should keep the symbolic source contract"
+    );
+}
+
+#[test]
+fn nested_imported_omit_preserves_html_attrs_and_omits_link_only_keys() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  name?: string
+  type?: 'button' | 'submit'
+}
+
+export interface AnchorHTMLAttributes {
+  download?: boolean
+  href?: string
+  hreflang?: string
+  media?: string
+  ping?: string
+  referrerpolicy?: string
+  rel?: string
+  target?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from './types/html'
+
+interface RouterLinkProps {
+  replace?: boolean
+  exactActiveClass?: string
+  viewTransition?: boolean
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: string
+  href?: string
+  external?: boolean
+  target?: string | null
+  rel?: string | null
+  noRel?: boolean
+  prefetchedClass?: string
+  prefetch?: boolean
+  prefetchOn?: 'visibility' | 'interaction'
+  noPrefetch?: boolean
+  trailingSlash?: 'append' | 'remove'
+}
+
+export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+  active?: boolean
+  exact?: boolean
+  exactQuery?: boolean | 'partial'
+  exactHash?: boolean
+  inactiveClass?: string
+  custom?: boolean
+  raw?: boolean
+  class?: any
+}
+
+export type LinkPropsKeys =
+  | 'to'
+  | 'href'
+  | 'target'
+  | 'rel'
+  | 'noRel'
+  | 'external'
+  | 'prefetch'
+  | 'prefetchOn'
+  | 'prefetchedClass'
+  | 'noPrefetch'
+  | 'trailingSlash'
+  | 'replace'
+  | 'active'
+  | 'exact'
+  | 'exactQuery'
+  | 'exactHash'
+  | 'inactiveClass'
+  | 'download'
+  | 'ping'
+  | 'referrerpolicy'
+  | 'hreflang'
+  | 'media'
+  | 'viewTransition'
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface UseComponentIconsProps {
+  icon?: string
+  leading?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+  variant?: string
+  size?: 'sm' | 'md'
+  square?: boolean
+  block?: boolean
+  class?: any
+  ui?: object
+}
+</script>
+<template><button /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types/index.ts",
+            "export * from '../Link.vue'\nexport * from '../Button.vue'",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface Props extends Omit<ButtonProps, LinkPropsKeys | 'icon' | 'color' | 'variant'> {
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  side?: 'left' | 'right'
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"autofocus")
+            && prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"name"),
+        "nested imported Omit should preserve inherited button attrs: {:?}",
+        prop_names
+    );
+    assert!(
+        !prop_names.contains(&"to")
+            && !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"rel")
+            && !prop_names.contains(&"prefetch")
+            && !prop_names.contains(&"prefetchOn")
+            && !prop_names.contains(&"external")
+            && !prop_names.contains(&"viewTransition"),
+        "nested imported Omit should exclude link-only keys: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn dual_heritage_omit_keeps_button_attrs_without_leaking_link_keys() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  name?: string
+  type?: 'button' | 'submit'
+}
+
+export interface AnchorHTMLAttributes {
+  download?: boolean
+  href?: string
+  hreflang?: string
+  media?: string
+  ping?: string
+  referrerpolicy?: string
+  rel?: string
+  target?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/drag.ts",
+            r#"
+export interface DragHandleProps {
+  class?: any
+  computePositionConfig?: unknown
+  editor?: object
+  element?: object
+  getReferencedVirtualElement?: () => unknown
+  nested?: boolean
+  nestedOptions?: object
+  onElementDragEnd?: () => void
+  onElementDragStart?: () => void
+  onNodeChange?: () => void
+  pluginKey?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from './types/html'
+
+interface RouterLinkProps {
+  replace?: boolean
+  exactActiveClass?: string
+  viewTransition?: boolean
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: string
+  href?: string
+  external?: boolean
+  target?: string | null
+  rel?: string | null
+  noRel?: boolean
+  prefetchedClass?: string
+  prefetch?: boolean
+  prefetchOn?: 'visibility' | 'interaction'
+  noPrefetch?: boolean
+  trailingSlash?: 'append' | 'remove'
+}
+
+export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+  active?: boolean
+  exact?: boolean
+  exactQuery?: boolean | 'partial'
+  exactHash?: boolean
+  inactiveClass?: string
+  custom?: boolean
+  raw?: boolean
+  class?: any
+}
+
+export type LinkPropsKeys =
+  | 'to'
+  | 'href'
+  | 'target'
+  | 'rel'
+  | 'noRel'
+  | 'external'
+  | 'prefetch'
+  | 'prefetchOn'
+  | 'prefetchedClass'
+  | 'noPrefetch'
+  | 'trailingSlash'
+  | 'replace'
+  | 'active'
+  | 'exact'
+  | 'exactQuery'
+  | 'exactHash'
+  | 'inactiveClass'
+  | 'download'
+  | 'ping'
+  | 'referrerpolicy'
+  | 'hreflang'
+  | 'media'
+  | 'viewTransition'
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface UseComponentIconsProps {
+  icon?: string
+  leading?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: string
+  variant?: string
+  size?: 'sm' | 'md'
+  square?: boolean
+  block?: boolean
+  class?: any
+  ui?: object
+}
+</script>
+<template><button /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types/index.ts",
+            "export * from '../Link.vue'\nexport * from '../Button.vue'",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { DragHandleProps } from './drag'
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface Props extends Omit<DragHandleProps, 'editor' | 'element' | 'onNodeChange' | 'computePositionConfig' | 'class'>, Omit<ButtonProps, LinkPropsKeys | 'icon' | 'color' | 'variant'> {
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  options?: object
+  editor: object
+  ui?: ButtonProps['ui']
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"autofocus")
+            && prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"name"),
+        "dual-heritage Omit should preserve inherited button attrs: {:?}",
+        prop_names
+    );
+    assert!(
+        !prop_names.contains(&"to")
+            && !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"rel")
+            && !prop_names.contains(&"prefetch")
+            && !prop_names.contains(&"prefetchOn")
+            && !prop_names.contains(&"external")
+            && !prop_names.contains(&"viewTransition"),
+        "dual-heritage Omit should exclude link-only keys: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn link_props_keep_inherited_html_attrs_across_vue_ignore_utility_heritage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  name?: string
+  type?: 'button' | 'submit'
+}
+
+export interface AnchorHTMLAttributes {
+  download?: boolean
+  href?: string
+  hreflang?: string
+  media?: string
+  ping?: string
+  referrerpolicy?: string
+  rel?: string
+  target?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from './types/html'
+
+interface RouterLinkProps {
+  replace?: boolean
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: string
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps, /** @vue-ignore */ Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, /** @vue-ignore */ Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+}
+</script>
+<script setup lang="ts">
+defineProps<LinkProps>()
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+
+    let export = project
+        .host()
+        .resolve_named_export_in_view(
+            "/node_modules/vue-router/index.d.ts",
+            "RouterLinkProps",
+            Some(true),
+            None,
+        )
+        .expect("package re-export should resolve RouterLinkProps");
+    assert_eq!(
+        export.source_canonical_id.as_deref(),
+        Some("/node_modules/vue-router/dist/index.d.ts")
+    );
+    assert_eq!(export.source_name, "R");
+    let decl = crate::meta_resolve::resolve_type_declaration_in_view(
+        project.host(),
+        "/node_modules/vue-router/index.d.ts",
+        "RouterLinkProps",
+        None,
+    );
+    assert_eq!(
+        decl.canonical_source,
+        "/node_modules/vue-router/dist/index.d.ts"
+    );
+    assert_eq!(decl.resolved_name, "R");
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Link.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"autofocus")
+            && prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"name")
+            && prop_names.contains(&"download")
+            && prop_names.contains(&"hreflang"),
+        "LinkProps should keep inherited HTML attrs across vue-ignore utility heritage: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn link_props_keep_router_members_across_package_reexported_utility_heritage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue-router/index.d.ts",
+            r#"
+export { R as RouterLinkProps } from './dist/index.js'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/vue-router/dist/index.d.ts",
+            r#"
+export interface RouterLinkOptions {
+  to?: string
+  replace?: boolean
+  viewTransition?: boolean
+}
+
+export interface R extends RouterLinkOptions {
+  activeClass?: string
+  exactActiveClass?: string
+  ariaCurrentValue?: 'page'
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+import type { RouterLinkProps } from 'vue-router'
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: string
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  custom?: boolean
+}
+</script>
+<script setup lang="ts">
+defineProps<LinkProps>()
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/Link.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue-router".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue-router/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/node_modules/vue-router/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./dist/index.js".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue-router/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Link.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"replace")
+            && prop_names.contains(&"viewTransition")
+            && prop_names.contains(&"activeClass")
+            && prop_names.contains(&"exactActiveClass")
+            && prop_names.contains(&"ariaCurrentValue"),
+        "LinkProps should keep router members across package re-exported Omit heritage: {:?}",
+        prop_names
     );
 }
 
@@ -6850,6 +8186,7 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
         props: vec![verter_analysis::type_expand::ExpandedField {
             name: "label".to_string(),
             r#type: TypeExpr::Primitive(PrimitiveName::String),
+            raw_type: None,
             optional: false,
             completeness: verter_analysis::type_expand::ExpansionCompleteness::Partial,
             diagnostics: vec![verter_analysis::type_expand::ExpansionDiagnostic {
@@ -6865,6 +8202,93 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
         component_meta_expansion_budget_exceeded(&types),
         "budget-exceeded diagnostics should force an explicit component-meta error"
     );
+}
+
+#[test]
+fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
+    let analysis = verter_analysis::component_meta::ComponentMetaAnalysis {
+        props: vec![verter_analysis::component_meta::PropAnalysis {
+            name: "label".to_string(),
+            type_expr: TypeExpr::Primitive(PrimitiveName::String),
+            type_expansion: None,
+            raw_type: Some("string".to_string()),
+            required: true,
+            has_default: false,
+            default_value: None,
+            description: None,
+            tags: Vec::new(),
+        }],
+        events: Vec::new(),
+        slots: Vec::new(),
+        models: Vec::new(),
+        exposed: Vec::new(),
+        type_registry: Vec::new(),
+        components: Vec::new(),
+        template_refs: Vec::new(),
+        imports: Vec::new(),
+        bindings: Vec::new(),
+        vue_api_calls: Vec::new(),
+        styles: Vec::new(),
+        flags: verter_analysis::component_meta::ComponentMetaFlags::default(),
+        root_reachability: verter_analysis::component_meta::RootReachability::NoFallthrough {
+            reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+        },
+        accepted_props: Vec::new(),
+        accepted_events: Vec::new(),
+        accepted_surface_completeness:
+            verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface: verter_analysis::component_meta::FallthroughSurface::None {
+            reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+        },
+        options_api: false,
+        file_path: "/src/App.vue".to_string(),
+    };
+
+    assert!(!component_meta_symbolic_budget_is_fatal(Some(&analysis)));
+    assert!(component_meta_symbolic_budget_is_fatal(None));
+}
+
+#[test]
+fn get_component_meta_retries_symbolic_budget_for_large_local_object_shapes() {
+    let project = make_project();
+
+    let prop_count = 2_400usize;
+    let mut props_body = String::new();
+    for index in 0..prop_count {
+        props_body.push_str(&format!("  p{index}: string\n"));
+    }
+
+    project
+        .upsert_base(
+            "/src/App.vue",
+            &format!(
+                r#"<script setup lang="ts">
+interface Props {{
+{props_body}}}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#
+            ),
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/src/App.vue")
+        .unwrap()
+        .expect("large local object shape should succeed after budget retry");
+
+    assert_eq!(
+        meta.props.len(),
+        prop_count,
+        "retry path should materialize the full local prop surface"
+    );
+    assert!(meta.props.iter().any(|prop| prop.name == "p0"));
+    assert!(meta
+        .props
+        .iter()
+        .any(|prop| prop.name == format!("p{}", prop_count - 1)));
 }
 
 #[test]

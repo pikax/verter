@@ -1,13 +1,23 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const items = ref([3, 1, 4, 1, 5])
+const items = ref([3, 1, 4, 1, 5]);
 
-function pushItem() { items.value.push(items.value.length + 1) }
-function popItem() { items.value.pop() }
-function spliceItem() { items.value.splice(1, 1) }
-function sortItems() { items.value.sort((a, b) => a - b) }
-function reverseItems() { items.value.reverse() }
+function pushItem() {
+  items.value.push(items.value.length + 1);
+}
+function popItem() {
+  items.value.pop();
+}
+function spliceItem() {
+  items.value.splice(1, 1);
+}
+function sortItems() {
+  items.value.sort((a, b) => a - b);
+}
+function reverseItems() {
+  items.value.reverse();
+}
 </script>
 
 <template>

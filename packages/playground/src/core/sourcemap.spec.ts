@@ -30,9 +30,7 @@ describe("VLQ codec", () => {
   });
 
   it("round-trips through parseMappings/encodeMappings for single segment", () => {
-    const segments: Segment[][] = [
-      [[0, 0, 0, 0]],
-    ];
+    const segments: Segment[][] = [[[0, 0, 0, 0]]];
     const encoded = encodeMappings(segments);
     const decoded = parseMappings(encoded);
     expect(decoded).toEqual(segments);
@@ -40,8 +38,14 @@ describe("VLQ codec", () => {
 
   it("round-trips through parseMappings/encodeMappings for multiple lines and segments", () => {
     const segments: Segment[][] = [
-      [[0, 0, 0, 0], [5, 0, 0, 10]],
-      [[0, 0, 1, 0], [8, 0, 1, 4]],
+      [
+        [0, 0, 0, 0],
+        [5, 0, 0, 10],
+      ],
+      [
+        [0, 0, 1, 0],
+        [8, 0, 1, 4],
+      ],
       [],
       [[2, 0, 3, 2]],
     ];
@@ -52,7 +56,10 @@ describe("VLQ codec", () => {
 
   it("round-trips segments with name indices", () => {
     const segments: Segment[][] = [
-      [[0, 0, 0, 0, 0], [4, 0, 0, 4, 1]],
+      [
+        [0, 0, 0, 0, 0],
+        [4, 0, 0, 4, 1],
+      ],
     ];
     const encoded = encodeMappings(segments);
     const decoded = parseMappings(encoded);
@@ -87,11 +94,14 @@ describe("combineSourceMaps", () => {
     });
   }
 
-  function makeMapFromSegments(segments: Segment[][], opts?: {
-    sources?: string[];
-    sourcesContent?: (string | null)[];
-    names?: string[];
-  }): string {
+  function makeMapFromSegments(
+    segments: Segment[][],
+    opts?: {
+      sources?: string[];
+      sourcesContent?: (string | null)[];
+      names?: string[];
+    },
+  ): string {
     return makeMap({
       mappings: encodeMappings(segments),
       ...opts,
@@ -183,12 +193,12 @@ describe("combineSourceMaps", () => {
 
   it("combines script + template maps with correct offsets", () => {
     const vueSource = [
-      '<script setup lang="ts">',  // line 0
-      'const msg = "hello"',        // line 1
-      '</script>',                   // line 2
-      '<template>',                  // line 3
-      '  <div>{{ msg }}</div>',      // line 4
-      '</template>',                 // line 5
+      '<script setup lang="ts">', // line 0
+      'const msg = "hello"', // line 1
+      "</script>", // line 2
+      "<template>", // line 3
+      "  <div>{{ msg }}</div>", // line 4
+      "</template>", // line 5
     ].join("\n");
 
     // Script virtual file code (3 lines, with "export default" → mergeLineOffset = 0)
@@ -205,7 +215,9 @@ describe("combineSourceMaps", () => {
     // Template source map: generated lines relative to full SFC CodeTransform.
     // sfcPrefixLines = 3 (lines 0,1,2 before <template>)
     const tplSegs: Segment[][] = [
-      [], [], [], // SFC lines 0-2 (script block)
+      [],
+      [],
+      [], // SFC lines 0-2 (script block)
       [], // SFC line 3 (<template> tag, no mappings)
       [[0, 0, 4, 2]], // SFC line 4 → src line 4, col 2 (<div>{{ msg }}</div>)
     ];
@@ -261,17 +273,17 @@ describe("lookupGenerated", () => {
   }
 
   it("finds exact match", () => {
-    const map = makeMap([
-      [[0, 0, 5, 3]],
-      [[4, 0, 10, 0]],
-    ]);
+    const map = makeMap([[[0, 0, 5, 3]], [[4, 0, 10, 0]]]);
     const result = lookupGenerated(map, 5, 3);
     expect(result).toEqual({ line: 0, col: 0 });
   });
 
   it("finds closest column match on same source line", () => {
     const map = makeMap([
-      [[0, 0, 5, 0], [10, 0, 5, 8]],
+      [
+        [0, 0, 5, 0],
+        [10, 0, 5, 8],
+      ],
     ]);
     const result = lookupGenerated(map, 5, 7);
     // col 7 is closer to col 8 (dist 1) than col 0 (dist 7)
@@ -281,9 +293,7 @@ describe("lookupGenerated", () => {
   });
 
   it("returns null when no matching source line", () => {
-    const map = makeMap([
-      [[0, 0, 5, 0]],
-    ]);
+    const map = makeMap([[[0, 0, 5, 0]]]);
     expect(lookupGenerated(map, 99, 0)).toBeNull();
   });
 
@@ -305,7 +315,10 @@ describe("lookupSource", () => {
 
   it("finds exact match", () => {
     const map = makeMap([
-      [[0, 0, 5, 3], [10, 0, 5, 10]],
+      [
+        [0, 0, 5, 3],
+        [10, 0, 5, 10],
+      ],
     ]);
     const result = lookupSource(map, 0, 0);
     expect(result).toEqual({ line: 5, col: 3 });
@@ -313,7 +326,10 @@ describe("lookupSource", () => {
 
   it("finds segment for column within range", () => {
     const map = makeMap([
-      [[0, 0, 5, 0], [10, 0, 6, 0]],
+      [
+        [0, 0, 5, 0],
+        [10, 0, 6, 0],
+      ],
     ]);
     // Column 5 falls within [0, 10) → maps to the first segment
     const result = lookupSource(map, 0, 5);
@@ -321,26 +337,19 @@ describe("lookupSource", () => {
   });
 
   it("returns null for column before first segment", () => {
-    const map = makeMap([
-      [[5, 0, 3, 0]],
-    ]);
+    const map = makeMap([[[5, 0, 3, 0]]]);
     // Column 2 is before the first segment at col 5
     const result = lookupSource(map, 0, 2);
     expect(result).toBeNull();
   });
 
   it("returns null for line beyond map", () => {
-    const map = makeMap([
-      [[0, 0, 0, 0]],
-    ]);
+    const map = makeMap([[[0, 0, 0, 0]]]);
     expect(lookupSource(map, 99, 0)).toBeNull();
   });
 
   it("returns null for empty line", () => {
-    const map = makeMap([
-      [],
-      [[0, 0, 1, 0]],
-    ]);
+    const map = makeMap([[], [[0, 0, 1, 0]]]);
     expect(lookupSource(map, 0, 0)).toBeNull();
   });
 
@@ -352,8 +361,14 @@ describe("lookupSource", () => {
   // @ai-generated - Bidirectional round-trip: source→generated→source
   it("round-trips source→generated→source", () => {
     const segments: Segment[][] = [
-      [[0, 0, 10, 5], [8, 0, 10, 12]],
-      [[0, 0, 11, 0], [4, 0, 11, 4]],
+      [
+        [0, 0, 10, 5],
+        [8, 0, 10, 12],
+      ],
+      [
+        [0, 0, 11, 0],
+        [4, 0, 11, 4],
+      ],
     ];
     const map = makeMap(segments);
 
@@ -372,7 +387,10 @@ describe("lookupSource", () => {
   it("round-trips generated→source→generated", () => {
     const segments: Segment[][] = [
       [[0, 0, 3, 0]],
-      [[0, 0, 4, 2], [6, 0, 4, 8]],
+      [
+        [0, 0, 4, 2],
+        [6, 0, 4, 8],
+      ],
     ];
     const map = makeMap(segments);
 

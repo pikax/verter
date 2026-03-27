@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref } from "vue";
 
-const count = ref(1)
-const formatted = computed(() => `count:${count.value}`)
+const count = ref(1);
+const formatted = computed(() => `count:${count.value}`);
 </script>
 
 <template>

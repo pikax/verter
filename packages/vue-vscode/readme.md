@@ -208,13 +208,13 @@ The completion benchmark writes per-run and summary JSON files under
 
 ## Dependencies
 
-| Dependency                  | Purpose                                                                |
-| --------------------------- | ---------------------------------------------------------------------- |
+| Dependency                  | Purpose                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------ |
 | `verter-lsp` (Rust binary)  | LSP server providing completions, diagnostics, hover, go-to-definition (stdio) |
-| `@verter/language-shared`   | Shared custom protocol types between extension and LSP binary          |
-| `@verter/typescript-plugin` | TypeScript plugin for `.vue` import resolution in TS/JS files          |
-| `@verter/oxc-bindings`      | Platform-specific OXC parser binary management                         |
-| `vscode-languageclient`     | VS Code LSP client library                                             |
+| `@verter/language-shared`   | Shared custom protocol types between extension and LSP binary                  |
+| `@verter/typescript-plugin` | TypeScript plugin for `.vue` import resolution in TS/JS files                  |
+| `@verter/oxc-bindings`      | Platform-specific OXC parser binary management                                 |
+| `vscode-languageclient`     | VS Code LSP client library                                                     |
 
 ## License
 

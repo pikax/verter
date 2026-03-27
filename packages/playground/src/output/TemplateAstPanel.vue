@@ -36,7 +36,10 @@ const tree = computed<TreeNode[]>(() => {
 
     const parentIdx = el.parentIndex ?? null;
     let siblings = childMap.get(parentIdx);
-    if (!siblings) { siblings = []; childMap.set(parentIdx, siblings); }
+    if (!siblings) {
+      siblings = [];
+      childMap.set(parentIdx, siblings);
+    }
     siblings.push(node);
   }
 
@@ -65,9 +68,7 @@ const filteredTree = computed<TreeNode[]>(() => {
   }
 
   function filterNodes(nodes: TreeNode[]): TreeNode[] {
-    return nodes
-      .filter(matches)
-      .map(n => ({ ...n, children: filterNodes(n.children) }));
+    return nodes.filter(matches).map((n) => ({ ...n, children: filterNodes(n.children) }));
   }
 
   return filterNodes(tree.value);
@@ -126,11 +127,23 @@ const AstNode = defineComponent({
   name: "AstNode",
   props: {
     node: { type: Object as PropType<TreeNode>, required: true },
-    isExpanded: { type: Function as PropType<(index: number, depth: number) => boolean>, required: true },
+    isExpanded: {
+      type: Function as PropType<(index: number, depth: number) => boolean>,
+      required: true,
+    },
     toggleExpand: { type: Function as PropType<(index: number) => void>, required: true },
-    handleClick: { type: Function as PropType<(el: AnalysisTemplateElement) => void>, required: true },
-    directiveBadges: { type: Function as PropType<(el: AnalysisTemplateElement) => string[]>, required: true },
-    attrSummary: { type: Function as PropType<(el: AnalysisTemplateElement) => string>, required: true },
+    handleClick: {
+      type: Function as PropType<(el: AnalysisTemplateElement) => void>,
+      required: true,
+    },
+    directiveBadges: {
+      type: Function as PropType<(el: AnalysisTemplateElement) => string[]>,
+      required: true,
+    },
+    attrSummary: {
+      type: Function as PropType<(el: AnalysisTemplateElement) => string>,
+      required: true,
+    },
   },
   setup(nodeProps) {
     return () => {
@@ -146,24 +159,39 @@ const AstNode = defineComponent({
       const tagLabel = el.tag || "(unknown)";
 
       children.push(
-        h("div", {
-          class: ["ast-node", el.isComponent ? "component" : "element"],
-          style: { paddingLeft: `${indent + 4}px` },
-          onClick: () => nodeProps.handleClick(el),
-        }, [
-          hasChildren
-            ? h("span", {
-                class: ["ast-toggle-icon", exp ? "expanded" : ""],
-                onClick: (e: Event) => { e.stopPropagation(); nodeProps.toggleExpand(node.index); },
-              }, "\u25B6")
-            : h("span", { class: "ast-toggle-icon placeholder" }, " "),
-          h("span", { class: el.isComponent ? "tag-component" : "tag-html" },
-            el.isSelfClosing ? `<${tagLabel} />` : `<${tagLabel}>`),
-          attrs ? h("span", { class: "attr-summary" }, ` ${attrs}`) : null,
-          ...badges.map((b: string) => h("span", { class: "directive-badge" }, b)),
-          ...(el.dynamicClasses ?? []).slice(0, 2).map((c: string) =>
-            h("span", { class: "class-badge" }, `.${c}`)),
-        ]),
+        h(
+          "div",
+          {
+            class: ["ast-node", el.isComponent ? "component" : "element"],
+            style: { paddingLeft: `${indent + 4}px` },
+            onClick: () => nodeProps.handleClick(el),
+          },
+          [
+            hasChildren
+              ? h(
+                  "span",
+                  {
+                    class: ["ast-toggle-icon", exp ? "expanded" : ""],
+                    onClick: (e: Event) => {
+                      e.stopPropagation();
+                      nodeProps.toggleExpand(node.index);
+                    },
+                  },
+                  "\u25B6",
+                )
+              : h("span", { class: "ast-toggle-icon placeholder" }, " "),
+            h(
+              "span",
+              { class: el.isComponent ? "tag-component" : "tag-html" },
+              el.isSelfClosing ? `<${tagLabel} />` : `<${tagLabel}>`,
+            ),
+            attrs ? h("span", { class: "attr-summary" }, ` ${attrs}`) : null,
+            ...badges.map((b: string) => h("span", { class: "directive-badge" }, b)),
+            ...(el.dynamicClasses ?? [])
+              .slice(0, 2)
+              .map((c: string) => h("span", { class: "class-badge" }, `.${c}`)),
+          ],
+        ),
       );
 
       if (exp && hasChildren) {
@@ -190,25 +218,25 @@ const AstNode = defineComponent({
 <template>
   <div class="ast-panel">
     <div class="ast-toolbar">
-      <input
-        v-model="filterText"
-        class="ast-filter"
-        type="text"
-        placeholder="Filter elements..."
-      />
+      <input v-model="filterText" class="ast-filter" type="text" placeholder="Filter elements..." />
       <label class="ast-toggle">
         <input v-model="componentsOnly" type="checkbox" />
         Components only
       </label>
     </div>
 
-    <div v-if="!elements.length" class="empty-state">
-      No template elements available
-    </div>
+    <div v-if="!elements.length" class="empty-state">No template elements available</div>
 
     <div v-else class="ast-tree">
       <template v-for="node in filteredTree" :key="node.index">
-        <AstNode :node="node" :is-expanded="isExpanded" :toggle-expand="toggleExpand" :handle-click="handleClick" :directive-badges="directiveBadges" :attr-summary="attrSummary" />
+        <AstNode
+          :node="node"
+          :is-expanded="isExpanded"
+          :toggle-expand="toggleExpand"
+          :handle-click="handleClick"
+          :directive-badges="directiveBadges"
+          :attr-summary="attrSummary"
+        />
       </template>
     </div>
   </div>

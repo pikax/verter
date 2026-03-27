@@ -95,7 +95,9 @@ export class TsgoService implements TypeScriptServiceBridge {
   private async _init(): Promise<void> {
     // Check SharedArrayBuffer support (requires COOP/COEP headers)
     if (typeof SharedArrayBuffer === "undefined") {
-      console.warn("[TsgoService] SharedArrayBuffer not available — tsgo requires COOP/COEP headers");
+      console.warn(
+        "[TsgoService] SharedArrayBuffer not available — tsgo requires COOP/COEP headers",
+      );
       this.available = false;
       this.initialized = true;
       return;
@@ -287,9 +289,7 @@ export class TsgoService implements TypeScriptServiceBridge {
       if (!result) return null;
 
       const content =
-        typeof result.contents === "string"
-          ? result.contents
-          : result.contents?.value ?? null;
+        typeof result.contents === "string" ? result.contents : (result.contents?.value ?? null);
 
       if (!content) return null;
 
@@ -385,10 +385,7 @@ export class TsgoService implements TypeScriptServiceBridge {
     return [];
   }
 
-  async getRenameLocations(
-    filename: string,
-    vueOffset: number,
-  ): Promise<RenameLocations> {
+  async getRenameLocations(filename: string, vueOffset: number): Promise<RenameLocations> {
     // tsgo LSP doesn't support textDocument/rename yet in WASM mode
     return {
       canRename: false,

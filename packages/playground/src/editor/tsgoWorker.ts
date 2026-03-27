@@ -136,7 +136,9 @@ async function loadAndRunTsgo(stdinBuffer: SharedArrayBuffer): Promise<void> {
   let stdinReadPos = 0;
 
   // ── Virtual filesystem + stdin/stdout overrides ──
-  const originalFs = (globalThis as Record<string, unknown>).fs as Record<string, unknown> | undefined;
+  const originalFs = (globalThis as Record<string, unknown>).fs as
+    | Record<string, unknown>
+    | undefined;
   const fs = { ...(originalFs ?? {}) };
 
   // Track open file descriptors for virtual files
@@ -262,7 +264,12 @@ async function loadAndRunTsgo(stdinBuffer: SharedArrayBuffer): Promise<void> {
     return err;
   };
 
-  fs.open = (path: string, _flags: number, _mode: number, callback: (err: Error | null, fd?: number) => void): void => {
+  fs.open = (
+    path: string,
+    _flags: number,
+    _mode: number,
+    callback: (err: Error | null, fd?: number) => void,
+  ): void => {
     const content = virtualFiles.get(path);
     if (content != null) {
       const fd = nextFd++;
@@ -331,7 +338,10 @@ async function loadAndRunTsgo(stdinBuffer: SharedArrayBuffer): Promise<void> {
   fs.fstat = (fd: number, callback: (err: Error | null, stats?: unknown) => void): void => {
     const fdEntry = openFds.get(fd);
     if (fdEntry) {
-      (fs.stat as (path: string, cb: (err: Error | null, stats?: unknown) => void) => void)(fdEntry.path, callback);
+      (fs.stat as (path: string, cb: (err: Error | null, stats?: unknown) => void) => void)(
+        fdEntry.path,
+        callback,
+      );
     } else {
       callback(enosys());
     }
