@@ -228,6 +228,26 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         )
     }
 
+    fn resolve_named_export_target(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        _kind: verter_vfs::ResolveRequestKind,
+    ) -> Option<(String, String)> {
+        let resolved = self.host.resolve_named_export_in_view(
+            dep_canonical,
+            type_name,
+            Some(true),
+            Some(self.store_view),
+        )?;
+        Some((
+            resolved
+                .source_canonical_id
+                .unwrap_or_else(|| dep_canonical.to_string()),
+            resolved.source_name,
+        ))
+    }
+
     fn debug_enabled(&self) -> bool {
         external_type_debug_enabled()
     }
@@ -1002,18 +1022,25 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        self.resolve_loaded_dependency_canonical(
+        let type_resolved = self.resolve_loaded_dependency_canonical(
             owner_canonical,
             import_source,
             verter_vfs::ResolveRequestKind::TypeImport,
-        )
-        .or_else(|| {
+        );
+        let esm_resolved = type_resolved.as_ref().is_none().then(|| {
             self.resolve_loaded_dependency_canonical(
                 owner_canonical,
                 import_source,
                 verter_vfs::ResolveRequestKind::EsmImport,
             )
-        })
+        });
+        if crate::host_manage::component_meta_debug_enabled() {
+            crate::host_manage::component_meta_debug(format!(
+                "resolve_type_dependency owner={} import={} type={:?} esm={:?}",
+                owner_canonical, import_source, type_resolved, esm_resolved,
+            ));
+        }
+        type_resolved.or(esm_resolved.flatten())
     }
 
     pub(crate) fn resolve_type_dependency_canonical_in_view(
@@ -1024,6 +1051,9 @@ impl VerterHost {
     ) -> Option<String> {
         if let Some(view) = store_view {
             self.current_eval_state_in_view(owner_canonical, Some(view))?;
+            if let Some(resolved) = self.resolve_type_dependency_canonical(owner_canonical, import_source) {
+                return Some(resolved);
+            }
             if let Some(resolved) = view
                 .dependency_resolution(owner_canonical, import_source)
                 .and_then(|resolution| {
@@ -1035,8 +1065,7 @@ impl VerterHost {
             {
                 return Some(resolved);
             }
-
-            return self.resolve_type_dependency_canonical(owner_canonical, import_source);
+            return None;
         }
         self.resolve_type_dependency_canonical(owner_canonical, import_source)
     }

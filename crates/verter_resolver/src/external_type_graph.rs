@@ -30,6 +30,15 @@ pub trait ExternalTypeGraphResolver {
         profile_hash: Option<u64>,
     ) -> Option<String>;
 
+    fn resolve_named_export_target(
+        &self,
+        _dep_canonical: &str,
+        _type_name: &str,
+        _kind: ResolveRequestKind,
+    ) -> Option<(String, String)> {
+        None
+    }
+
     fn debug_enabled(&self) -> bool {
         false
     }
@@ -208,6 +217,36 @@ pub fn resolve_external_type_from_graph<R: ExternalTypeGraphResolver>(
             cache.insert(cache_key, entry.resolved.clone());
             tracked_deps.extend(entry.tracked_deps.iter().cloned());
             return Ok(entry.resolved);
+        }
+    }
+
+    if let Some((target_canonical, target_type_name)) =
+        resolver.resolve_named_export_target(&dep_canonical, type_name, kind)
+    {
+        if target_canonical != dep_canonical || target_type_name != type_name {
+            tracked_deps.insert(target_canonical.clone());
+            resolution_deps.insert(target_canonical.clone());
+            if let Some(target_source) =
+                resolver.read_source_for_type_resolution(&target_canonical, profile_hash)
+            {
+                let body_resolver = GraphBodyResolver { resolver };
+                let resolved = resolve_external_type_from_source_body(
+                    &body_resolver,
+                    &target_canonical,
+                    &target_type_name,
+                    &target_source,
+                    tracked_deps,
+                    resolution_deps,
+                    cache,
+                    visiting,
+                    kind,
+                    use_host_cache,
+                    profile_hash,
+                    depth + 1,
+                )?;
+                cache.insert(cache_key, resolved.clone());
+                return Ok(resolved);
+            }
         }
     }
 
@@ -393,13 +432,14 @@ mod tests {
     use super::{resolve_external_type_from_graph, ExternalTypeGraphResolver};
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use verter_vfs::ResolveRequestKind;
 
     #[derive(Default)]
     struct TestResolver {
-        routes: BTreeMap<(String, String), String>,
-        sources: BTreeMap<String, String>,
+        routes: FxHashMap<(String, String), String>,
+        sources: FxHashMap<String, String>,
+        named_export_targets: FxHashMap<(String, String, ResolveRequestKind), (String, String)>,
         logs: RefCell<Vec<String>>,
     }
 
@@ -443,6 +483,17 @@ mod tests {
             _profile_hash: Option<u64>,
         ) -> Option<String> {
             self.sources.get(dep_canonical).cloned()
+        }
+
+        fn resolve_named_export_target(
+            &self,
+            dep_canonical: &str,
+            type_name: &str,
+            kind: ResolveRequestKind,
+        ) -> Option<(String, String)> {
+            self.named_export_targets
+                .get(&(dep_canonical.to_string(), type_name.to_string(), kind))
+                .cloned()
         }
 
         fn debug_enabled(&self) -> bool {
@@ -543,5 +594,55 @@ mod tests {
 
         assert!(actual.is_some());
         assert!(tracked.contains("/src/deep.ts"));
+    }
+
+    #[test]
+    fn resolve_external_type_from_graph_uses_named_export_target_before_reading_barrel_source() {
+        let mut resolver = TestResolver::default();
+        resolver.routes.insert(
+            ("/src/Consumer.vue".to_string(), "./types".to_string()),
+            "/src/types/index.ts".to_string(),
+        );
+        resolver.named_export_targets.insert(
+            (
+                "/src/types/index.ts".to_string(),
+                "ButtonProps".to_string(),
+                ResolveRequestKind::TypeImport,
+            ),
+            (
+                "/src/components/Button.vue".to_string(),
+                "ButtonProps".to_string(),
+            ),
+        );
+        resolver.sources.insert(
+            "/src/components/Button.vue".to_string(),
+            "export interface ButtonProps { label: string }".to_string(),
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = FxHashMap::default();
+        let mut visiting = FxHashSet::default();
+        let actual = resolve_external_type_from_graph(
+            &resolver,
+            "/src/Consumer.vue",
+            "./types",
+            "ButtonProps",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            true,
+            ResolveRequestKind::TypeImport,
+            false,
+            None,
+            0,
+        )
+        .expect("named export routing should bypass the unreadable barrel source");
+
+        assert!(actual.is_some());
+        assert!(tracked.contains("/src/types/index.ts"));
+        assert!(tracked.contains("/src/components/Button.vue"));
+        assert!(!tracked.contains("/src/deep.ts"));
     }
 }
