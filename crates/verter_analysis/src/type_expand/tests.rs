@@ -927,6 +927,363 @@ fn expand_object_shape_normalizes_inline_property_types() {
     }
 }
 
+fn add_deep_alias_chain(env: &mut EvalEnv, prefix: &str, depth: usize) -> String {
+    let leaf = format!("{prefix}Leaf");
+    env.add_type(TypeDeclInfo {
+        name: leaf.clone(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Primitive(PrimitiveName::String),
+    });
+
+    let mut current = leaf;
+    for index in (0..depth).rev() {
+        let name = format!("{prefix}Layer{index}");
+        env.add_type(TypeDeclInfo {
+            name: name.clone(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![],
+            body: TypeExpr::named(current),
+        });
+        current = name;
+    }
+
+    current
+}
+
+#[test]
+fn expand_object_shape_keeps_wide_utility_member_types_shallow() {
+    let mut env = EvalEnv::new();
+    let mut members = vec![
+        ObjectMember::Property(ObjectProperty {
+            name: "element".to_string(),
+            ty: TypeExpr::named(add_deep_alias_chain(&mut env, "Element", 24)),
+            optional: false,
+            readonly: false,
+        }),
+        ObjectMember::Property(ObjectProperty {
+            name: "content".to_string(),
+            ty: TypeExpr::named(add_deep_alias_chain(&mut env, "Content", 24)),
+            optional: false,
+            readonly: false,
+        }),
+    ];
+
+    for index in 0..6 {
+        members.push(ObjectMember::Property(ObjectProperty {
+            name: format!("prop{index}"),
+            ty: TypeExpr::named(add_deep_alias_chain(&mut env, &format!("Prop{index}"), 24)),
+            optional: false,
+            readonly: false,
+        }));
+    }
+
+    env.add_type(TypeDeclInfo {
+        name: "EditorOptions".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: members,
+        })),
+    });
+
+    let expr = TypeExpr::named_with_args(
+        "Omit",
+        vec![
+            TypeExpr::named_with_args("Partial", vec![TypeExpr::named("EditorOptions")]),
+            TypeExpr::union(vec![
+                TypeExpr::string_literal("content"),
+                TypeExpr::string_literal("element"),
+            ]),
+        ],
+    );
+    let mut budget = default_budget();
+    budget.max_symbolic_work = 48;
+
+    let result = expand_object_shape(&expr, &mut env, &budget);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.reason != ExpansionStopReason::BudgetExceeded),
+        "utility shape extraction should keep wide member types shallow, got diagnostics: {:?}",
+        result.diagnostics
+    );
+    assert_eq!(result.value.properties.len(), 6);
+    assert!(
+        result.value.properties.iter().all(|prop| prop.optional),
+        "Partial<EditorOptions> should still make every prop optional"
+    );
+    assert!(
+        result
+            .value
+            .properties
+            .iter()
+            .all(|prop| matches!(&prop.ty, TypeExpr::Ref { name, .. } if name.starts_with("Prop"))),
+        "wide local member types should stay symbolic instead of resolving deep alias chains: {:?}",
+        result.value.properties
+    );
+}
+
+#[test]
+fn expand_object_shape_normalizes_direct_union_alias_member_types() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "RouteLocationRaw".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "path".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "name".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+        ]),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "Props".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "to".to_string(),
+                ty: TypeExpr::named("RouteLocationRaw"),
+                optional: true,
+                readonly: false,
+            })],
+        })),
+    });
+
+    let result = expand_object_shape(&TypeExpr::named("Props"), &mut env, &default_budget());
+    let to = result
+        .value
+        .properties
+        .iter()
+        .find(|prop| prop.name == "to")
+        .expect("to property should exist");
+
+    match &to.ty {
+        TypeExpr::Union(types) => assert!(
+            types
+                .iter()
+                .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+            "normalized union should retain the string route variant: {:?}",
+            to.ty
+        ),
+        other => panic!("expected direct union alias member to normalize, got {other:?}"),
+    }
+}
+
+#[test]
+fn expand_object_shape_normalizes_short_ref_chain_member_types() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "Leaf".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Primitive(PrimitiveName::String),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "Middle".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::named("Leaf"),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "Props".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "value".to_string(),
+                ty: TypeExpr::named("Middle"),
+                optional: true,
+                readonly: false,
+            })],
+        })),
+    });
+
+    let result = expand_object_shape(&TypeExpr::named("Props"), &mut env, &default_budget());
+    let value = result
+        .value
+        .properties
+        .iter()
+        .find(|prop| prop.name == "value")
+        .expect("value property should exist");
+
+    assert_eq!(
+        value.ty,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "short alias chains should still normalize to their concrete member type"
+    );
+}
+
+#[test]
+fn expand_object_shape_normalizes_direct_indexed_access_member_types() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "RouteLocationRaw".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "path".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+        ]),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "Props".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "to".to_string(),
+                    ty: TypeExpr::named("RouteLocationRaw"),
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "href".to_string(),
+                    ty: TypeExpr::IndexedAccess {
+                        object: Arc::new(TypeExpr::named("Props")),
+                        index: Arc::new(TypeExpr::string_literal("to")),
+                    },
+                    optional: true,
+                    readonly: false,
+                }),
+            ],
+        })),
+    });
+
+    let result = expand_object_shape(&TypeExpr::named("Props"), &mut env, &default_budget());
+    let href = result
+        .value
+        .properties
+        .iter()
+        .find(|prop| prop.name == "href")
+        .expect("href property should exist");
+
+    match &href.ty {
+        TypeExpr::Union(types) => assert!(
+            types
+                .iter()
+                .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+            "normalized indexed access should retain the string route variant: {:?}",
+            href.ty
+        ),
+        other => panic!("expected indexed access member to normalize, got {other:?}"),
+    }
+}
+
+#[test]
+fn expand_object_shape_normalizes_indexed_access_through_short_alias_target_chain() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "RouteLocationRaw".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "path".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+        ]),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "BaseProps".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "to".to_string(),
+                ty: TypeExpr::named("RouteLocationRaw"),
+                optional: true,
+                readonly: false,
+            })],
+        })),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "Props".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::named("BaseProps"),
+    });
+    env.add_type(TypeDeclInfo {
+        name: "Wrapper".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "href".to_string(),
+                ty: TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("Props")),
+                    index: Arc::new(TypeExpr::string_literal("to")),
+                },
+                optional: true,
+                readonly: false,
+            })],
+        })),
+    });
+
+    let result = expand_object_shape(&TypeExpr::named("Wrapper"), &mut env, &default_budget());
+    let href = result
+        .value
+        .properties
+        .iter()
+        .find(|prop| prop.name == "href")
+        .expect("href property should exist");
+
+    match &href.ty {
+        TypeExpr::Union(types) => assert!(
+            types
+                .iter()
+                .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
+            "indexed access through a short alias chain should retain the string branch: {:?}",
+            href.ty
+        ),
+        other => panic!("expected indexed access member to normalize, got {other:?}"),
+    }
+}
+
 #[test]
 fn expand_object_shape_intersection_different_types() {
     // { a: string | number } & { a: string }

@@ -3597,12 +3597,69 @@ defineProps<Props>()
             None,
             None,
             None,
+            None,
         )
         .expect("owner env should build");
 
     assert!(
         built.env.type_symbols.contains_key("Props"),
         "builder should materialize shallow imported aliases into the owner env"
+    );
+}
+
+#[test]
+fn build_fallthrough_eval_env_skips_unused_runtime_import_dependency_lookups() {
+    let host = make_host();
+    upsert_non_sfc(&host, "/src/used.ts", "export const used = 'used'");
+    upsert_non_sfc(&host, "/src/unused.ts", "export const unused = 'unused'");
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import { used } from './used'
+import { unused } from './unused'
+</script>
+<template><div :title="used" /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            exact_dependency("./used", "/src/used.ts"),
+            exact_dependency("./unused", "/src/unused.ts"),
+        ],
+    );
+
+    assert!(host
+        .clone_current_imported_dependency_entry("/src/used.ts", None)
+        .is_none());
+    assert!(host
+        .clone_current_imported_dependency_entry("/src/unused.ts", None)
+        .is_none());
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let env = host
+        .build_fallthrough_eval_env_in_view("/src/App.vue", &snapshot, None, None)
+        .expect("fallthrough owner env should build");
+
+    assert!(
+        env.value_symbols.contains_key("used"),
+        "template-referenced runtime bindings should still be materialized"
+    );
+    assert!(
+        !env.value_symbols.contains_key("unused"),
+        "unused runtime imports should stay out of the fallthrough owner env"
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/used.ts", None)
+            .is_some(),
+        "referenced runtime imports should still populate their dependency cache entry"
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/unused.ts", None)
+            .is_none(),
+        "unused runtime imports should not populate dependency cache entries during fallthrough env construction"
     );
 }
 

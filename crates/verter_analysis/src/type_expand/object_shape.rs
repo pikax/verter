@@ -471,9 +471,12 @@ fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
             name,
             type_arguments,
         } => {
-            (type_arguments.is_empty()
-                && (env.type_bindings.contains_key(name.as_ref())
-                    || env.type_symbols.contains_key(name.as_ref())))
+            (type_arguments.is_empty() && env.type_bindings.contains_key(name.as_ref()))
+                || (type_arguments.is_empty()
+                    && env
+                        .type_symbols
+                        .get(name.as_ref())
+                        .is_some_and(|decl| should_normalize_direct_ref_body(&decl.body, env)))
                 || is_builtin_member_utility(name)
                 || type_arguments
                     .iter()
@@ -492,7 +495,9 @@ fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
         }),
         TypeExpr::Function(func) => should_normalize_function_member(func, env),
         TypeExpr::IndexedAccess { object, index } => {
-            should_normalize_member_type(object, env) || should_normalize_member_type(index, env)
+            should_normalize_member_type(object, env)
+                || should_normalize_member_type(index, env)
+                || should_normalize_indexed_access_member(object, index, env)
         }
         TypeExpr::Conditional {
             check,
@@ -521,6 +526,92 @@ fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
         TypeExpr::TemplateLiteral { expressions, .. } => expressions
             .iter()
             .any(|expr| should_normalize_member_type(expr, env)),
+        _ => false,
+    }
+}
+
+const MEMBER_REF_NORMALIZATION_ALIAS_DEPTH: usize = 4;
+
+fn should_normalize_direct_ref_body(expr: &TypeExpr, env: &EvalEnv) -> bool {
+    should_normalize_direct_ref_body_with_depth(expr, env, MEMBER_REF_NORMALIZATION_ALIAS_DEPTH)
+}
+
+fn should_normalize_direct_ref_body_with_depth(
+    expr: &TypeExpr,
+    env: &EvalEnv,
+    remaining_depth: usize,
+) -> bool {
+    match expr {
+        TypeExpr::Parenthesized(inner) => {
+            should_normalize_direct_ref_body_with_depth(inner, env, remaining_depth)
+        }
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() && remaining_depth > 0 => {
+            let next_depth = remaining_depth - 1;
+            env.type_bindings.get(name.as_ref()).is_some_and(|bound| {
+                should_normalize_direct_ref_body_with_depth(bound, env, next_depth)
+            }) || env.type_symbols.get(name.as_ref()).is_some_and(|decl| {
+                should_normalize_direct_ref_body_with_depth(&decl.body, env, next_depth)
+            })
+        }
+        TypeExpr::Ref { .. } | TypeExpr::Object(_) | TypeExpr::Function(_) => false,
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Array { .. }
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Union(_)
+        | TypeExpr::Intersection(_)
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::Rest(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TemplateLiteral { .. } => true,
+        TypeExpr::Unknown { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Infer { .. } => false,
+    }
+}
+
+fn should_normalize_indexed_access_member(
+    object: &TypeExpr,
+    index: &TypeExpr,
+    env: &EvalEnv,
+) -> bool {
+    matches!(
+        index,
+        TypeExpr::Literal(LiteralValue::String(_)) | TypeExpr::Literal(LiteralValue::Number(_))
+    ) && has_direct_structural_index_target(object, env)
+}
+
+fn has_direct_structural_index_target(expr: &TypeExpr, env: &EvalEnv) -> bool {
+    has_direct_structural_index_target_with_depth(expr, env, MEMBER_REF_NORMALIZATION_ALIAS_DEPTH)
+}
+
+fn has_direct_structural_index_target_with_depth(
+    expr: &TypeExpr,
+    env: &EvalEnv,
+    remaining_depth: usize,
+) -> bool {
+    match expr {
+        TypeExpr::Parenthesized(inner) => {
+            has_direct_structural_index_target_with_depth(inner, env, remaining_depth)
+        }
+        TypeExpr::Object(_) | TypeExpr::Intersection(_) => true,
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() && remaining_depth > 0 => {
+            let next_depth = remaining_depth - 1;
+            env.type_bindings.get(name.as_ref()).is_some_and(|bound| {
+                has_direct_structural_index_target_with_depth(bound, env, next_depth)
+            }) || env.type_symbols.get(name.as_ref()).is_some_and(|decl| {
+                has_direct_structural_index_target_with_depth(&decl.body, env, next_depth)
+            })
+        }
         _ => false,
     }
 }

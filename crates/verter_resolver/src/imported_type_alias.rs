@@ -142,8 +142,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
             &local_body.body,
         );
         decl.body = local_body.body;
-        let requires_source_merge =
-            local_body.requires_source_merge || !symbol_dependencies.is_empty();
+        let requires_source_merge = local_body.requires_source_merge;
         resolver.cache_prepared_imported_type_alias(
             &resolved_source_canonical_id,
             resolved_exported_name.as_str(),
@@ -264,7 +263,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         }
     } else {
         selected_body.is_none()
-    } || !symbol_dependencies.is_empty();
+    };
 
     if body_has_structural_extends && requires_source_merge {
         // Keep the raw intersection body for later source-merge-backed evaluation.
@@ -730,45 +729,13 @@ fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
             types.iter().any(contains_nested_resolution_targets)
         }
-        TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
-            ObjectMember::Property(prop) => contains_nested_resolution_targets(&prop.ty),
-            ObjectMember::Method(method) => {
-                contains_nested_resolution_targets_in_function(&method.function)
-            }
-            ObjectMember::IndexSignature(sig) => {
-                contains_nested_resolution_targets(&sig.key_type)
-                    || contains_nested_resolution_targets(&sig.value_type)
-            }
-            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                contains_nested_resolution_targets_in_function(func)
-            }
-        }),
-        TypeExpr::Function(func) => contains_nested_resolution_targets_in_function(func),
+        TypeExpr::Object(_) => false,
+        TypeExpr::Function(_) => false,
         TypeExpr::TemplateLiteral { expressions, .. } => {
             expressions.iter().any(contains_nested_resolution_targets)
         }
         TypeExpr::Infer { .. } => false,
     }
-}
-
-fn contains_nested_resolution_targets_in_function(func: &FunctionExpr) -> bool {
-    func.parameters
-        .iter()
-        .any(|param| contains_nested_resolution_targets(&param.ty))
-        || func
-            .return_type
-            .as_deref()
-            .is_some_and(contains_nested_resolution_targets)
-        || func.type_parameters.iter().any(|param| {
-            param
-                .constraint
-                .as_deref()
-                .is_some_and(contains_nested_resolution_targets)
-                || param
-                    .default
-                    .as_deref()
-                    .is_some_and(contains_nested_resolution_targets)
-        })
 }
 
 fn count_top_level_properties(expr: &TypeExpr) -> usize {
@@ -1240,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_imported_type_alias_keeps_local_object_surface_with_nested_refs_lazy() {
+    fn prepare_imported_type_alias_keeps_local_object_surface_with_nested_refs_shallow() {
         let request = ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/src/App.vue".to_string(),
             import_source: "./types".to_string(),
@@ -1263,8 +1230,8 @@ mod tests {
             "object-shaped local symbol bodies with nested refs should stay lazy instead of forcing external resolution"
         );
         assert!(
-            actual.requires_source_merge,
-            "nested refs should still mark the alias for lazy source-merge follow-up"
+            !actual.requires_source_merge,
+            "plain object member refs should stay shallow instead of forcing source-merge follow-up"
         );
         let TypeExpr::Object(obj) = actual.decl.body else {
             panic!("expected object body");

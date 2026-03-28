@@ -2341,6 +2341,132 @@ defineProps<{
 }
 
 #[test]
+fn evaluate_types_skip_irrelevant_transitive_slot_value_dependencies() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/leaf.ts",
+            r#"export interface LeafValue {
+  class: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/tv.ts",
+            r#"import type { LeafValue } from './leaf'
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: LeafValue
+}
+
+export type ComponentConfig<T extends { slots?: Record<string, any> }> = {
+  slots: ComponentSlots<T>
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/theme.ts",
+            r#"export default {
+  slots: {
+    item: 'item',
+    body: 'body'
+  }
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ComponentConfig } from './tv'
+import theme from './theme'
+
+type Accordion = ComponentConfig<typeof theme>
+
+defineProps<{
+  ui: Accordion['slots']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    match evaluated_prop_type(&evaluated, "ui") {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"item"));
+            assert!(names.contains(&"body"));
+        }
+        other => panic!("expected ui slots object, got {other:?}"),
+    }
+
+    let state = cached_resolved_state(&project, "/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("evaluation should populate the resolved-meta cache");
+    let inputs = state
+        .cached_eval_inputs
+        .as_ref()
+        .expect("expanded resolution should cache imported eval inputs");
+
+    assert!(
+        inputs.canonical_dependencies.contains("/tv.ts"),
+        "ComponentConfig declaration source should be tracked"
+    );
+    assert!(
+        !inputs.canonical_dependencies.contains("/leaf.ts"),
+        "slot value leaf imports should stay out of eval inputs when only slot keys are needed"
+    );
+}
+
+#[test]
+fn evaluate_types_materializes_imported_indexed_access_from_shallow_alias_source_env() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/dep.ts",
+            r#"type Child = string
+
+export type Parent = {
+  x: Child
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Parent } from './dep'
+
+defineProps<{
+  value: Parent['x']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    assert_eq!(
+        evaluated_define_props_type(&evaluated, "value"),
+        &TypeExpr::Primitive(PrimitiveName::String),
+        "indexed access through an imported shallow alias should still resolve via the source env"
+    );
+}
+
+#[test]
 fn get_component_meta_merges_local_eval_surface_with_imported_props() {
     let project = make_project();
     project

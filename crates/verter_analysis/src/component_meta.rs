@@ -2130,8 +2130,24 @@ fn merge_slot_bindings_with_source(
     source_field: &crate::types::AnalyzedSlotField,
     expanded_bindings: Vec<SlotBindingAnalysis>,
 ) -> Vec<SlotBindingAnalysis> {
-    if source_field.bindings.is_empty() || expanded_bindings.is_empty() {
+    if source_field.bindings.is_empty() {
         return expanded_bindings;
+    }
+    if expanded_bindings.is_empty() {
+        return source_field
+            .bindings
+            .iter()
+            .map(|binding| SlotBindingAnalysis {
+                name: binding.name.clone(),
+                type_expr: binding
+                    .type_annotation
+                    .as_deref()
+                    .map(parse_annotation_or_unknown)
+                    .unwrap_or_else(|| unknown_type("unknown".to_string())),
+                type_expansion: None,
+                raw_type: binding.type_annotation.clone(),
+            })
+            .collect();
     }
 
     let mut expanded_by_name: rustc_hash::FxHashMap<String, SlotBindingAnalysis> =

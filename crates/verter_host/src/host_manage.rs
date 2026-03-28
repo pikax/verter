@@ -1658,13 +1658,53 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
 
         canonical_dependencies.insert(request.source_canonical_id.clone());
         let eval_source = self.cached_eval_source(request.source_canonical_id.as_str())?;
-        let requires_source_merge = !self
-            .cached_required_import_names_for_exported_type(
-                request.source_canonical_id.as_str(),
-                request.exported_name.as_str(),
-                eval_source.as_ref(),
-            )
-            .is_empty();
+        let analysis = self
+            .host
+            .external_type_analysis_in_view(request.source_canonical_id.as_str(), self.store_view);
+        let target_name = analysis
+            .as_ref()
+            .map(|analysis| analysis.local_symbol_target_name(request.exported_name.as_str()))
+            .unwrap_or_else(|| request.exported_name.clone());
+        let forwards_to_import = analysis.as_ref().is_some_and(|analysis| {
+            analysis
+                .direct_reexport_target(request.exported_name.as_str())
+                .is_some()
+                || analysis
+                    .local_import_symbol_target(target_name.as_str())
+                    .is_some()
+        });
+        let merge_root = self.host.resolve_imported_type_root_in_view(
+            request.source_canonical_id.as_str(),
+            request.exported_name.as_str(),
+            self.store_view,
+        );
+        let requires_source_merge = if merge_root.0 != request.source_canonical_id
+            || merge_root.1 != request.exported_name
+        {
+            true
+        } else if !forwards_to_import {
+            self.cached_dependency_eval_env(request.source_canonical_id.as_str())
+                .and_then(|env| env.type_symbols.get(target_name.as_str()).cloned())
+                .map(|decl| verter_resolver::prepare_local_imported_type_alias(&decl))
+                .map(|prepared| prepared.requires_source_merge)
+                .unwrap_or_else(|| {
+                    !self
+                        .cached_required_import_names_for_exported_type(
+                            request.source_canonical_id.as_str(),
+                            request.exported_name.as_str(),
+                            eval_source.as_ref(),
+                        )
+                        .is_empty()
+                })
+        } else {
+            !self
+                .cached_required_import_names_for_exported_type(
+                    request.source_canonical_id.as_str(),
+                    request.exported_name.as_str(),
+                    eval_source.as_ref(),
+                )
+                .is_empty()
+        };
 
         Some(ImportedTypeAlias {
             local_name: request.local_name,
@@ -1922,6 +1962,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
                 imported_inputs,
                 None,
                 Some(context.env.clone()),
+                None,
                 self.store_view,
             )
             .map(|built| built.env)
@@ -2156,12 +2197,14 @@ impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
         &self,
         snapshot: &Self::Snapshot,
         owner_local_value_names: &rustc_hash::FxHashSet<String>,
+        required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         env: &mut verter_analysis::type_eval::EvalEnv,
     ) {
         self.host
             .materialize_imported_runtime_values_into_env_in_view(
                 snapshot,
                 owner_local_value_names,
+                required_runtime_value_names,
                 env,
                 self.store_view,
             );
@@ -4940,12 +4983,20 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
         budget: verter_analysis::type_expand::ExpansionBudget,
     ) -> Option<ComputedEvaluatedTypes> {
+        let required_runtime_value_names = if let Some(owner_env) = owner_env.as_ref() {
+            collect_required_runtime_value_names(snapshot, eval_source, owner_env)
+        } else if let Some(base_env) = self.base_eval_env_in_view(canonical, store_view) {
+            collect_required_runtime_value_names(snapshot, eval_source, &base_env)
+        } else {
+            rustc_hash::FxHashSet::default()
+        };
         let built = self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
             canonical,
             snapshot,
             imported_inputs,
             None,
             owner_env,
+            Some(&required_runtime_value_names),
             store_view,
         )?;
         let mut env = built.env;
@@ -5386,6 +5437,7 @@ impl VerterHost {
                 store_view.is_some(),
             ),
         );
+        let required_runtime_value_names = collect_required_template_runtime_value_names(snapshot);
         Some(
             self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
                 canonical_id,
@@ -5393,6 +5445,7 @@ impl VerterHost {
                 imported_inputs,
                 prop_type_overrides,
                 None,
+                Some(&required_runtime_value_names),
                 store_view,
             )?
             .env,
@@ -5408,6 +5461,7 @@ impl VerterHost {
             &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
         >,
         owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+        required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<OwnerEvalEnvBuild> {
         let _trace =
@@ -5436,6 +5490,7 @@ impl VerterHost {
             imported_inputs,
             prop_type_overrides,
             owner_env,
+            required_runtime_value_names,
         )?;
         if component_meta_debug_enabled() {
             component_meta_debug(format!(
@@ -5482,6 +5537,10 @@ impl VerterHost {
             if owner_local_type_names.contains(&alias.local_name) {
                 continue;
             }
+            // Imported source envs are merged before alias hydration, so a raw dep symbol can
+            // already occupy this local name. Drop non-owner placeholders and replace them with
+            // the hydrated alias surface for the owner's import binding.
+            env.type_symbols.remove(&alias.local_name);
             if self.materialize_shallow_type_symbol_into_env_in_view(
                 env,
                 alias.local_name.as_str(),
@@ -5554,7 +5613,7 @@ impl VerterHost {
         };
 
         let mut hydrated = cached.clone();
-        if hydrated.requires_source_merge || !hydrated.symbol_dependencies.is_empty() {
+        if hydrated.requires_source_merge {
             let mut env = self
                 .base_eval_env_in_view(resolved_canonical_id.as_str(), store_view)
                 .unwrap_or_default();
@@ -5610,16 +5669,25 @@ impl VerterHost {
         );
 
         let inserted =
-            if let Some((_resolved_canonical_id, _resolved_exported_name, prepared)) = prepared {
+            if let Some((resolved_canonical_id, _resolved_exported_name, prepared)) = prepared {
+                if !prepared.requires_source_merge && !prepared.symbol_dependencies.is_empty() {
+                    if let Some(dep_env) =
+                        self.base_eval_env_in_view(resolved_canonical_id.as_str(), store_view)
+                    {
+                        env.extend_missing_from_ref(&dep_env);
+                    }
+                }
                 for child in &prepared.symbol_dependencies {
-                    self.materialize_shallow_type_symbol_into_env_in_view(
-                        env,
-                        child.local_name.as_str(),
-                        child.canonical_id.as_str(),
-                        child.exported_name.as_str(),
-                        store_view,
-                        visiting,
-                    );
+                    if prepared.requires_source_merge {
+                        self.materialize_shallow_type_symbol_into_env_in_view(
+                            env,
+                            child.local_name.as_str(),
+                            child.canonical_id.as_str(),
+                            child.exported_name.as_str(),
+                            store_view,
+                            visiting,
+                        );
+                    }
                 }
                 let mut decl = prepared.decl.clone();
                 decl.name = local_name.to_string();
@@ -5648,6 +5716,7 @@ impl VerterHost {
         &self,
         snapshot: &FileAnalysisSnapshot,
         owner_local_value_names: &rustc_hash::FxHashSet<String>,
+        required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         env: &mut verter_analysis::type_eval::EvalEnv,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
@@ -5669,6 +5738,7 @@ impl VerterHost {
         materialize_imported_runtime_values_into_env(
             snapshot.imports.as_slice(),
             owner_local_value_names,
+            required_runtime_value_names,
             env,
             &resolver,
         );
@@ -8536,6 +8606,533 @@ fn collect_required_owner_import_names_from_parts(
         ));
     }
     required
+}
+
+fn collect_required_runtime_value_names(
+    snapshot: &FileAnalysisSnapshot,
+    owner_eval_source: &str,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+) -> rustc_hash::FxHashSet<String> {
+    let owner_snapshot = ImportedEvalOwnerSnapshot {
+        imports: snapshot.imports.as_slice(),
+        macros: snapshot.macros.as_ref(),
+        bindings: snapshot.bindings.as_ref(),
+        macro_type_deps: snapshot.macro_type_deps.as_ref(),
+    };
+    collect_required_runtime_value_names_from_parts(&owner_snapshot, owner_eval_source, owner_env)
+}
+
+fn collect_required_template_runtime_value_names(
+    snapshot: &FileAnalysisSnapshot,
+) -> rustc_hash::FxHashSet<String> {
+    let mut required = rustc_hash::FxHashSet::default();
+    let Some(template) = snapshot.template.as_ref() else {
+        return required;
+    };
+
+    required.extend(
+        template
+            .binding_occurrences
+            .iter()
+            .map(|occurrence| occurrence.name.clone()),
+    );
+
+    for component in &template.components {
+        for prop in &component.props {
+            required.extend(prop.referenced_bindings.iter().cloned());
+            if prop.is_shorthand {
+                required.insert(prop.name.clone());
+            }
+        }
+    }
+
+    required
+}
+
+fn collect_required_runtime_value_names_from_parts(
+    owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
+    owner_eval_source: &str,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+) -> rustc_hash::FxHashSet<String> {
+    let mut required = rustc_hash::FxHashSet::default();
+    if owner_eval_source.is_empty() {
+        return required;
+    }
+
+    let type_bindings = VerterHost::owner_generic_type_bindings(owner_env);
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let macro_type_params =
+        verter_analysis::type_eval_build::collect_define_macro_type_params(owner_eval_source);
+    let mut define_props_index = 0usize;
+    let mut define_emits_index = 0usize;
+    let mut define_slots_index = 0usize;
+    let binding_type_annotations: rustc_hash::FxHashMap<&str, &str> = owner_snapshot
+        .bindings
+        .iter()
+        .filter_map(|binding| {
+            binding
+                .type_annotation
+                .as_deref()
+                .map(|type_ann| (binding.name.as_str(), type_ann))
+        })
+        .collect();
+
+    for mac in owner_snapshot.macros.iter() {
+        if mac.is_type_based {
+            let macro_type_expr = match mac.kind {
+                verter_analysis::AnalyzedMacroKind::DefineProps => {
+                    let expr = macro_type_params.define_props.get(define_props_index);
+                    define_props_index += 1;
+                    expr
+                }
+                verter_analysis::AnalyzedMacroKind::DefineEmits => {
+                    let expr = macro_type_params.define_emits.get(define_emits_index);
+                    define_emits_index += 1;
+                    expr
+                }
+                verter_analysis::AnalyzedMacroKind::DefineSlots => {
+                    let expr = macro_type_params.define_slots.get(define_slots_index);
+                    define_slots_index += 1;
+                    expr
+                }
+                _ => None,
+            };
+            if let Some(expr) = macro_type_expr {
+                if !expr.is_unknown() {
+                    collect_runtime_value_names_from_expr(
+                        expr,
+                        owner_env,
+                        &type_bindings,
+                        &mut active_locals,
+                        &mut required,
+                    );
+                }
+            }
+            for type_reference in &mac.type_references {
+                collect_required_runtime_value_names_for_symbol(
+                    type_reference,
+                    owner_env,
+                    &type_bindings,
+                    &mut active_locals,
+                    &mut required,
+                );
+            }
+        }
+
+        for field in &mac.prop_fields {
+            if let Some(type_ann) = field.type_annotation.as_deref() {
+                let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                if !expr.is_unknown() {
+                    collect_runtime_value_names_from_expr(
+                        &expr,
+                        owner_env,
+                        &type_bindings,
+                        &mut active_locals,
+                        &mut required,
+                    );
+                }
+            }
+        }
+
+        for field in &mac.emit_fields {
+            if let Some(payload) = field.payload_type.as_deref() {
+                let expr = verter_analysis::type_expr_lower::parse_type_annotation(payload);
+                if !expr.is_unknown() {
+                    collect_runtime_value_names_from_expr(
+                        &expr,
+                        owner_env,
+                        &type_bindings,
+                        &mut active_locals,
+                        &mut required,
+                    );
+                }
+            }
+        }
+
+        if mac.kind != verter_analysis::AnalyzedMacroKind::DefineSlots {
+            for slot in &mac.slot_fields {
+                for binding in &slot.bindings {
+                    if let Some(type_ann) = binding.type_annotation.as_deref() {
+                        let expr =
+                            verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                        if !expr.is_unknown() {
+                            collect_runtime_value_names_from_expr(
+                                &expr,
+                                owner_env,
+                                &type_bindings,
+                                &mut active_locals,
+                                &mut required,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        for field in &mac.expose_fields {
+            let Some(type_ann) = binding_type_annotations.get(field.name.as_str()) else {
+                continue;
+            };
+            let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+            if expr.is_unknown() {
+                continue;
+            }
+            collect_runtime_value_names_from_expr(
+                &expr,
+                owner_env,
+                &type_bindings,
+                &mut active_locals,
+                &mut required,
+            );
+        }
+    }
+
+    required
+}
+
+fn collect_required_runtime_value_names_for_symbol(
+    symbol: &str,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    active_locals: &mut rustc_hash::FxHashSet<String>,
+    required: &mut rustc_hash::FxHashSet<String>,
+) {
+    if owner_env.type_symbols.contains_key(symbol) || type_bindings.contains_key(symbol) {
+        collect_runtime_value_names_from_expr(
+            &verter_analysis::type_expr::TypeExpr::named(symbol),
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        );
+    }
+}
+
+fn collect_runtime_value_names_from_function(
+    func: &verter_analysis::type_expr::FunctionExpr,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    active_locals: &mut rustc_hash::FxHashSet<String>,
+    required: &mut rustc_hash::FxHashSet<String>,
+) {
+    let mut local_bindings = type_bindings.clone();
+    for param in &func.type_parameters {
+        local_bindings.insert(
+            param.name.clone(),
+            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
+        );
+        if let Some(constraint) = param.constraint.as_deref() {
+            collect_runtime_value_names_from_expr(
+                constraint,
+                owner_env,
+                &local_bindings,
+                active_locals,
+                required,
+            );
+        }
+        if let Some(default) = param.default.as_deref() {
+            collect_runtime_value_names_from_expr(
+                default,
+                owner_env,
+                &local_bindings,
+                active_locals,
+                required,
+            );
+        }
+    }
+    for param in &func.parameters {
+        collect_runtime_value_names_from_expr(
+            &param.ty,
+            owner_env,
+            &local_bindings,
+            active_locals,
+            required,
+        );
+    }
+    if let Some(return_type) = func.return_type.as_deref() {
+        collect_runtime_value_names_from_expr(
+            return_type,
+            owner_env,
+            &local_bindings,
+            active_locals,
+            required,
+        );
+    }
+}
+
+fn collect_runtime_value_names_from_expr(
+    expr: &verter_analysis::type_expr::TypeExpr,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    active_locals: &mut rustc_hash::FxHashSet<String>,
+    required: &mut rustc_hash::FxHashSet<String>,
+) {
+    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Infer { .. }
+        | TypeExpr::Unknown { .. } => {}
+        TypeExpr::TypeParameter(param) => {
+            if let Some(constraint) = param.constraint.as_deref() {
+                collect_runtime_value_names_from_expr(
+                    constraint,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+            if let Some(default) = param.default.as_deref() {
+                collect_runtime_value_names_from_expr(
+                    default,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            for ty in types.iter() {
+                collect_runtime_value_names_from_expr(
+                    ty,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element)
+        | TypeExpr::Parenthesized(element) => collect_runtime_value_names_from_expr(
+            element,
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        ),
+        TypeExpr::Tuple { elements, .. } => {
+            for element in elements.iter() {
+                collect_runtime_value_names_from_expr(
+                    &element.ty,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                match member {
+                    ObjectMember::Property(prop) => collect_runtime_value_names_from_expr(
+                        &prop.ty,
+                        owner_env,
+                        type_bindings,
+                        active_locals,
+                        required,
+                    ),
+                    ObjectMember::IndexSignature(idx) => {
+                        collect_runtime_value_names_from_expr(
+                            &idx.key_type,
+                            owner_env,
+                            type_bindings,
+                            active_locals,
+                            required,
+                        );
+                        collect_runtime_value_names_from_expr(
+                            &idx.value_type,
+                            owner_env,
+                            type_bindings,
+                            active_locals,
+                            required,
+                        );
+                    }
+                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        collect_runtime_value_names_from_function(
+                            func,
+                            owner_env,
+                            type_bindings,
+                            active_locals,
+                            required,
+                        );
+                    }
+                    ObjectMember::Method(method) => collect_runtime_value_names_from_function(
+                        &method.function,
+                        owner_env,
+                        type_bindings,
+                        active_locals,
+                        required,
+                    ),
+                }
+            }
+        }
+        TypeExpr::Function(func) => collect_runtime_value_names_from_function(
+            func,
+            owner_env,
+            type_bindings,
+            active_locals,
+            required,
+        ),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if let Some(bound) = type_bindings.get(&**name) {
+                let binding_guard = format!("$type:{name}");
+                if !active_locals.insert(binding_guard.clone()) {
+                    return;
+                }
+                collect_runtime_value_names_from_expr(
+                    bound,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+                active_locals.remove(&binding_guard);
+                return;
+            }
+
+            if let Some(decl) = owner_env.type_symbols.get(&**name) {
+                if !active_locals.insert(name.to_string()) {
+                    return;
+                }
+
+                let mut local_bindings = type_bindings.clone();
+                for (index, param) in decl.type_parameters.iter().enumerate() {
+                    if let Some(constraint) = param.constraint.as_deref() {
+                        collect_runtime_value_names_from_expr(
+                            constraint,
+                            owner_env,
+                            &local_bindings,
+                            active_locals,
+                            required,
+                        );
+                    }
+                    if let Some(default) = param.default.as_deref() {
+                        collect_runtime_value_names_from_expr(
+                            default,
+                            owner_env,
+                            &local_bindings,
+                            active_locals,
+                            required,
+                        );
+                    }
+                    let arg = type_arguments.get(index).cloned().or_else(|| {
+                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
+                            param.clone(),
+                        ))
+                    });
+                    if let Some(arg) = arg {
+                        local_bindings.insert(param.name.to_string(), arg);
+                    }
+                }
+
+                collect_runtime_value_names_from_expr(
+                    &decl.body,
+                    owner_env,
+                    &local_bindings,
+                    active_locals,
+                    required,
+                );
+                active_locals.remove(&**name);
+                return;
+            }
+
+            for arg in type_arguments.iter() {
+                collect_runtime_value_names_from_expr(
+                    arg,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::TypeOf(value_ref) => {
+            if let Some(root) = value_ref.path.first() {
+                required.insert(root.clone());
+            }
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_runtime_value_names_from_expr(
+                object,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+            collect_runtime_value_names_from_expr(
+                index,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            for ty in [check, extends, true_type, false_type] {
+                collect_runtime_value_names_from_expr(
+                    ty,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            collect_runtime_value_names_from_expr(
+                source,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+            collect_runtime_value_names_from_expr(
+                value,
+                owner_env,
+                type_bindings,
+                active_locals,
+                required,
+            );
+            if let Some(name_type) = name_type.as_deref() {
+                collect_runtime_value_names_from_expr(
+                    name_type,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            for expr in expressions.iter() {
+                collect_runtime_value_names_from_expr(
+                    expr,
+                    owner_env,
+                    type_bindings,
+                    active_locals,
+                    required,
+                );
+            }
+        }
+    }
 }
 
 fn collect_required_import_names_for_type_decl(

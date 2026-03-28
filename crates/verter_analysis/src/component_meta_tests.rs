@@ -894,6 +894,89 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
 }
 
 #[test]
+fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![crate::types::AnalyzedSlotField {
+            name: "day".to_string(),
+            is_required: false,
+            span: verter_span::Span::default(),
+            bindings: vec![crate::types::AnalyzedSlotFieldBinding {
+                name: "day".to_string(),
+                type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
+                span: verter_span::Span::default(),
+            }],
+            return_type: Some("any".to_string()),
+            description: None,
+            tags: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: vec![crate::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::type_expand::ExpansionResult::exact(
+                crate::type_expand::ExpandedObjectShape {
+                    properties: vec![crate::type_expand::ExpandedProperty {
+                        name: "day".to_string(),
+                        ty: TypeExpr::Function(Arc::new(crate::type_expr::FunctionExpr {
+                            parameters: vec![crate::type_expr::FunctionParam {
+                                name: Some("props".to_string()),
+                                ty: TypeExpr::IndexedAccess {
+                                    object: Arc::new(TypeExpr::named("CalendarSlotProps")),
+                                    index: Arc::new(TypeExpr::string_literal("day")),
+                                },
+                                optional: false,
+                                rest: false,
+                            }],
+                            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                            type_parameters: Vec::new(),
+                        })),
+                        optional: true,
+                        readonly: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let slot = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "day")
+        .expect("day slot should be extracted");
+    let binding = slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "day")
+        .expect("day binding should fall back to the source slot binding");
+
+    assert_eq!(
+        binding.type_expr,
+        TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("CalendarCellTriggerProps")),
+            index: Arc::new(TypeExpr::string_literal("day")),
+        }
+    );
+    assert_eq!(
+        binding.raw_type.as_deref(),
+        Some("CalendarCellTriggerProps['day']")
+    );
+}
+
+#[test]
 fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_contract() {
     let macros = vec![make_define_props(vec![make_prop(
         "ui",

@@ -248,25 +248,6 @@ fn normalized_imported_type_root<R: ImportedEvalSourceMergeResolver>(
     resolver.resolve_imported_type_root(dep_canonical, imported_name)
 }
 
-fn requires_source_merge_inputs<R: ImportedEvalSourceMergeResolver>(
-    resolver: &mut R,
-    canonical_id: &str,
-    exported_name: &str,
-) -> bool {
-    resolver
-        .load_eval_source_for_merge(canonical_id)
-        .map(|eval_source| {
-            !resolver
-                .required_import_names_for_exported_type(
-                    canonical_id,
-                    exported_name,
-                    eval_source.as_ref(),
-                )
-                .is_empty()
-        })
-        .unwrap_or(false)
-}
-
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn record_required_source_merge_inputs_recursive<R: ImportedEvalSourceMergeResolver>(
@@ -414,7 +395,7 @@ pub fn collect_imported_eval_inputs<R: ImportedEvalCollectorResolver>(
                 canonical_dependencies.insert(merge_root.0.clone());
 
                 if alias_names.insert(required_alias_name.clone()) {
-                    if let Some(mut alias) = resolver.collect_imported_type_alias(
+                    if let Some(alias) = resolver.collect_imported_type_alias(
                         ImportedTypeAliasResolveRequest {
                             owner_canonical_id: owner_canonical_id.to_string(),
                             import_source: import.source.clone(),
@@ -426,8 +407,6 @@ pub fn collect_imported_eval_inputs<R: ImportedEvalCollectorResolver>(
                         canonical_dependencies,
                         budget,
                     ) {
-                        alias.requires_source_merge = alias.requires_source_merge
-                            || requires_source_merge_inputs(resolver, &merge_root.0, &merge_root.1);
                         if alias.requires_source_merge {
                             record_required_source_merge_inputs_recursive(
                                 resolver,

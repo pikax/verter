@@ -294,6 +294,9 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                 runtime_key: self.runtime_key.clone(),
             };
             let backend = Arc::clone(&self.backend);
+            let owner = request.canonical_id.clone();
+            let slot = slot_name.to_string();
+            let backend_label = self.backend_label;
             let data = self.runtime.block_on(async move {
                 backend
                     .sync_file(
@@ -303,7 +306,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                     )
                     .await
                     .map_err(map_backend_error)?;
-                let data = backend
+                let data = match backend
                     .query_type_data(
                         &file_id,
                         query_artifact.artifact.source_revision,
@@ -311,8 +314,33 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                         BackendTypeQuery::MembersAtOffset,
                     )
                     .await
-                    .map_err(map_backend_error)?;
-                fill_missing_backend_member_types(
+                {
+                    Ok(data) => data,
+                    Err(error) => {
+                        type_runtime_trace_event(
+                            "runtime_component_meta_slot_binding_probe",
+                            format!(
+                                "backend={} owner={} slot={} error={error}",
+                                backend_label, owner, slot,
+                            ),
+                        );
+                        return Ok(None);
+                    }
+                };
+                if !backend_members_are_useful(&data) {
+                    type_runtime_trace_event(
+                        "runtime_component_meta_slot_binding_probe",
+                        format!(
+                            "backend={} owner={} slot={} member_count={} used=false",
+                            backend_label,
+                            owner,
+                            slot,
+                            data.members.len(),
+                        ),
+                    );
+                    return Ok(None);
+                }
+                let data = match fill_missing_backend_member_types(
                     backend.as_ref(),
                     &file_id,
                     query_artifact.artifact.source_revision,
@@ -323,11 +351,35 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                     data,
                 )
                 .await
+                {
+                    Ok(data) => data,
+                    Err(error) => {
+                        type_runtime_trace_event(
+                            "runtime_component_meta_slot_binding_probe",
+                            format!(
+                                "backend={} owner={} slot={} fill_error={error}",
+                                backend_label, owner, slot,
+                            ),
+                        );
+                        return Ok(None);
+                    }
+                };
+                type_runtime_trace_event(
+                    "runtime_component_meta_slot_binding_probe",
+                    format!(
+                        "backend={} owner={} slot={} member_count={} used=true",
+                        backend_label,
+                        owner,
+                        slot,
+                        data.members.len(),
+                    ),
+                );
+                Ok(Some(data))
             })?;
 
-            if !backend_members_are_useful(&data) {
+            let Some(data) = data else {
                 return Ok(None);
-            }
+            };
 
             type_expansion_from_backend_data(data).map(Some)
         })
@@ -1608,6 +1660,7 @@ mod tests {
     #[derive(Default)]
     struct FakeGeneratedQueryBackend {
         synced_sources: StdMutex<Vec<String>>,
+        member_results: StdMutex<VecDeque<StdResult<BackendTypeData, BackendError>>>,
         definition_results: StdMutex<VecDeque<StdResult<BackendTypeData, BackendError>>>,
         hover_results: StdMutex<VecDeque<StdResult<BackendTypeData, BackendError>>>,
     }
@@ -1649,6 +1702,12 @@ mod tests {
         ) -> verter_type_runtime::BackendFuture<'a, BackendTypeData> {
             Box::pin(async move {
                 match query {
+                    BackendTypeQuery::MembersAtOffset => self
+                        .member_results
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or_else(|| Ok(BackendTypeData::default())),
                     BackendTypeQuery::DefinitionTypeAtOffset => self
                         .definition_results
                         .lock()
@@ -1787,6 +1846,45 @@ defineProps<Props<T>>()
                 .is_some_and(|offset| offset as usize >= base_generated_len),
             "member query should point at the appended probe so generic params are in scope"
         );
+    }
+
+    #[test]
+    fn runtime_component_meta_slot_bindings_degrade_backend_member_errors() {
+        let backend = Arc::new(FakeGeneratedQueryBackend {
+            member_results: StdMutex::new(VecDeque::from([Err(BackendError::BackendReported(
+                "No content available.".to_string(),
+            ))])),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let expander = RuntimeBackedComponentMetaExpander::new(
+            "tsserver",
+            runtime,
+            backend,
+            "component-meta-tsserver",
+        );
+        let source = r#"<script setup lang="ts">
+type Slots = {
+  description(props: { label: string }): any
+}
+defineSlots<Slots>()
+</script>"#;
+        let snapshot = setup_only_snapshot(source);
+        let type_start = source.rfind("Slots").expect("type reference");
+        let request = TypeExpansionRequest {
+            canonical_id: "/src/AuthForm.vue".to_string(),
+            span: verter_span::Span::new(type_start as u32, (type_start + "Slots".len()) as u32),
+            profile: ExpansionProfile::ComponentMeta,
+        };
+
+        let result = expander
+            .expand_slot_bindings(&request, snapshot, "description", None)
+            .expect("slot binding failures should degrade");
+
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1977,6 +2075,7 @@ defineProps<Props>()
     async fn fill_missing_backend_member_types_prefers_definition_site_text() {
         let backend = FakeGeneratedQueryBackend {
             synced_sources: StdMutex::new(Vec::new()),
+            member_results: StdMutex::new(VecDeque::new()),
             definition_results: StdMutex::new(VecDeque::from([
                 Ok(BackendTypeData {
                     type_text: Some("(property) type?: SingleOrMultipleType | undefined".to_string()),

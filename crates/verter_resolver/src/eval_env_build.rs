@@ -30,6 +30,7 @@ pub trait OwnerEvalEnvAssembler {
         &self,
         snapshot: &Self::Snapshot,
         owner_local_value_names: &FxHashSet<String>,
+        required_runtime_value_names: Option<&FxHashSet<String>>,
         env: &mut EvalEnv,
     );
 }
@@ -49,6 +50,7 @@ pub fn build_owner_eval_env_with_inputs<A: OwnerEvalEnvAssembler>(
     imported_inputs: &ImportedEvalInputs,
     prop_type_overrides: Option<&rustc_hash::FxHashMap<String, TypeExpr>>,
     owner_env: Option<EvalEnv>,
+    required_runtime_value_names: Option<&FxHashSet<String>>,
 ) -> Option<OwnerEvalEnvBuild> {
     let mut env = owner_env.or_else(|| {
         assembler
@@ -76,7 +78,12 @@ pub fn build_owner_eval_env_with_inputs<A: OwnerEvalEnvAssembler>(
         imported_inputs,
         &mut env,
     );
-    assembler.materialize_imported_runtime_values(snapshot, &local_value_names, &mut env);
+    assembler.materialize_imported_runtime_values(
+        snapshot,
+        &local_value_names,
+        required_runtime_value_names,
+        &mut env,
+    );
 
     if let Some(overrides) = prop_type_overrides {
         inject_prop_type_overrides(&mut env, overrides);
@@ -145,10 +152,14 @@ mod tests {
             &self,
             _snapshot: &Self::Snapshot,
             owner_local_value_names: &FxHashSet<String>,
+            required_runtime_value_names: Option<&FxHashSet<String>>,
             env: &mut EvalEnv,
         ) {
             for (name, value) in &self.runtime_values {
                 if owner_local_value_names.contains(name) {
+                    continue;
+                }
+                if required_runtime_value_names.is_some_and(|required| !required.contains(name)) {
                     continue;
                 }
                 env.value_symbols.insert(name.clone(), value.clone());
@@ -346,6 +357,7 @@ mod tests {
             &imported_inputs,
             Some(&overrides),
             None,
+            None,
         )
         .expect("owner env should build");
 
@@ -394,5 +406,65 @@ mod tests {
             Some(&TypeExpr::Primitive(PrimitiveName::String))
         );
         assert!(actual.requested_binding_names.is_empty());
+    }
+
+    #[test]
+    fn build_owner_eval_env_with_inputs_filters_runtime_values_to_requested_bindings() {
+        let mut owner_env = EvalEnv::new();
+        owner_env.add_type(TypeDeclInfo {
+            name: "Local".to_string(),
+            declaration_id: 1,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: TypeExpr::Primitive(PrimitiveName::String),
+        });
+
+        let mut assembler = TestAssembler::default();
+        assembler
+            .base_envs
+            .insert("/src/owner.ts".to_string(), Arc::new(owner_env));
+        assembler.runtime_values.insert(
+            "theme".to_string(),
+            ValueDeclInfo {
+                name: "theme".to_string(),
+                declaration_id: 2,
+                kind: ValueDeclKind::Const,
+                type_annotation: Some(TypeExpr::Primitive(PrimitiveName::String)),
+                function_signature: None,
+                object_shape: None,
+            },
+        );
+        assembler.runtime_values.insert(
+            "helper".to_string(),
+            ValueDeclInfo {
+                name: "helper".to_string(),
+                declaration_id: 3,
+                kind: ValueDeclKind::Const,
+                type_annotation: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+                function_signature: None,
+                object_shape: None,
+            },
+        );
+
+        let required_runtime_value_names = FxHashSet::from_iter(["theme".to_string()].into_iter());
+        let actual = build_owner_eval_env_with_inputs(
+            &assembler,
+            "/src/owner.ts",
+            &(),
+            &[],
+            &ImportedEvalInputs {
+                sources: Vec::new(),
+                type_aliases: Vec::new(),
+                canonical_dependencies: BTreeSet::new(),
+                overflow: None,
+            },
+            None,
+            None,
+            Some(&required_runtime_value_names),
+        )
+        .expect("owner env should build");
+
+        assert!(actual.env.value_symbols.contains_key("theme"));
+        assert!(!actual.env.value_symbols.contains_key("helper"));
     }
 }
