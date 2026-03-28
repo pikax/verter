@@ -41,6 +41,8 @@ pub trait RegistryRouteResolver {
         source_specifier: &str,
         kind: ResolveRequestKind,
     ) -> Option<String>;
+
+    fn note_barrel_fact_reuse(&self) {}
 }
 
 pub fn resolve_type_via_registry<R: RegistryRouteResolver>(
@@ -86,6 +88,9 @@ fn resolve_type_via_registry_inner<R: RegistryRouteResolver>(
     let registry = resolver.ensure_export_registry(canonical)?;
     tracked_deps.push(canonical.to_string());
     route_hashes.push((canonical.to_string(), registry.source_hash));
+    if !registry.wildcard_edges.is_empty() {
+        resolver.note_barrel_fact_reuse();
+    }
 
     if let Some(entry) = registry.named.get(type_name) {
         return match entry {
@@ -130,6 +135,9 @@ fn resolve_type_via_registry_inner<R: RegistryRouteResolver>(
 
         tracked_deps.push(child_canonical.clone());
         route_hashes.push((child_canonical.clone(), child_registry.source_hash));
+        if !child_registry.wildcard_edges.is_empty() {
+            resolver.note_barrel_fact_reuse();
+        }
 
         if let Some(entry) = child_registry.named.get(type_name) {
             visited.insert((child_canonical.clone(), type_name.to_string()));
@@ -184,6 +192,9 @@ fn resolve_type_via_registry_inner<R: RegistryRouteResolver>(
 
         tracked_deps.push(next_canonical.clone());
         route_hashes.push((next_canonical.clone(), next_registry.source_hash));
+        if !next_registry.wildcard_edges.is_empty() {
+            resolver.note_barrel_fact_reuse();
+        }
 
         if let Some(entry) = next_registry.named.get(type_name) {
             return match entry {
@@ -234,6 +245,7 @@ mod tests {
         RegistryRouteResolver,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
     use verter_vfs::ResolveRequestKind;
 
@@ -241,10 +253,14 @@ mod tests {
     struct TestResolver {
         registries: BTreeMap<String, ExportRegistryView>,
         routes: BTreeMap<(String, String), String>,
+        registry_lookups: RefCell<Vec<String>>,
     }
 
     impl RegistryRouteResolver for TestResolver {
         fn ensure_export_registry(&self, canonical: &str) -> Option<ExportRegistryView> {
+            self.registry_lookups
+                .borrow_mut()
+                .push(canonical.to_string());
             self.registries.get(canonical).cloned()
         }
 
@@ -371,6 +387,69 @@ mod tests {
             Some(RegistryResolvedTarget {
                 final_canonical_id: "/src/b.ts".to_string(),
                 exported_name: "Props".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_type_via_registry_preserves_wildcard_source_order_for_duplicate_exports() {
+        let mut resolver = TestResolver::default();
+        resolver.registries.insert(
+            "/src/types/index.ts".to_string(),
+            ExportRegistryView {
+                source_hash: [1; 16],
+                named: FxHashMap::default(),
+                wildcard_edges: vec!["./legacy".to_string(), "./Button.vue".to_string()],
+            },
+        );
+        resolver.registries.insert(
+            "/src/components/Legacy.ts".to_string(),
+            ExportRegistryView {
+                source_hash: [2; 16],
+                named: FxHashMap::from_iter([(
+                    "ButtonProps".to_string(),
+                    RegistryExportEntry::Defined,
+                )]),
+                wildcard_edges: Vec::new(),
+            },
+        );
+        resolver.registries.insert(
+            "/src/components/Button.vue".to_string(),
+            ExportRegistryView {
+                source_hash: [3; 16],
+                named: FxHashMap::from_iter([(
+                    "ButtonProps".to_string(),
+                    RegistryExportEntry::Defined,
+                )]),
+                wildcard_edges: Vec::new(),
+            },
+        );
+        resolver.routes.insert(
+            ("/src/types/index.ts".to_string(), "./legacy".to_string()),
+            "/src/components/Legacy.ts".to_string(),
+        );
+        resolver.routes.insert(
+            (
+                "/src/types/index.ts".to_string(),
+                "./Button.vue".to_string(),
+            ),
+            "/src/components/Button.vue".to_string(),
+        );
+
+        let mut visited = FxHashSet::default();
+        let route = resolve_type_via_registry(
+            &resolver,
+            "/src/types/index.ts",
+            "ButtonProps",
+            ResolveRequestKind::TypeImport,
+            &mut visited,
+        );
+
+        assert_eq!(
+            route.target,
+            Some(RegistryResolvedTarget {
+                final_canonical_id: "/src/components/Legacy.ts".to_string(),
+                exported_name: "ButtonProps".to_string(),
             })
         );
     }

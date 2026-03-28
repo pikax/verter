@@ -23,7 +23,7 @@ export type {
 
 export { ProjectSession } from "./project-session.js";
 
-export { getMetaRuntime, shutdownMetaRuntime } from "./meta-runtime.js";
+export { createMetaRuntime, getMetaRuntime, shutdownMetaRuntime } from "./meta-runtime.js";
 export type { MetaRuntimeImpl, BootstrapFn, EngineBootstrapResult } from "./meta-runtime.js";
 
 export { parseTsconfig, extractPathAliases, discoverVueFiles } from "./discovery.js";

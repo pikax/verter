@@ -588,6 +588,89 @@ describe("ComponentMetaChecker", () => {
     shutdownMetaRuntime();
   });
 
+  it("createCheckerByJson can opt into dedicated runtime mode for benchmark isolation", async () => {
+    shutdownMetaRuntime();
+    const runtime = getMetaRuntime();
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-dedicated-json-"));
+    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "src", "App.vue"),
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+      "utf8",
+    );
+
+    const checker = await createCheckerByJson(
+      projectRoot,
+      {
+        include: ["src/**/*.vue"],
+        compilerOptions: { baseUrl: "." },
+      },
+      {
+        runtimeMode: "dedicated",
+      },
+    );
+
+    const checkerRuntime = (checker as any)._runtime;
+    const engine = (checker as any)._session.engine;
+
+    expect(runtime.engineCount).toBe(0);
+    expect(checkerRuntime).toBeTruthy();
+    expect(checkerRuntime).not.toBe(runtime);
+    expect(engine.state).toBe("active");
+
+    checker.close();
+
+    expect(engine.state).toBe("closed");
+    expect(runtime.engineCount).toBe(0);
+    shutdownMetaRuntime();
+  });
+
+  it("dedicated runtime mode does not reuse benchmark-created engines after dispose", async () => {
+    shutdownMetaRuntime();
+    const projectRoot = mkdtempSync(resolve(tmpdir(), "verter-checker-dedicated-reopen-"));
+    mkdirSync(resolve(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "src", "App.vue"),
+      `<script setup lang="ts">defineProps<{ label: string }>()</script><template><div /></template>`,
+      "utf8",
+    );
+
+    const checkerA = await createCheckerByJson(
+      projectRoot,
+      {
+        include: ["src/**/*.vue"],
+        compilerOptions: { baseUrl: "." },
+      },
+      {
+        runtimeMode: "dedicated",
+      },
+    );
+    const runtimeA = (checkerA as any)._runtime;
+    const engineA = (checkerA as any)._session.engine;
+    checkerA.close();
+
+    const checkerB = await createCheckerByJson(
+      projectRoot,
+      {
+        include: ["src/**/*.vue"],
+        compilerOptions: { baseUrl: "." },
+      },
+      {
+        runtimeMode: "dedicated",
+      },
+    );
+    const runtimeB = (checkerB as any)._runtime;
+    const engineB = (checkerB as any)._session.engine;
+
+    expect(runtimeA).not.toBe(runtimeB);
+    expect(engineA).not.toBe(engineB);
+    expect(engineA.state).toBe("closed");
+    expect(engineB.state).toBe("active");
+
+    checkerB.close();
+    shutdownMetaRuntime();
+  });
+
   it("createChecker reuses one pooled engine for repeated tsconfig opens", async () => {
     shutdownMetaRuntime();
     const runtime = getMetaRuntime();

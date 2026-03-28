@@ -269,6 +269,7 @@ impl FilesystemWorkspace {
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
         self.engine.invalidate_package_manifest(&canonical_id);
         self.engine.snapshot.write().inject(canonical_id, source);
+        self.engine.bump_content_generation();
     }
 
     /// Apply a batch of workspace changes.
@@ -442,6 +443,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.owner_for_file(canonical_id)
     }
 
+    fn content_generation(&self) -> u64 {
+        self.engine.current_content_generation()
+    }
+
     fn preferred_specifier(&self, importer_id: &str, target_id: &str) -> Option<String> {
         self.engine
             .preferred_specifier(self, importer_id, target_id)
@@ -473,6 +478,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             .overlay
             .write()
             .set(canonical_id.to_string(), source);
+        self.engine.bump_content_generation();
     }
 
     fn notify_close(&self, canonical_id: &str) {
@@ -481,6 +487,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         // Invalidate snapshot so next read falls through to disk,
         // picking up any saves made while the overlay was active.
         self.engine.snapshot.write().remove(canonical_id);
+        self.engine.bump_content_generation();
     }
 
     fn notify_delete(&self, canonical_id: &str) {
@@ -488,6 +495,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
+        self.engine.bump_content_generation();
     }
 
     fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
@@ -537,6 +545,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             .snapshot
             .write()
             .inject(path.to_string(), Arc::from(content));
+        self.engine.bump_content_generation();
         Ok(())
     }
 
@@ -550,6 +559,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.native_fs.delete_file(path)?;
         self.engine.invalidate_package_manifest(path);
         self.engine.snapshot.write().remove(path);
+        self.engine.bump_content_generation();
         Ok(())
     }
 

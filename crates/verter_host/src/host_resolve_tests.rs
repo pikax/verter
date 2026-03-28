@@ -19,11 +19,9 @@ fn strict_host() -> VerterHost {
         ..HostConfig::default()
     })
 }
-
 fn profile() -> CompileProfile {
     CompileProfile::default()
 }
-
 fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
@@ -1701,7 +1699,7 @@ export interface Props {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(
@@ -1756,7 +1754,7 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -1787,7 +1785,7 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -1852,7 +1850,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -1876,7 +1874,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -1947,7 +1945,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -1975,7 +1973,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -2051,7 +2049,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(
@@ -2134,7 +2132,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files_in_view(
@@ -2218,7 +2216,7 @@ defineProps<FirstProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -2248,7 +2246,7 @@ defineProps<FirstProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -2337,7 +2335,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let err = host
         .resolve_external_type_from_loaded_files(
@@ -2422,7 +2420,7 @@ export interface ButtonProps {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(
@@ -2445,15 +2443,24 @@ export interface ButtonProps {
         "ButtonProps should resolve through the barrel"
     );
 
-    let barrel_state = host
+    let route_entry = host
         .compile_cache
-        .get("/src/types/index.ts")
-        .and_then(|cc| cc.barrel_export_surface.clone())
-        .expect("barrel state should be cached");
-    let scanned_hash = *barrel_state
-        .scanned_sources
-        .get("/src/Button.vue")
-        .expect("Vue child should be tracked in scanned_sources");
+        .get("/src/Consumer.vue")
+        .and_then(|cc| {
+            cc.import_route_cache
+                .get(&(
+                    "./types".to_string(),
+                    "ButtonProps".to_string(),
+                    verter_vfs::ResolveRequestKind::TypeImport,
+                ))
+                .cloned()
+        })
+        .expect("optimized wildcard lookup should persist an importer route cache entry");
+    let scanned_hash = route_entry
+        .route_hashes
+        .iter()
+        .find_map(|(canonical, hash)| (canonical == "/src/Button.vue").then_some(*hash))
+        .expect("Vue child should be tracked in route_hashes");
     let whole_hash = host
         .get_whole_hash("/src/Button.vue")
         .expect("Vue child should have a whole hash");
@@ -2461,6 +2468,222 @@ export interface ButtonProps {
     assert_eq!(
         scanned_hash, whole_hash,
         "barrel child freshness must use the same whole-hash domain as validation"
+    );
+}
+
+#[test]
+fn cyclic_barrel_recursive_companions_resolve_through_store_view() {
+    let host = strict_host();
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/types/html.ts",
+        r#"export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+}
+
+export interface AnchorHTMLAttributes {
+  href?: string
+  target?: string
+  rel?: string
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/types/tv.ts",
+        r#"export type ComponentConfig<TTheme, TAppConfig, TName extends string> = {
+  variants: {
+    color: 'primary' | 'neutral'
+    variant: 'solid' | 'ghost'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    base?: string
+  }
+  ui: {
+    base: string
+  }
+  AppConfig: TAppConfig
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/composables/useComponentIcons.ts",
+        r#"import type { AvatarProps, IconProps } from '../types'
+
+export interface UseComponentIconsProps {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+  loading?: boolean
+}"#,
+    );
+    upsert_vue(
+        &host,
+        "/workspace/components/Avatar.vue",
+        r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+  alt?: string
+}
+</script>
+<template><img /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/workspace/components/Icon.vue",
+        r#"<script lang="ts">
+export interface IconProps {
+  name?: string
+}
+</script>
+<template><i /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/workspace/components/Link.vue",
+        r#"<script lang="ts">
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from '../types/html'
+
+export interface LinkProps extends Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+  href?: string
+  target?: string
+  rel?: string
+  active?: boolean
+  raw?: boolean
+  custom?: boolean
+  class?: any
+}
+</script>
+<template><a /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/workspace/components/Button.vue",
+        r#"<script lang="ts">
+import type { AppConfig } from './nuxt-schema'
+import theme from './button-theme'
+import type { UseComponentIconsProps } from '../composables/useComponentIcons'
+import type { LinkProps, AvatarProps } from '../types'
+import type { ComponentConfig } from '../types/tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  color?: Button['variants']['color']
+  variant?: Button['variants']['variant']
+  size?: Button['variants']['size']
+  avatar?: AvatarProps
+}
+</script>
+<template><button /></template>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/components/button-theme.ts",
+        "export default { variants: {} }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/components/nuxt-schema.ts",
+        "export interface AppConfig {}\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/types/index.ts",
+        r#"export * from '../components/Avatar.vue'
+export * from '../components/Button.vue'
+export * from '../components/Icon.vue'
+export * from '../components/Link.vue'"#,
+    );
+    upsert_vue(
+        &host,
+        "/workspace/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let view = host.resolver_store_view();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+
+    let link_props = host
+        .resolve_external_type_from_loaded_files_in_view(
+            "/workspace/components/Button.vue",
+            "../types",
+            "LinkProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            false,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+            Some(&view),
+        )
+        .expect("LinkProps resolution should complete")
+        .expect("LinkProps should resolve through the cyclic barrel");
+    assert!(
+        link_props
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("as")),
+        "LinkProps should keep inherited props through the cyclic barrel, got: {:?}",
+        link_props.props
+    );
+    assert!(
+        link_props
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("type")),
+        "LinkProps should keep button attribute props through the cyclic barrel, got: {:?}",
+        link_props.props
+    );
+
+    let use_icons = host
+        .resolve_external_type_from_loaded_files_in_view(
+            "/workspace/components/Button.vue",
+            "../composables/useComponentIcons",
+            "UseComponentIconsProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            false,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+            Some(&view),
+        )
+        .expect("UseComponentIconsProps resolution should complete")
+        .expect("UseComponentIconsProps should resolve through the cyclic barrel");
+    assert!(
+        use_icons
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("icon")),
+        "UseComponentIconsProps should keep imported IconProps members, got: {:?}",
+        use_icons.props
+    );
+    assert!(
+        use_icons
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("avatar")),
+        "UseComponentIconsProps should keep imported AvatarProps members, got: {:?}",
+        use_icons.props
     );
 }
 
@@ -3320,7 +3543,7 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = rustc_hash::FxHashMap::default();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(

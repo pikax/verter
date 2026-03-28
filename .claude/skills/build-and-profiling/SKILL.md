@@ -114,3 +114,14 @@ MCP config files are checked in at:
 - `mcp/verter-http.mcp.json` (HTTP)
 
 For the full tool catalog and agent workflow guide, see [mcp/README.md](mcp/README.md).
+
+## Meta UI Benchmark
+
+The repository-owned real-project component-meta benchmark lives in `packages/benchmark`:
+
+```bash
+pnpm --filter @verter/benchmark bench:meta:ui:setup
+pnpm --filter @verter/benchmark bench:meta:ui -- --backends=verter --scenarios=single_cold --limit=2
+```
+
+CI uses `.github/workflows/meta-benchmark.yml` to pin the latest `nuxt/ui` `v4` SHA once, run the backend/scenario matrix, and aggregate JSON artifacts into one markdown report.

@@ -118,6 +118,56 @@ fn import_resolves_to_dep_view(
     }
 }
 
+fn import_resolves_to_dep_with_resolver_data(
+    canonical_id: &str,
+    dependency_resolutions: &mut rustc_hash::FxHashMap<String, DependencyResolution>,
+    dependencies: &mut BTreeSet<String>,
+    script_lang: Option<&str>,
+    import_source: &str,
+    dependency_id: &str,
+    resolve_extensions: &[String],
+    workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
+) -> bool {
+    let cached_view = DependentView {
+        canonical_id: canonical_id.to_string(),
+        dependency_resolutions: dependency_resolutions.clone(),
+        dependencies: dependencies.clone(),
+        script_lang: script_lang.map(str::to_string),
+        macro_type_deps: Vec::new(),
+        imports: Vec::new(),
+        resolved_type_hashes: rustc_hash::FxHashMap::default(),
+    };
+    if import_resolves_to_dep_view(
+        &cached_view,
+        import_source,
+        dependency_id,
+        resolve_extensions,
+    ) {
+        return true;
+    }
+
+    if let Some(ws) = workspace {
+        let ctx = verter_vfs::ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        };
+        if let Some(result) = ws.resolve_import(canonical_id, import_source, ctx) {
+            dependencies.insert(result.source_id.clone());
+            dependency_resolutions.insert(
+                import_source.to_string(),
+                DependencyResolution {
+                    specifier: import_source.to_string(),
+                    resolved_canonical_id: Some(result.source_id.clone()),
+                    possible_canonical_ids: vec![result.source_id.clone()],
+                },
+            );
+            return result.source_id == dependency_id;
+        }
+    }
+
+    false
+}
+
 /// Check if an import source from `file` resolves to `dependency_id`.
 /// Legacy wrapper that delegates to `import_resolves_to_dep_view`.
 #[cfg(any(not(feature = "scheduler"), test))]
@@ -133,28 +183,22 @@ pub(crate) fn import_resolves_to_dep(
 }
 
 fn import_resolves_to_dep_with_resolver_view(
-    view: &DependentView,
+    view: &mut DependentView,
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
     workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
 ) -> bool {
-    if import_resolves_to_dep_view(view, import_source, dependency_id, resolve_extensions) {
-        return true;
-    }
-
-    // Workspace resolution (goes through published snapshot)
-    if let Some(ws) = workspace {
-        let ctx = verter_vfs::ResolutionContext {
-            phase: ResolvePhase::CodegenBlocker,
-            kind: ResolveRequestKind::EsmImport,
-        };
-        if let Some(result) = ws.resolve_import(&view.canonical_id, import_source, ctx) {
-            return result.source_id == dependency_id;
-        }
-    }
-
-    false
+    import_resolves_to_dep_with_resolver_data(
+        &view.canonical_id,
+        &mut view.dependency_resolutions,
+        &mut view.dependencies,
+        view.script_lang.as_deref(),
+        import_source,
+        dependency_id,
+        resolve_extensions,
+        workspace,
+    )
 }
 
 /// Like [`import_resolves_to_dep`], but also consults the workspace resolver
@@ -162,20 +206,23 @@ fn import_resolves_to_dep_with_resolver_view(
 #[cfg(not(feature = "scheduler"))]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn import_resolves_to_dep_with_resolver(
-    file: &FileEntry,
+    file: &mut FileEntry,
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
     workspace: Option<&dyn verter_vfs::WorkspaceAccess>,
 ) -> bool {
-    let view = DependentView::from_file_entry(file);
-    import_resolves_to_dep_with_resolver_view(
-        &view,
+    let mut view = DependentView::from_file_entry(file);
+    let result = import_resolves_to_dep_with_resolver_view(
+        &mut view,
         import_source,
         dependency_id,
         resolve_extensions,
         workspace,
-    )
+    );
+    file.dependency_resolutions = view.dependency_resolutions;
+    file.dependencies = view.dependencies;
+    result
 }
 
 /// Determine whether a dependent SFC should be invalidated given
@@ -204,19 +251,23 @@ pub(crate) fn should_invalidate_dependent_view(
         return false;
     }
 
-    let macro_type_deps: Vec<&verter_analysis::MacroTypeDep> = view
+    let mut macro_type_deps = Vec::new();
+    let macro_import_sources: Vec<_> = view
         .macro_type_deps
         .iter()
-        .filter(|dep| {
-            import_resolves_to_dep_with_resolver_view(
-                view,
-                &dep.import_source,
-                dependency_id,
-                resolve_extensions,
-                workspace,
-            )
-        })
+        .map(|dep| dep.import_source.clone())
         .collect();
+    for (index, import_source) in macro_import_sources.iter().enumerate() {
+        if import_resolves_to_dep_with_resolver_view(
+            view,
+            import_source,
+            dependency_id,
+            resolve_extensions,
+            workspace,
+        ) {
+            macro_type_deps.push(view.macro_type_deps[index].clone());
+        }
+    }
 
     if !macro_type_deps.is_empty() {
         let tier2_changed: Vec<&str> = macro_type_deps
@@ -266,26 +317,36 @@ pub(crate) fn should_invalidate_dependent_view(
         return true;
     }
 
-    let has_runtime_import = view.imports.iter().any(|imp| {
-        !imp.is_type_only
+    let import_checks: Vec<_> = view
+        .imports
+        .iter()
+        .map(|imp| (imp.source.clone(), imp.is_type_only))
+        .collect();
+    let mut has_runtime_import = false;
+    for (import_source, is_type_only) in &import_checks {
+        if !*is_type_only
             && import_resolves_to_dep_with_resolver_view(
                 view,
-                &imp.source,
+                import_source,
                 dependency_id,
                 resolve_extensions,
                 workspace,
             )
-    });
+        {
+            has_runtime_import = true;
+            break;
+        }
+    }
 
     if has_runtime_import {
         return true;
     }
 
     if view.dependencies.contains(dependency_id)
-        && view.imports.iter().all(|imp| {
+        && import_checks.iter().all(|(import_source, _)| {
             !import_resolves_to_dep_with_resolver_view(
                 view,
-                &imp.source,
+                import_source,
                 dependency_id,
                 resolve_extensions,
                 workspace,
@@ -321,6 +382,8 @@ pub(crate) fn should_invalidate_dependent(
     );
     // Write back updated type hashes
     file.resolved_type_hashes = view.resolved_type_hashes;
+    file.dependency_resolutions = view.dependency_resolutions;
+    file.dependencies = view.dependencies;
     result
 }
 
@@ -411,6 +474,8 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
                 cc.cached_fallthrough = None;
             }
             cc.resolved_type_hashes = view.resolved_type_hashes;
+            cc.dependency_resolutions = view.dependency_resolutions;
+            cc.dependencies = view.dependencies;
         }
     }
 }

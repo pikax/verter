@@ -135,8 +135,16 @@ pub fn build_script_analysis_with_scope(
     }
 
     let program = &result.program;
+    build_script_analysis_with_scope_from_program(content, source_type, program, scope)
+}
 
-    // ── Single-pass collection ──
+pub fn build_script_analysis_with_scope_from_program(
+    content: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    scope: AnalysisScope,
+) -> ScriptAnalysisSnapshot {
+    // â”€â”€ Single-pass collection â”€â”€
     // Imports always precede declarations in valid ESM, so the import list is
     // complete when we encounter variable/function/class declarations.
     let mut imports = Vec::new();
@@ -152,9 +160,6 @@ pub fn build_script_analysis_with_scope(
     let mut first_await_offset: Option<u32> = None;
     let mut options_api: Option<AnalyzedOptionsApi> = None;
     let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
-    // Track local type → referenced type names (from extends and intersection)
-    // e.g., `interface Local extends Base {}` → { "Local": ["Base"] }
-    // e.g., `type Local = Base & { own: string }` → { "Local": ["Base"] }
     let mut local_type_deps: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
     for stmt in &program.body {
@@ -205,7 +210,6 @@ pub fn build_script_analysis_with_scope(
                             }
                         }
                         Declaration::VariableDeclaration(var_decl) => {
-                            // Handle `export const useXxxStore = defineStore(...)`
                             for vd in &var_decl.declarations {
                                 if let Some(ref init) = vd.init {
                                     let binding_name = match &vd.id {
@@ -254,17 +258,13 @@ pub fn build_script_analysis_with_scope(
                     content,
                     &program.comments,
                 );
-                // Detect Vue API call sites (e.g., onMounted(cb), watch(src, cb))
                 try_extract_vue_api_call(&expr_stmt.expression, &import_map, &mut vue_api_calls);
-                // Detect DOM query calls (e.g., document.querySelector('.foo'))
                 try_extract_dom_query(&expr_stmt.expression, &mut dom_query_calls);
-                // Detect CSS variable manipulations (e.g., el.style.setProperty('--x', val))
                 try_extract_css_var_manipulation(
                     &expr_stmt.expression,
                     content,
                     &mut css_var_manipulations,
                 );
-                // Detect store API calls (e.g., mapState(useUserStore, [...]))
                 try_extract_store_call(
                     &expr_stmt.expression,
                     &imports,
@@ -306,7 +306,6 @@ pub fn build_script_analysis_with_scope(
                         } else {
                             (None, false, ReactivityKind::None)
                         };
-                    // let bindings are mutable regardless of initializer
                     if kind == AnalyzedBindingKind::Let {
                         reactivity_kind = ReactivityKind::Mutable;
                     }
@@ -338,7 +337,6 @@ pub fn build_script_analysis_with_scope(
                             }
                         }
                     } else {
-                        // Destructured binding: ObjectPattern, ArrayPattern, etc.
                         extract_destructured_bindings(
                             &decl.id,
                             kind,
@@ -349,7 +347,6 @@ pub fn build_script_analysis_with_scope(
                         );
                     }
 
-                    // Extract Vue API calls, DOM queries, and CSS manipulations from initializer
                     if let Some(ref init) = decl.init {
                         try_extract_vue_api_call(init, &import_map, &mut vue_api_calls);
                         try_extract_dom_query(init, &mut dom_query_calls);
@@ -361,7 +358,6 @@ pub fn build_script_analysis_with_scope(
                             &mut module_references,
                         );
 
-                        // Detect store API calls in variable initializers
                         let binding_name = match &decl.id {
                             BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
                             _ => None,
@@ -438,7 +434,6 @@ pub fn build_script_analysis_with_scope(
                 }
             }
 
-            // Collect local type inheritance for transitive dep discovery
             Statement::TSInterfaceDeclaration(iface) => {
                 let mut bases = Vec::new();
                 for heritage in &iface.extends {
@@ -460,10 +455,8 @@ pub fn build_script_analysis_with_scope(
                 }
             }
 
-            // export default { ... } or export default defineComponent({ ... })
             Statement::ExportDefaultDeclaration(export) => {
                 if let Some(expr) = export.declaration.as_expression() {
-                    // Build an owned source map to avoid borrow conflicts with `imports`
                     let source_map: FxHashMap<String, String> = import_map
                         .iter()
                         .filter_map(|(name, (idx, _))| {
@@ -485,13 +478,10 @@ pub fn build_script_analysis_with_scope(
         }
     }
 
-    // ── Post-process: resolve local type references in defineProps macros ──
     resolve_macro_type_references(program, &mut macros, content);
 
-    // ── Derive: macro type deps ──
     let macro_type_deps = derive_macro_type_deps(&macros, &imports, &import_map, &local_type_deps);
 
-    // ── Derive: flags ──
     let mut flags = derive_flags(&imports, &macros, &bindings, &macro_type_deps);
     if first_await_offset.is_some() {
         flags |= AnalysisFlags::ASYNC_SETUP;
@@ -506,14 +496,12 @@ pub fn build_script_analysis_with_scope(
         flags |= AnalysisFlags::HAS_STORE_DEFINITION;
     }
 
-    // ── Exported function analysis (when FUNC_RETURNS scope is active) ──
     let exported_functions = if scope.contains(AnalysisScope::FUNC_RETURNS) {
         analyze_exported_functions(content, program, &import_map)
     } else {
         Vec::new()
     };
 
-    // ── Script binding usages (second pass, gated by scope flag) ──
     let script_binding_occurrences =
         if scope.contains(AnalysisScope::SCRIPT_USAGES) && !bindings.is_empty() {
             collect_script_binding_usages(program, &bindings)
@@ -521,10 +509,7 @@ pub fn build_script_analysis_with_scope(
             Vec::new()
         };
 
-    // ── Detect nested macro calls (macros inside functions/blocks/conditionals) ──
     let nested_macro_calls = collect_nested_macro_calls(program, 0);
-
-    // ── Collect local declaration entries for stable cross-file IDs ──
     let declaration_entries = collect_declaration_entries(content, program);
 
     ScriptAnalysisSnapshot {
@@ -566,6 +551,13 @@ pub fn build_export_signatures(
     }
 
     extract_export_signatures_from_program(content, &result.program)
+}
+
+pub fn build_export_signatures_from_program(
+    content: &str,
+    program: &Program<'_>,
+) -> Vec<ExportSignature> {
+    extract_export_signatures_from_program(content, program)
 }
 
 fn build_static_module_reference(

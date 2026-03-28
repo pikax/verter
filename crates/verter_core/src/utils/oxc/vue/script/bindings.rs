@@ -41,10 +41,10 @@ pub fn extract_bindings<'a>(
 
 /// Classify a single top-level statement.
 fn classify_statement<'a>(
-    stmt: &Statement<'a>,
+    stmt: &'a Statement<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     match stmt {
         Statement::VariableDeclaration(decl) => {
@@ -78,10 +78,10 @@ fn classify_statement<'a>(
 
 /// Classify variable declarations: const/let/var.
 fn classify_variable_declaration<'a>(
-    decl: &VariableDeclaration<'a>,
+    decl: &'a VariableDeclaration<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     let is_const = decl.kind == VariableDeclarationKind::Const;
 
@@ -280,10 +280,10 @@ fn extract_pattern_bindings<'a>(
 
 /// Classify standalone expression statements (e.g., `defineProps<{msg: string}>()`).
 fn classify_expression_statement<'a>(
-    expr: &Expression<'a>,
+    expr: &'a Expression<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     if let Expression::CallExpression(call) = expr {
         let callee_name = get_callee_name(&call.callee);
@@ -308,10 +308,10 @@ fn classify_expression_statement<'a>(
 /// Called for variable declarations (`const props = defineProps<{...}>()`) to ensure
 /// individual prop names are classified as Props alongside the whole-object binding.
 fn extract_individual_props_from_expr<'a>(
-    expr: &Expression<'a>,
+    expr: &'a Expression<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     if let Expression::CallExpression(call) = expr {
         let callee_name = get_callee_name(&call.callee);
@@ -338,10 +338,10 @@ fn extract_individual_props_from_expr<'a>(
 /// - Runtime object: `defineProps({ foo: String })`
 /// - Runtime array: `defineProps(['foo', 'bar'])`
 fn extract_props_from_define_props<'a>(
-    call: &CallExpression<'a>,
+    call: &'a CallExpression<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     // 1. Type parameters: defineProps<{ foo: string }>() or defineProps<MyInterface>()
     if let Some(type_args) = &call.type_arguments {
@@ -360,10 +360,10 @@ fn extract_props_from_define_props<'a>(
 /// Extract prop names from TypeScript type parameters of `defineProps`.
 /// Handles inline type literals, type references (interfaces/aliases), and other TS constructs.
 fn extract_props_from_type_params<'a>(
-    type_params: &TSTypeParameterInstantiation<'a>,
+    type_params: &'a TSTypeParameterInstantiation<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     if let Some(first_param) = type_params.params.first() {
         // Use the type resolution infrastructure to resolve all type variants:

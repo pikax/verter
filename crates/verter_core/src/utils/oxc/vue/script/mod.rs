@@ -99,7 +99,7 @@ use shared::{try_process_export, try_process_import};
 ///
 /// A `ScriptParseResult` containing all extracted items, async status, and errors.
 pub fn parse_script<'a>(
-    program: &Program<'a>,
+    program: &'a Program<'a>,
     mode: ScriptMode,
     content_offset: u32,
     source: &'a str,
@@ -113,7 +113,7 @@ pub fn parse_script<'a>(
 /// that can't be resolved from the setup script's own declarations will
 /// fall back to these pre-resolved types from the companion `<script>` block.
 pub fn parse_script_with_companion<'a>(
-    program: &Program<'a>,
+    program: &'a Program<'a>,
     mode: ScriptMode,
     content_offset: u32,
     source: &'a str,

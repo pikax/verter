@@ -182,6 +182,35 @@ impl HostStoreView {
             }
         }
 
+        let workspace_generation = host.ws().content_generation();
+        let imported_entries: Vec<_> = host
+            .imported_dependency_cache
+            .lock()
+            .iter()
+            .filter_map(|(canonical_id, entry)| {
+                (entry.workspace_generation == workspace_generation)
+                    .then(|| (canonical_id.clone(), entry.clone()))
+            })
+            .collect();
+        for (canonical_id, entry) in imported_entries {
+            view.whole_hashes
+                .entry(canonical_id.clone())
+                .or_insert(entry.whole_hash);
+            if !entry.dependency_resolutions.is_empty()
+                && !view.dependency_resolutions.contains_key(&canonical_id)
+            {
+                view.dependency_resolutions
+                    .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
+                view.derived_hashes.insert(
+                    (
+                        canonical_id.clone(),
+                        verter_resolver::DerivedFactKind::ExactResolution,
+                    ),
+                    hash_dependency_resolutions(&entry.dependency_resolutions),
+                );
+            }
+        }
+
         view.snapshot_transitive_dependency_targets(host);
         view.compat_token = view.compute_compat_token();
         view
@@ -192,18 +221,9 @@ impl HostStoreView {
             return;
         }
 
-        #[cfg(feature = "scheduler")]
-        {
-            if let Some(source) = host.scheduler.try_get_source(canonical_id) {
-                self.whole_hashes
-                    .insert(canonical_id.to_string(), source.whole_hash);
-                return;
-            }
-        }
-
-        if let Some(state) = host.effective_file_state(canonical_id, None) {
+        if let Some(whole_hash) = host.get_whole_hash(canonical_id) {
             self.whole_hashes
-                .insert(canonical_id.to_string(), state.whole_hash);
+                .insert(canonical_id.to_string(), whole_hash);
         }
     }
 
@@ -288,6 +308,73 @@ impl HostStoreView {
         canonical_id: &str,
     ) -> Option<&FxHashMap<String, crate::types::DependencyResolution>> {
         self.dependency_resolutions.get(canonical_id)
+    }
+
+    pub(crate) fn invalid_fact_details(
+        &self,
+        facts: &[verter_resolver::FactVersionRef],
+        limit: usize,
+    ) -> Vec<String> {
+        facts
+            .iter()
+            .filter_map(|fact| self.describe_invalid_fact(fact))
+            .take(limit)
+            .collect()
+    }
+
+    fn describe_invalid_fact(&self, fact: &verter_resolver::FactVersionRef) -> Option<String> {
+        match fact {
+            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                match self.whole_hashes.get(canonical_id) {
+                    Some(current) if current == hash => None,
+                    Some(current) => Some(format!(
+                        "FileWholeHash mismatch canonical={} expected={hash:?} actual={current:?}",
+                        canonical_id
+                    )),
+                    None => Some(format!(
+                        "FileWholeHash missing canonical={} expected={hash:?}",
+                        canonical_id
+                    )),
+                }
+            }
+            verter_resolver::FactVersionRef::BarrelGeneration {
+                canonical_id,
+                generation,
+            } => match self.barrel_generations.get(canonical_id) {
+                Some(current) if current == generation => None,
+                Some(current) => Some(format!(
+                    "BarrelGeneration mismatch canonical={} expected={} actual={}",
+                    canonical_id, generation, current
+                )),
+                None => Some(format!(
+                    "BarrelGeneration missing canonical={} expected={}",
+                    canonical_id, generation
+                )),
+            },
+            verter_resolver::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind,
+                hash,
+            } => {
+                let current = match kind {
+                    verter_resolver::DerivedFactKind::DirectSource => {
+                        self.whole_hashes.get(canonical_id)
+                    }
+                    _ => self.derived_hashes.get(&(canonical_id.clone(), *kind)),
+                };
+                match current {
+                    Some(current) if current == hash => None,
+                    Some(current) => Some(format!(
+                        "DerivedFactHash mismatch canonical={} kind={kind:?} expected={hash:?} actual={current:?}",
+                        canonical_id
+                    )),
+                    None => Some(format!(
+                        "DerivedFactHash missing canonical={} kind={kind:?} expected={hash:?}",
+                        canonical_id
+                    )),
+                }
+            }
+        }
     }
 
     fn snapshot_dependency_resolutions_if_missing(
@@ -397,9 +484,14 @@ pub(crate) fn hash_dependency_resolutions(
             0u8.hash(hasher);
             specifier.hash(hasher);
             resolution.specifier.hash(hasher);
-            resolution.resolved_canonical_id.hash(hasher);
+            let effective_target = resolution.effective_target().map(str::to_string);
+            effective_target.hash(hasher);
             let mut candidates = resolution.possible_canonical_ids.clone();
             candidates.sort();
+            candidates.dedup();
+            if let Some(ref effective_target) = effective_target {
+                candidates.retain(|candidate| candidate != effective_target);
+            }
             candidates.hash(hasher);
         }
     })
@@ -516,5 +608,76 @@ impl verter_resolver::ResolverStore for VerterHost {
 impl VerterHost {
     pub(crate) fn resolver_store_view(&self) -> HostStoreView {
         HostStoreView::from_host(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_dependency_resolutions;
+    use crate::types::DependencyResolution;
+    use rustc_hash::FxHashMap;
+
+    #[test]
+    fn exact_resolution_hash_ignores_lazy_promotion_to_same_effective_target() {
+        let lazy = FxHashMap::from_iter([(
+            "./types".to_string(),
+            DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: None,
+                possible_canonical_ids: vec![
+                    "/src/types.d.ts".to_string(),
+                    "/src/types.ts".to_string(),
+                ],
+            },
+        )]);
+        let promoted = FxHashMap::from_iter([(
+            "./types".to_string(),
+            DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.d.ts".to_string()),
+                possible_canonical_ids: vec![
+                    "/src/types.d.ts".to_string(),
+                    "/src/types.ts".to_string(),
+                ],
+            },
+        )]);
+
+        assert_eq!(
+            hash_dependency_resolutions(&lazy),
+            hash_dependency_resolutions(&promoted),
+            "lazy promotion to the same effective canonical target should not invalidate ExactResolution facts",
+        );
+    }
+
+    #[test]
+    fn exact_resolution_hash_changes_when_effective_target_changes() {
+        let before = FxHashMap::from_iter([(
+            "./types".to_string(),
+            DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: None,
+                possible_canonical_ids: vec![
+                    "/src/types.d.ts".to_string(),
+                    "/src/types.ts".to_string(),
+                ],
+            },
+        )]);
+        let after = FxHashMap::from_iter([(
+            "./types".to_string(),
+            DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: vec![
+                    "/src/types.d.ts".to_string(),
+                    "/src/types.ts".to_string(),
+                ],
+            },
+        )]);
+
+        assert_ne!(
+            hash_dependency_resolutions(&before),
+            hash_dependency_resolutions(&after),
+            "changing the effective canonical target must still invalidate ExactResolution facts",
+        );
     }
 }

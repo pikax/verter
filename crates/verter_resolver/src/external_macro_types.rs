@@ -29,7 +29,7 @@ pub trait ExternalMacroTypeCollectorHost {
         dep: &MacroTypeDep,
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
-        cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+        cache: &mut crate::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         profile_hash: Option<u64>,
     ) -> Result<Option<ResolvedElements>, Self::Error>;
@@ -53,7 +53,7 @@ pub fn collect_external_macro_types<H: ExternalMacroTypeCollectorHost>(
     let mut resolved = FxHashMap::default();
     let mut diagnostics = Vec::new();
     let mut tracked_deps = BTreeSet::new();
-    let mut cache = FxHashMap::default();
+    let mut cache = crate::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
 
     for dep in macro_type_deps {
@@ -98,7 +98,6 @@ mod tests {
     use super::{
         collect_external_macro_types, ExternalMacroTypeCollectorHost, ExternalMacroTypeDiagnostic,
     };
-    use rustc_hash::FxHashMap;
     use std::collections::{BTreeMap, BTreeSet};
     use verter_analysis::{AnalyzedImport, MacroTypeDep};
     use verter_core::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
@@ -118,7 +117,7 @@ mod tests {
             dep: &MacroTypeDep,
             _tracked_deps: &mut BTreeSet<String>,
             _resolution_deps: &mut BTreeSet<String>,
-            _cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+            _cache: &mut crate::ExternalTypeBodyCache,
             _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
             _profile_hash: Option<u64>,
         ) -> Result<Option<ResolvedElements>, Self::Error> {

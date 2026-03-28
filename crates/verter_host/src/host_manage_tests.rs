@@ -1,11 +1,14 @@
 use super::*;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 use std::sync::Arc;
 use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use verter_resolver::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
-    should_attempt_owner_env_resolution, ImportedEvalLookupResolver,
+    should_attempt_owner_env_resolution, ImportedEvalCollectorResolver, ImportedEvalLookupResolver,
+    ImportedEvalSourceMergeResolver,
 };
+use verter_vfs::WorkspaceAccess;
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
 <script setup>
@@ -59,9 +62,38 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
         .unwrap();
 }
 
+fn resolved_imported_alias_body(
+    host: &VerterHost,
+    alias: &verter_resolver::ImportedTypeAlias,
+) -> TypeExpr {
+    let view = host.resolver_store_view();
+    host.resolve_shallow_symbol_dependency_alias_in_view(
+        alias.source_canonical_id.as_str(),
+        alias.exported_name.as_str(),
+        Some(&view),
+    )
+    .map(|prepared| prepared.2.decl.body)
+    .expect("imported alias should materialize through the host cache")
+}
+
+fn resolved_imported_alias_dependencies(
+    host: &VerterHost,
+    alias: &verter_resolver::ImportedTypeAlias,
+) -> Vec<verter_resolver::ImportedSymbolDependency> {
+    let view = host.resolver_store_view();
+    host.resolve_shallow_symbol_dependency_alias_in_view(
+        alias.source_canonical_id.as_str(),
+        alias.exported_name.as_str(),
+        Some(&view),
+    )
+    .map(|prepared| prepared.2.symbol_dependencies)
+    .expect("imported alias should materialize through the host cache")
+}
+
 struct CountingWorkspace {
     inner: Arc<verter_vfs::MemoryWorkspace>,
     read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
+    resolve_counts: parking_lot::Mutex<rustc_hash::FxHashMap<(String, String), u64>>,
 }
 
 impl CountingWorkspace {
@@ -71,6 +103,7 @@ impl CountingWorkspace {
                 verter_vfs::MemoryOptions::default(),
             )),
             read_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            resolve_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
         }
     }
 
@@ -85,6 +118,18 @@ impl CountingWorkspace {
 
     fn read_count(&self, path: &str) -> u64 {
         self.read_counts.lock().get(path).copied().unwrap_or(0)
+    }
+
+    fn reset_resolves(&self) {
+        self.resolve_counts.lock().clear();
+    }
+
+    fn resolve_count(&self, importer_id: &str, specifier: &str) -> u64 {
+        self.resolve_counts
+            .lock()
+            .get(&(importer_id.to_string(), specifier.to_string()))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -120,11 +165,20 @@ impl verter_vfs::WorkspaceAccess for CountingWorkspace {
         specifier: &str,
         ctx: verter_vfs::ResolutionContext,
     ) -> Option<verter_vfs::ResolveResult> {
+        *self
+            .resolve_counts
+            .lock()
+            .entry((importer_id.to_string(), specifier.to_string()))
+            .or_default() += 1;
         self.inner.resolve_import(importer_id, specifier, ctx)
     }
 
     fn owner_for_file(&self, canonical_id: &str) -> Option<verter_vfs::ProjectOwnership> {
         self.inner.owner_for_file(canonical_id)
+    }
+
+    fn content_generation(&self) -> u64 {
+        self.inner.content_generation()
     }
 
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_vfs::ParsedEdge]) {
@@ -235,6 +289,58 @@ fn exact_dependency(specifier: &str, resolved: &str) -> DependencyResolution {
         resolved_canonical_id: Some(resolved.to_string()),
         possible_canonical_ids: Vec::new(),
     }
+}
+
+fn budget_exceeded_field(name: &str) -> verter_analysis::type_expand::ExpandedField {
+    verter_analysis::type_expand::ExpandedField {
+        name: name.to_string(),
+        r#type: TypeExpr::Primitive(PrimitiveName::String),
+        raw_type: None,
+        optional: false,
+        completeness: verter_analysis::type_expand::ExpansionCompleteness::Partial,
+        diagnostics: vec![verter_analysis::type_expand::ExpansionDiagnostic {
+            reason: verter_analysis::type_expand::ExpansionStopReason::BudgetExceeded,
+            context: "test".to_string(),
+            property_name: Some(name.to_string()),
+        }],
+    }
+}
+
+#[test]
+fn component_meta_expansion_retry_skips_non_empty_budget_limited_results() {
+    let computed = ComputedEvaluatedTypes {
+        evaluated_types: Some(verter_analysis::type_expand::ExpandedComponentTypes {
+            props: vec![budget_exceeded_field("label")],
+            ..Default::default()
+        }),
+        discovered_dependencies: BTreeSet::new(),
+    };
+
+    assert!(
+        !should_retry_component_meta_expansion(&computed),
+        "non-empty budget-limited expansion output should be kept instead of rerunning the full symbolic expansion"
+    );
+}
+
+#[test]
+fn component_meta_expansion_retry_keeps_empty_budget_limited_results_retryable() {
+    let computed = ComputedEvaluatedTypes {
+        evaluated_types: Some(verter_analysis::type_expand::ExpandedComponentTypes {
+            props: Vec::new(),
+            define_props: Vec::new(),
+            define_emits: Vec::new(),
+            emits: Vec::new(),
+            define_slots: Vec::new(),
+            slot_bindings: Vec::new(),
+            bindings: vec![budget_exceeded_field("binding")],
+        }),
+        discovered_dependencies: BTreeSet::new(),
+    };
+
+    assert!(
+        should_retry_component_meta_expansion(&computed),
+        "budget-limited expansion should remain retryable when it produced no component surface"
+    );
 }
 
 #[cfg(not(feature = "scheduler"))]
@@ -837,6 +943,57 @@ defineProps<Props>();
 }
 
 #[test]
+fn current_store_view_can_resolve_missing_relative_type_routes_for_existing_workspace_files() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/composables/useComponentIcons.ts",
+        "export interface UseComponentIconsProps { icon?: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/types/index.ts",
+        "export interface LinkProps { href?: string }\n",
+    );
+    upsert_vue(
+        &host,
+        "/workspace/components/Button.vue",
+        r#"<script lang="ts">
+import type { UseComponentIconsProps } from '../composables/useComponentIcons'
+import type { LinkProps } from '../types'
+
+export interface ButtonProps extends UseComponentIconsProps, LinkProps {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+
+    let view = host.resolver_store_view();
+
+    assert_eq!(
+        host.resolve_type_dependency_canonical_in_view(
+            "/workspace/components/Button.vue",
+            "../composables/useComponentIcons",
+            Some(&view)
+        )
+        .as_deref(),
+        Some("/workspace/composables/useComponentIcons.ts"),
+        "current store views should resolve missing relative type routes for existing workspace files",
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_in_view(
+            "/workspace/components/Button.vue",
+            "../types",
+            Some(&view)
+        )
+        .as_deref(),
+        Some("/workspace/types/index.ts"),
+        "current store views should resolve missing relative barrel routes for existing workspace files",
+    );
+}
+
+#[test]
 fn imported_eval_merge_keeps_captured_dependency_import_routes_when_candidates_change() {
     let host = make_host();
     upsert_non_sfc(
@@ -1391,8 +1548,8 @@ defineProps<ChildProps>()
         .find(|alias| alias.local_name == "LinkPropsKeys")
         .expect("imported key alias should be tracked");
     assert!(
-        link_keys.source_canonical_id == "/src/Link.vue",
-        "key alias should resolve to the Vue dependency source, got: {:?}",
+        link_keys.source_canonical_id == "/src/types/index.ts",
+        "key alias should stay shallow and point at the imported barrel source, got: {:?}",
         link_keys
     );
     assert_eq!(link_keys.exported_name, "LinkPropsKeys");
@@ -1518,7 +1675,7 @@ defineProps<Props>()
     let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
         &host,
         "/workspace/src/Link.vue",
-        dep_resolutions,
+        &dep_resolutions,
         Some(&view),
     );
     let mut deps = BTreeSet::new();
@@ -1744,19 +1901,12 @@ defineProps<Props>()
     )
     .expect("imported alias should be collected");
 
-    let TypeExpr::Union(types) = &alias.decl.body else {
-        panic!(
-            "collected imported alias should keep RouteLocationRaw as a union, got {:?}",
-            alias.decl.body
-        );
-    };
-    assert!(
-        types
-            .iter()
-            .any(|ty| matches!(ty, TypeExpr::Primitive(PrimitiveName::String))),
-        "collected imported alias should preserve the string route branch, got {:?}",
-        alias.decl.body
+    assert_eq!(
+        alias.source_canonical_id,
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
     );
+    assert_eq!(alias.exported_name, "RouteLocationRaw");
+    assert_eq!(alias.local_name, "RouteLocationRaw");
 }
 
 #[test]
@@ -1839,7 +1989,7 @@ defineProps<Props>()
     );
     assert!(
         aliases.iter().all(|alias| {
-            alias.source_canonical_id == "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
+            alias.source_canonical_id == "/workspace/node_modules/vue-router/dist/vue-router.d.ts"
                 && alias.exported_name == "RouteLocationRaw"
         }),
         "RouteLocationRaw aliases should target the actual declaration source/name, got {:?}",
@@ -1848,19 +1998,1404 @@ defineProps<Props>()
             .map(|alias| (
                 alias.source_canonical_id.clone(),
                 alias.exported_name.clone(),
-                alias.decl.body.clone(),
+                alias.requires_source_merge,
             ))
             .collect::<Vec<_>>()
     );
     assert!(
-        aliases
+        aliases.iter().all(|alias| alias.requires_source_merge),
+        "package route aliases should stay marked for source-merge-backed evaluation, got {:?}",
+        aliases,
+    );
+}
+
+#[test]
+fn imported_eval_inputs_read_reexported_dependency_source_once_per_canonical_id() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        r#"export { Alpha, Beta } from "./shared";"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"
+export interface Alpha { alpha?: string }
+export interface Beta { beta?: number }
+"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script lang="ts">
+import type { Alpha, Beta } from 'pkg'
+
+export interface Props extends Alpha, Beta {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "pkg".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./shared".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/shared.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/workspace/src/App.vue");
+
+    ws.reset_reads();
+    let inputs = host.imported_eval_inputs("/workspace/src/App.vue", &snapshot, &dep_resolutions);
+
+    assert!(
+        inputs
+            .type_aliases
             .iter()
-            .any(|alias| matches!(alias.decl.body, TypeExpr::Union(_))),
-        "at least one RouteLocationRaw alias should preserve a union surface, got {:?}",
-        aliases
+            .any(|alias| alias.local_name == "Alpha"),
+        "Alpha should be present in imported eval inputs"
+    );
+    assert!(
+        inputs
+            .type_aliases
             .iter()
-            .map(|alias| alias.decl.body.clone())
+            .any(|alias| alias.local_name == "Beta"),
+        "Beta should be present in imported eval inputs"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/shared.d.ts"),
+        1,
+        "shared declaration source should be loaded once per imported-eval request"
+    );
+}
+
+#[test]
+fn imported_eval_inputs_reuse_canonical_dependency_cache_across_owners() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        r#"export { Alpha, Beta } from "./shared";"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"
+export interface Alpha { alpha?: string }
+export interface Beta { beta?: number }
+"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script lang="ts">
+import type { Alpha } from 'pkg'
+export interface Props extends Alpha {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/workspace/src/Other.vue",
+        r#"<script lang="ts">
+import type { Beta } from 'pkg'
+export interface Props extends Beta {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    for owner in ["/workspace/src/App.vue", "/workspace/src/Other.vue"] {
+        host.set_import_dependencies(
+            owner,
+            vec![crate::types::DependencyResolution {
+                specifier: "pkg".to_string(),
+                resolved_canonical_id: Some(
+                    "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
+                ),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+    }
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./shared".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/shared.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let app_snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/App.vue", None)
+        .expect("App analysis snapshot should exist");
+    let other_snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/Other.vue", None)
+        .expect("Other analysis snapshot should exist");
+    let app_deps = host.dependency_resolutions_for_eval("/workspace/src/App.vue");
+    let other_deps = host.dependency_resolutions_for_eval("/workspace/src/Other.vue");
+
+    ws.reset_reads();
+    let app_inputs = host.imported_eval_inputs("/workspace/src/App.vue", &app_snapshot, &app_deps);
+    let other_inputs =
+        host.imported_eval_inputs("/workspace/src/Other.vue", &other_snapshot, &other_deps);
+
+    assert!(
+        app_inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "Alpha"),
+        "Alpha should be present for App"
+    );
+    assert!(
+        other_inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "Beta"),
+        "Beta should be present for Other"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/shared.d.ts"),
+        1,
+        "shared declaration source should be reused across owners while the hash is unchanged"
+    );
+}
+
+#[test]
+fn imported_eval_inputs_promote_loaded_workspace_dependency_state_into_host_cache() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface SharedProps { label?: string }",
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { SharedProps } from './types'
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+
+    assert!(
+        inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "SharedProps"),
+        "SharedProps should be present in imported eval inputs"
+    );
+
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("loaded workspace dependency should be promoted into the shared imported cache");
+    assert!(
+        cached.snapshot.is_some(),
+        "promoted loaded dependency should retain its parsed snapshot in shared host cache"
+    );
+    assert!(
+        cached.eval_source.is_some(),
+        "promoted loaded dependency should retain eval source in shared host cache"
+    );
+    assert!(
+        cached.env.is_some(),
+        "promoted loaded dependency should retain eval env in shared host cache"
+    );
+}
+
+#[test]
+fn imported_decl_resolution_persists_required_name_lookups_in_host_cache() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        r#"export { Alpha } from "./shared";"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"
+import type { Base } from "./base";
+export interface Alpha extends Base { alpha?: string }
+"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/base.d.ts",
+        r#"export interface Base { base?: number }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script lang="ts">
+import type { Alpha } from 'pkg'
+export interface Props extends Alpha {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![exact_dependency(
+            "pkg",
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![exact_dependency(
+            "./shared",
+            "/workspace/node_modules/pkg/dist/shared.d.ts",
+        )],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        vec![exact_dependency(
+            "./base",
+            "/workspace/node_modules/pkg/dist/base.d.ts",
+        )],
+    );
+
+    let view = host.resolver_store_view();
+    let dep_resolutions = host
+        .dependency_resolutions_for_eval_in_view("/workspace/src/App.vue", Some(&view))
+        .unwrap_or_default();
+    let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
+        &host,
+        "/workspace/src/App.vue",
+        &dep_resolutions,
+        Some(&view),
+    );
+    let evaluated = verter_resolver::evaluate_imported_decl_with_owner_env(
+        &mut resolver,
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        "Alpha",
+        &mut BTreeSet::new(),
+    );
+
+    assert!(
+        evaluated.is_some(),
+        "imported declaration should evaluate before its lookup metadata is cached"
+    );
+
+    let cached = host
+        .clone_current_imported_dependency_entry(
+            "/workspace/node_modules/pkg/dist/shared.d.ts",
+            Some(&view),
+        )
+        .expect("shared dependency should stay cached after imported decl evaluation");
+    let exported_required = cached
+        .exported_required_import_names
+        .get("Alpha")
+        .expect("export-level required import names should be persisted in the host cache");
+
+    assert!(
+        cached.external_type_analysis.is_some(),
+        "external type analysis should be retained in the host cache after the first lookup"
+    );
+    assert!(
+        cached.required_owner_import_names.is_some(),
+        "owner-level required names should still be persisted even when the resolved set is empty"
+    );
+    assert!(
+        exported_required.contains("Base"),
+        "export-level required names should preserve the imported base reference, got {:?}",
+        exported_required
+    );
+}
+
+#[test]
+fn imported_eval_inputs_reuse_barrel_routes_for_repeated_type_exports() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { TargetProps, TargetEmits } from './types'
+
+defineProps<TargetProps>()
+defineEmits<TargetEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './a'\nexport * from './b'\nexport * from './target'\n",
+    );
+    ws.inject_file(
+        "/src/types/a.ts",
+        "export interface AOnly { unused: string }\n",
+    );
+    ws.inject_file(
+        "/src/types/b.ts",
+        "export interface BOnly { unused: number }\n",
+    );
+    ws.inject_file(
+        "/src/types/target.ts",
+        r#"
+export interface TargetProps { label: string }
+export type TargetEmits = { change: [value: string] }
+"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            exact_dependency("./a", "/src/types/a.ts"),
+            exact_dependency("./b", "/src/types/b.ts"),
+            exact_dependency("./target", "/src/types/target.ts"),
+        ],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/Consumer.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/Consumer.vue");
+
+    ws.reset_reads();
+    let inputs = host.imported_eval_inputs("/src/Consumer.vue", &snapshot, &dep_resolutions);
+
+    assert!(
+        inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "TargetProps"),
+        "TargetProps should be present in imported eval inputs, got {:?}",
+        inputs
+            .type_aliases
+            .iter()
+            .map(|alias| alias.local_name.as_str())
             .collect::<Vec<_>>()
+    );
+    assert!(
+        inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "TargetEmits"),
+        "TargetEmits should be present in imported eval inputs, got {:?}",
+        inputs
+            .type_aliases
+            .iter()
+            .map(|alias| alias.local_name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        ws.read_count("/src/types/a.ts") <= 1,
+        "repeated barrel alias lookups should not reread unrelated sibling 'a', got {}",
+        ws.read_count("/src/types/a.ts"),
+    );
+    assert!(
+        ws.read_count("/src/types/b.ts") <= 1,
+        "repeated barrel alias lookups should not reread unrelated sibling 'b', got {}",
+        ws.read_count("/src/types/b.ts"),
+    );
+}
+
+#[test]
+fn imported_eval_inputs_discard_canonical_dependency_cache_when_hash_changes() {
+    fn has_property(expr: &TypeExpr, name: &str) -> bool {
+        match expr {
+            TypeExpr::Object(shape) => shape.properties.iter().any(|member| {
+                matches!(member, ObjectMember::Property(property) if property.name == name)
+            }),
+            TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+                types.iter().any(|ty| has_property(ty, name))
+            }
+            _ => false,
+        }
+    }
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        r#"export { Alpha } from "./shared";"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"export interface Alpha { alpha?: string }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script lang="ts">
+import type { Alpha } from 'pkg'
+export interface Props extends Alpha {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "pkg".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./shared".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/shared.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/workspace/src/App.vue");
+
+    ws.reset_reads();
+    let first = host.imported_eval_inputs("/workspace/src/App.vue", &snapshot, &dep_resolutions);
+    let first_alpha = first
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "Alpha")
+        .expect("Alpha should be present in first imported eval inputs");
+    assert!(
+        has_property(&resolved_imported_alias_body(&host, first_alpha), "alpha"),
+        "first imported eval should reflect the initial declaration shape"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/shared.d.ts"),
+        1,
+        "first read should load the dependency exactly once"
+    );
+
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"export interface Alpha { renamed?: number }"#,
+    );
+    let second = host.imported_eval_inputs("/workspace/src/App.vue", &snapshot, &dep_resolutions);
+    let second_alpha = second
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "Alpha")
+        .expect("Alpha should be present after dependency update");
+    assert!(
+        has_property(
+            &resolved_imported_alias_body(&host, second_alpha),
+            "renamed"
+        ),
+        "updated imported eval should reflect the new dependency shape"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/shared.d.ts"),
+        2,
+        "a new dependency hash should invalidate and reload the cached canonical entry once"
+    );
+
+    let third = host.imported_eval_inputs("/workspace/src/App.vue", &snapshot, &dep_resolutions);
+    let third_alpha = third
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "Alpha")
+        .expect("Alpha should still be present on the warm path");
+    assert!(
+        has_property(&resolved_imported_alias_body(&host, third_alpha), "renamed"),
+        "warm path after invalidation should reuse the refreshed dependency shape"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/shared.d.ts"),
+        2,
+        "unchanged refreshed dependency should be reused without another read"
+    );
+}
+
+#[test]
+fn generic_dependency_state_paths_reuse_cached_imported_snapshot_and_env() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        r#"export { Alpha } from "./shared";"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"export interface Alpha { alpha?: string }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script lang="ts">
+import type { Alpha } from 'pkg'
+export interface Props extends Alpha {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "pkg".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./shared".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/shared.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/workspace/src/App.vue");
+    let inputs = host.imported_eval_inputs("/workspace/src/App.vue", &snapshot, &dep_resolutions);
+    assert!(
+        inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "Alpha"),
+        "Alpha should be present in imported eval inputs"
+    );
+
+    let imported_entry = host
+        .imported_dependency_cache
+        .lock()
+        .get("/workspace/node_modules/pkg/dist/shared.d.ts")
+        .cloned()
+        .expect("shared dependency should be present in imported dependency cache");
+    let imported_snapshot = imported_entry
+        .snapshot
+        .clone()
+        .expect("imported dependency snapshot should be cached");
+    let imported_env = imported_entry
+        .env
+        .clone()
+        .expect("imported dependency env should be cached");
+
+    host.raw_analysis_snapshot_cache.lock().clear();
+    host.eval_env_cache.lock().clear();
+
+    assert!(
+        host.raw_analysis_snapshot_cache_entry("/workspace/node_modules/pkg/dist/shared.d.ts")
+            .is_none(),
+        "raw analysis snapshot cache should start empty for the dependency"
+    );
+    assert!(
+        host.eval_env_cache
+            .lock()
+            .get("/workspace/node_modules/pkg/dist/shared.d.ts")
+            .is_none(),
+        "eval env cache should start empty for the dependency"
+    );
+
+    let dep_snapshot = host
+        .get_raw_analysis_snapshot_in_view("/workspace/node_modules/pkg/dist/shared.d.ts", None)
+        .expect("generic snapshot path should return the dependency snapshot");
+    let cached_snapshot = host
+        .raw_analysis_snapshot_cache_entry("/workspace/node_modules/pkg/dist/shared.d.ts")
+        .expect("generic snapshot path should seed the raw analysis snapshot cache");
+    assert!(
+        Arc::ptr_eq(&imported_snapshot, &cached_snapshot),
+        "generic snapshot path should reuse the imported dependency snapshot arc"
+    );
+    assert_eq!(
+        dep_snapshot.imports.len(),
+        cached_snapshot.imports.len(),
+        "reused snapshot should preserve the same import surface"
+    );
+
+    let dep_env = host
+        .base_eval_env("/workspace/node_modules/pkg/dist/shared.d.ts")
+        .expect("generic eval env path should return the dependency env");
+    let cached_env = host
+        .eval_env_cache
+        .lock()
+        .get("/workspace/node_modules/pkg/dist/shared.d.ts")
+        .map(|(_, env)| Arc::clone(env))
+        .expect("generic eval env path should seed the eval env cache");
+    assert!(
+        Arc::ptr_eq(&imported_env, &cached_env),
+        "generic eval env path should reuse the imported dependency env arc"
+    );
+    assert!(
+        dep_env.type_symbols.contains_key("Alpha"),
+        "reused env should preserve the imported declaration symbols"
+    );
+}
+
+#[test]
+fn store_view_generic_dependency_paths_promote_snapshot_and_env_into_imported_cache() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"export interface Alpha { alpha?: string }"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let view = host.resolver_store_view();
+    let source = host
+        .read_analysis_source("/workspace/node_modules/pkg/dist/shared.d.ts")
+        .expect("dependency source should load into the imported dependency cache");
+    assert!(
+        source.contains("Alpha"),
+        "sanity check: the dependency source should be readable"
+    );
+
+    let before = host
+        .clone_current_imported_dependency_entry(
+            "/workspace/node_modules/pkg/dist/shared.d.ts",
+            Some(&view),
+        )
+        .expect("source-only imported dependency entry should exist");
+    assert!(
+        before.snapshot.is_none(),
+        "source-only imported dependency entry should start without a snapshot"
+    );
+    assert!(
+        before.env.is_none(),
+        "source-only imported dependency entry should start without an eval env"
+    );
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(
+            "/workspace/node_modules/pkg/dist/shared.d.ts",
+            Some(&view),
+        )
+        .expect("store-view snapshot path should build the dependency snapshot");
+    assert!(
+        snapshot.bindings.is_empty(),
+        "simple declaration file should still produce a valid analysis snapshot"
+    );
+
+    let env = host
+        .base_eval_env_in_view("/workspace/node_modules/pkg/dist/shared.d.ts", Some(&view))
+        .expect("store-view eval env path should build the dependency env");
+    assert!(
+        env.type_symbols.contains_key("Alpha"),
+        "built dependency env should expose the declaration symbol"
+    );
+
+    let after = host
+        .clone_current_imported_dependency_entry(
+            "/workspace/node_modules/pkg/dist/shared.d.ts",
+            Some(&view),
+        )
+        .expect("dependency entry should remain cached after store-view generic access");
+    assert!(
+        after.snapshot.is_some(),
+        "store-view snapshot build should promote the snapshot into the imported dependency cache"
+    );
+    assert!(
+        after.env.is_some(),
+        "store-view eval env build should promote the env into the imported dependency cache"
+    );
+}
+
+#[test]
+fn read_dep_source_for_type_resolution_reuses_imported_dependency_cache() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        r#"export { Alpha } from "./shared";"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"export interface Alpha { alpha?: string }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script lang="ts">
+import type { Alpha } from 'pkg'
+export interface Props extends Alpha {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "pkg".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./shared".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/shared.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/workspace/src/App.vue");
+    let inputs = host.imported_eval_inputs("/workspace/src/App.vue", &snapshot, &dep_resolutions);
+    assert!(
+        inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "Alpha"),
+        "Alpha should be present in imported eval inputs"
+    );
+
+    ws.reset_reads();
+    let first = host
+        .read_dep_source_for_type_resolution("/workspace/node_modules/pkg/dist/shared.d.ts", None);
+    let second = host
+        .read_dep_source_for_type_resolution("/workspace/node_modules/pkg/dist/shared.d.ts", None);
+
+    assert_eq!(
+        first.as_deref(),
+        Some("export interface Alpha { alpha?: string }"),
+        "direct type-resolution source reads should still return the cached declaration source"
+    );
+    assert_eq!(
+        second, first,
+        "warm source reads should return the same cached declaration source"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/shared.d.ts"),
+        0,
+        "warm non-view type-resolution source reads should not go back to the workspace once the canonical dependency cache is populated"
+    );
+}
+
+#[test]
+fn read_dep_source_for_type_resolution_promotes_eval_source_for_loaded_workspace_file() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    upsert_vue(
+        &host,
+        "/workspace/src/InputMenu.vue",
+        r#"<script setup lang="ts">
+const answer: string = '42'
+</script>
+<template><div>{{ answer }}</div></template>"#,
+    );
+
+    assert!(
+        host.clone_current_imported_dependency_entry("/workspace/src/InputMenu.vue", None)
+            .is_none(),
+        "loaded workspace file should not have a promoted dependency entry before the first type-resolution read",
+    );
+
+    let first = host.read_dep_source_for_type_resolution("/workspace/src/InputMenu.vue", None);
+    let second = host.read_dep_source_for_type_resolution("/workspace/src/InputMenu.vue", None);
+    let promoted = host
+        .clone_current_imported_dependency_entry("/workspace/src/InputMenu.vue", None)
+        .expect("type-resolution read should promote eval source into the host dependency cache");
+
+    assert_eq!(
+        first.as_deref().map(str::trim),
+        Some("const answer: string = '42'"),
+        "Vue type-resolution reads should return script content only",
+    );
+    assert_eq!(
+        second, first,
+        "warm reads should reuse the same promoted source"
+    );
+    assert_eq!(
+        promoted.eval_source.as_deref().map(str::trim),
+        Some("const answer: string = '42'"),
+        "the promoted dependency cache entry should keep the extracted type-resolution source",
+    );
+    assert!(
+        promoted.cached_parse.is_some(),
+        "the promoted Vue dependency cache entry should retain the cached SFC parse",
+    );
+    assert!(
+        promoted.snapshot.is_some(),
+        "the promoted Vue dependency cache entry should also retain the parsed analysis snapshot so revisits do not rebuild it",
+    );
+}
+
+#[test]
+fn materialize_imported_dependency_state_in_view_reuses_cached_vue_entry_arc() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface Base { id: string }\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/types.vue",
+        r#"<script lang="ts">
+import type { Base } from './base'
+
+export interface Props extends Base {
+  label: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/types.vue",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+
+    let first = host
+        .materialize_imported_dependency_state_in_view("/src/types.vue", None)
+        .expect("first Vue imported dependency state should be built");
+    let second = host
+        .materialize_imported_dependency_state_in_view("/src/types.vue", None)
+        .expect("second Vue imported dependency state should reuse the cached entry");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "repeated Vue imported dependency state lookups should reuse the same cached entry object",
+    );
+    assert!(
+        first.cached_parse.is_some() && first.snapshot.is_some() && first.env.is_some(),
+        "cached Vue imported dependency entry should retain parse/snapshot/env state",
+    );
+    assert!(
+        first.external_type_analysis.is_some(),
+        "cached Vue imported dependency entry should eagerly retain external type analysis so later resolver lookups do not reparse",
+    );
+    let first_program = host
+        .cached_parsed_eval_program_for_imported_dependency_in_view("/src/types.vue", None)
+        .expect("first Vue entry should expose a cached parsed eval program");
+    let second_program = host
+        .cached_parsed_eval_program_for_imported_dependency_in_view("/src/types.vue", None)
+        .expect("second Vue entry should expose the same cached parsed eval program");
+    let first_type_context = host
+        .cached_type_resolution_context_for_imported_dependency_in_view("/src/types.vue", None)
+        .expect("first Vue entry should expose a cached type-resolution context");
+    let second_type_context = host
+        .cached_type_resolution_context_for_imported_dependency_in_view("/src/types.vue", None)
+        .expect("second Vue entry should expose the same cached type-resolution context");
+    assert!(
+        Rc::ptr_eq(&first_program, &second_program),
+        "repeated Vue imported dependency state lookups should reuse the same parsed eval program Rc",
+    );
+    assert!(
+        Rc::ptr_eq(&first_type_context, &second_type_context),
+        "repeated Vue imported dependency state lookups should reuse the same type-resolution context Rc",
+    );
+}
+
+#[test]
+fn materialize_imported_dependency_state_in_view_populates_external_type_analysis_for_non_sfc() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { Base } from './base'\nexport interface Props extends Base { label: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface Base { id: string }\n",
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+
+    let entry = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("imported dependency state should be materialized");
+
+    assert!(
+        entry.snapshot.is_some() && entry.env.is_some(),
+        "non-SFC imported dependency state should eagerly retain analysis snapshot and eval env",
+    );
+    assert!(
+        entry.external_type_analysis.is_some(),
+        "non-SFC imported dependency state should eagerly retain external type analysis so later resolver lookups stay on cache",
+    );
+    assert!(
+        host.cached_parsed_eval_program_for_imported_dependency_in_view("/src/types.ts", None)
+            .is_some(),
+        "non-SFC imported dependency state should expose a cached parsed eval program so later resolver lookups do not reparse source",
+    );
+    assert!(
+        host.cached_type_resolution_context_for_imported_dependency_in_view("/src/types.ts", None)
+            .is_some(),
+        "non-SFC imported dependency state should expose a cached type-resolution context so repeated symbol resolution can reuse one base context",
+    );
+}
+
+#[test]
+fn imported_eval_resolver_reuses_cached_dependency_entry_arc_and_eval_source_arc_for_vue() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface Base { id: string }\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/types.vue",
+        r#"<script lang="ts">
+import type { Base } from './base'
+
+export interface Props extends Base {
+  label: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/types.vue",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+
+    let view = host.resolver_store_view();
+    let mut resolver = HostImportedEvalResolver::new(&host, "/src/types.vue", Some(&view));
+
+    let first_entry = resolver
+        .cached_dependency("/src/types.vue")
+        .expect("first cached dependency lookup should materialize the Vue entry");
+    let second_entry = resolver
+        .cached_dependency("/src/types.vue")
+        .expect("second cached dependency lookup should reuse the same Vue entry");
+    let first_eval_source = ImportedEvalSourceMergeResolver::load_eval_source_for_merge(
+        &mut resolver,
+        "/src/types.vue",
+    )
+    .expect("first eval-source lookup should return the cached source");
+    let second_eval_source = ImportedEvalSourceMergeResolver::load_eval_source_for_merge(
+        &mut resolver,
+        "/src/types.vue",
+    )
+    .expect("second eval-source lookup should reuse the cached source arc");
+
+    assert!(
+        Arc::ptr_eq(&first_entry, &second_entry),
+        "resolver dependency lookups should reuse the same cached dependency entry instead of rebuilding a wrapper",
+    );
+    assert!(
+        Arc::ptr_eq(&first_eval_source, &second_eval_source),
+        "eval-source lookups should reuse the same cached source arc instead of allocating a fresh string",
+    );
+}
+
+#[test]
+fn resolve_type_dependency_canonical_reuses_cached_import_routes_for_imported_owner() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        r#"export { Alpha } from "./shared";"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        r#"export interface Alpha { alpha?: string }"#,
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script lang="ts">
+import type { Alpha } from 'pkg'
+export interface Props extends Alpha {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "pkg".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./shared".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/shared.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/workspace/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/workspace/src/App.vue");
+    let inputs = host.imported_eval_inputs("/workspace/src/App.vue", &snapshot, &dep_resolutions);
+    assert!(
+        inputs
+            .type_aliases
+            .iter()
+            .any(|alias| alias.local_name == "Alpha"),
+        "Alpha should be present in imported eval inputs"
+    );
+
+    ws.reset_resolves();
+    let first = host.resolve_type_dependency_canonical(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "./shared",
+    );
+    let second = host.resolve_type_dependency_canonical(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "./shared",
+    );
+
+    assert_eq!(
+        first.as_deref(),
+        Some("/workspace/node_modules/pkg/dist/shared.d.ts"),
+        "cached type dependency routes should still resolve to the canonical target"
+    );
+    assert_eq!(
+        second, first,
+        "warm route resolution should keep returning the cached canonical target"
+    );
+    assert_eq!(
+        ws.resolve_count("/workspace/node_modules/pkg/dist/index.d.ts", "./shared"),
+        0,
+        "warm imported-owner route lookups should use cached dependency resolutions instead of re-entering the workspace resolver"
+    );
+}
+
+#[test]
+fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_state() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/partial.html",
+        "<div class=\"partial\">partial</div>",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<template src="./partial.html"></template>
+<script setup>const ok = true</script>"#,
+    );
+    ws.set_exact_resolutions(
+        "/workspace/src/App.vue",
+        vec![verter_vfs::ExactResolution {
+            specifier: "./partial.html".to_string(),
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("/workspace/src/partial.html".to_string()),
+            possible_canonical_ids: vec!["/workspace/src/partial.html".to_string()],
+        }],
+    );
+
+    ws.reset_reads();
+    let first = host.resolve_dep_source(
+        "/workspace/src/App.vue",
+        "/workspace/src/partial.html",
+        "./partial.html",
+    );
+    let second = host.resolve_dep_source(
+        "/workspace/src/App.vue",
+        "/workspace/src/partial.html",
+        "./partial.html",
+    );
+
+    assert_eq!(
+        first.as_deref(),
+        Some("<div class=\"partial\">partial</div>"),
+        "first dependency source lookup should return the external source text"
+    );
+    assert_eq!(
+        second, first,
+        "warm dependency source lookup should return the same cached source"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/partial.html"),
+        1,
+        "dependency source should be read once, then served from the canonical cache"
+    );
+    assert!(
+        host.get_source("/workspace/src/partial.html").is_none(),
+        "cache-backed dependency source reuse should not force the dependency into loaded host file state"
+    );
+}
+
+#[test]
+fn cached_dependency_resolution_is_reused_by_internal_and_public_import_lookups() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/workspace/src/dep.ts", "export const dep = 1");
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+import { dep } from "@/dep"
+</script>"#,
+    );
+    ws.set_exact_resolutions(
+        "/workspace/src/App.vue",
+        vec![verter_vfs::ExactResolution {
+            specifier: "@/dep".to_string(),
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("/workspace/src/dep.ts".to_string()),
+            possible_canonical_ids: vec!["/workspace/src/dep.ts".to_string()],
+        }],
+    );
+
+    ws.reset_resolves();
+    let first = host.resolve_loaded_dependency_canonical(
+        "/workspace/src/App.vue",
+        "@/dep",
+        verter_vfs::ResolveRequestKind::EsmImport,
+    );
+    let second = host.resolve_import("/workspace/src/App.vue", "@/dep");
+    let third = host.resolve_loaded_dependency_canonical(
+        "/workspace/src/App.vue",
+        "@/dep",
+        verter_vfs::ResolveRequestKind::EsmImport,
+    );
+
+    assert_eq!(
+        first.as_deref(),
+        Some("/workspace/src/dep.ts"),
+        "first lookup should resolve through the workspace fallback"
+    );
+    assert_eq!(
+        second.as_deref(),
+        Some("/workspace/src/dep.ts"),
+        "public resolve_import should reuse the same cached canonical route"
+    );
+    assert_eq!(
+        third, first,
+        "subsequent internal lookups should keep hitting the promoted cache entry"
+    );
+    assert_eq!(
+        ws.resolve_count("/workspace/src/App.vue", "@/dep"),
+        1,
+        "workspace resolve_import should run once before the cached dependency resolution is reused"
     );
 }
 
@@ -1873,6 +3408,16 @@ fn collect_imported_type_alias_preserves_same_file_base_members_for_package_alia
             }),
             TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
                 types.iter().any(|ty| has_property(ty, name))
+            }
+            _ => false,
+        }
+    }
+
+    fn has_named_ref(expr: &TypeExpr, name: &str) -> bool {
+        match expr {
+            TypeExpr::Ref { name: current, .. } => current.as_ref() == name,
+            TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+                types.iter().any(|ty| has_named_ref(ty, name))
             }
             _ => false,
         }
@@ -1967,15 +3512,427 @@ defineProps<Props>()
     )
     .expect("imported alias should be collected");
 
+    assert_eq!(
+        alias.source_canonical_id,
+        "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
+    );
+    assert_eq!(alias.exported_name, "RouterLinkProps");
+    let alias_body = resolved_imported_alias_body(&host, &alias);
     assert!(
-        has_property(&alias.decl.body, "replace"),
-        "collected imported alias should preserve inherited base members, got {:?}",
-        alias.decl.body
+        has_named_ref(&alias_body, "RouterLinkOptions"),
+        "collected imported alias should preserve the same-file inherited symbol route, got {:?}",
+        alias_body
     );
     assert!(
-        has_property(&alias.decl.body, "activeClass"),
+        has_property(&alias_body, "activeClass"),
         "collected imported alias should preserve own interface members, got {:?}",
-        alias.decl.body
+        alias_body
+    );
+}
+
+#[test]
+fn build_owner_eval_env_hydrates_imported_symbol_dependencies_for_shallow_aliases() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BaseProps { replace?: boolean }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+import type { BaseProps as ImportedBase } from './base'
+
+export interface Props extends ImportedBase {
+  activeClass?: string
+}
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let imported_inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let props_alias = imported_inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "Props")
+        .expect("Props alias should be collected");
+    let props_dependencies = resolved_imported_alias_dependencies(&host, props_alias);
+    assert!(
+        props_dependencies.iter().any(|dependency| {
+            dependency.local_name == "ImportedBase"
+                && dependency.canonical_id == "/src/base.ts"
+                && dependency.exported_name == "BaseProps"
+        }),
+        "shallow imported aliases should keep imported symbol lookup links, got {:?}",
+        props_dependencies
+    );
+
+    let built = host
+        .build_owner_eval_env_with_inputs_from_owner_env_in_view(
+            "/src/App.vue",
+            &snapshot,
+            &imported_inputs,
+            None,
+            None,
+            None,
+        )
+        .expect("owner env should build");
+
+    assert!(
+        built.env.type_symbols.contains_key("Props"),
+        "builder should materialize shallow imported aliases into the owner env"
+    );
+}
+
+#[test]
+fn resolve_shallow_symbol_dependency_alias_follows_barrel_root_to_cached_defining_file() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BaseProps { replace?: boolean }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export type { BaseProps } from './base'",
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+
+    let view = host.resolver_store_view();
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/barrel.ts", "BaseProps", Some(&view))
+        .expect("builder should follow barrel export roots to the defining file");
+
+    assert!(
+        matches!(
+            &prepared.2.decl.body,
+            TypeExpr::Object(shape)
+                if shape.properties.iter().any(|member| {
+                    matches!(member, ObjectMember::Property(property) if property.name == "replace")
+                })
+        ),
+        "the shallow cached alias should come from the defining file body, got {:?}",
+        prepared.2.decl.body
+    );
+
+    let barrel_cached = host
+        .clone_current_imported_dependency_entry("/src/barrel.ts", Some(&view))
+        .expect("barrel source should be cached");
+    assert!(
+        !barrel_cached.prepared_type_aliases.contains_key("BaseProps"),
+        "shallow symbol builder lookup should cache the defining-file alias, not synthesize a barrel-local prepared alias"
+    );
+
+    let base_cached = host
+        .clone_current_imported_dependency_entry("/src/base.ts", Some(&view))
+        .expect("base source should be cached");
+    assert!(
+        base_cached.prepared_type_aliases.contains_key("BaseProps"),
+        "builder should cache the shallow defining-file alias for later requests"
+    );
+}
+
+#[test]
+fn imported_eval_inputs_record_transitive_vue_sources_for_shallow_barrel_aliases() {
+    let host = make_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types/index.ts".to_string(),
+            source: Arc::from("export * from '../Link.vue'\nexport * from '../Button.vue'"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    upsert_vue(
+        &host,
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  raw?: boolean
+  custom?: boolean
+}
+
+export type LinkPropsKeys = 'href'
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface UseComponentIconsProps {
+  loading?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface ChildProps extends Omit<ButtonProps, LinkPropsKeys | 'loading'> {
+  status?: string
+}
+
+defineProps<ChildProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            exact_dependency("../Link.vue", "/src/Link.vue"),
+            exact_dependency("../Button.vue", "/src/Button.vue"),
+        ],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
+    let imported_inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let source_ids: Vec<&str> = imported_inputs
+        .sources
+        .iter()
+        .map(|source| source.canonical_id.as_str())
+        .collect();
+
+    assert!(
+        source_ids.contains(&"/src/Button.vue"),
+        "source-merge inputs should record the shallow alias owner source, got {source_ids:?}"
+    );
+    assert!(
+        source_ids.contains(&"/src/Link.vue"),
+        "source-merge inputs should follow required imported names through Vue barrels, got {source_ids:?}"
+    );
+}
+
+#[test]
+fn resolve_imported_type_root_and_declaration_reuse_host_imported_dependency_cache_across_resolvers(
+) {
+    let host = make_host();
+    upsert_non_sfc(&host, "/src/index.ts", "export { Props } from './types'");
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label?: string }",
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let view = host.resolver_store_view();
+    let resolver_a = HostImportedEvalResolver::new(&host, "/src/Consumer.ts", Some(&view));
+
+    let root_a = ImportedEvalLookupResolver::resolve_imported_type_root(
+        &resolver_a,
+        "/src/index.ts",
+        "Props",
+    );
+    let decl_a = resolver_a.resolve_imported_type_declaration("/src/types.ts", "Props");
+
+    let cached_index = host
+        .clone_current_imported_dependency_entry("/src/index.ts", Some(&view))
+        .expect("index source should be cached in the host imported dependency cache");
+    assert_eq!(
+        cached_index
+            .resolved_type_roots
+            .get("Props")
+            .map(|root| (root.canonical_source.clone(), root.resolved_name.clone())),
+        Some(("/src/types.ts".to_string(), "Props".to_string())),
+        "resolved imported type roots should be stored on the host-owned imported dependency cache"
+    );
+
+    let cached_types = host
+        .clone_current_imported_dependency_entry("/src/types.ts", Some(&view))
+        .expect("types source should be cached in the host imported dependency cache");
+    assert_eq!(
+        cached_types.resolved_type_declarations.len(),
+        1,
+        "resolved imported type declarations should be stored on the host-owned imported dependency cache"
+    );
+    assert_eq!(
+        cached_types
+            .resolved_type_declarations
+            .get("Props")
+            .cloned(),
+        Some(decl_a.clone()),
+        "host cache should retain the resolved declaration payload"
+    );
+
+    let resolver_b = HostImportedEvalResolver::new(&host, "/src/OtherConsumer.ts", Some(&view));
+    let root_b = ImportedEvalLookupResolver::resolve_imported_type_root(
+        &resolver_b,
+        "/src/index.ts",
+        "Props",
+    );
+    let decl_b = resolver_b.resolve_imported_type_declaration("/src/types.ts", "Props");
+
+    assert_eq!(root_a, root_b);
+    assert_eq!(decl_a, decl_b);
+}
+
+#[test]
+fn resolve_imported_type_root_follows_local_exported_import_symbol_via_shallow_graph() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "import type { Foo as LocalFoo } from './types'; export { LocalFoo as Props };",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Foo { label?: string }",
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let view = host.resolver_store_view();
+    let resolver = HostImportedEvalResolver::new(&host, "/src/Consumer.ts", Some(&view));
+
+    let root =
+        ImportedEvalLookupResolver::resolve_imported_type_root(&resolver, "/src/index.ts", "Props");
+
+    assert_eq!(root, ("/src/types.ts".to_string(), "Foo".to_string()));
+
+    let cached_index = host
+        .clone_current_imported_dependency_entry("/src/index.ts", Some(&view))
+        .expect("index source should be cached in the host imported dependency cache");
+    assert_eq!(
+        cached_index
+            .resolved_type_roots
+            .get("Props")
+            .map(|root| (root.canonical_source.clone(), root.resolved_name.clone())),
+        Some(("/src/types.ts".to_string(), "Foo".to_string())),
+        "local exported import symbols should cache the final external target"
+    );
+}
+
+#[test]
+fn collect_imported_type_alias_reuses_host_cached_prepared_alias_across_resolvers() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label?: string }",
+    );
+
+    let view = host.resolver_store_view();
+    let mut resolver_a = HostImportedEvalResolver::new(&host, "/src/ConsumerA.ts", Some(&view));
+    let mut deps_a = BTreeSet::new();
+    let mut budget_a = verter_resolver::ImportedEvalTraversalBudget::new("/src/ConsumerA.ts", 16);
+    let alias_a = ImportedEvalCollectorResolver::collect_imported_type_alias(
+        &mut resolver_a,
+        verter_resolver::ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/ConsumerA.ts".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalPropsA".to_string(),
+            imported_name: "Props".to_string(),
+            source_canonical_id: "/src/types.ts".to_string(),
+            exported_name: "Props".to_string(),
+        },
+        &mut deps_a,
+        &mut budget_a,
+    )
+    .expect("first imported alias should be collected");
+
+    assert_eq!(alias_a.local_name, "LocalPropsA");
+
+    {
+        let cached = host
+            .clone_current_imported_dependency_entry("/src/types.ts", Some(&view))
+            .expect("types source should be present in the imported dependency cache");
+        assert!(
+            !cached.prepared_type_aliases.contains_key("Props"),
+            "collecting shallow aliases should not eagerly populate prepared alias cache"
+        );
+    }
+
+    let mut resolver_b = HostImportedEvalResolver::new(&host, "/src/ConsumerB.ts", Some(&view));
+    let mut deps_b = BTreeSet::new();
+    let mut budget_b = verter_resolver::ImportedEvalTraversalBudget::new("/src/ConsumerB.ts", 16);
+    let alias_b = ImportedEvalCollectorResolver::collect_imported_type_alias(
+        &mut resolver_b,
+        verter_resolver::ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/ConsumerB.ts".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalPropsB".to_string(),
+            imported_name: "Props".to_string(),
+            source_canonical_id: "/src/types.ts".to_string(),
+            exported_name: "Props".to_string(),
+        },
+        &mut deps_b,
+        &mut budget_b,
+    )
+    .expect("second imported alias should still be collected through the shallow route");
+
+    assert_eq!(alias_b.local_name, "LocalPropsB");
+    assert_eq!(alias_b.exported_name, "Props");
+
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", Some(&view))
+        .expect("types source should still be cached");
+    assert_eq!(
+        cached.prepared_type_aliases.len(),
+        0,
+        "shallow collection should leave prepared aliases cold until the builder materializes them",
     );
 }
 
@@ -2087,6 +4044,16 @@ defineProps<Props>()
         .flat_map(|entry| entry.result.value.properties.iter())
         .map(|prop| prop.name.clone())
         .collect();
+    let alias_bodies: Vec<_> = inputs
+        .type_aliases
+        .iter()
+        .map(|alias| {
+            (
+                alias.local_name.clone(),
+                resolved_imported_alias_body(&host, alias),
+            )
+        })
+        .collect();
 
     assert!(
         inputs.canonical_dependencies.contains("/src/base.ts"),
@@ -2095,7 +4062,7 @@ defineProps<Props>()
     );
     assert!(
         names.iter().any(|name| name == "base"),
-        "evaluated props should preserve transitive imported fields, got: {names:?}"
+        "evaluated props should preserve transitive imported fields, got props={names:?} aliases={alias_bodies:?}"
     );
     assert!(
         names.iter().any(|name| name == "current"),
@@ -5105,6 +7072,86 @@ fn resolved_dependency_targets_uses_effective_target() {
     assert_eq!(targets.len(), 2, "missing should not contribute a target");
 }
 
+#[test]
+fn external_type_analysis_in_view_reuses_cached_analysis_for_same_dependency() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "import type { Base } from './base'\nexport interface Props extends Base { label: string }\n",
+    );
+    ws.inject_file("/src/base.ts", "export interface Base { id: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let first = host
+        .external_type_analysis_in_view("/src/types.ts", None)
+        .expect("first analysis should load and cache the dependency");
+    let second = host
+        .external_type_analysis_in_view("/src/types.ts", None)
+        .expect("second analysis should reuse the cached dependency analysis");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "repeated dependency analysis should reuse the cached analysis object",
+    );
+    assert_eq!(
+        ws.read_count("/src/types.ts"),
+        1,
+        "the dependency source should only be loaded once for repeated analysis lookups",
+    );
+}
+
+#[test]
+fn external_type_analysis_in_view_uses_eval_source_for_vue_dependencies() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface Base { id: string }\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/types.vue",
+        r#"<script lang="ts">
+import type { Base } from './base'
+
+export interface Props extends Base {
+  label: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/types.vue",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+
+    let analysis = host
+        .external_type_analysis_in_view("/src/types.vue", None)
+        .expect("vue dependency analysis should be built from the script/eval source");
+
+    assert!(
+        analysis.local_symbol_span("Props").is_some(),
+        "vue dependency analysis should see local type symbols in the script block",
+    );
+    assert_eq!(
+        analysis.local_import_symbol_target("Base"),
+        Some(("./base", "Base")),
+        "vue dependency analysis should keep import lookup-table entries for script imports",
+    );
+    assert!(
+        analysis.required_import_names("Props").contains("Base"),
+        "vue dependency analysis should compute required imported names from the script block",
+    );
+}
+
 #[cfg(feature = "scheduler")]
 #[test]
 fn get_component_meta_named_barrel_lookup_skips_unrelated_siblings() {
@@ -5178,5 +7225,91 @@ defineProps<IconProps>()
         ws.read_count("/src/types/b.ts"),
         0,
         "named barrel lookup should stop after the requested export is found",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn get_component_meta_reuses_barrel_routes_for_multiple_late_exports() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { TargetProps, TargetEmits } from './types'
+
+defineProps<TargetProps>()
+defineEmits<TargetEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './a'\nexport * from './b'\nexport * from './target'\n",
+    );
+    ws.inject_file(
+        "/src/types/a.ts",
+        "export interface AOnly { unused: string }\n",
+    );
+    ws.inject_file(
+        "/src/types/b.ts",
+        "export interface BOnly { unused: number }\n",
+    );
+    ws.inject_file(
+        "/src/types/target.ts",
+        r#"
+export interface TargetProps { label: string }
+export type TargetEmits = { change: [value: string] }
+"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            exact_dependency("./a", "/src/types/a.ts"),
+            exact_dependency("./b", "/src/types/b.ts"),
+            exact_dependency("./target", "/src/types/target.ts"),
+        ],
+    );
+
+    ws.reset_reads();
+    let meta = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta should resolve for repeated late barrel exports");
+
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "label"),
+        "resolved props should include TargetProps.label, got {:?}",
+        meta.props,
+    );
+    assert!(
+        meta.events.iter().any(|event| event.name == "change"),
+        "resolved events should include TargetEmits.change, got {:?}",
+        meta.events,
+    );
+    assert!(
+        ws.read_count("/src/types/a.ts") <= 1,
+        "multiple late barrel exports should not reread unrelated sibling 'a', got {}",
+        ws.read_count("/src/types/a.ts"),
+    );
+    assert!(
+        ws.read_count("/src/types/b.ts") <= 1,
+        "multiple late barrel exports should not reread unrelated sibling 'b', got {}",
+        ws.read_count("/src/types/b.ts"),
     );
 }

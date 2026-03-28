@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use verter_analysis::component_meta::ResolvedTypeAnalysis;
 use verter_analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 use verter_analysis::types::{AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep};
@@ -150,7 +150,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         exported_name: &str,
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
-        cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+        cache: &mut crate::ExternalTypeBodyCache,
         visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedElements>;
 
@@ -160,7 +160,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         span: verter_span::Span,
         expanded: bool,
         tracked_deps: &mut BTreeSet<String>,
-        cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+        cache: &mut crate::ExternalTypeBodyCache,
         visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock>;
 
@@ -203,7 +203,7 @@ where
     let mut resolved_type_registry = Vec::new();
     let mut resolved_type_registry_meta = Vec::new();
     let mut seen_registry_names = FxHashSet::default();
-    let mut cache = FxHashMap::default();
+    let mut cache = crate::ExternalTypeBodyCache::default();
     let mut visiting = FxHashSet::default();
     let mut tracked_deps = BTreeSet::new();
 
@@ -282,12 +282,22 @@ where
             &mut cache,
             &mut visiting,
         ) {
-            let projected = project_macro_surfaces(
-                host.read_source(declaration.canonical_source.as_str())
-                    .as_deref(),
-                dep.macro_kind,
-                &elements,
-            );
+            let declaration_source = host.read_source(declaration.canonical_source.as_str());
+            let mut projected =
+                project_macro_surfaces(declaration_source.as_deref(), dep.macro_kind, &elements);
+            if dep.macro_kind == AnalyzedMacroKind::DefineSlots {
+                if let Some(source_projected) = declaration_source.as_deref().and_then(|source| {
+                    project_macro_surfaces_from_source_type_name(
+                        source,
+                        dep.macro_kind,
+                        declaration.resolved_name.as_str(),
+                    )
+                }) {
+                    if source_projected.slots.len() > projected.slots.len() {
+                        projected.slots = source_projected.slots;
+                    }
+                }
+            }
             if seen_registry_names.insert(dep.type_name.clone()) {
                 resolved_type_registry.push(ResolvedTypeAnalysis {
                     name: dep.type_name.clone(),
@@ -515,7 +525,7 @@ mod tests {
             _exported_name: &str,
             _tracked_deps: &mut BTreeSet<String>,
             _resolution_deps: &mut BTreeSet<String>,
-            _cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+            _cache: &mut crate::ExternalTypeBodyCache,
             _visiting: &mut FxHashSet<(String, String)>,
         ) -> Option<ResolvedElements> {
             None
@@ -527,7 +537,7 @@ mod tests {
             _span: Span,
             _expanded: bool,
             _tracked_deps: &mut BTreeSet<String>,
-            _cache: &mut FxHashMap<(String, String), Option<ResolvedElements>>,
+            _cache: &mut crate::ExternalTypeBodyCache,
             _visiting: &mut FxHashSet<(String, String)>,
         ) -> Option<ResolvedJsdocBlock> {
             None

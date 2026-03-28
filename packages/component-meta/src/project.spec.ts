@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ComponentMetaSession, evictComponentMetaSession, shutdownMetaRuntime } from "./project.js";
-import { getMetaRuntime } from "./runtime/index.js";
+import { createMetaRuntime, getMetaRuntime } from "./runtime/index.js";
 import type { NativeMetaProject, NativeMetaSession } from "./runtime/index.js";
 
 function nativeMetaPayload(filePath: string) {
@@ -170,6 +170,41 @@ describe("ComponentMetaSession public API", () => {
     const engine1 = await runtime.getOrCreateEngine(input, bootstrap);
     const engine2 = await runtime.getOrCreateEngine(input, bootstrap);
     expect(engine1).toBe(engine2);
+  });
+
+  it("dedicated runtime mode shuts down the owned engine on close", async () => {
+    const baseFiles = new Map([["A.vue", "<template>A</template>"]]);
+    const bootstrap = async () => ({
+      nativeProject: createMockProject(baseFiles),
+      baseFileIds: ["A.vue"],
+    });
+
+    const input = {
+      backend: "napi" as const,
+      root: "/dedicated",
+      configKind: "inline" as const,
+      configHash: "dedicated",
+      nativeFlags: { analysisLevel: "full" },
+    };
+
+    const dedicatedRuntime = createMetaRuntime();
+    const engine = await dedicatedRuntime.getOrCreateEngine(input, bootstrap);
+    const session = dedicatedRuntime.openSession(engine);
+    const project = new ComponentMetaSession(
+      session,
+      "/dedicated",
+      { runtimeMode: "dedicated" },
+      undefined,
+      dedicatedRuntime,
+      true,
+    );
+
+    expect(getMetaRuntime().engineCount).toBe(0);
+    expect(engine.state).toBe("active");
+
+    project.close();
+
+    expect(engine.state).toBe("closed");
   });
 
   it("dropping one handle does not break another", async () => {

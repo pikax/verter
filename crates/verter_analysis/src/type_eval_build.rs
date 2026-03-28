@@ -37,6 +37,52 @@ fn type_expand_debug(message: impl FnOnce() -> String) {
     }
 }
 
+fn expansion_metadata_hit_budget(
+    completeness: crate::type_expand::ExpansionCompleteness,
+    diagnostics: &[crate::type_expand::ExpansionDiagnostic],
+) -> bool {
+    completeness == crate::type_expand::ExpansionCompleteness::Partial
+        && diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason == crate::type_expand::ExpansionStopReason::BudgetExceeded
+        })
+}
+
+fn log_expand_stage(
+    macro_index: usize,
+    macro_kind: crate::types::AnalyzedMacroKind,
+    stage: &str,
+    target: &str,
+    started: Instant,
+    completeness: crate::type_expand::ExpansionCompleteness,
+    diagnostics: &[crate::type_expand::ExpansionDiagnostic],
+    env: &EvalEnv,
+    start_steps: usize,
+) {
+    type_expand_debug(|| {
+        format!(
+            "expand_macro_types:item macro_index={} macro_kind={:?} stage={} target={} took {:?} steps_delta={} completeness={:?} diagnostics={} budget_hit={}",
+            macro_index,
+            macro_kind,
+            stage,
+            target,
+            started.elapsed(),
+            env.steps().saturating_sub(start_steps),
+            completeness,
+            diagnostics.len(),
+            expansion_metadata_hit_budget(completeness, diagnostics),
+        )
+    });
+}
+
+fn log_expand_skip(macro_index: usize, macro_kind: crate::types::AnalyzedMacroKind, reason: &str) {
+    type_expand_debug(|| {
+        format!(
+            "expand_macro_types:skip macro_index={} macro_kind={:?} reason={}",
+            macro_index, macro_kind, reason
+        )
+    });
+}
+
 /// Build an evaluation environment from an OXC program AST.
 ///
 /// Extracts:
@@ -845,7 +891,20 @@ pub fn expand_macro_types_with_lookup(
             if let Some(ref type_ann) = field.type_annotation {
                 let parsed = parse_type_annotation(type_ann);
                 if !parsed.is_unknown() {
+                    let item_started = Instant::now();
+                    let item_start_steps = env.steps();
                     let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
+                    log_expand_stage(
+                        macro_index,
+                        m.kind,
+                        "prop_field",
+                        field.name.as_str(),
+                        item_started,
+                        expanded.completeness,
+                        &expanded.diagnostics,
+                        env,
+                        item_start_steps,
+                    );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -865,8 +924,21 @@ pub fn expand_macro_types_with_lookup(
                 .map(|params| &params.define_props)
             {
                 if let Some(lowered) = type_params.get(define_props_index) {
+                    let item_started = Instant::now();
+                    let item_start_steps = env.steps();
                     let shape_result =
                         expand_object_shape_with_lookup(lowered, env, budget, lookup);
+                    log_expand_stage(
+                        macro_index,
+                        m.kind,
+                        "define_props",
+                        "type_param",
+                        item_started,
+                        shape_result.completeness,
+                        &shape_result.diagnostics,
+                        env,
+                        item_start_steps,
+                    );
                     if !shape_result.value.properties.is_empty()
                         || !shape_result.value.index_signatures.is_empty()
                     {
@@ -886,8 +958,21 @@ pub fn expand_macro_types_with_lookup(
                 .map(|params| &params.define_emits)
             {
                 if let Some(lowered) = type_params.get(define_emits_index) {
+                    let item_started = Instant::now();
+                    let item_start_steps = env.steps();
                     let shape_result =
                         expand_object_shape_with_lookup(lowered, env, budget, lookup);
+                    log_expand_stage(
+                        macro_index,
+                        m.kind,
+                        "define_emits",
+                        "type_param",
+                        item_started,
+                        shape_result.completeness,
+                        &shape_result.diagnostics,
+                        env,
+                        item_start_steps,
+                    );
                     if has_named_shape_surface(&shape_result.value) {
                         result.define_emits.push(ExpandedMacroObjectShape {
                             macro_index,
@@ -904,7 +989,20 @@ pub fn expand_macro_types_with_lookup(
             if let Some(ref payload) = field.payload_type {
                 let parsed = parse_type_annotation(payload);
                 if !parsed.is_unknown() {
+                    let item_started = Instant::now();
+                    let item_start_steps = env.steps();
                     let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
+                    log_expand_stage(
+                        macro_index,
+                        m.kind,
+                        "emit_field",
+                        field.name.as_str(),
+                        item_started,
+                        expanded.completeness,
+                        &expanded.diagnostics,
+                        env,
+                        item_start_steps,
+                    );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -923,13 +1021,34 @@ pub fn expand_macro_types_with_lookup(
                 .map(|params| &params.define_slots)
             {
                 if let Some(lowered) = type_params.get(define_slots_index) {
-                    let shape_result =
-                        expand_object_shape_with_lookup(lowered, env, budget, lookup);
-                    if !shape_result.value.properties.is_empty() {
-                        result.define_slots.push(ExpandedMacroObjectShape {
+                    if m.slot_fields.is_empty() {
+                        let item_started = Instant::now();
+                        let item_start_steps = env.steps();
+                        let shape_result =
+                            expand_object_shape_with_lookup(lowered, env, budget, lookup);
+                        log_expand_stage(
                             macro_index,
-                            result: shape_result,
-                        });
+                            m.kind,
+                            "define_slots",
+                            "type_param",
+                            item_started,
+                            shape_result.completeness,
+                            &shape_result.diagnostics,
+                            env,
+                            item_start_steps,
+                        );
+                        if !shape_result.value.properties.is_empty() {
+                            result.define_slots.push(ExpandedMacroObjectShape {
+                                macro_index,
+                                result: shape_result,
+                            });
+                        }
+                    } else {
+                        log_expand_skip(
+                            macro_index,
+                            m.kind,
+                            "define_slots_shape_already_available_from_slot_fields",
+                        );
                     }
                 }
             }
@@ -942,8 +1061,21 @@ pub fn expand_macro_types_with_lookup(
                 if let Some(ref type_ann) = binding.type_annotation {
                     let parsed = parse_type_annotation(type_ann);
                     if !parsed.is_unknown() {
+                        let item_started = Instant::now();
+                        let item_start_steps = env.steps();
                         let expanded =
                             expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
+                        log_expand_stage(
+                            macro_index,
+                            m.kind,
+                            "slot_binding",
+                            &format!("{}.{}", slot.name, binding.name),
+                            item_started,
+                            expanded.completeness,
+                            &expanded.diagnostics,
+                            env,
+                            item_start_steps,
+                        );
                         result.slot_bindings.push(ExpandedField {
                             name: format!("{}.{}", slot.name, binding.name),
                             r#type: expanded.value.expr,
@@ -974,7 +1106,20 @@ pub fn expand_macro_types_with_lookup(
         })
         .collect();
     for (name, type_ann) in binding_entries {
+        let item_started = Instant::now();
+        let item_start_steps = env.steps();
         let expanded = expand_normalized_expr_with_lookup(&type_ann, env, budget, lookup);
+        log_expand_stage(
+            usize::MAX,
+            crate::types::AnalyzedMacroKind::DefineExpose,
+            "binding",
+            name.as_str(),
+            item_started,
+            expanded.completeness,
+            &expanded.diagnostics,
+            env,
+            item_start_steps,
+        );
         result.bindings.push(ExpandedField {
             name,
             r#type: expanded.value.expr,

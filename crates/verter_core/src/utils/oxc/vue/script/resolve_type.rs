@@ -15,11 +15,48 @@
 
 #![allow(dead_code)]
 
+use std::{
+    cell::RefCell,
+    io::Write,
+    path::PathBuf,
+    rc::Rc,
+    sync::{Mutex, OnceLock},
+};
+
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::common::Span;
+
+fn component_meta_core_trace_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn component_meta_core_trace_path() -> Option<&'static PathBuf> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH").map(PathBuf::from))
+        .as_ref()
+}
+
+fn component_meta_core_trace_enabled() -> bool {
+    component_meta_core_trace_path().is_some()
+}
+
+fn component_meta_core_trace_event(name: &'static str, detail: impl AsRef<str>) {
+    let Some(path) = component_meta_core_trace_path() else {
+        return;
+    };
+    let _lock = component_meta_core_trace_lock().lock();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "core_event name={} {}", name, detail.as_ref());
+    }
+}
 
 /// Find the first TSType from a call expression's type parameters at the given span.
 ///
@@ -411,31 +448,25 @@ pub struct ResolutionDiagnostic {
 pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Source bytes for name comparisons
     pub source: &'ctx [u8],
-    /// Local type alias declarations: (name_span, type_node, type_params)
-    pub type_aliases: Vec<(
-        Span,
-        &'ctx TSType<'a>,
-        Option<&'ctx TSTypeParameterDeclaration<'a>>,
-    )>,
-    /// Local interface declarations: (name_span, interface_body_members, extends_type_names, heritage_refs)
-    /// The extends_type_names are extracted from heritage clauses as String names,
-    /// since we need to look them up recursively. Heritage refs are preserved for
-    /// utility types like `Pick<T, K>` that need type argument resolution.
-    #[allow(clippy::type_complexity)]
-    pub interfaces: Vec<(
-        Span,
-        &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>,
-        Vec<String>,
-        &'ctx [TSInterfaceHeritage<'a>],
-        Option<&'ctx TSTypeParameterDeclaration<'a>>,
-    )>,
-    /// Local class declarations: (name_span, class_decl).
+    /// Local type alias declarations keyed by symbol bytes.
+    pub type_aliases: FxHashMap<
+        Box<[u8]>,
+        (
+            &'ctx TSType<'a>,
+            Option<&'ctx TSTypeParameterDeclaration<'a>>,
+        ),
+    >,
+    /// Local interface declarations keyed by symbol bytes.
+    pub interfaces: FxHashMap<Box<[u8]>, InterfaceResolutionEntry<'ctx, 'a>>,
+    /// Local class declarations keyed by symbol bytes.
     /// Classes resolve to their instance-side shape in type position.
-    pub classes: Vec<(Span, &'ctx Class<'a>)>,
+    pub classes: FxHashMap<Box<[u8]>, &'ctx Class<'a>>,
     /// Generic type parameters with constraints: (name_span, constraint_type)
     pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
     /// Bound generic type parameters for the current instantiation.
     pub type_param_bindings: Vec<(Span, &'ctx TSType<'a>)>,
+    /// Stable cache-key representation of `type_param_bindings`.
+    type_param_bindings_cache_key: Rc<[ResolvedTypeParamBindingCacheKey]>,
     /// Diagnostics collected during resolution
     pub diagnostics: Vec<ResolutionDiagnostic>,
     /// Pre-resolved types from companion `<script>` block.
@@ -452,6 +483,96 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Current resolution surface, used to filter `blocked_types` by surface.
     /// When None, all blocked types apply regardless of surface.
     pub current_surface: Option<BlockedTypeSurface>,
+    /// Stable sorted imported companion names available during this resolution.
+    /// Included in named-type cache keys so different companion availability
+    /// sets do not reuse an incompatible cached local expansion.
+    companion_cache_key: Rc<[Box<[u8]>]>,
+    /// Optional debug/trace label for the owning source file.
+    trace_label: Option<Rc<str>>,
+    /// Per-context cache of fully resolved named local symbols.
+    /// Child contexts share this cache so repeated local/interface expansion
+    /// can reuse one resolved shape within the request.
+    resolved_named_types: Rc<RefCell<FxHashMap<ResolvedNamedTypeCacheKey, Rc<ResolvedElements>>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterfaceResolutionEntry<'ctx, 'a: 'ctx> {
+    pub members: &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>,
+    pub extends: Vec<String>,
+    pub heritage: &'ctx [TSInterfaceHeritage<'a>],
+    pub type_params: Option<&'ctx TSTypeParameterDeclaration<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolvedNamedTypeCacheKey {
+    name: Box<[u8]>,
+    surface: Option<BlockedTypeSurface>,
+    base_offset: u32,
+    companion_cache_key: Rc<[Box<[u8]>]>,
+    type_param_bindings: Rc<[ResolvedTypeParamBindingCacheKey]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolvedTypeParamBindingCacheKey {
+    name: Box<[u8]>,
+    bound: Box<[u8]>,
+}
+
+#[derive(Debug, Clone)]
+enum NamedTypeResolutionPlan<'ctx, 'a: 'ctx> {
+    Interface(InterfaceResolutionPlan<'ctx, 'a>),
+    Class(ClassResolutionPlan<'ctx, 'a>),
+}
+
+#[derive(Debug, Clone)]
+struct InterfaceResolutionPlan<'ctx, 'a: 'ctx> {
+    own: ShallowResolvedElements,
+    heritage: Vec<NamedTypeHeritageEdge<'ctx, 'a>>,
+}
+
+#[derive(Debug, Clone)]
+struct ClassResolutionPlan<'ctx, 'a: 'ctx> {
+    own: ShallowResolvedElements,
+    heritage: Vec<NamedTypeHeritageEdge<'ctx, 'a>>,
+}
+
+#[derive(Debug, Clone)]
+struct ShallowResolvedElements {
+    props: Rc<[ResolvedProp]>,
+    emits: Rc<[ResolvedEmit]>,
+    has_call_signature: bool,
+}
+
+impl ShallowResolvedElements {
+    fn apply_to(&self, result: &mut ResolvedElements) {
+        result.props.extend(self.props.iter().cloned());
+        result.emits.extend(self.emits.iter().cloned());
+        if self.has_call_signature {
+            result.has_call_signature = true;
+        }
+    }
+}
+
+impl From<ResolvedElements> for ShallowResolvedElements {
+    fn from(value: ResolvedElements) -> Self {
+        Self {
+            props: Rc::from(value.props.into_boxed_slice()),
+            emits: Rc::from(value.emits.into_boxed_slice()),
+            has_call_signature: value.has_call_signature,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum NamedTypeHeritageEdge<'ctx, 'a: 'ctx> {
+    Named {
+        name: String,
+        type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
+    },
+    Utility {
+        name: String,
+        type_args: &'ctx TSTypeParameterInstantiation<'a>,
+    },
 }
 
 impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
@@ -459,17 +580,66 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
     pub fn new(source: &'ctx [u8]) -> Self {
         Self {
             source,
-            type_aliases: Vec::new(),
-            interfaces: Vec::new(),
-            classes: Vec::new(),
+            type_aliases: FxHashMap::default(),
+            interfaces: FxHashMap::default(),
+            classes: FxHashMap::default(),
             type_params: Vec::new(),
             type_param_bindings: Vec::new(),
+            type_param_bindings_cache_key: Rc::from(
+                Vec::<ResolvedTypeParamBindingCacheKey>::new().into_boxed_slice(),
+            ),
             diagnostics: Vec::new(),
             companion_types: rustc_hash::FxHashMap::default(),
             companion_origins: rustc_hash::FxHashMap::default(),
             blocked_types: Vec::new(),
             current_surface: None,
+            companion_cache_key: Rc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+            trace_label: None,
+            resolved_named_types: Rc::new(RefCell::new(FxHashMap::default())),
         }
+    }
+
+    pub fn refresh_companion_cache_key(&mut self) {
+        let mut names = self
+            .companion_types
+            .keys()
+            .map(|name| name.as_bytes().to_vec().into_boxed_slice())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        self.companion_cache_key = Rc::from(names.into_boxed_slice());
+    }
+
+    pub fn refresh_type_param_bindings_cache_key(&mut self) {
+        let bindings = self
+            .type_param_bindings
+            .iter()
+            .map(|(name_span, bound)| ResolvedTypeParamBindingCacheKey {
+                name: symbol_key_from_span(self.source, *name_span),
+                bound: semantic_type_cache_key(bound, self),
+            })
+            .collect::<Vec<_>>();
+        self.type_param_bindings_cache_key = Rc::from(bindings.into_boxed_slice());
+    }
+
+    pub fn clear_type_param_bindings(&mut self) {
+        self.type_param_bindings.clear();
+        self.refresh_type_param_bindings_cache_key();
+    }
+
+    pub fn set_trace_label(&mut self, label: impl Into<Rc<str>>) {
+        self.trace_label = Some(label.into());
+    }
+
+    pub fn extend_companion_types(
+        &mut self,
+        imported_companions: &FxHashMap<String, ResolvedElements>,
+    ) {
+        for (name, resolved) in imported_companions {
+            self.companion_types
+                .entry(name.clone())
+                .or_insert_with(|| resolved.clone());
+        }
+        self.refresh_companion_cache_key();
     }
 
     /// Check if a type name is blocked by the per-surface blocklist.
@@ -527,9 +697,8 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         Option<&'ctx TSTypeParameterDeclaration<'a>>,
     )> {
         self.type_aliases
-            .iter()
-            .find(|(span, _, _)| &self.source[span.start as usize..span.end as usize] == name)
-            .map(|(_, ty, params)| (*ty, *params))
+            .get(name)
+            .map(|(ty, params)| (*ty, *params))
     }
 
     /// Look up an interface by comparing spans against source bytes.
@@ -544,22 +713,52 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         &'ctx [TSInterfaceHeritage<'a>],
         Option<&'ctx TSTypeParameterDeclaration<'a>>,
     )> {
-        self.interfaces
-            .iter()
-            .find(|(span, _, _, _, _)| &self.source[span.start as usize..span.end as usize] == name)
-            .map(|(_, members, extends, heritage, params)| {
-                (*members, extends.as_slice(), *heritage, *params)
-            })
+        self.interfaces.get(name).map(|entry| {
+            (
+                entry.members,
+                entry.extends.as_slice(),
+                entry.heritage,
+                entry.type_params,
+            )
+        })
     }
 
     /// Look up a class by comparing spans against source bytes.
     pub fn find_class(&self, name: &[u8]) -> Option<&'ctx Class<'a>> {
-        self.classes
-            .iter()
-            .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
-            .map(|(_, class)| *class)
+        self.classes.get(name).copied()
     }
 
+    fn cache_key_for_name(&self, name: &[u8], base_offset: u32) -> ResolvedNamedTypeCacheKey {
+        ResolvedNamedTypeCacheKey {
+            name: name.to_vec().into_boxed_slice(),
+            surface: self.current_surface.clone(),
+            base_offset,
+            companion_cache_key: Rc::clone(&self.companion_cache_key),
+            type_param_bindings: Rc::clone(&self.type_param_bindings_cache_key),
+        }
+    }
+
+    fn cached_named_resolution(
+        &self,
+        name: &[u8],
+        base_offset: u32,
+    ) -> Option<Rc<ResolvedElements>> {
+        self.resolved_named_types
+            .borrow()
+            .get(&self.cache_key_for_name(name, base_offset))
+            .cloned()
+    }
+
+    fn store_named_resolution(
+        &self,
+        name: &[u8],
+        base_offset: u32,
+        resolved: Rc<ResolvedElements>,
+    ) {
+        self.resolved_named_types
+            .borrow_mut()
+            .insert(self.cache_key_for_name(name, base_offset), resolved);
+    }
     /// Look up a type parameter constraint by comparing spans against source bytes
     pub fn find_type_param(&self, name: &[u8]) -> Option<&'ctx TSType<'a>> {
         if let Some(bound) = self
@@ -577,8 +776,337 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
     }
 }
 
+fn symbol_key_from_span(source: &[u8], span: Span) -> Box<[u8]> {
+    source[span.start as usize..span.end as usize]
+        .to_vec()
+        .into_boxed_slice()
+}
+
+fn normalized_source_key_from_span(source: &[u8], span: Span) -> Box<[u8]> {
+    source[span.start as usize..span.end as usize]
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+}
+
+fn append_type_name_cache_key(out: &mut Vec<u8>, type_name: &TSTypeName<'_>) {
+    match type_name {
+        TSTypeName::IdentifierReference(ident) => out.extend_from_slice(ident.name.as_bytes()),
+        TSTypeName::QualifiedName(qualified) => {
+            append_qualified_type_name_cache_key(out, qualified)
+        }
+        TSTypeName::ThisExpression(_) => out.extend_from_slice(b"this"),
+    }
+}
+
+fn append_qualified_type_name_cache_key(out: &mut Vec<u8>, qualified: &TSQualifiedName<'_>) {
+    append_type_name_cache_key(out, &qualified.left);
+    out.push(b'.');
+    out.extend_from_slice(qualified.right.name.as_bytes());
+}
+
+fn append_literal_cache_key(out: &mut Vec<u8>, literal: &TSLiteralType<'_>) {
+    match &literal.literal {
+        TSLiteral::StringLiteral(value) => {
+            out.extend_from_slice(b"str:");
+            out.extend_from_slice(value.value.as_bytes());
+        }
+        TSLiteral::NumericLiteral(value) => {
+            out.extend_from_slice(b"num:");
+            if let Some(raw) = &value.raw {
+                out.extend_from_slice(raw.as_bytes());
+            } else {
+                out.extend_from_slice(value.value.to_string().as_bytes());
+            }
+        }
+        TSLiteral::BooleanLiteral(value) => {
+            out.extend_from_slice(if value.value {
+                b"bool:true"
+            } else {
+                b"bool:false"
+            });
+        }
+        TSLiteral::BigIntLiteral(value) => {
+            out.extend_from_slice(b"bigint:");
+            if let Some(raw) = &value.raw {
+                out.extend_from_slice(raw.as_bytes());
+            }
+        }
+        TSLiteral::TemplateLiteral(template) => {
+            out.extend_from_slice(b"tpl:");
+            for quasi in &template.quasis {
+                out.extend_from_slice(quasi.value.raw.as_bytes());
+                out.push(b'|');
+            }
+        }
+        TSLiteral::UnaryExpression(unary) => {
+            out.extend_from_slice(b"unary:");
+            match unary.operator {
+                UnaryOperator::UnaryNegation => out.push(b'-'),
+                UnaryOperator::UnaryPlus => out.push(b'+'),
+                _ => out.push(b'?'),
+            }
+            if let Expression::NumericLiteral(value) = &unary.argument {
+                if let Some(raw) = &value.raw {
+                    out.extend_from_slice(raw.as_bytes());
+                } else {
+                    out.extend_from_slice(value.value.to_string().as_bytes());
+                }
+            } else if let Expression::BigIntLiteral(value) = &unary.argument {
+                if let Some(raw) = &value.raw {
+                    out.extend_from_slice(raw.as_bytes());
+                }
+            }
+        }
+    }
+}
+
+fn append_semantic_type_cache_key<'ctx, 'a: 'ctx>(
+    out: &mut Vec<u8>,
+    ty: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    active_type_params: &mut Vec<Box<[u8]>>,
+) {
+    match ty {
+        TSType::TSStringKeyword(_) => out.extend_from_slice(b"kw:string"),
+        TSType::TSNumberKeyword(_) => out.extend_from_slice(b"kw:number"),
+        TSType::TSBooleanKeyword(_) => out.extend_from_slice(b"kw:boolean"),
+        TSType::TSAnyKeyword(_) => out.extend_from_slice(b"kw:any"),
+        TSType::TSUnknownKeyword(_) => out.extend_from_slice(b"kw:unknown"),
+        TSType::TSNeverKeyword(_) => out.extend_from_slice(b"kw:never"),
+        TSType::TSVoidKeyword(_) => out.extend_from_slice(b"kw:void"),
+        TSType::TSNullKeyword(_) => out.extend_from_slice(b"kw:null"),
+        TSType::TSUndefinedKeyword(_) => out.extend_from_slice(b"kw:undefined"),
+        TSType::TSObjectKeyword(_) => out.extend_from_slice(b"kw:object"),
+        TSType::TSSymbolKeyword(_) => out.extend_from_slice(b"kw:symbol"),
+        TSType::TSBigIntKeyword(_) => out.extend_from_slice(b"kw:bigint"),
+        TSType::TSLiteralType(literal) => append_literal_cache_key(out, literal),
+        TSType::TSParenthesizedType(paren) => {
+            out.extend_from_slice(b"paren(");
+            append_semantic_type_cache_key(out, &paren.type_annotation, ctx, active_type_params);
+            out.push(b')');
+        }
+        TSType::TSArrayType(array) => {
+            out.extend_from_slice(b"arr(");
+            append_semantic_type_cache_key(out, &array.element_type, ctx, active_type_params);
+            out.push(b')');
+        }
+        TSType::TSTupleType(tuple) => {
+            out.extend_from_slice(b"tuple(");
+            for element in &tuple.element_types {
+                match element {
+                    TSTupleElement::TSOptionalType(optional) => {
+                        out.extend_from_slice(b"opt(");
+                        append_semantic_type_cache_key(
+                            out,
+                            &optional.type_annotation,
+                            ctx,
+                            active_type_params,
+                        );
+                        out.push(b')');
+                    }
+                    TSTupleElement::TSRestType(rest) => {
+                        out.extend_from_slice(b"rest(");
+                        append_semantic_type_cache_key(
+                            out,
+                            &rest.type_annotation,
+                            ctx,
+                            active_type_params,
+                        );
+                        out.push(b')');
+                    }
+                    TSTupleElement::TSNamedTupleMember(named) => {
+                        out.extend_from_slice(named.label.name.as_bytes());
+                        out.push(b':');
+                        if let Some(ts_type) = named.element_type.as_ts_type() {
+                            append_semantic_type_cache_key(out, ts_type, ctx, active_type_params);
+                        }
+                    }
+                    _ => {
+                        if let Some(ts_type) = element.as_ts_type() {
+                            append_semantic_type_cache_key(out, ts_type, ctx, active_type_params);
+                        }
+                    }
+                }
+                out.push(b',');
+            }
+            out.push(b')');
+        }
+        TSType::TSUnionType(union) => {
+            let mut parts = union
+                .types
+                .iter()
+                .map(|part| semantic_type_cache_key_with_active(part, ctx, active_type_params))
+                .collect::<Vec<_>>();
+            parts.sort_unstable();
+            out.extend_from_slice(b"union(");
+            for part in parts {
+                out.extend_from_slice(part.as_ref());
+                out.push(b',');
+            }
+            out.push(b')');
+        }
+        TSType::TSIntersectionType(intersection) => {
+            let mut parts = intersection
+                .types
+                .iter()
+                .map(|part| semantic_type_cache_key_with_active(part, ctx, active_type_params))
+                .collect::<Vec<_>>();
+            parts.sort_unstable();
+            out.extend_from_slice(b"inter(");
+            for part in parts {
+                out.extend_from_slice(part.as_ref());
+                out.push(b',');
+            }
+            out.push(b')');
+        }
+        TSType::TSTypeReference(type_ref) => {
+            let mut name = Vec::new();
+            append_type_name_cache_key(&mut name, &type_ref.type_name);
+            if let Some(bound) = ctx
+                .type_param_bindings
+                .iter()
+                .rev()
+                .find(|(span, _)| {
+                    &ctx.source[span.start as usize..span.end as usize] == name.as_slice()
+                })
+                .map(|(_, bound)| *bound)
+            {
+                let name_key = name.into_boxed_slice();
+                if active_type_params
+                    .iter()
+                    .any(|active| active.as_ref() == name_key.as_ref())
+                {
+                    out.extend_from_slice(b"param:");
+                    out.extend_from_slice(name_key.as_ref());
+                    return;
+                }
+                active_type_params.push(name_key.clone());
+                out.extend_from_slice(b"bound(");
+                append_semantic_type_cache_key(out, bound, ctx, active_type_params);
+                out.push(b')');
+                active_type_params.pop();
+                return;
+            }
+
+            out.extend_from_slice(b"ref:");
+            out.extend_from_slice(&name);
+            if let Some(type_args) = &type_ref.type_arguments {
+                out.push(b'<');
+                for arg in &type_args.params {
+                    append_semantic_type_cache_key(out, arg, ctx, active_type_params);
+                    out.push(b',');
+                }
+                out.push(b'>');
+            }
+        }
+        TSType::TSTypeOperatorType(operator) => {
+            out.extend_from_slice(b"op:");
+            out.extend_from_slice(format!("{:?}", operator.operator).as_bytes());
+            out.push(b'(');
+            append_semantic_type_cache_key(out, &operator.type_annotation, ctx, active_type_params);
+            out.push(b')');
+        }
+        TSType::TSIndexedAccessType(indexed) => {
+            out.extend_from_slice(b"idx(");
+            append_semantic_type_cache_key(out, &indexed.object_type, ctx, active_type_params);
+            out.push(b',');
+            append_semantic_type_cache_key(out, &indexed.index_type, ctx, active_type_params);
+            out.push(b')');
+        }
+        TSType::TSTypeQuery(query) => {
+            out.extend_from_slice(b"query:");
+            match &query.expr_name {
+                TSTypeQueryExprName::IdentifierReference(ident) => {
+                    out.extend_from_slice(ident.name.as_bytes());
+                }
+                TSTypeQueryExprName::QualifiedName(qualified) => {
+                    append_qualified_type_name_cache_key(out, qualified);
+                }
+                TSTypeQueryExprName::ThisExpression(_) => out.extend_from_slice(b"this"),
+                TSTypeQueryExprName::TSImportType(import) => {
+                    out.extend_from_slice(b"import(");
+                    out.extend_from_slice(
+                        normalized_source_key_from_span(ctx.source, import.span.into()).as_ref(),
+                    );
+                    out.push(b')');
+                }
+            }
+        }
+        _ => out.extend_from_slice(
+            normalized_source_key_from_span(ctx.source, ty.span().into()).as_ref(),
+        ),
+    }
+}
+
+fn semantic_type_cache_key_with_active<'ctx, 'a: 'ctx>(
+    ty: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    active_type_params: &mut Vec<Box<[u8]>>,
+) -> Box<[u8]> {
+    let mut out = Vec::new();
+    append_semantic_type_cache_key(&mut out, ty, ctx, active_type_params);
+    out.into_boxed_slice()
+}
+
+fn semantic_type_cache_key<'ctx, 'a: 'ctx>(
+    ty: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Box<[u8]> {
+    semantic_type_cache_key_with_active(ty, ctx, &mut Vec::new())
+}
+
+fn binding_name_from_span<'ctx>(source: &'ctx [u8], span: Span) -> Option<&'ctx str> {
+    std::str::from_utf8(&source[span.start as usize..span.end as usize]).ok()
+}
+
+fn collect_relevant_outer_type_param_bindings<'ctx, 'a: 'ctx>(
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    seed_bounds: &[&'ctx TSType<'a>],
+) -> Vec<(Span, &'ctx TSType<'a>)> {
+    if ctx.type_param_bindings.is_empty() || seed_bounds.is_empty() {
+        return Vec::new();
+    }
+
+    let mut referenced_names = FxHashSet::default();
+    for bound in seed_bounds {
+        collect_type_reference_names(bound, &mut referenced_names);
+    }
+
+    if referenced_names.is_empty() {
+        return Vec::new();
+    }
+
+    let mut relevant = Vec::new();
+    let mut seen_spans = FxHashSet::default();
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+
+        for (name_span, bound) in &ctx.type_param_bindings {
+            let Some(name) = binding_name_from_span(ctx.source, *name_span) else {
+                continue;
+            };
+            let span_key = (name_span.start, name_span.end);
+            if !referenced_names.contains(name) || !seen_spans.insert(span_key) {
+                continue;
+            }
+
+            relevant.push((*name_span, *bound));
+            collect_type_reference_names(bound, &mut referenced_names);
+            changed = true;
+        }
+    }
+
+    relevant
+}
+
 /// Build type resolution context from a parsed program.
 /// Collects type aliases and interfaces for later lookup.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn build_type_context<'ctx, 'a: 'ctx>(
     program: &'ctx Program<'a>,
     source: &'ctx [u8],
@@ -593,28 +1121,30 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                 // alias.id.span is already adjusted by adjust_program_spans() to SFC coordinates,
                 // so we use it directly — no additional offset needed.
                 let name_span = Span::from(alias.id.span);
-                ctx.type_aliases.push((
-                    name_span,
-                    &alias.type_annotation,
-                    alias.type_parameters.as_deref(),
-                ));
+                ctx.type_aliases.insert(
+                    symbol_key_from_span(source, name_span),
+                    (&alias.type_annotation, alias.type_parameters.as_deref()),
+                );
             }
             // Collect interfaces: `interface Foo { bar: string }`
             Statement::TSInterfaceDeclaration(interface) => {
                 // interface.id.span is already adjusted by adjust_program_spans() to SFC coordinates.
                 let name_span = Span::from(interface.id.span);
                 let extends = extract_heritage_type_names(&interface.extends);
-                ctx.interfaces.push((
-                    name_span,
-                    &interface.body.body,
-                    extends,
-                    &interface.extends,
-                    interface.type_parameters.as_deref(),
-                ));
+                ctx.interfaces.insert(
+                    symbol_key_from_span(source, name_span),
+                    InterfaceResolutionEntry {
+                        members: &interface.body.body,
+                        extends,
+                        heritage: &interface.extends,
+                        type_params: interface.type_parameters.as_deref(),
+                    },
+                );
             }
             Statement::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
-                    ctx.classes.push((Span::from(id.span), class));
+                    ctx.classes
+                        .insert(symbol_key_from_span(source, Span::from(id.span)), class);
                 }
             }
             // Collect exported type aliases and interfaces:
@@ -624,32 +1154,58 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                     match decl {
                         Declaration::TSTypeAliasDeclaration(alias) => {
                             let name_span = Span::from(alias.id.span);
-                            ctx.type_aliases.push((
-                                name_span,
-                                &alias.type_annotation,
-                                alias.type_parameters.as_deref(),
-                            ));
+                            ctx.type_aliases.insert(
+                                symbol_key_from_span(source, name_span),
+                                (&alias.type_annotation, alias.type_parameters.as_deref()),
+                            );
                         }
                         Declaration::TSInterfaceDeclaration(interface) => {
                             let name_span = Span::from(interface.id.span);
                             let extends = extract_heritage_type_names(&interface.extends);
-                            ctx.interfaces.push((
-                                name_span,
-                                &interface.body.body,
-                                extends,
-                                &interface.extends,
-                                interface.type_parameters.as_deref(),
-                            ));
+                            ctx.interfaces.insert(
+                                symbol_key_from_span(source, name_span),
+                                InterfaceResolutionEntry {
+                                    members: &interface.body.body,
+                                    extends,
+                                    heritage: &interface.extends,
+                                    type_params: interface.type_parameters.as_deref(),
+                                },
+                            );
                         }
                         Declaration::ClassDeclaration(class) => {
                             if let Some(id) = &class.id {
-                                ctx.classes.push((Span::from(id.span), class));
+                                ctx.classes.insert(
+                                    symbol_key_from_span(source, Span::from(id.span)),
+                                    class,
+                                );
                             }
                         }
                         _ => {}
                     }
                 }
             }
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    if let Some(id) = &class.id {
+                        ctx.classes
+                            .insert(symbol_key_from_span(source, Span::from(id.span)), class);
+                    }
+                }
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
+                    let name_span = Span::from(interface.id.span);
+                    let extends = extract_heritage_type_names(&interface.extends);
+                    ctx.interfaces.insert(
+                        symbol_key_from_span(source, name_span),
+                        InterfaceResolutionEntry {
+                            members: &interface.body.body,
+                            extends,
+                            heritage: &interface.extends,
+                            type_params: interface.type_parameters.as_deref(),
+                        },
+                    );
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -665,8 +1221,22 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
     let mut child = ctx.clone();
     child.diagnostics.clear();
     let Some(decl_params) = decl_params else {
+        child.clear_type_param_bindings();
         return child;
     };
+
+    let mut chosen_bounds = Vec::new();
+    for (index, param) in decl_params.params.iter().enumerate() {
+        let bound = type_args
+            .and_then(|args| args.params.get(index))
+            .or(param.default.as_ref())
+            .or(param.constraint.as_ref());
+        if let Some(bound) = bound {
+            chosen_bounds.push(bound);
+        }
+    }
+
+    child.type_param_bindings = collect_relevant_outer_type_param_bindings(ctx, &chosen_bounds);
 
     for (index, param) in decl_params.params.iter().enumerate() {
         let bound = type_args
@@ -679,6 +1249,8 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
                 .push((Span::from(param.name.span), bound));
         }
     }
+
+    child.refresh_type_param_bindings_cache_key();
 
     child
 }
@@ -840,6 +1412,7 @@ pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
 /// * `node` - The TSType node to resolve
 /// * `base_offset` - The document offset to apply to all spans
 /// * `ctx` - Immutable type resolution context with local type definitions
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,
@@ -956,6 +1529,389 @@ fn resolve_root_runtime_type_with_ctx_ref<'ctx, 'a: 'ctx>(
                 .map(inferred_root_runtime_type_for_companion)
         }
         _ => None,
+    }
+}
+
+fn resolve_named_local_type_with_ctx_ref<'ctx, 'a: 'ctx>(
+    type_name: &str,
+    type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
+    base_offset: u32,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) -> Option<Rc<ResolvedElements>> {
+    resolve_named_local_type_with_ctx_ref_inner(
+        type_name,
+        type_args,
+        base_offset,
+        ctx,
+        recursion_guard,
+        true,
+    )
+}
+
+fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
+    type_name: &str,
+    type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
+    base_offset: u32,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+    store_result: bool,
+) -> Option<Rc<ResolvedElements>> {
+    let type_name_bytes = type_name.as_bytes();
+
+    if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
+        let child = instantiate_type_params_ctx(ctx, type_params, type_args);
+        if let Some(cached) = child.cached_named_resolution(type_name_bytes, base_offset) {
+            if component_meta_core_trace_enabled() {
+                component_meta_core_trace_event(
+                    "core_named_resolution",
+                    format!(
+                        "file={} kind=alias cache=hit name={} bindings={} companions={}",
+                        child.trace_label.as_deref().unwrap_or("<unknown>"),
+                        type_name,
+                        child.type_param_bindings.len(),
+                        child.companion_types.len()
+                    ),
+                );
+            }
+            return Some(cached);
+        }
+        if component_meta_core_trace_enabled() {
+            component_meta_core_trace_event(
+                "core_named_resolution",
+                format!(
+                    "file={} kind=alias cache=miss name={} bindings={} companions={}",
+                    child.trace_label.as_deref().unwrap_or("<unknown>"),
+                    type_name,
+                    child.type_param_bindings.len(),
+                    child.companion_types.len()
+                ),
+            );
+        }
+        let resolved = Rc::new(resolve_type_elements_with_ctx_ref(
+            aliased_type,
+            base_offset,
+            &child,
+        ));
+        if store_result {
+            child.store_named_resolution(type_name_bytes, base_offset, Rc::clone(&resolved));
+        }
+        return Some(resolved);
+    }
+
+    if let Some((members, _extends, heritage, type_params)) = ctx.find_interface(type_name_bytes) {
+        let child = instantiate_type_params_ctx(ctx, type_params, type_args);
+        if let Some(cached) = child.cached_named_resolution(type_name_bytes, base_offset) {
+            if component_meta_core_trace_enabled() {
+                component_meta_core_trace_event(
+                    "core_named_resolution",
+                    format!(
+                        "file={} kind=interface cache=hit name={} bindings={} companions={} members={} extends={}",
+                        child.trace_label.as_deref().unwrap_or("<unknown>"),
+                        type_name,
+                        child.type_param_bindings.len(),
+                        child.companion_types.len(),
+                        members.len(),
+                        _extends.len()
+                    ),
+                );
+            }
+            return Some(cached);
+        }
+        if component_meta_core_trace_enabled() {
+            component_meta_core_trace_event(
+                "core_named_resolution",
+                format!(
+                    "file={} kind=interface cache=miss name={} bindings={} companions={} members={} extends={}",
+                    child.trace_label.as_deref().unwrap_or("<unknown>"),
+                    type_name,
+                    child.type_param_bindings.len(),
+                    child.companion_types.len(),
+                    members.len(),
+                    _extends.len()
+                ),
+            );
+        }
+        let plan = NamedTypeResolutionPlan::Interface(build_interface_resolution_plan(
+            members,
+            _extends,
+            heritage,
+            base_offset,
+            &child,
+        ));
+        let mut resolved = ResolvedElements::default();
+        flatten_named_type_plan_with_ctx_ref(
+            &plan,
+            base_offset,
+            &mut resolved,
+            &child,
+            recursion_guard,
+        );
+        resolved.root_runtime_types = vec![RuntimeType::Object];
+        let resolved = Rc::new(resolved);
+        if store_result {
+            child.store_named_resolution(type_name_bytes, base_offset, Rc::clone(&resolved));
+        }
+        return Some(resolved);
+    }
+
+    if let Some(class_decl) = ctx.find_class(type_name_bytes) {
+        let type_params = class_decl.type_parameters.as_deref();
+        let child = instantiate_type_params_ctx(ctx, type_params, type_args);
+        if let Some(cached) = child.cached_named_resolution(type_name_bytes, base_offset) {
+            if component_meta_core_trace_enabled() {
+                component_meta_core_trace_event(
+                    "core_named_resolution",
+                    format!(
+                        "file={} kind=class cache=hit name={} bindings={} companions={}",
+                        child.trace_label.as_deref().unwrap_or("<unknown>"),
+                        type_name,
+                        child.type_param_bindings.len(),
+                        child.companion_types.len()
+                    ),
+                );
+            }
+            return Some(cached);
+        }
+        if component_meta_core_trace_enabled() {
+            component_meta_core_trace_event(
+                "core_named_resolution",
+                format!(
+                    "file={} kind=class cache=miss name={} bindings={} companions={}",
+                    child.trace_label.as_deref().unwrap_or("<unknown>"),
+                    type_name,
+                    child.type_param_bindings.len(),
+                    child.companion_types.len()
+                ),
+            );
+        }
+        let plan = NamedTypeResolutionPlan::Class(build_class_resolution_plan(
+            class_decl,
+            base_offset,
+            &child,
+        ));
+        let mut resolved = ResolvedElements::default();
+        flatten_named_type_plan_with_ctx_ref(
+            &plan,
+            base_offset,
+            &mut resolved,
+            &child,
+            recursion_guard,
+        );
+        resolved.root_runtime_types = vec![RuntimeType::Object];
+        resolved.dedup_props();
+        let resolved = Rc::new(resolved);
+        if store_result {
+            child.store_named_resolution(type_name_bytes, base_offset, Rc::clone(&resolved));
+        }
+        return Some(resolved);
+    }
+
+    if let Some(companion) = ctx.companion_types.get(type_name).cloned() {
+        if component_meta_core_trace_enabled() {
+            component_meta_core_trace_event(
+                "core_named_resolution",
+                format!(
+                    "file={} kind=companion cache=hit name={} bindings={} companions={}",
+                    ctx.trace_label.as_deref().unwrap_or("<unknown>"),
+                    type_name,
+                    ctx.type_param_bindings.len(),
+                    ctx.companion_types.len()
+                ),
+            );
+        }
+        return Some(Rc::new(companion));
+    }
+
+    if component_meta_core_trace_enabled() {
+        component_meta_core_trace_event(
+            "core_named_resolution",
+            format!(
+                "file={} kind=missing cache=miss name={} bindings={} companions={}",
+                ctx.trace_label.as_deref().unwrap_or("<unknown>"),
+                type_name,
+                ctx.type_param_bindings.len(),
+                ctx.companion_types.len()
+            ),
+        );
+    }
+    None
+}
+
+fn is_supported_heritage_utility(name: &str) -> bool {
+    matches!(
+        name,
+        "Pick" | "Omit" | "Partial" | "Required" | "Readonly" | "Record"
+    )
+}
+
+fn build_interface_resolution_plan<'ctx, 'a: 'ctx>(
+    members: &[TSSignature],
+    extends: &[String],
+    heritage: &'ctx [TSInterfaceHeritage<'a>],
+    base_offset: u32,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> InterfaceResolutionPlan<'ctx, 'a> {
+    let mut own = ResolvedElements::default();
+    resolve_type_literal_members(members, base_offset, &mut own, ctx.source);
+
+    let heritage = heritage
+        .iter()
+        .enumerate()
+        .filter(|(_, clause)| !has_immediate_vue_ignore_comment(ctx.source, clause.span().start))
+        .map(|(index, clause)| {
+            let name = extends
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            match clause.type_arguments.as_deref() {
+                Some(type_args)
+                    if !type_args.params.is_empty()
+                        && is_supported_heritage_utility(name.as_str()) =>
+                {
+                    NamedTypeHeritageEdge::Utility { name, type_args }
+                }
+                other => NamedTypeHeritageEdge::Named {
+                    name,
+                    type_args: other,
+                },
+            }
+        })
+        .collect();
+
+    InterfaceResolutionPlan {
+        own: own.into(),
+        heritage,
+    }
+}
+
+fn build_class_resolution_plan<'ctx, 'a: 'ctx>(
+    class: &'ctx Class<'a>,
+    base_offset: u32,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> ClassResolutionPlan<'ctx, 'a> {
+    let mut own = ResolvedElements::default();
+    resolve_class_members(&class.body.body, base_offset, &mut own, ctx.source);
+
+    let mut heritage = Vec::new();
+    if let Some(super_class) = &class.super_class {
+        if let Some(name) = get_expression_reference_name(super_class) {
+            if let Some(type_args) = class.super_type_arguments.as_deref() {
+                if !type_args.params.is_empty() && is_supported_heritage_utility(name.as_str()) {
+                    heritage.push(NamedTypeHeritageEdge::Utility { name, type_args });
+                } else {
+                    heritage.push(NamedTypeHeritageEdge::Named {
+                        name,
+                        type_args: Some(type_args),
+                    });
+                }
+            } else {
+                heritage.push(NamedTypeHeritageEdge::Named {
+                    name,
+                    type_args: None,
+                });
+            }
+        }
+    }
+
+    for clause in &class.implements {
+        let name = get_type_reference_name(&clause.expression);
+        if let Some(type_args) = clause.type_arguments.as_deref() {
+            if !type_args.params.is_empty() && is_supported_heritage_utility(name.as_str()) {
+                heritage.push(NamedTypeHeritageEdge::Utility { name, type_args });
+            } else {
+                heritage.push(NamedTypeHeritageEdge::Named {
+                    name,
+                    type_args: Some(type_args),
+                });
+            }
+        } else {
+            heritage.push(NamedTypeHeritageEdge::Named {
+                name,
+                type_args: None,
+            });
+        }
+    }
+
+    ClassResolutionPlan {
+        own: own.into(),
+        heritage,
+    }
+}
+
+fn flatten_named_type_plan_with_ctx_ref<'ctx, 'a: 'ctx>(
+    plan: &NamedTypeResolutionPlan<'ctx, 'a>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    match plan {
+        NamedTypeResolutionPlan::Interface(plan) => {
+            plan.own.apply_to(result);
+            for edge in &plan.heritage {
+                apply_named_type_heritage_edge_with_ctx_ref(
+                    edge,
+                    base_offset,
+                    result,
+                    ctx,
+                    recursion_guard,
+                );
+            }
+        }
+        NamedTypeResolutionPlan::Class(plan) => {
+            plan.own.apply_to(result);
+            for edge in &plan.heritage {
+                apply_named_type_heritage_edge_with_ctx_ref(
+                    edge,
+                    base_offset,
+                    result,
+                    ctx,
+                    recursion_guard,
+                );
+            }
+        }
+    }
+}
+
+fn apply_named_type_heritage_edge_with_ctx_ref<'ctx, 'a: 'ctx>(
+    edge: &NamedTypeHeritageEdge<'ctx, 'a>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    match edge {
+        NamedTypeHeritageEdge::Utility { name, type_args } => {
+            let _ = try_resolve_heritage_utility_type(
+                name.as_str(),
+                type_args,
+                base_offset,
+                result,
+                ctx,
+            );
+        }
+        NamedTypeHeritageEdge::Named { name, type_args } => {
+            if recursion_guard.contains(name) {
+                return;
+            }
+            recursion_guard.push(name.clone());
+            if let Some(resolved) = resolve_named_local_type_with_ctx_ref_inner(
+                name.as_str(),
+                *type_args,
+                base_offset,
+                ctx,
+                recursion_guard,
+                false,
+            ) {
+                result.props.extend(resolved.props.iter().cloned());
+                result.emits.extend(resolved.emits.iter().cloned());
+                if resolved.has_call_signature {
+                    result.has_call_signature = true;
+                }
+            }
+            recursion_guard.pop();
+        }
     }
 }
 
@@ -1099,6 +2055,7 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
 }
 
 /// Resolve an interface including its extends clauses using immutable context.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     members: &[TSSignature],
     extends: &[String],
@@ -1108,6 +2065,23 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     ctx: &TypeResolutionContext<'ctx, 'a>,
     recursion_guard: &mut Vec<String>,
 ) {
+    let current_name = recursion_guard
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "<anonymous>".to_string());
+    if component_meta_core_trace_enabled() {
+        component_meta_core_trace_event(
+            "core_interface_resolution",
+            format!(
+                "file={} phase=start name={} depth={} members={} extends={}",
+                ctx.trace_label.as_deref().unwrap_or("<unknown>"),
+                current_name,
+                recursion_guard.len(),
+                members.len(),
+                extends.len()
+            ),
+        );
+    }
     // Resolve own members
     resolve_type_literal_members(members, base_offset, result, ctx.source);
 
@@ -1118,8 +2092,6 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
             continue;
         }
         recursion_guard.push(base_name.clone());
-
-        let base_bytes = base_name.as_bytes();
 
         // When a heritage clause has type arguments (e.g., `extends Pick<T, 'k'>`),
         // the name-based lookup below won't find it since "Pick" isn't a local type.
@@ -1161,41 +2133,40 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
             }
         }
 
-        if let Some((aliased_type, _)) = ctx.find_type_alias(base_bytes) {
-            resolve_type_elements_inner_with_ctx_ref(aliased_type, base_offset, result, ctx);
-        } else if let Some((iface_members, iface_extends, iface_heritage, _)) =
-            ctx.find_interface(base_bytes)
-        {
-            let iface_extends_owned: Vec<String> = iface_extends.to_vec();
-            resolve_interface_with_extends_ctx_ref(
-                iface_members,
-                &iface_extends_owned,
-                iface_heritage,
-                base_offset,
-                result,
-                ctx,
-                recursion_guard,
-            );
-        } else if let Some(class_decl) = ctx.find_class(base_bytes) {
-            resolve_class_with_heritage_ctx_ref(
-                class_decl,
-                base_offset,
-                result,
-                ctx,
-                recursion_guard,
-            );
-        } else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
-            result.props.extend(companion.props.iter().cloned());
-            result.emits.extend(companion.emits.iter().cloned());
-            if companion.has_call_signature {
+        let type_args = heritage.get(i).and_then(|h| h.type_arguments.as_deref());
+        if let Some(resolved) = resolve_named_local_type_with_ctx_ref(
+            base_name.as_str(),
+            type_args,
+            base_offset,
+            ctx,
+            recursion_guard,
+        ) {
+            result.props.extend(resolved.props.iter().cloned());
+            result.emits.extend(resolved.emits.iter().cloned());
+            if resolved.has_call_signature {
                 result.has_call_signature = true;
             }
         }
 
         recursion_guard.pop();
     }
+
+    if component_meta_core_trace_enabled() {
+        component_meta_core_trace_event(
+            "core_interface_resolution",
+            format!(
+                "file={} phase=end name={} depth={} props={} emits={}",
+                ctx.trace_label.as_deref().unwrap_or("<unknown>"),
+                current_name,
+                recursion_guard.len(),
+                result.props.len(),
+                result.emits.len()
+            ),
+        );
+    }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
     name: &str,
     type_args: &'ctx TSTypeParameterInstantiation<'a>,
@@ -1267,6 +2238,7 @@ fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_class_with_heritage_ctx_ref<'ctx, 'a: 'ctx>(
     class: &'ctx Class<'a>,
     base_offset: u32,
@@ -1351,6 +2323,7 @@ fn resolve_class_with_heritage_ctx_ref<'ctx, 'a: 'ctx>(
     result.dedup_props();
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_named_class_heritage_target<'ctx, 'a: 'ctx>(
     name: &str,
     type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
@@ -1359,38 +2332,12 @@ fn resolve_named_class_heritage_target<'ctx, 'a: 'ctx>(
     ctx: &TypeResolutionContext<'ctx, 'a>,
     recursion_guard: &mut Vec<String>,
 ) {
-    let name_bytes = name.as_bytes();
-    if let Some((aliased_type, type_params)) = ctx.find_type_alias(name_bytes) {
-        let child = instantiate_type_params_ctx(ctx, type_params, type_args);
-        resolve_type_elements_inner_with_ctx_ref(aliased_type, base_offset, result, &child);
-    } else if let Some((iface_members, iface_extends, iface_heritage, iface_type_params)) =
-        ctx.find_interface(name_bytes)
+    if let Some(resolved) =
+        resolve_named_local_type_with_ctx_ref(name, type_args, base_offset, ctx, recursion_guard)
     {
-        let child = instantiate_type_params_ctx(ctx, iface_type_params, type_args);
-        let iface_extends_owned: Vec<String> = iface_extends.to_vec();
-        resolve_interface_with_extends_ctx_ref(
-            iface_members,
-            &iface_extends_owned,
-            iface_heritage,
-            base_offset,
-            result,
-            &child,
-            recursion_guard,
-        );
-    } else if let Some(base_class) = ctx.find_class(name_bytes) {
-        let child =
-            instantiate_type_params_ctx(ctx, base_class.type_parameters.as_deref(), type_args);
-        resolve_class_with_heritage_ctx_ref(
-            base_class,
-            base_offset,
-            result,
-            &child,
-            recursion_guard,
-        );
-    } else if let Some(companion) = ctx.companion_types.get(name) {
-        result.props.extend(companion.props.iter().cloned());
-        result.emits.extend(companion.emits.iter().cloned());
-        if companion.has_call_signature {
+        result.props.extend(resolved.props.iter().cloned());
+        result.emits.extend(resolved.emits.iter().cloned());
+        if resolved.has_call_signature {
             result.has_call_signature = true;
         }
     }
@@ -1797,6 +2744,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
 }
 
 /// Inner resolution function that uses an immutable context (doesn't collect diagnostics).
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,
@@ -1853,71 +2801,25 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 1. Check local type aliases
-            if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
-                let child = instantiate_type_params_ctx(
-                    ctx,
-                    type_params,
-                    type_ref.type_arguments.as_deref(),
-                );
-                resolve_type_elements_inner_with_ctx_ref(aliased_type, base_offset, result, &child);
-                return;
-            }
-
-            // 2. Check local interfaces (with extends support)
-            if let Some((interface_members, iface_extends, iface_heritage, iface_type_params)) =
-                ctx.find_interface(type_name_bytes)
-            {
-                let extends_owned: Vec<String> = iface_extends.to_vec();
-                let mut guard = vec![type_name.clone()];
-                let child = instantiate_type_params_ctx(
-                    ctx,
-                    iface_type_params,
-                    type_ref.type_arguments.as_deref(),
-                );
-                resolve_interface_with_extends_ctx_ref(
-                    interface_members,
-                    &extends_owned,
-                    iface_heritage,
-                    base_offset,
-                    result,
-                    &child,
-                    &mut guard,
-                );
-                return;
-            }
-
-            // 3. Check local classes (instance-side shape with heritage)
-            if let Some(class_decl) = ctx.find_class(type_name_bytes) {
-                let mut guard = vec![type_name.clone()];
-                let child = instantiate_type_params_ctx(
-                    ctx,
-                    class_decl.type_parameters.as_deref(),
-                    type_ref.type_arguments.as_deref(),
-                );
-                resolve_class_with_heritage_ctx_ref(
-                    class_decl,
-                    base_offset,
-                    result,
-                    &child,
-                    &mut guard,
-                );
+            let mut guard = vec![type_name.clone()];
+            if let Some(resolved) = resolve_named_local_type_with_ctx_ref(
+                type_name.as_str(),
+                type_ref.type_arguments.as_deref(),
+                base_offset,
+                ctx,
+                &mut guard,
+            ) {
+                result.props.extend(resolved.props.iter().cloned());
+                result.emits.extend(resolved.emits.iter().cloned());
+                if resolved.has_call_signature {
+                    result.has_call_signature = true;
+                }
                 return;
             }
 
             // 4. Check generic type parameter constraints
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
                 resolve_type_elements_inner_with_ctx_ref(constraint, base_offset, result, ctx);
-                return;
-            }
-
-            // 5. Check companion <script> block's pre-resolved types
-            if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
-                result.props.extend(companion.props.iter().cloned());
-                result.emits.extend(companion.emits.iter().cloned());
-                if companion.has_call_signature {
-                    result.has_call_signature = true;
-                }
                 return;
             }
 
@@ -2001,6 +2903,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
 }
 
 /// Resolve members from a type literal's members array.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_type_literal_members(
     members: &[TSSignature],
     base_offset: u32,
@@ -2043,6 +2946,7 @@ struct ResolvedMappedKey {
     optional: bool,
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
     mapped: &'ctx TSMappedType<'a>,
     base_offset: u32,
@@ -2296,6 +3200,7 @@ fn extract_string_literal_keys_with_ctx<'ctx, 'a: 'ctx>(
     extract_string_literal_keys_inner(ty, ctx, &mut visited)
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn extract_string_literal_keys_inner<'ctx, 'a: 'ctx>(
     ty: &TSType<'a>,
     ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
@@ -2749,12 +3654,13 @@ fn get_type_reference_name(type_name: &TSTypeName) -> String {
 /// non-exported positions. If the variable has a type annotation, resolves that.
 /// Otherwise, if it has an object literal initializer, infers prop types from
 /// the property values.
-fn resolve_value_declaration_type<'a>(
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+fn resolve_value_declaration_type<'ctx, 'a: 'ctx>(
     type_name: &str,
-    program: &Program<'a>,
+    program: &'ctx Program<'a>,
     source_bytes: &[u8],
     base_offset: u32,
-    ctx: &TypeResolutionContext<'_, 'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
 ) -> Option<ResolvedElements> {
     let name_bytes = type_name.as_bytes();
 
@@ -2874,101 +3780,178 @@ pub struct ExtractedTypeBindings {
     pub wildcard_reexport_sources: Vec<String>,
 }
 
-pub fn extract_imported_type_bindings(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzedExternalTypeSymbolKind {
+    TypeAlias,
+    Interface,
+    Class,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyzedExternalTypeSymbol {
+    pub kind: AnalyzedExternalTypeSymbolKind,
+    pub span: Span,
+    pub dependency_names: FxHashSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnalyzedExternalTypeSource {
+    pub extracted: ExtractedTypeBindings,
+    import_locals: FxHashSet<String>,
+    direct_reexport_targets: FxHashMap<String, (String, String)>,
+    local_import_symbol_targets: FxHashMap<String, (String, String)>,
+    local_export_symbol_targets: FxHashMap<String, String>,
+    local_type_symbols: FxHashMap<String, AnalyzedExternalTypeSymbol>,
+    top_level_statement_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalyzedExternalTypeSourceStats {
+    pub top_level_statement_count: usize,
+    pub binding_count: usize,
+    pub direct_reexport_count: usize,
+    pub wildcard_reexport_count: usize,
+    pub import_local_count: usize,
+    pub local_type_symbol_count: usize,
+    pub local_export_symbol_count: usize,
+}
+
+impl AnalyzedExternalTypeSource {
+    pub fn required_import_names(&self, type_name: &str) -> FxHashSet<String> {
+        let mut required_imports = FxHashSet::default();
+        let mut visited = FxHashSet::default();
+        let mut pending = vec![type_name.to_string()];
+
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+
+            if self.import_locals.contains(&current) {
+                required_imports.insert(current);
+                continue;
+            }
+
+            if let Some(symbol) = self.local_type_symbols.get(&current) {
+                enqueue_required_import_refs(
+                    symbol.dependency_names.clone(),
+                    &self.import_locals,
+                    &mut required_imports,
+                    &mut pending,
+                    &visited,
+                );
+            }
+        }
+
+        required_imports
+    }
+
+    pub fn direct_reexport_target(&self, exported_name: &str) -> Option<(&str, &str)> {
+        self.direct_reexport_targets
+            .get(exported_name)
+            .map(|(source, imported_name)| (source.as_str(), imported_name.as_str()))
+    }
+
+    pub fn local_import_symbol_target(&self, local_name: &str) -> Option<(&str, &str)> {
+        self.local_import_symbol_targets
+            .get(local_name)
+            .map(|(source, imported_name)| (source.as_str(), imported_name.as_str()))
+    }
+
+    pub fn local_export_symbol_target(&self, exported_name: &str) -> Option<&str> {
+        self.local_export_symbol_targets
+            .get(exported_name)
+            .map(|name| name.as_str())
+    }
+
+    pub fn local_symbol_span(&self, symbol_name: &str) -> Option<Span> {
+        self.local_type_symbols
+            .get(symbol_name)
+            .map(|symbol| symbol.span)
+    }
+
+    pub fn local_type_symbol(&self, symbol_name: &str) -> Option<&AnalyzedExternalTypeSymbol> {
+        self.local_type_symbols.get(symbol_name)
+    }
+
+    pub fn local_symbol_target_name(&self, requested_name: &str) -> String {
+        let mut current = requested_name.to_string();
+        let mut visited = FxHashSet::default();
+
+        while visited.insert(current.clone()) {
+            let Some(next) = self.local_export_symbol_target(current.as_str()) else {
+                break;
+            };
+            if next == current {
+                break;
+            }
+            current = next.to_string();
+        }
+
+        current
+    }
+
+    pub fn has_local_symbol_target(&self, requested_name: &str) -> bool {
+        let target = self.local_symbol_target_name(requested_name);
+        self.local_type_symbols.contains_key(&target)
+    }
+
+    pub fn local_symbol_dependency_names(&self, symbol_name: &str) -> FxHashSet<String> {
+        let mut dependencies = FxHashSet::default();
+        let Some(symbol) = self.local_type_symbols.get(symbol_name) else {
+            return dependencies;
+        };
+
+        for reference in &symbol.dependency_names {
+            let root = reference
+                .split('.')
+                .next()
+                .map(str::to_string)
+                .unwrap_or_else(|| reference.clone());
+            if self.import_locals.contains(&root) {
+                continue;
+            }
+            if self.local_type_symbols.contains_key(&root) && root != symbol_name {
+                dependencies.insert(root);
+            }
+        }
+
+        dependencies
+    }
+
+    pub fn stats(&self) -> AnalyzedExternalTypeSourceStats {
+        AnalyzedExternalTypeSourceStats {
+            top_level_statement_count: self.top_level_statement_count,
+            binding_count: self.extracted.bindings.len(),
+            direct_reexport_count: self.extracted.reexport_bindings.len(),
+            wildcard_reexport_count: self.extracted.wildcard_reexport_sources.len(),
+            import_local_count: self.import_locals.len(),
+            local_type_symbol_count: self.local_type_symbols.len(),
+            local_export_symbol_count: self.local_export_symbol_targets.len(),
+        }
+    }
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub fn analyze_external_type_source(
     dep_source: &str,
     allocator: &oxc_allocator::Allocator,
-) -> ExtractedTypeBindings {
+) -> AnalyzedExternalTypeSource {
     let source_type = oxc_span::SourceType::ts();
     let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
 
     if parsed.panicked {
-        return ExtractedTypeBindings::default();
+        return AnalyzedExternalTypeSource::default();
     }
 
-    let mut result = ExtractedTypeBindings::default();
-    for stmt in &parsed.program.body {
-        match stmt {
-            Statement::ImportDeclaration(import_decl) => {
-                let Some(specifiers) = &import_decl.specifiers else {
-                    continue;
-                };
-                for specifier in specifiers {
-                    match specifier {
-                        ImportDeclarationSpecifier::ImportSpecifier(import_spec) => {
-                            result.bindings.push(ImportedTypeBinding {
-                                local_name: import_spec.local.name.to_string(),
-                                imported_name: import_spec.imported.name().to_string(),
-                                source: import_decl.source.value.to_string(),
-                                is_namespace: false,
-                            });
-                        }
-                        ImportDeclarationSpecifier::ImportDefaultSpecifier(import_spec) => {
-                            result.bindings.push(ImportedTypeBinding {
-                                local_name: import_spec.local.name.to_string(),
-                                imported_name: "default".to_string(),
-                                source: import_decl.source.value.to_string(),
-                                is_namespace: false,
-                            });
-                        }
-                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(import_spec) => {
-                            result.bindings.push(ImportedTypeBinding {
-                                local_name: import_spec.local.name.to_string(),
-                                imported_name: "*".to_string(),
-                                source: import_decl.source.value.to_string(),
-                                is_namespace: true,
-                            });
-                        }
-                    }
-                }
-            }
-            Statement::ExportNamedDeclaration(export_decl) => {
-                if let Some(source) = &export_decl.source {
-                    // `export { X } from './Y'` — named re-export with source
-                    for specifier in &export_decl.specifiers {
-                        let local_name = specifier.exported.name().to_string();
-                        let imported_name = specifier.local.name().to_string();
-                        let binding = ImportedTypeBinding {
-                            local_name,
-                            imported_name,
-                            source: source.value.to_string(),
-                            is_namespace: false,
-                        };
-                        result.bindings.push(binding.clone());
-                        result.reexport_bindings.push(binding);
-                    }
-                    continue;
-                }
+    analyze_external_type_program(&parsed.program)
+}
 
-                // `import { Foo as Bar } from './Y'; export type { Bar as Baz }`
-                // should resolve like a real re-export while preserving the original
-                // imported symbol and source module.
-                for specifier in &export_decl.specifiers {
-                    let Some(imported) = result
-                        .bindings
-                        .iter()
-                        .find(|binding| specifier.local.name() == binding.local_name)
-                    else {
-                        continue;
-                    };
-                    result.reexport_bindings.push(ImportedTypeBinding {
-                        local_name: specifier.exported.name().to_string(),
-                        imported_name: imported.imported_name.clone(),
-                        source: imported.source.clone(),
-                        is_namespace: imported.is_namespace,
-                    });
-                }
-            }
-            Statement::ExportAllDeclaration(export_all) => {
-                // `export * from './Drawer'` — wildcard re-export
-                result
-                    .wildcard_reexport_sources
-                    .push(export_all.source.value.to_string());
-            }
-            _ => {}
-        }
-    }
-
-    result
+pub fn extract_imported_type_bindings(
+    dep_source: &str,
+    allocator: &oxc_allocator::Allocator,
+) -> ExtractedTypeBindings {
+    analyze_external_type_source(dep_source, allocator).extracted
 }
 
 pub fn required_import_alias_names_for_binding(
@@ -3121,74 +4104,286 @@ pub fn collect_required_import_names_for_external_type(
     dep_source: &str,
     allocator: &oxc_allocator::Allocator,
 ) -> FxHashSet<String> {
-    let source_type = oxc_span::SourceType::ts();
-    let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
+    analyze_external_type_source(dep_source, allocator).required_import_names(type_name)
+}
 
-    if parsed.panicked {
-        return FxHashSet::default();
-    }
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalTypeSource {
+    let mut result = AnalyzedExternalTypeSource::default();
 
-    let source_bytes = dep_source.as_bytes();
-    let ctx = build_type_context(&parsed.program, source_bytes, 0);
-    let import_locals = collect_named_import_locals(&parsed.program);
-    let mut required_imports = FxHashSet::default();
-    let mut visited = FxHashSet::default();
-    let mut pending = vec![type_name.to_string()];
-
-    while let Some(current) = pending.pop() {
-        if !visited.insert(current.clone()) {
-            continue;
-        }
-
-        if import_locals.contains(&current) {
-            required_imports.insert(current);
-            continue;
-        }
-
-        let current_bytes = current.as_bytes();
-        if let Some((ts_type, _)) = ctx.find_type_alias(current_bytes) {
-            let mut refs = FxHashSet::default();
-            collect_type_reference_names(ts_type, &mut refs);
-            enqueue_required_import_refs(
-                refs,
-                &import_locals,
-                &mut required_imports,
-                &mut pending,
-                &visited,
-            );
-            continue;
-        }
-
-        if let Some((members, extends, heritage, _)) = ctx.find_interface(current_bytes) {
-            let mut refs = FxHashSet::default();
-            for parent in extends {
-                refs.insert(parent.clone());
+    for stmt in &program.body {
+        result.top_level_statement_count += 1;
+        match stmt {
+            Statement::ImportDeclaration(import_decl) => {
+                let Some(specifiers) = &import_decl.specifiers else {
+                    continue;
+                };
+                for specifier in specifiers {
+                    match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(import_spec) => {
+                            let local_name = import_spec.local.name.to_string();
+                            result.import_locals.insert(local_name.clone());
+                            result.extracted.bindings.push(ImportedTypeBinding {
+                                local_name,
+                                imported_name: import_spec.imported.name().to_string(),
+                                source: import_decl.source.value.to_string(),
+                                is_namespace: false,
+                            });
+                            result.local_import_symbol_targets.insert(
+                                import_spec.local.name.to_string(),
+                                (
+                                    import_decl.source.value.to_string(),
+                                    import_spec.imported.name().to_string(),
+                                ),
+                            );
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(import_spec) => {
+                            let local_name = import_spec.local.name.to_string();
+                            result.import_locals.insert(local_name.clone());
+                            result.extracted.bindings.push(ImportedTypeBinding {
+                                local_name,
+                                imported_name: "default".to_string(),
+                                source: import_decl.source.value.to_string(),
+                                is_namespace: false,
+                            });
+                            result.local_import_symbol_targets.insert(
+                                import_spec.local.name.to_string(),
+                                (import_decl.source.value.to_string(), "default".to_string()),
+                            );
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(import_spec) => {
+                            result.extracted.bindings.push(ImportedTypeBinding {
+                                local_name: import_spec.local.name.to_string(),
+                                imported_name: "*".to_string(),
+                                source: import_decl.source.value.to_string(),
+                                is_namespace: true,
+                            });
+                        }
+                    }
+                }
             }
-            collect_interface_reference_names(members, heritage, &mut refs);
-            enqueue_required_import_refs(
-                refs,
-                &import_locals,
-                &mut required_imports,
-                &mut pending,
-                &visited,
-            );
-            continue;
-        }
+            Statement::ExportNamedDeclaration(export_decl) => {
+                if let Some(source) = &export_decl.source {
+                    for specifier in &export_decl.specifiers {
+                        let local_name = specifier.exported.name().to_string();
+                        let imported_name = specifier.local.name().to_string();
+                        let binding = ImportedTypeBinding {
+                            local_name,
+                            imported_name,
+                            source: source.value.to_string(),
+                            is_namespace: false,
+                        };
+                        result.extracted.bindings.push(binding.clone());
+                        result.extracted.reexport_bindings.push(binding);
+                        result.direct_reexport_targets.insert(
+                            specifier.exported.name().to_string(),
+                            (source.value.to_string(), specifier.local.name().to_string()),
+                        );
+                    }
+                    continue;
+                }
 
-        if let Some(class_decl) = ctx.find_class(current_bytes) {
-            let mut refs = FxHashSet::default();
-            collect_class_reference_names(class_decl, &mut refs);
-            enqueue_required_import_refs(
-                refs,
-                &import_locals,
-                &mut required_imports,
-                &mut pending,
-                &visited,
-            );
+                for specifier in &export_decl.specifiers {
+                    let Some(imported) = result
+                        .extracted
+                        .bindings
+                        .iter()
+                        .find(|binding| specifier.local.name() == binding.local_name)
+                    else {
+                        continue;
+                    };
+                    result
+                        .extracted
+                        .reexport_bindings
+                        .push(ImportedTypeBinding {
+                            local_name: specifier.exported.name().to_string(),
+                            imported_name: imported.imported_name.clone(),
+                            source: imported.source.clone(),
+                            is_namespace: imported.is_namespace,
+                        });
+                    result.local_export_symbol_targets.insert(
+                        specifier.exported.name().to_string(),
+                        specifier.local.name().to_string(),
+                    );
+                }
+
+                for specifier in &export_decl.specifiers {
+                    result
+                        .local_export_symbol_targets
+                        .entry(specifier.exported.name().to_string())
+                        .or_insert_with(|| specifier.local.name().to_string());
+                }
+
+                if let Some(declaration) = &export_decl.declaration {
+                    record_local_type_symbol_from_declaration(
+                        declaration,
+                        &mut result.local_type_symbols,
+                    );
+                }
+            }
+            Statement::ExportAllDeclaration(export_all) => {
+                result
+                    .extracted
+                    .wildcard_reexport_sources
+                    .push(export_all.source.value.to_string());
+            }
+            Statement::TSTypeAliasDeclaration(type_alias) => {
+                let mut refs = FxHashSet::default();
+                collect_type_reference_names(&type_alias.type_annotation, &mut refs);
+                result.local_type_symbols.insert(
+                    type_alias.id.name.to_string(),
+                    AnalyzedExternalTypeSymbol {
+                        kind: AnalyzedExternalTypeSymbolKind::TypeAlias,
+                        span: type_alias.span.into(),
+                        dependency_names: refs,
+                    },
+                );
+            }
+            Statement::TSInterfaceDeclaration(interface) => {
+                let mut refs = FxHashSet::default();
+                for parent in &interface.extends {
+                    if let Some(name) = get_expression_reference_name(&parent.expression) {
+                        refs.insert(name);
+                    }
+                    if let Some(type_arguments) = &parent.type_arguments {
+                        for param in &type_arguments.params {
+                            collect_type_reference_names(param, &mut refs);
+                        }
+                    }
+                }
+                collect_interface_reference_names(
+                    &interface.body.body,
+                    &interface.extends,
+                    &mut refs,
+                );
+                result.local_type_symbols.insert(
+                    interface.id.name.to_string(),
+                    AnalyzedExternalTypeSymbol {
+                        kind: AnalyzedExternalTypeSymbolKind::Interface,
+                        span: interface.span.into(),
+                        dependency_names: refs,
+                    },
+                );
+            }
+            Statement::ClassDeclaration(class_decl) => {
+                if let Some(id) = &class_decl.id {
+                    let mut refs = FxHashSet::default();
+                    collect_class_reference_names(class_decl, &mut refs);
+                    result.local_type_symbols.insert(
+                        id.name.to_string(),
+                        AnalyzedExternalTypeSymbol {
+                            kind: AnalyzedExternalTypeSymbolKind::Class,
+                            span: class_decl.span.into(),
+                            dependency_names: refs,
+                        },
+                    );
+                }
+            }
+            Statement::ExportDefaultDeclaration(export_default) => {
+                match &export_default.declaration {
+                    ExportDefaultDeclarationKind::ClassDeclaration(class_decl) => {
+                        let mut refs = FxHashSet::default();
+                        collect_class_reference_names(class_decl, &mut refs);
+                        result.local_type_symbols.insert(
+                            "default".to_string(),
+                            AnalyzedExternalTypeSymbol {
+                                kind: AnalyzedExternalTypeSymbolKind::Class,
+                                span: export_default.span.into(),
+                                dependency_names: refs,
+                            },
+                        );
+                    }
+                    ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
+                        let mut refs = FxHashSet::default();
+                        for parent in &interface.extends {
+                            if let Some(name) = get_expression_reference_name(&parent.expression) {
+                                refs.insert(name);
+                            }
+                            if let Some(type_arguments) = &parent.type_arguments {
+                                for param in &type_arguments.params {
+                                    collect_type_reference_names(param, &mut refs);
+                                }
+                            }
+                        }
+                        collect_interface_reference_names(
+                            &interface.body.body,
+                            &interface.extends,
+                            &mut refs,
+                        );
+                        result.local_type_symbols.insert(
+                            "default".to_string(),
+                            AnalyzedExternalTypeSymbol {
+                                kind: AnalyzedExternalTypeSymbolKind::Interface,
+                                span: export_default.span.into(),
+                                dependency_names: refs,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 
-    required_imports
+    result
+}
+
+fn record_local_type_symbol_from_declaration(
+    declaration: &Declaration<'_>,
+    local_type_symbols: &mut FxHashMap<String, AnalyzedExternalTypeSymbol>,
+) {
+    match declaration {
+        Declaration::TSTypeAliasDeclaration(type_alias) => {
+            let mut refs = FxHashSet::default();
+            collect_type_reference_names(&type_alias.type_annotation, &mut refs);
+            local_type_symbols.insert(
+                type_alias.id.name.to_string(),
+                AnalyzedExternalTypeSymbol {
+                    kind: AnalyzedExternalTypeSymbolKind::TypeAlias,
+                    span: type_alias.span.into(),
+                    dependency_names: refs,
+                },
+            );
+        }
+        Declaration::TSInterfaceDeclaration(interface) => {
+            let mut refs = FxHashSet::default();
+            for parent in &interface.extends {
+                if let Some(name) = get_expression_reference_name(&parent.expression) {
+                    refs.insert(name);
+                }
+                if let Some(type_arguments) = &parent.type_arguments {
+                    for param in &type_arguments.params {
+                        collect_type_reference_names(param, &mut refs);
+                    }
+                }
+            }
+            collect_interface_reference_names(&interface.body.body, &interface.extends, &mut refs);
+            local_type_symbols.insert(
+                interface.id.name.to_string(),
+                AnalyzedExternalTypeSymbol {
+                    kind: AnalyzedExternalTypeSymbolKind::Interface,
+                    span: interface.span.into(),
+                    dependency_names: refs,
+                },
+            );
+        }
+        Declaration::ClassDeclaration(class_decl) => {
+            if let Some(id) = &class_decl.id {
+                let mut refs = FxHashSet::default();
+                collect_class_reference_names(class_decl, &mut refs);
+                local_type_symbols.insert(
+                    id.name.to_string(),
+                    AnalyzedExternalTypeSymbol {
+                        kind: AnalyzedExternalTypeSymbolKind::Class,
+                        span: class_decl.span.into(),
+                        dependency_names: refs,
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_named_import_locals(program: &Program<'_>) -> FxHashSet<String> {
@@ -3434,106 +4629,106 @@ pub fn resolve_external_type_with_companion(
         return None;
     }
 
-    let source_bytes = dep_source.as_bytes();
-    let mut ctx = build_type_context(&parsed.program, source_bytes, 0);
-    for (name, resolved) in companion_types {
-        ctx.companion_types
-            .entry(name.clone())
-            .or_insert_with(|| resolved.clone());
-    }
-
-    let mut result = resolve_named_external_type(type_name, &parsed.program, source_bytes, &ctx);
-
-    if result.is_none() {
-        if let Some(local_name) = resolve_local_export_alias_target(&parsed.program, type_name) {
-            result = resolve_named_external_type(&local_name, &parsed.program, source_bytes, &ctx);
-        }
-    }
-
-    if result.is_none() && type_name == "default" {
-        result = resolve_default_exported_type(&parsed.program, &ctx);
-    }
-
-    // Populate key_name on all props since spans reference the external file,
-    // not the consuming SFC. Consumers use key_name when available.
-    result.map(|resolved| finalize_external_resolution(resolved, source_bytes))
+    let analysis = analyze_external_type_program(&parsed.program);
+    let base_ctx = build_type_context(&parsed.program, dep_source.as_bytes(), 0);
+    resolve_external_type_in_context_with_analyzed_symbol_companion(
+        type_name,
+        &parsed.program,
+        dep_source.as_bytes(),
+        &base_ctx,
+        &analysis,
+        companion_types,
+    )
 }
 
-fn resolve_named_external_type<'a>(
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub fn resolve_external_type_in_program_with_analyzed_symbol_companion(
     type_name: &str,
-    program: &Program<'a>,
+    program: &Program<'_>,
     source_bytes: &[u8],
-    ctx: &TypeResolutionContext<'_, 'a>,
+    analysis: &AnalyzedExternalTypeSource,
+    imported_companions: &FxHashMap<String, ResolvedElements>,
+) -> Option<ResolvedElements> {
+    let base_ctx = build_type_context(program, source_bytes, 0);
+    resolve_external_type_in_context_with_analyzed_symbol_companion(
+        type_name,
+        program,
+        source_bytes,
+        &base_ctx,
+        analysis,
+        imported_companions,
+    )
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub fn resolve_external_type_in_context_with_analyzed_symbol_companion<'ctx, 'a: 'ctx>(
+    type_name: &str,
+    program: &'ctx Program<'a>,
+    source_bytes: &[u8],
+    base_ctx: &TypeResolutionContext<'ctx, 'a>,
+    analysis: &AnalyzedExternalTypeSource,
+    imported_companions: &FxHashMap<String, ResolvedElements>,
+) -> Option<ResolvedElements> {
+    if type_name != "default" && !analysis.has_local_symbol_target(type_name) {
+        return resolve_value_declaration_type(type_name, program, source_bytes, 0, base_ctx)
+            .map(|resolved| finalize_external_resolution_with_offset(resolved, source_bytes, 0));
+    }
+
+    let target_name = analysis.local_symbol_target_name(type_name);
+    resolve_external_type_in_context_with_companion(
+        target_name.as_str(),
+        program,
+        source_bytes,
+        base_ctx,
+        imported_companions,
+    )
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+fn resolve_external_type_in_context_with_companion<'ctx, 'a: 'ctx>(
+    type_name: &str,
+    program: &'ctx Program<'a>,
+    source_bytes: &[u8],
+    base_ctx: &TypeResolutionContext<'ctx, 'a>,
+    imported_companions: &FxHashMap<String, ResolvedElements>,
+) -> Option<ResolvedElements> {
+    let mut ctx = base_ctx.clone();
+    ctx.extend_companion_types(imported_companions);
+
+    let mut result = resolve_named_external_type(type_name, program, source_bytes, &ctx);
+
+    if result.is_none() && type_name == "default" {
+        result = resolve_default_exported_type(program, &ctx);
+    }
+
+    result.map(|resolved| finalize_external_resolution_with_offset(resolved, source_bytes, 0))
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+fn resolve_named_external_type<'ctx, 'a: 'ctx>(
+    type_name: &str,
+    program: &'ctx Program<'a>,
+    source_bytes: &[u8],
+    ctx: &TypeResolutionContext<'ctx, 'a>,
 ) -> Option<ResolvedElements> {
     // Check per-surface type blocklist before expanding
     if ctx.is_type_blocked(type_name) {
         return Some(ResolvedElements::default());
     }
 
-    let name_bytes = type_name.as_bytes();
-
-    if let Some((ts_type, _)) = ctx.find_type_alias(name_bytes) {
-        return Some(resolve_type_elements_with_ctx_ref(ts_type, 0, ctx));
-    }
-
-    if let Some((members, extends, heritage, _)) = ctx.find_interface(name_bytes) {
-        let mut resolved = ResolvedElements::default();
-        let extends_owned: Vec<String> = extends.to_vec();
-        let mut guard = vec![type_name.to_string()];
-        resolve_interface_with_extends_ctx_ref(
-            members,
-            &extends_owned,
-            heritage,
-            0,
-            &mut resolved,
-            ctx,
-            &mut guard,
-        );
-        resolved.root_runtime_types = vec![RuntimeType::Object];
-        return Some(resolved);
-    }
-
-    if let Some(class_decl) = ctx.find_class(name_bytes) {
-        let mut resolved = ResolvedElements::default();
-        let mut guard = vec![type_name.to_string()];
-        resolve_class_with_heritage_ctx_ref(class_decl, 0, &mut resolved, ctx, &mut guard);
-        resolved.root_runtime_types = vec![RuntimeType::Object];
-        return Some(resolved);
+    let mut guard = vec![type_name.to_string()];
+    if let Some(resolved) =
+        resolve_named_local_type_with_ctx_ref(type_name, None, 0, ctx, &mut guard)
+    {
+        return Some((*resolved).clone());
     }
 
     resolve_value_declaration_type(type_name, program, source_bytes, 0, ctx)
 }
 
-fn resolve_local_export_alias_target(program: &Program<'_>, exported_name: &str) -> Option<String> {
-    let mut current = exported_name.to_string();
-    let mut visited = FxHashSet::default();
-    let mut changed = false;
-
-    while visited.insert(current.clone()) {
-        let next = program.body.iter().find_map(|stmt| match stmt {
-            Statement::ExportNamedDeclaration(export) if export.source.is_none() => export
-                .specifiers
-                .iter()
-                .find(|specifier| specifier.exported.name() == current)
-                .map(|specifier| specifier.local.name().to_string()),
-            _ => None,
-        });
-
-        match next {
-            Some(local) if local != current => {
-                current = local;
-                changed = true;
-            }
-            _ => break,
-        }
-    }
-
-    changed.then_some(current)
-}
-
-fn resolve_default_exported_type<'a>(
-    program: &Program<'a>,
-    ctx: &TypeResolutionContext<'_, 'a>,
+fn resolve_default_exported_type<'ctx, 'a: 'ctx>(
+    program: &'ctx Program<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
 ) -> Option<ResolvedElements> {
     for stmt in &program.body {
         let Statement::ExportDefaultDeclaration(export) = stmt else {
@@ -3542,22 +4737,45 @@ fn resolve_default_exported_type<'a>(
 
         match &export.declaration {
             ExportDefaultDeclarationKind::ClassDeclaration(class_decl) => {
-                let mut resolved = ResolvedElements::default();
                 let guard_name = class_decl
                     .id
                     .as_ref()
                     .map(|id| id.name.to_string())
                     .unwrap_or_else(|| "default".to_string());
+                let mut guard = vec![guard_name.clone()];
+                if let Some(id) = &class_decl.id {
+                    if let Some(resolved) = resolve_named_local_type_with_ctx_ref(
+                        id.name.as_str(),
+                        None,
+                        0,
+                        ctx,
+                        &mut guard,
+                    ) {
+                        return Some((*resolved).clone());
+                    }
+                }
+
+                let mut resolved = ResolvedElements::default();
                 let mut guard = vec![guard_name];
                 resolve_class_with_heritage_ctx_ref(class_decl, 0, &mut resolved, ctx, &mut guard);
                 resolved.root_runtime_types = vec![RuntimeType::Object];
                 return Some(resolved);
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface_decl) => {
+                let mut guard = vec![interface_decl.id.name.to_string()];
+                if let Some(resolved) = resolve_named_local_type_with_ctx_ref(
+                    interface_decl.id.name.as_str(),
+                    None,
+                    0,
+                    ctx,
+                    &mut guard,
+                ) {
+                    return Some((*resolved).clone());
+                }
+
                 let mut resolved = ResolvedElements::default();
                 let extends = extract_heritage_type_names(&interface_decl.extends);
-                let guard_name = interface_decl.id.name.to_string();
-                let mut guard = vec![guard_name];
+                let mut guard = vec![interface_decl.id.name.to_string()];
                 resolve_interface_with_extends_ctx_ref(
                     &interface_decl.body.body,
                     &extends,
@@ -3577,9 +4795,10 @@ fn resolve_default_exported_type<'a>(
     None
 }
 
-fn finalize_external_resolution(
+fn finalize_external_resolution_with_offset(
     mut resolved: ResolvedElements,
     source_bytes: &[u8],
+    span_offset: u32,
 ) -> ResolvedElements {
     for prop in &mut resolved.props {
         let start = prop.key.start as usize;
@@ -3603,10 +4822,34 @@ fn finalize_external_resolution(
                 }
             }
         }
+        prop.span = Span::new(
+            prop.span.start.saturating_add(span_offset),
+            prop.span.end.saturating_add(span_offset),
+        );
+        prop.key = Span::new(
+            prop.key.start.saturating_add(span_offset),
+            prop.key.end.saturating_add(span_offset),
+        );
+        prop.type_span = prop.type_span.map(|type_span| {
+            Span::new(
+                type_span.start.saturating_add(span_offset),
+                type_span.end.saturating_add(span_offset),
+            )
+        });
         prop.map_local = false;
         prop.span_is_absolute = false;
     }
     for emit in &mut resolved.emits {
+        emit.span = Span::new(
+            emit.span.start.saturating_add(span_offset),
+            emit.span.end.saturating_add(span_offset),
+        );
+        emit.name_span = emit.name_span.map(|name_span| {
+            Span::new(
+                name_span.start.saturating_add(span_offset),
+                name_span.end.saturating_add(span_offset),
+            )
+        });
         emit.map_local = false;
         emit.span_is_absolute = false;
     }

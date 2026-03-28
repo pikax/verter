@@ -49,11 +49,12 @@ pub use component_meta::{
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
-    ResolvedDeclarationKind, ResolvedExportTarget, ResolvedTypeDeclaration,
+    ResolvedDeclarationKind, ResolvedExportTarget, ResolvedLocalTypeSymbolMetadata,
+    ResolvedTypeDeclaration,
 };
 pub use eval_env_build::{
-    build_owner_eval_env_with_inputs, collect_requested_binding_names,
-    inject_imported_type_aliases, OwnerEvalEnvAssembler, OwnerEvalEnvBuild,
+    build_owner_eval_env_with_inputs, collect_requested_binding_names, OwnerEvalEnvAssembler,
+    OwnerEvalEnvBuild,
 };
 pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
@@ -87,7 +88,8 @@ pub use fallthrough::{
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use imported_decl_eval::{
-    evaluate_imported_decl_with_owner_env, ImportedDeclEvalResolver, PreparedImportedDeclContext,
+    evaluate_imported_decl_with_owner_env, CachedEvaluatedImportedDecl, ImportedDeclEvalResolver,
+    PreparedImportedDeclContext,
 };
 pub use imported_eval_collect::{
     build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
@@ -102,12 +104,14 @@ pub use imported_eval_lookup::{
 };
 pub use imported_eval_types::{
     ComputedEvaluatedTypes, ImportedEvalInputs, ImportedEvalOverflow, ImportedEvalSource,
-    ImportedTypeAlias,
+    ImportedSymbolDependency, ImportedTypeAlias,
 };
 pub use imported_type_alias::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
-    prepare_imported_type_alias, should_attempt_owner_env_resolution,
-    ImportedTypeAliasPrepareError, ImportedTypeAliasResolver,
+    prepare_imported_type_alias, prepare_local_imported_type_alias,
+    should_attempt_owner_env_resolution, CachedPreparedImportedTypeAlias,
+    ImportedTypeAliasPrepareError, ImportedTypeAliasResolver, PreparedImportedTypeAlias,
+    PreparedLocalImportedTypeAlias,
 };
 pub use runtime_values::{
     materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,

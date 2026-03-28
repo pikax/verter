@@ -15,12 +15,18 @@ pub struct ImportedEvalSource {
     pub source: Arc<str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ImportedSymbolDependency {
+    pub local_name: String,
+    pub canonical_id: String,
+    pub exported_name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ImportedTypeAlias {
     pub local_name: String,
     pub source_canonical_id: String,
     pub exported_name: String,
-    pub decl: verter_analysis::type_eval::TypeDeclInfo,
     pub requires_source_merge: bool,
 }
 

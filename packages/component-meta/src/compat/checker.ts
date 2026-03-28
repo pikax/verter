@@ -21,6 +21,7 @@ import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
 import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
 import {
+  createMetaRuntime,
   getMetaRuntime,
   stableSelectiveConfigHash,
   normalizePath as runtimeNormalizePath,
@@ -537,6 +538,7 @@ export class ComponentMetaChecker {
   /** Runtime session backing this checker. */
   private _session: ProjectSession | null = null;
   private _runtime: MetaRuntimeImpl | null = null;
+  private _ownsRuntime = false;
 
   constructor(
     adapter: VerterHostAdapter,
@@ -545,6 +547,7 @@ export class ComponentMetaChecker {
     session?: ProjectSession,
     workspace?: CheckerWorkspace,
     runtime?: MetaRuntimeImpl,
+    ownsRuntime = false,
   ) {
     this.adapter = adapter;
     this.projectRoot = projectRoot;
@@ -552,6 +555,7 @@ export class ComponentMetaChecker {
     this.workspace = workspace;
     this._session = session ?? null;
     this._runtime = runtime ?? null;
+    this._ownsRuntime = ownsRuntime;
   }
 
   /**
@@ -765,6 +769,9 @@ export class ComponentMetaChecker {
     if (session) {
       if (runtime) {
         runtime.closeSession(session);
+        if (this._ownsRuntime) {
+          runtime.shutdownNow();
+        }
       } else {
         session.close();
       }
@@ -878,7 +885,8 @@ export async function createChecker(
     nativeFlags: { analysisLevel: "full" },
     typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
-  const runtime = getMetaRuntime();
+  const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
+  const ownsRuntime = options?.runtimeMode === "dedicated";
   const bootstrap: BootstrapFn = async () => {
     const native = loadNative();
     const hostConfig = {
@@ -923,6 +931,7 @@ export async function createChecker(
     session,
     workspace,
     runtime,
+    ownsRuntime,
   );
 
   // Pre-track discovered files
@@ -962,7 +971,8 @@ export async function createCheckerByJson(
     nativeFlags: { analysisLevel: "full" },
     typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
-  const runtime = getMetaRuntime();
+  const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
+  const ownsRuntime = options?.runtimeMode === "dedicated";
   const bootstrap: BootstrapFn = async () => {
     const native = loadNative();
     const hostConfig = {
@@ -997,7 +1007,15 @@ export async function createCheckerByJson(
     },
   };
 
-  const checker = new ComponentMetaChecker(adapter, absRoot, options, session, workspace, runtime);
+  const checker = new ComponentMetaChecker(
+    adapter,
+    absRoot,
+    options,
+    session,
+    workspace,
+    runtime,
+    ownsRuntime,
+  );
 
   const baseIds = engine.nativeProject.baseFileIds();
   for (const filePath of baseIds) {

@@ -83,9 +83,9 @@ impl SetupContext {
 
 /// Process statements for setup mode and collect items
 pub fn process_setup_statements<'a>(
-    statements: &[Statement<'a>],
+    statements: &'a [Statement<'a>],
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
@@ -97,9 +97,9 @@ pub fn process_setup_statements<'a>(
 
 /// Process a single statement in setup mode
 pub fn process_setup_statement<'a>(
-    stmt: &Statement<'a>,
+    stmt: &'a Statement<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
@@ -379,9 +379,9 @@ fn is_ref_creating_call(init: &Expression<'_>) -> bool {
 
 /// Process a variable declaration
 fn process_variable_declaration<'a>(
-    var_decl: &VariableDeclaration<'a>,
+    var_decl: &'a VariableDeclaration<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -476,9 +476,9 @@ fn process_function_declaration<'a>(
 
 /// Process an expression statement
 fn process_expression_statement<'a>(
-    expr_stmt: &ExpressionStatement<'a>,
+    expr_stmt: &'a ExpressionStatement<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -625,9 +625,9 @@ fn check_expression_for_async<'a>(
 
 /// Try to parse a macro from an expression
 fn try_parse_macro_from_expression<'a>(
-    expr: &Expression<'a>,
+    expr: &'a Expression<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     match expr {
@@ -638,9 +638,9 @@ fn try_parse_macro_from_expression<'a>(
 
 /// Parse a CallExpression into a ScriptMacro enum variant
 pub fn parse_macro_call<'a>(
-    call: &CallExpression<'a>,
+    call: &'a CallExpression<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     // Get callee name as bytes
@@ -780,9 +780,9 @@ pub fn parse_macro_call<'a>(
 /// Uses the `TypeResolutionContext` to resolve type references (interfaces, type aliases)
 /// declared in the same SFC. Unresolvable external types produce empty results.
 fn extract_type_params<'a>(
-    tp: &TSTypeParameterInstantiation<'a>,
+    tp: &'a TSTypeParameterInstantiation<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'_, 'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) -> MacroTypeParams {
     let full_span = tp.span;
     let offset = ctx.content_offset;

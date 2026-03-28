@@ -38,6 +38,28 @@ pub trait ImportedEvalLookupResolver: DeclarationMetadataResolver {
         imported_name: &str,
     ) -> Option<ResolvedExportTarget>;
 
+    fn resolve_imported_type_root(
+        &self,
+        dep_canonical_id: &str,
+        imported_name: &str,
+    ) -> (String, String)
+    where
+        Self: Sized,
+    {
+        let declaration = resolve_type_declaration(self, dep_canonical_id, imported_name);
+        let source_canonical_id = if declaration.canonical_source.is_empty() {
+            dep_canonical_id.to_string()
+        } else {
+            declaration.canonical_source
+        };
+        let exported_name = if declaration.resolved_name.is_empty() {
+            imported_name.to_string()
+        } else {
+            declaration.resolved_name
+        };
+        (source_canonical_id, exported_name)
+    }
+
     fn dependency_eval_env(&self, canonical_id: &str) -> Option<EvalEnv>;
 }
 
@@ -218,21 +240,9 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
         }
 
         let resolved = self.resolve_type_lookup_target(name).and_then(|target| {
-            let declaration = resolve_type_declaration(
-                &*self.resolver,
-                &target.dep_canonical_id,
-                &target.imported_name,
-            );
-            let source_canonical_id = if declaration.canonical_source.is_empty() {
-                target.dep_canonical_id.clone()
-            } else {
-                declaration.canonical_source
-            };
-            let exported_name = if declaration.resolved_name.is_empty() {
-                target.imported_name.clone()
-            } else {
-                declaration.resolved_name
-            };
+            let (source_canonical_id, exported_name) = self
+                .resolver
+                .resolve_imported_type_root(&target.dep_canonical_id, &target.imported_name);
 
             self.discovered_dependencies
                 .insert(target.dep_canonical_id.clone());
@@ -338,6 +348,9 @@ mod tests {
         type_requests: RefCell<Vec<ImportedTypeAliasResolveRequest>>,
         value_exports: FxHashMap<(String, String), ResolvedExportTarget>,
         dep_envs: FxHashMap<String, EvalEnv>,
+        root_targets: FxHashMap<(String, String), (String, String)>,
+        declaration_lookups: RefCell<u32>,
+        root_lookups: RefCell<u32>,
     }
 
     impl DeclarationMetadataResolver for TestResolver {
@@ -358,6 +371,7 @@ mod tests {
         }
 
         fn read_source(&self, _canonical_source: &str) -> Option<String> {
+            self.record_declaration_lookup();
             None
         }
 
@@ -412,8 +426,26 @@ mod tests {
                 .cloned()
         }
 
+        fn resolve_imported_type_root(
+            &self,
+            dep_canonical_id: &str,
+            imported_name: &str,
+        ) -> (String, String) {
+            *self.root_lookups.borrow_mut() += 1;
+            self.root_targets
+                .get(&(dep_canonical_id.to_string(), imported_name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| (dep_canonical_id.to_string(), imported_name.to_string()))
+        }
+
         fn dependency_eval_env(&self, canonical_id: &str) -> Option<EvalEnv> {
             self.dep_envs.get(canonical_id).cloned()
+        }
+    }
+
+    impl TestResolver {
+        fn record_declaration_lookup(&self) {
+            *self.declaration_lookups.borrow_mut() += 1;
         }
     }
 
@@ -540,5 +572,35 @@ mod tests {
             lookup.utility_source("Readonly"),
             BuiltinUtilitySource::Builtin
         );
+    }
+
+    #[test]
+    fn imported_eval_lookup_prefers_cached_root_lookup_over_full_declaration_resolution() {
+        let imports = vec![analyzed_import(
+            "./dep",
+            Some("/src/dep.ts"),
+            vec![binding("Types", ImportBindingKind::Namespace, None, true)],
+            true,
+        )];
+        let mut resolver = TestResolver::default();
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/types.ts".to_string(), "ResolvedUser".to_string()),
+        );
+        let mut lookup = ImportedEvalLookup::new(&mut resolver, "/src/App.vue", &imports);
+
+        let resolved = lookup.resolve_type_decl("Types.User").unwrap();
+
+        assert_eq!(resolved.name, "Types.User");
+        assert_eq!(*resolver.root_lookups.borrow(), 1);
+        assert_eq!(
+            *resolver.declaration_lookups.borrow(),
+            0,
+            "cached root lookup should avoid full declaration resolution in imported lookup",
+        );
+        let requests = resolver.type_requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].source_canonical_id, "/src/types.ts");
+        assert_eq!(requests[0].exported_name, "ResolvedUser");
     }
 }

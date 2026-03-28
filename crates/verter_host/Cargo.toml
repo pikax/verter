@@ -18,6 +18,7 @@ hotpath = [
   "hotpath/hotpath",
   "verter_core/hotpath",
   "verter_analysis/hotpath",
+  "verter_resolver/hotpath",
   "verter_scheduler?/hotpath",
   "verter_vfs/hotpath",
 ]
@@ -30,8 +31,11 @@ verter_span = { path = "../verter_span" }
 verter_vfs = { path = "../verter_vfs" }
 hotpath = { version = "0.13", optional = true }
 oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
+self_cell = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { workspace = true }
 tracing = "0.1"

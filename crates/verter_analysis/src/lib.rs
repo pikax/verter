@@ -61,7 +61,8 @@ mod type_eval_memory_tests;
 mod type_eval_build_tests;
 
 pub use analysis::{
-    build_export_signatures, build_script_analysis, build_script_analysis_with_scope,
+    build_export_signatures, build_export_signatures_from_program, build_script_analysis,
+    build_script_analysis_with_scope, build_script_analysis_with_scope_from_program,
 };
 pub use classify::{classify_store_api, is_store_composable_call};
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};

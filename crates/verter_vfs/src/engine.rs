@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -43,6 +44,7 @@ pub(crate) struct Engine {
     pub(crate) overlay: RwLock<OverlayStore>,
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
+    pub(crate) content_generation: AtomicU64,
     /// Project graph — the write-side store. Callers update this via
     /// `set_project_graph()` / `configure_resolver()`, then
     /// `rebuild_and_publish()` atomically derives and publishes a
@@ -67,6 +69,7 @@ impl Engine {
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
+            content_generation: AtomicU64::new(1),
             project_graph: RwLock::new(ProjectGraph::new()),
             package_index: RwLock::new(PackageIndex::new()),
             published_state: ArcSwapOption::new(None),
@@ -85,6 +88,14 @@ impl Engine {
     /// new snapshot. One store, one generation.
     pub(crate) fn publish_snapshot(&self, root: PublishedRoot) {
         self.published_state.store(Some(Arc::new(root)));
+    }
+
+    pub(crate) fn current_content_generation(&self) -> u64 {
+        self.content_generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn bump_content_generation(&self) -> u64 {
+        self.content_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Load the current published state (lock-free).
@@ -160,6 +171,7 @@ impl Engine {
     /// Apply a batch of workspace changes.
     pub(crate) fn apply_changes(&self, changes: Vec<WorkspaceChange>) -> ChangeResult {
         let mut result = ChangeResult::default();
+        let mut content_changed = false;
 
         for change in changes {
             match change {
@@ -170,11 +182,13 @@ impl Engine {
                     self.invalidate_package_manifest(&canonical_id);
                     self.overlay.write().set(canonical_id.clone(), source);
                     result.invalidated_files.push(canonical_id);
+                    content_changed = true;
                 }
                 WorkspaceChange::OverlayClear { canonical_id } => {
                     self.invalidate_package_manifest(&canonical_id);
                     if self.overlay.write().clear(&canonical_id) {
                         result.invalidated_files.push(canonical_id);
+                        content_changed = true;
                     }
                 }
                 WorkspaceChange::FileChanged {
@@ -189,6 +203,7 @@ impl Engine {
                             self.snapshot.write().remove(&canonical_id);
                         }
                         result.invalidated_files.push(canonical_id);
+                        content_changed = true;
                     }
                 }
                 WorkspaceChange::FileDeleted { canonical_id } => {
@@ -196,12 +211,17 @@ impl Engine {
                     self.edges.write().remove_file(&canonical_id);
                     self.snapshot.write().remove(&canonical_id);
                     result.invalidated_files.push(canonical_id);
+                    content_changed = true;
                 }
                 WorkspaceChange::ConfigChanged { canonical_id: _ } => {
                     result.graph_rebuilt = true;
                     result.generation = Some(self.project_graph.read().generation() + 1);
                 }
             }
+        }
+
+        if content_changed {
+            self.bump_content_generation();
         }
 
         result

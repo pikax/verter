@@ -1,7 +1,5 @@
-use oxc_allocator::Allocator;
 use rustc_hash::FxHashSet;
 use verter_analysis::type_eval::DeclarationId;
-use verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedExportTarget {
@@ -35,6 +33,38 @@ pub trait DeclarationMetadataResolver {
         from_canonical: &str,
         import_source: &str,
     ) -> Option<String>;
+
+    fn resolve_direct_type_reexport_target(
+        &self,
+        _dep_canonical: &str,
+        _requested_name: &str,
+    ) -> Option<(String, String)> {
+        None
+    }
+
+    fn resolve_local_import_symbol_target(
+        &self,
+        _dep_canonical: &str,
+        _resolved_name: &str,
+    ) -> Option<(String, String)> {
+        None
+    }
+
+    fn resolve_local_export_symbol_target(
+        &self,
+        _canonical_source: &str,
+        _exported_name: &str,
+    ) -> Option<String> {
+        None
+    }
+
+    fn resolve_local_type_symbol_metadata(
+        &self,
+        _canonical_source: &str,
+        _resolved_name: &str,
+    ) -> Option<ResolvedLocalTypeSymbolMetadata> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +73,12 @@ pub enum ResolvedDeclarationKind {
     TypeAlias,
     Class,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedLocalTypeSymbolMetadata {
+    pub kind: ResolvedDeclarationKind,
+    pub span: verter_span::Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +90,37 @@ pub struct ResolvedTypeDeclaration {
     pub span: verter_span::Span,
     pub kind: ResolvedDeclarationKind,
     pub text: Option<String>,
+}
+
+fn resolve_local_symbol_details<R: DeclarationMetadataResolver>(
+    resolver: &R,
+    canonical_source: &str,
+    resolved_name: &str,
+    fallback_span: verter_span::Span,
+    source: Option<&str>,
+) -> (ResolvedDeclarationKind, verter_span::Span, Option<String>) {
+    if let Some(symbol) =
+        resolver.resolve_local_type_symbol_metadata(canonical_source, resolved_name)
+    {
+        if let Some(source) = source {
+            let (_, derived_span, derived_text) =
+                extract_declaration_details(source, symbol.span, resolved_name);
+            if derived_text.is_some() {
+                let _ = derived_span;
+                return (symbol.kind, symbol.span, derived_text);
+            }
+            return (
+                symbol.kind,
+                symbol.span,
+                slice_declaration_text(source, symbol.span),
+            );
+        }
+        return (symbol.kind, symbol.span, None);
+    }
+
+    source
+        .map(|source| extract_declaration_details(source, fallback_span, resolved_name))
+        .unwrap_or((ResolvedDeclarationKind::Unknown, fallback_span, None))
 }
 
 pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
@@ -69,29 +136,75 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
                     .unwrap_or_else(|| dep_canonical.to_string()),
                 export.source_name,
             )
+        } else if let Some((followed_canonical, followed_name)) =
+            resolver.resolve_direct_type_reexport_target(dep_canonical, requested_name)
+        {
+            (followed_canonical, followed_name)
+        } else if let Some((followed_canonical, followed_name)) =
+            resolver.resolve_local_import_symbol_target(dep_canonical, requested_name)
+        {
+            (followed_canonical, followed_name)
         } else {
             follow_direct_type_reexport_chain(resolver, dep_canonical, requested_name)
                 .unwrap_or_else(|| (dep_canonical.to_string(), requested_name.to_string()))
         };
 
+    if canonical_source == dep_canonical {
+        if let Some((followed_canonical, followed_name)) =
+            follow_local_import_symbol_target(resolver, dep_canonical, resolved_name.as_str())
+        {
+            if followed_canonical != canonical_source || followed_name != resolved_name {
+                let followed = resolve_type_declaration(
+                    resolver,
+                    followed_canonical.as_str(),
+                    followed_name.as_str(),
+                );
+                if followed.canonical_source != canonical_source
+                    || followed.resolved_name != resolved_name
+                    || followed.kind != ResolvedDeclarationKind::Unknown
+                    || followed.text.is_some()
+                {
+                    return ResolvedTypeDeclaration {
+                        requested_name: requested_name.to_string(),
+                        declaration_id: followed.declaration_id,
+                        resolved_name: followed.resolved_name,
+                        canonical_source: followed.canonical_source,
+                        span: followed.span,
+                        kind: followed.kind,
+                        text: followed.text,
+                    };
+                }
+            }
+        }
+    }
+
     let export_span = resolver
         .get_export_span_follow_reexports(dep_canonical, requested_name)
         .unwrap_or_default();
     let source = resolver.read_source(canonical_source.as_str());
-    let (kind, span, text) = source
-        .as_deref()
-        .map(|source| extract_declaration_details(source, export_span, resolved_name.as_str()))
-        .unwrap_or((ResolvedDeclarationKind::Unknown, export_span, None));
+    let (kind, span, text) = resolve_local_symbol_details(
+        resolver,
+        canonical_source.as_str(),
+        resolved_name.as_str(),
+        export_span,
+        source.as_deref(),
+    );
     let declaration_id =
         resolver.type_declaration_id(canonical_source.as_str(), resolved_name.as_str());
 
     if kind == ResolvedDeclarationKind::Unknown {
         if let Some(source) = source.as_deref() {
-            if let Some(local_name) =
-                resolve_local_export_alias_target(source, resolved_name.as_str())
-            {
-                let followed_details =
-                    extract_declaration_details(source, export_span, local_name.as_str());
+            if let Some(local_name) = resolver.resolve_local_export_symbol_target(
+                canonical_source.as_str(),
+                resolved_name.as_str(),
+            ) {
+                let followed_details = resolve_local_symbol_details(
+                    resolver,
+                    canonical_source.as_str(),
+                    local_name.as_str(),
+                    export_span,
+                    Some(source),
+                );
                 if followed_details.0 != ResolvedDeclarationKind::Unknown
                     || followed_details.2.is_some()
                 {
@@ -115,12 +228,44 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
         && canonical_source == dep_canonical
     {
         if let Some((followed_canonical, followed_name)) =
+            follow_local_import_symbol_target(resolver, dep_canonical, resolved_name.as_str())
+        {
+            if followed_canonical != canonical_source || followed_name != resolved_name {
+                let followed = resolve_type_declaration(
+                    resolver,
+                    followed_canonical.as_str(),
+                    followed_name.as_str(),
+                );
+                if followed.canonical_source != canonical_source
+                    || followed.resolved_name != resolved_name
+                    || followed.kind != ResolvedDeclarationKind::Unknown
+                    || followed.text.is_some()
+                {
+                    return ResolvedTypeDeclaration {
+                        requested_name: requested_name.to_string(),
+                        declaration_id: followed.declaration_id,
+                        resolved_name: followed.resolved_name,
+                        canonical_source: followed.canonical_source,
+                        span: followed.span,
+                        kind: followed.kind,
+                        text: followed.text,
+                    };
+                }
+            }
+        }
+
+        if let Some((followed_canonical, followed_name)) =
             follow_direct_type_reexport_chain(resolver, dep_canonical, requested_name)
         {
             if followed_canonical != canonical_source || followed_name != resolved_name {
                 if let Some(source) = resolver.read_source(followed_canonical.as_str()) {
-                    let followed_details =
-                        extract_declaration_details(&source, export_span, followed_name.as_str());
+                    let followed_details = resolve_local_symbol_details(
+                        resolver,
+                        followed_canonical.as_str(),
+                        followed_name.as_str(),
+                        export_span,
+                        Some(&source),
+                    );
                     if followed_details.0 != ResolvedDeclarationKind::Unknown
                         || followed_details.2.is_some()
                     {
@@ -190,93 +335,24 @@ fn follow_direct_type_reexport_chain<R: DeclarationMetadataResolver>(
             return Some((current_canonical, current_name));
         }
 
-        let source = resolver.read_source(current_canonical.as_str())?;
-        let alloc = Allocator::new();
-        let extracted = extract_imported_type_bindings(&source, &alloc);
-
-        let Some(reexport) = extracted
-            .reexport_bindings
-            .iter()
-            .find(|binding| binding.local_name == current_name)
-        else {
-            return Some((current_canonical, current_name));
-        };
-
-        let Some(next_canonical) = resolver.resolve_type_dependency_canonical(
-            current_canonical.as_str(),
-            reexport.source.as_str(),
-        ) else {
-            return Some((current_canonical, current_name));
-        };
-
-        current_canonical = next_canonical;
-        current_name = reexport.imported_name.clone();
-    }
-}
-
-fn resolve_local_export_alias_target(source: &str, exported_name: &str) -> Option<String> {
-    let mut current = exported_name.to_string();
-    let mut visited = FxHashSet::default();
-    let mut changed = false;
-
-    while visited.insert(current.clone()) {
-        let next = find_local_export_alias_target(source, current.as_str());
-
-        match next {
-            Some(local) if local != current => {
-                current = local;
-                changed = true;
-            }
-            _ => break,
-        }
-    }
-
-    changed.then_some(current)
-}
-
-fn find_local_export_alias_target(source: &str, exported_name: &str) -> Option<String> {
-    let mut search_from = 0usize;
-    while let Some(relative_index) = source[search_from..].find("export") {
-        let export_index = search_from + relative_index;
-        let after_export = &source[export_index + "export".len()..];
-        let after_export = after_export.trim_start();
-        let after_export = after_export
-            .strip_prefix("type")
-            .map(str::trim_start)
-            .unwrap_or(after_export);
-        let Some(body) = after_export.strip_prefix('{') else {
-            search_from = export_index + "export".len();
-            continue;
-        };
-        let Some(close_index) = body.find('}') else {
-            break;
-        };
-        let specifiers = &body[..close_index];
-        let trailing = body[close_index + 1..].trim_start();
-        if trailing.starts_with("from") {
-            search_from = export_index + "export".len();
+        if let Some(next) = resolver
+            .resolve_direct_type_reexport_target(current_canonical.as_str(), current_name.as_str())
+        {
+            current_canonical = next.0;
+            current_name = next.1;
             continue;
         }
 
-        for raw_specifier in specifiers.split(',') {
-            let specifier = raw_specifier.trim();
-            if specifier.is_empty() {
-                continue;
-            }
-            let specifier = specifier.strip_prefix("type ").unwrap_or(specifier).trim();
-            let (local, exported) = specifier
-                .split_once(" as ")
-                .map(|(local, exported)| (local.trim(), exported.trim()))
-                .unwrap_or((specifier, specifier));
-            if exported == exported_name {
-                return Some(local.to_string());
-            }
-        }
-
-        search_from = export_index + "export".len();
+        return Some((current_canonical, current_name));
     }
+}
 
-    None
+fn follow_local_import_symbol_target<R: DeclarationMetadataResolver>(
+    resolver: &R,
+    dep_canonical: &str,
+    resolved_name: &str,
+) -> Option<(String, String)> {
+    resolver.resolve_local_import_symbol_target(dep_canonical, resolved_name)
 }
 
 fn extract_declaration_details(
@@ -304,6 +380,12 @@ fn extract_declaration_details(
     }
 
     (ResolvedDeclarationKind::Unknown, span, None)
+}
+
+fn slice_declaration_text(source: &str, span: verter_span::Span) -> Option<String> {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    (start < end && end <= source.len()).then(|| source[start..end].trim().to_string())
 }
 
 fn find_named_declaration_start(
@@ -451,6 +533,11 @@ mod tests {
         sources: FxHashMap<String, String>,
         ids: FxHashMap<(String, String), DeclarationId>,
         dep_canonicals: FxHashMap<(String, String), String>,
+        direct_reexports: FxHashMap<(String, String), (String, String)>,
+        local_import_symbol_targets: FxHashMap<(String, String), (String, String)>,
+        local_export_symbol_targets: FxHashMap<(String, String), String>,
+        local_type_symbol_metadata: FxHashMap<(String, String), ResolvedLocalTypeSymbolMetadata>,
+        read_source_calls: std::cell::RefCell<Vec<String>>,
     }
 
     impl DeclarationMetadataResolver for FakeResolver {
@@ -475,6 +562,9 @@ mod tests {
         }
 
         fn read_source(&self, canonical_source: &str) -> Option<String> {
+            self.read_source_calls
+                .borrow_mut()
+                .push(canonical_source.to_string());
             self.sources.get(canonical_source).cloned()
         }
 
@@ -496,6 +586,46 @@ mod tests {
             self.dep_canonicals
                 .get(&(from_canonical.to_string(), import_source.to_string()))
                 .cloned()
+        }
+
+        fn resolve_direct_type_reexport_target(
+            &self,
+            dep_canonical: &str,
+            requested_name: &str,
+        ) -> Option<(String, String)> {
+            self.direct_reexports
+                .get(&(dep_canonical.to_string(), requested_name.to_string()))
+                .cloned()
+        }
+
+        fn resolve_local_import_symbol_target(
+            &self,
+            dep_canonical: &str,
+            resolved_name: &str,
+        ) -> Option<(String, String)> {
+            self.local_import_symbol_targets
+                .get(&(dep_canonical.to_string(), resolved_name.to_string()))
+                .cloned()
+        }
+
+        fn resolve_local_export_symbol_target(
+            &self,
+            canonical_source: &str,
+            exported_name: &str,
+        ) -> Option<String> {
+            self.local_export_symbol_targets
+                .get(&(canonical_source.to_string(), exported_name.to_string()))
+                .cloned()
+        }
+
+        fn resolve_local_type_symbol_metadata(
+            &self,
+            canonical_source: &str,
+            resolved_name: &str,
+        ) -> Option<ResolvedLocalTypeSymbolMetadata> {
+            self.local_type_symbol_metadata
+                .get(&(canonical_source.to_string(), resolved_name.to_string()))
+                .copied()
         }
     }
 
@@ -539,17 +669,20 @@ type Props = {
             ("/types.ts".to_string(), "Props".to_string()),
             verter_span::Span::new(0, 100),
         );
-        resolver.sources.insert(
-            "/types.ts".to_string(),
-            r#"import { Props } from "./inner"; export type { Props };"#.to_string(),
+        resolver.direct_reexports.insert(
+            ("/types.ts".to_string(), "Props".to_string()),
+            ("/inner.ts".to_string(), "Props".to_string()),
         );
         resolver.sources.insert(
             "/inner.ts".to_string(),
             "export interface Props { label: string }".to_string(),
         );
-        resolver.dep_canonicals.insert(
-            ("/types.ts".to_string(), "./inner".to_string()),
-            "/inner.ts".to_string(),
+        resolver.local_type_symbol_metadata.insert(
+            ("/inner.ts".to_string(), "Props".to_string()),
+            ResolvedLocalTypeSymbolMetadata {
+                kind: ResolvedDeclarationKind::Interface,
+                span: verter_span::Span::new(0, 39),
+            },
         );
         resolver
             .ids
@@ -564,7 +697,7 @@ type Props = {
     }
 
     #[test]
-    fn resolve_type_declaration_follows_same_file_local_export_alias_when_span_points_to_alias() {
+    fn resolve_type_declaration_follows_same_file_local_export_symbol_when_span_points_to_alias() {
         let source = "type RouteLocationRaw = string;\nexport { RouteLocationRaw as Lt };";
         let alias_start = source.find("Lt").expect("alias should exist") as u32;
         let alias_end = alias_start + 2;
@@ -576,6 +709,17 @@ type Props = {
         resolver
             .sources
             .insert("/inner.ts".to_string(), source.to_string());
+        resolver.local_export_symbol_targets.insert(
+            ("/inner.ts".to_string(), "Lt".to_string()),
+            "RouteLocationRaw".to_string(),
+        );
+        resolver.local_type_symbol_metadata.insert(
+            ("/inner.ts".to_string(), "RouteLocationRaw".to_string()),
+            ResolvedLocalTypeSymbolMetadata {
+                kind: ResolvedDeclarationKind::TypeAlias,
+                span: verter_span::Span::new(0, 31),
+            },
+        );
         resolver.ids.insert(
             ("/inner.ts".to_string(), "RouteLocationRaw".to_string()),
             11,
@@ -590,6 +734,94 @@ type Props = {
         assert_eq!(
             resolved.text.as_deref(),
             Some("type RouteLocationRaw = string;")
+        );
+    }
+
+    #[test]
+    fn resolve_type_declaration_uses_cached_reexport_route_without_reparsing_source() {
+        let mut resolver = FakeResolver::default();
+        resolver.spans.insert(
+            ("/types.ts".to_string(), "Props".to_string()),
+            verter_span::Span::new(0, 32),
+        );
+        resolver.direct_reexports.insert(
+            ("/types.ts".to_string(), "Props".to_string()),
+            ("/inner.ts".to_string(), "Props".to_string()),
+        );
+        resolver.sources.insert(
+            "/inner.ts".to_string(),
+            "export interface Props { label: string }".to_string(),
+        );
+
+        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
+
+        assert_eq!(resolved.canonical_source, "/inner.ts");
+        assert_eq!(resolved.resolved_name, "Props");
+        assert!(
+            !resolver
+                .read_source_calls
+                .borrow()
+                .iter()
+                .any(|path| path == "/types.ts"),
+            "cached reexport routing should skip rereading the barrel source",
+        );
+    }
+
+    #[test]
+    fn resolve_type_declaration_uses_cached_local_import_symbol_target_without_reparsing_source() {
+        let mut resolver = FakeResolver::default();
+        resolver.spans.insert(
+            ("/types.ts".to_string(), "Props".to_string()),
+            verter_span::Span::new(0, 5),
+        );
+        resolver.local_import_symbol_targets.insert(
+            ("/types.ts".to_string(), "Props".to_string()),
+            ("/inner.ts".to_string(), "InnerProps".to_string()),
+        );
+        resolver.sources.insert(
+            "/inner.ts".to_string(),
+            "export interface InnerProps { label: string }".to_string(),
+        );
+
+        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
+
+        assert_eq!(resolved.canonical_source, "/inner.ts");
+        assert_eq!(resolved.resolved_name, "InnerProps");
+        assert!(
+            !resolver
+                .read_source_calls
+                .borrow()
+                .iter()
+                .any(|path| path == "/types.ts"),
+            "cached local symbol routing should skip rereading the owner source",
+        );
+    }
+
+    #[test]
+    fn resolve_type_declaration_prefers_cached_local_symbol_metadata_for_text() {
+        let mut resolver = FakeResolver::default();
+        let source = "type Props = {\n  label: string\n};\n";
+        resolver
+            .sources
+            .insert("/types.ts".to_string(), source.to_string());
+        resolver.local_type_symbol_metadata.insert(
+            ("/types.ts".to_string(), "Props".to_string()),
+            ResolvedLocalTypeSymbolMetadata {
+                kind: ResolvedDeclarationKind::TypeAlias,
+                span: verter_span::Span::new(0, source.len() as u32),
+            },
+        );
+
+        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
+
+        assert_eq!(resolved.kind, ResolvedDeclarationKind::TypeAlias);
+        assert_eq!(
+            resolved.span,
+            verter_span::Span::new(0, source.len() as u32)
+        );
+        assert_eq!(
+            resolved.text.as_deref(),
+            Some("type Props = {\n  label: string\n};")
         );
     }
 }

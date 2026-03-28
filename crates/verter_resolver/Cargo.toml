@@ -10,7 +10,10 @@ description = "Deterministic semantic resolution primitives for Verter"
 publish = false
 
 [dependencies]
+hotpath = { version = "0.13", optional = true }
 oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
 parking_lot = "0.12"
 rustc-hash = { workspace = true }
 verter_analysis = { path = "../verter_analysis" }
@@ -21,4 +24,5 @@ verter_vfs = { path = "../verter_vfs" }
 
 [features]
 default = []
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
 type-runtime = ["verter_type_runtime"]

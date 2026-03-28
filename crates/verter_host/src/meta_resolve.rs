@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use verter_resolver::{
     run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
-    SingleflightRole, StoreView,
+    SingleflightRole,
 };
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
@@ -531,16 +531,24 @@ impl VerterHost {
 
         if let Some(inputs) = cached_eval_inputs {
             for alias in &inputs.type_aliases {
-                upsert_entry(
-                    alias.local_name.clone(),
-                    alias.decl.body.clone(),
-                    resolve_type_declaration_in_view(
-                        self,
+                if let Some((_resolved_canonical_id, _resolved_exported_name, prepared)) = self
+                    .resolve_shallow_symbol_dependency_alias_in_view(
                         alias.source_canonical_id.as_str(),
                         alias.exported_name.as_str(),
                         store_view,
-                    ),
-                );
+                    )
+                {
+                    upsert_entry(
+                        alias.local_name.clone(),
+                        prepared.decl.body.clone(),
+                        resolve_type_declaration_in_view(
+                            self,
+                            alias.source_canonical_id.as_str(),
+                            alias.exported_name.as_str(),
+                            store_view,
+                        ),
+                    );
+                }
             }
         }
 
@@ -594,6 +602,7 @@ impl VerterHost {
         #[cfg(feature = "scheduler")]
         {
             let mut fallback_whole_hash = None;
+            let mut fallback_source: Option<Arc<str>> = None;
             let mut snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical)
             {
                 let whole_hash = store_view
@@ -616,9 +625,59 @@ impl VerterHost {
                 );
                 snapshot
             } else {
+                if let Some(imported_entry) =
+                    self.clone_current_imported_dependency_entry(canonical, store_view)
+                {
+                    if let Some(snapshot) = imported_entry.snapshot.clone() {
+                        if store_view.is_none() {
+                            self.provenance
+                                .raw_analysis_snapshot_cache_hits
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        component_meta_trace_event(
+                            "get_raw_analysis_snapshot_imported_cache",
+                            format!(
+                                "owner={} hit=true imports={} macros={} bindings={} has_template={} whole_hash={:?}",
+                                canonical,
+                                snapshot.imports.len(),
+                                snapshot.macros.len(),
+                                snapshot.bindings.len(),
+                                snapshot.template.is_some(),
+                                imported_entry.whole_hash,
+                            ),
+                        );
+                        let mut snapshot = if store_view.is_none() {
+                            (*self.cache_raw_analysis_snapshot_arc(
+                                canonical,
+                                imported_entry.whole_hash,
+                                snapshot,
+                            ))
+                            .clone()
+                        } else {
+                            (*snapshot).clone()
+                        };
+                        if self.config.effective_scope().needs_template_analysis() {
+                            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                        }
+                        component_meta_trace_event(
+                            "get_raw_analysis_snapshot_result",
+                            format!(
+                                "owner={} imports={} macros={} bindings={} has_template={}",
+                                canonical,
+                                snapshot.imports.len(),
+                                snapshot.macros.len(),
+                                snapshot.bindings.len(),
+                                snapshot.template.is_some(),
+                            ),
+                        );
+                        return Some(snapshot);
+                    }
+                }
+
                 let source = self.read_analysis_source_in_view(canonical, store_view)?;
                 let whole_hash = crate::hash::hash_16(source.as_bytes());
                 fallback_whole_hash = Some(whole_hash);
+                fallback_source = Some(Arc::clone(&source));
                 if store_view.is_none() {
                     if let Some(snapshot) =
                         self.clone_cached_raw_analysis_snapshot(canonical, whole_hash)
@@ -658,6 +717,24 @@ impl VerterHost {
             self.enrich_destructured_bindings(&mut snapshot);
             if self.config.effective_scope().needs_template_analysis() {
                 self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+            }
+            if let (Some(whole_hash), Some(source)) = (
+                fallback_whole_hash,
+                fallback_source.as_ref().map(Arc::clone),
+            ) {
+                let dependency_resolutions =
+                    VerterHost::dependency_resolutions_from_snapshot(&snapshot);
+                let _ = self.cache_imported_dependency_state(
+                    canonical,
+                    whole_hash,
+                    source,
+                    None,
+                    Some(Arc::new(snapshot.clone())),
+                    None,
+                    None,
+                    None,
+                    dependency_resolutions,
+                );
             }
             component_meta_trace_event(
                 "get_raw_analysis_snapshot_result",
@@ -741,11 +818,18 @@ impl VerterHost {
         {
             let entry = self.compile_cache.get(canonical)?;
             let cached = entry.cached_resolved_meta.get(&mode)?;
-            if !cached
-                .fact_versions
-                .iter()
-                .all(|fact| store_view.validates(fact))
-            {
+            let invalid_details = store_view.invalid_fact_details(&cached.fact_versions, 6);
+            if !invalid_details.is_empty() {
+                component_meta_trace_event(
+                    "try_get_cached_component_meta_invalid",
+                    format!(
+                        "owner={} mode={mode:?} cache=legacy facts={} invalid={} details=[{}]",
+                        canonical,
+                        cached.fact_versions.len(),
+                        invalid_details.len(),
+                        invalid_details.join(" | "),
+                    ),
+                );
                 return None;
             }
             self.resolver_runtime().component_meta.insert_arc(
@@ -763,11 +847,18 @@ impl VerterHost {
             let files = read_lock(&self.files);
             let entry = files.get(canonical)?;
             let cached = entry.cached_resolved_meta.get(&mode)?;
-            if !cached
-                .fact_versions
-                .iter()
-                .all(|fact| store_view.validates(fact))
-            {
+            let invalid_details = store_view.invalid_fact_details(&cached.fact_versions, 6);
+            if !invalid_details.is_empty() {
+                component_meta_trace_event(
+                    "try_get_cached_component_meta_invalid",
+                    format!(
+                        "owner={} mode={mode:?} cache=legacy facts={} invalid={} details=[{}]",
+                        canonical,
+                        cached.fact_versions.len(),
+                        invalid_details.len(),
+                        invalid_details.join(" | "),
+                    ),
+                );
                 return None;
             }
             self.resolver_runtime().component_meta.insert_arc(
@@ -786,6 +877,17 @@ impl VerterHost {
         state: &ResolvedComponentMetaState,
         fact_versions: &[verter_resolver::FactVersionRef],
     ) {
+        component_meta_trace_event(
+            "store_cached_component_meta_result",
+            format!(
+                "owner={} mode={mode:?} facts={} macros={} resolved_types={} has_evaluated_types={}",
+                canonical,
+                fact_versions.len(),
+                state.resolved_macros.len(),
+                state.resolved_type_registry.len(),
+                state.evaluated_types.is_some(),
+            ),
+        );
         let state = Arc::new(state.clone());
         self.resolver_runtime().component_meta.insert_arc(
             resolved_meta_cache_key(canonical, mode),
@@ -861,7 +963,9 @@ impl VerterHost {
         fact_versions: &[verter_resolver::FactVersionRef],
     ) -> bool {
         let view = self.resolver_store_view();
-        fact_versions.iter().all(|fact| view.validates(fact))
+        fact_versions
+            .iter()
+            .all(|fact| verter_resolver::StoreView::validates(&view, fact))
     }
 
     fn append_dependency_fact_versions_in_view(
@@ -871,15 +975,17 @@ impl VerterHost {
         seen: &mut rustc_hash::FxHashSet<verter_resolver::FactVersionRef>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
-        let file_fact = verter_resolver::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
-            hash: store_view
-                .and_then(|view| view.whole_hash(canonical))
-                .or_else(|| self.get_whole_hash(canonical))
-                .unwrap_or_default(),
-        };
-        if seen.insert(file_fact.clone()) {
-            facts.push(file_fact);
+        if let Some(hash) = store_view
+            .and_then(|view| view.whole_hash(canonical))
+            .or_else(|| self.get_whole_hash(canonical))
+        {
+            let file_fact = verter_resolver::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash,
+            };
+            if seen.insert(file_fact.clone()) {
+                facts.push(file_fact);
+            }
         }
 
         for kind in [
@@ -1038,15 +1144,14 @@ impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<
         requested_name: &str,
     ) -> Option<verter_resolver::ResolvedExportTarget> {
         self.host
-            .resolve_named_export_in_view(
+            .resolve_named_type_export_target_in_view(
                 dep_canonical,
                 requested_name,
-                Some(true),
                 self.store_view,
             )
-            .map(|export| verter_resolver::ResolvedExportTarget {
-                source_canonical_id: export.source_canonical_id,
-                source_name: export.source_name,
+            .map(|(canonical, name)| verter_resolver::ResolvedExportTarget {
+                source_canonical_id: (canonical != dep_canonical).then_some(canonical),
+                source_name: name,
             })
     }
 
@@ -1073,9 +1178,11 @@ impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<verter_analysis::type_eval::DeclarationId> {
-        self.host
-            .base_eval_env_in_view(canonical_source, self.store_view)
-            .and_then(|env| env.type_declaration_id(resolved_name))
+        self.host.local_type_declaration_id_in_view(
+            canonical_source,
+            resolved_name,
+            self.store_view,
+        )
     }
 
     fn resolve_type_dependency_canonical(
@@ -1088,6 +1195,68 @@ impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<
             import_source,
             self.store_view,
         )
+    }
+
+    fn resolve_direct_type_reexport_target(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<(String, String)> {
+        self.host.resolve_direct_type_reexport_target_in_view(
+            dep_canonical,
+            requested_name,
+            self.store_view,
+        )
+    }
+
+    fn resolve_local_import_symbol_target(
+        &self,
+        dep_canonical: &str,
+        resolved_name: &str,
+    ) -> Option<(String, String)> {
+        self.host.resolve_local_import_symbol_target_in_view(
+            dep_canonical,
+            resolved_name,
+            self.store_view,
+        )
+    }
+
+    fn resolve_local_export_symbol_target(
+        &self,
+        canonical_source: &str,
+        exported_name: &str,
+    ) -> Option<String> {
+        self.host.resolve_local_export_symbol_target_in_view(
+            canonical_source,
+            exported_name,
+            self.store_view,
+        )
+    }
+
+    fn resolve_local_type_symbol_metadata(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<verter_resolver::ResolvedLocalTypeSymbolMetadata> {
+        let analysis = self
+            .host
+            .external_type_analysis_in_view(canonical_source, self.store_view)?;
+        let symbol = analysis.local_type_symbol(resolved_name)?;
+        let kind = match symbol.kind {
+            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+                verter_resolver::ResolvedDeclarationKind::TypeAlias
+            }
+            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
+                verter_resolver::ResolvedDeclarationKind::Interface
+            }
+            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
+                verter_resolver::ResolvedDeclarationKind::Class
+            }
+        };
+        Some(verter_resolver::ResolvedLocalTypeSymbolMetadata {
+            kind,
+            span: symbol.span,
+        })
     }
 }
 
@@ -1214,10 +1383,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         exported_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut rustc_hash::FxHashMap<
-            (String, String),
-            Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
-        >,
+        cache: &mut verter_resolver::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.host
@@ -1246,10 +1412,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         span: verter_span::Span,
         expanded: bool,
         tracked_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut rustc_hash::FxHashMap<
-            (String, String),
-            Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
-        >,
+        cache: &mut verter_resolver::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         resolve_jsdoc_block(
@@ -1344,22 +1507,6 @@ fn read_full_source(
 ) -> Option<String> {
     host.read_analysis_source_in_view(canonical_source, store_view)
         .map(|source| source.to_string())
-        .or_else(|| {
-            host.workspace
-                .read()
-                .read_file(canonical_source)
-                .and_then(|source| {
-                    let whole_hash = crate::hash::hash_16(source.as_bytes());
-                    if !host.store_view_allows_current_whole_hash(
-                        canonical_source,
-                        whole_hash,
-                        store_view,
-                    ) {
-                        return None;
-                    }
-                    Some(source.to_string())
-                })
-        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1369,10 +1516,7 @@ fn resolve_jsdoc_block(
     span: verter_span::Span,
     mode: ResolverMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    cache: &mut rustc_hash::FxHashMap<
-        (String, String),
-        Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
-    >,
+    cache: &mut verter_resolver::ExternalTypeBodyCache,
     visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     kind: verter_vfs::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -1415,10 +1559,7 @@ fn map_jsdoc_tag(
     canonical_source: &str,
     mode: ResolverMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    cache: &mut rustc_hash::FxHashMap<
-        (String, String),
-        Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
-    >,
+    cache: &mut verter_resolver::ExternalTypeBodyCache,
     visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     kind: verter_vfs::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -1511,10 +1652,7 @@ fn resolve_jsdoc_tag_type(
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    cache: &mut rustc_hash::FxHashMap<
-        (String, String),
-        Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
-    >,
+    cache: &mut verter_resolver::ExternalTypeBodyCache,
     visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     kind: verter_vfs::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,

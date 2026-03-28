@@ -105,6 +105,7 @@ pub trait ExternalTypeRequestResolver: ExternalTypeBodyResolver {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
     resolver: &R,
     owner_canonical: &str,
@@ -191,6 +192,10 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
     }
 
     let cache_key = (dep_canonical.clone(), type_name.to_string());
+    let mut effective_dep_canonical = dep_canonical.clone();
+    let mut effective_type_name = type_name.to_string();
+    let mut registry_route_target: Option<RegistryResolvedTarget> = None;
+    let mut registry_route_hashes: Vec<(String, ResolverHash16)> = Vec::new();
     if debug_enabled {
         resolver.debug_log(format!(
             "resolve_external_type enter depth={} owner={} import={} dep={} type={}",
@@ -222,31 +227,52 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
             &mut registry_visited,
         ) {
             if let Some(target) = &route.target {
-                let target_hash = resolver.whole_hash(&target.final_canonical_id);
-                if let Some(entry) = resolver.lookup_resolved_type_cache(
-                    &target.final_canonical_id,
-                    target_hash,
-                    &target.exported_name,
-                    kind,
-                ) {
-                    resolver.note_resolved_type_cache_hit();
-                    for dep in &entry.tracked_deps {
-                        tracked_deps.insert(dep.clone());
+                if let Some(target_source) = resolver
+                    .read_source_for_type_resolution(&target.final_canonical_id, profile_hash)
+                {
+                    let target_hash = resolver.compute_source_hash(&target_source);
+                    if let Some(entry) = resolver.lookup_resolved_type_cache(
+                        &target.final_canonical_id,
+                        target_hash,
+                        &target.exported_name,
+                        kind,
+                    ) {
+                        resolver.note_resolved_type_cache_hit();
+                        for dep in &entry.tracked_deps {
+                            tracked_deps.insert(dep.clone());
+                            resolution_deps.insert(dep.clone());
+                        }
+                        for dep in &route.tracked_deps {
+                            tracked_deps.insert(dep.clone());
+                            resolution_deps.insert(dep.clone());
+                        }
+                        cache.insert(cache_key.clone(), entry.resolved.clone());
+                        if debug_enabled {
+                            resolver.debug_log(format!(
+                                "resolve_external_type registry-hit dep={} type={} -> {}#{}",
+                                dep_canonical,
+                                type_name,
+                                target.final_canonical_id,
+                                target.exported_name
+                            ));
+                        }
+                        if depth == 0 {
+                            resolver.store_route_cache(
+                                owner_canonical,
+                                import_source,
+                                type_name,
+                                kind,
+                                ExternalTypeRouteEntry {
+                                    owner_hash: resolver.whole_hash(owner_canonical),
+                                    target: Some(target.clone()),
+                                    tracked_deps: resolution_deps.iter().cloned().collect(),
+                                    route_hashes: route.route_hashes.clone(),
+                                    negative_barrel_generation: None,
+                                },
+                            );
+                        }
+                        return Ok(entry.resolved);
                     }
-                    for dep in &route.tracked_deps {
-                        tracked_deps.insert(dep.clone());
-                    }
-                    cache.insert(cache_key.clone(), entry.resolved.clone());
-                    if debug_enabled {
-                        resolver.debug_log(format!(
-                            "resolve_external_type registry-hit dep={} type={} -> {}#{}",
-                            dep_canonical,
-                            type_name,
-                            target.final_canonical_id,
-                            target.exported_name
-                        ));
-                    }
-                    return Ok(entry.resolved);
                 }
                 if debug_enabled {
                     resolver.debug_log(format!(
@@ -254,16 +280,24 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
                         dep_canonical, type_name, target.final_canonical_id, target.exported_name
                     ));
                 }
+                for dep in &route.tracked_deps {
+                    tracked_deps.insert(dep.clone());
+                    resolution_deps.insert(dep.clone());
+                }
+                effective_dep_canonical = target.final_canonical_id.clone();
+                effective_type_name = target.exported_name.clone();
+                registry_route_target = Some(target.clone());
+                registry_route_hashes = route.route_hashes;
             }
         }
     }
 
     let effective_source =
-        match resolver.read_source_for_type_resolution(&dep_canonical, profile_hash) {
+        match resolver.read_source_for_type_resolution(&effective_dep_canonical, profile_hash) {
             Some(source) => source,
             None => {
-                if dep_canonical.ends_with(".vue") {
-                    cache.insert(cache_key, None);
+                if effective_dep_canonical.ends_with(".vue") {
+                    cache.insert(cache_key.clone(), None);
                     return Ok(None);
                 }
                 return if required_root_dep {
@@ -282,15 +316,22 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
 
     if use_host_cache {
         if let Some(dep_hash) = dep_source_hash {
-            if let Some(entry) =
-                resolver.lookup_resolved_type_cache(&dep_canonical, dep_hash, type_name, kind)
-            {
+            if let Some(entry) = resolver.lookup_resolved_type_cache(
+                &effective_dep_canonical,
+                dep_hash,
+                &effective_type_name,
+                kind,
+            ) {
                 resolver.note_resolved_type_cache_hit();
                 for dep in &entry.tracked_deps {
                     tracked_deps.insert(dep.clone());
                     resolution_deps.insert(dep.clone());
                 }
                 cache.insert(cache_key.clone(), entry.resolved.clone());
+                cache.insert(
+                    (effective_dep_canonical.clone(), effective_type_name.clone()),
+                    entry.resolved.clone(),
+                );
                 return Ok(entry.resolved);
             }
             resolver.note_resolved_type_cache_miss();
@@ -299,8 +340,8 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
 
     let resolved = resolve_external_type_from_source_body(
         resolver,
-        &dep_canonical,
-        type_name,
+        &effective_dep_canonical,
+        &effective_type_name,
         &effective_source,
         tracked_deps,
         resolution_deps,
@@ -315,9 +356,9 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
     if use_host_cache {
         if let Some(dep_hash) = dep_source_hash {
             resolver.store_resolved_type_cache(
-                &cache_key.0,
+                &effective_dep_canonical,
                 dep_hash,
-                &cache_key.1,
+                &effective_type_name,
                 kind,
                 resolved.clone(),
                 resolution_deps.iter().cloned().collect(),
@@ -326,8 +367,24 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
     }
 
     cache.insert(cache_key.clone(), resolved.clone());
+    cache.insert(
+        (effective_dep_canonical.clone(), effective_type_name.clone()),
+        resolved.clone(),
+    );
 
     if depth == 0 && use_host_cache && profile_hash.is_none() {
+        let mut route_hashes: Vec<(String, ResolverHash16)> = resolution_deps
+            .iter()
+            .map(|dep| (dep.clone(), resolver.whole_hash(dep)))
+            .collect();
+        for (canonical, hash) in registry_route_hashes {
+            if !route_hashes
+                .iter()
+                .any(|(existing_canonical, _)| existing_canonical == &canonical)
+            {
+                route_hashes.push((canonical, hash));
+            }
+        }
         resolver.store_route_cache(
             owner_canonical,
             import_source,
@@ -335,15 +392,14 @@ pub fn resolve_external_type_request<R: ExternalTypeRequestResolver>(
             kind,
             ExternalTypeRouteEntry {
                 owner_hash: resolver.whole_hash(owner_canonical),
-                target: resolved.as_ref().map(|_| RegistryResolvedTarget {
-                    final_canonical_id: cache_key.0.clone(),
-                    exported_name: cache_key.1.clone(),
+                target: resolved.as_ref().map(|_| {
+                    registry_route_target.unwrap_or(RegistryResolvedTarget {
+                        final_canonical_id: effective_dep_canonical.clone(),
+                        exported_name: effective_type_name.clone(),
+                    })
                 }),
                 tracked_deps: resolution_deps.iter().cloned().collect(),
-                route_hashes: resolution_deps
-                    .iter()
-                    .map(|dep| (dep.clone(), resolver.whole_hash(dep)))
-                    .collect(),
+                route_hashes,
                 negative_barrel_generation: None,
             },
         );
@@ -363,7 +419,9 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeSet;
     use verter_analysis::hash_16;
-    use verter_core::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
+    use verter_core::utils::oxc::vue::resolve_type::{
+        AnalyzedExternalTypeSource, ResolvedElements, RuntimeType,
+    };
     use verter_vfs::ResolveRequestKind;
 
     #[derive(Default)]
@@ -396,6 +454,29 @@ mod tests {
 
         fn step_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
             format!("step limit exceeded for {type_name} at {last_dep}")
+        }
+
+        fn resolve_external_type_from_analysis(
+            &self,
+            _dep_canonical: &str,
+            type_name: &str,
+            effective_source: &str,
+            analysis: &AnalyzedExternalTypeSource,
+            imported_companions: &FxHashMap<String, ResolvedElements>,
+        ) -> Option<ResolvedElements> {
+            let allocator = oxc_allocator::Allocator::new();
+            let parsed =
+                oxc_parser::Parser::new(&allocator, effective_source, oxc_span::SourceType::ts())
+                    .parse();
+            (!parsed.panicked).then(|| {
+                verter_core::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+                    type_name,
+                    &parsed.program,
+                    effective_source.as_bytes(),
+                    analysis,
+                    imported_companions,
+                )
+            })?
         }
 
         fn resolve_external_type_recursive(
@@ -695,10 +776,14 @@ mod tests {
                 route_hashes: Vec::new(),
             },
         );
+        resolver.sources.insert(
+            "/src/final.ts".to_string(),
+            "export interface Props {}".to_string(),
+        );
         resolver.resolved_cache.borrow_mut().insert(
             (
                 "/src/final.ts".to_string(),
-                hash_16(b"/src/final.ts"),
+                hash_16(b"export interface Props {}"),
                 "Props".to_string(),
                 ResolveRequestKind::TypeImport,
             ),
@@ -735,6 +820,87 @@ mod tests {
         assert!(tracked.contains("/src/registry.ts"));
         assert!(tracked.contains("/src/payload.ts"));
         assert_eq!(*resolver.cache_hits.borrow(), 1);
+    }
+
+    #[test]
+    fn resolve_external_type_request_uses_registry_target_source_when_payload_is_cold() {
+        let mut resolver = TestResolver::default();
+        resolver.dependency_routes.insert(
+            (
+                "/src/owner.ts".to_string(),
+                "./dep".to_string(),
+                ResolveRequestKind::TypeImport,
+            ),
+            "/src/dep.ts".to_string(),
+        );
+        resolver.registry_routes.insert(
+            (
+                "/src/dep.ts".to_string(),
+                "Props".to_string(),
+                ResolveRequestKind::TypeImport,
+            ),
+            RegistryRoute {
+                target: Some(RegistryResolvedTarget {
+                    final_canonical_id: "/src/final.ts".to_string(),
+                    exported_name: "InnerProps".to_string(),
+                }),
+                tracked_deps: vec!["/src/registry.ts".to_string()],
+                route_hashes: vec![("/src/registry.ts".to_string(), hash_16(b"/src/registry.ts"))],
+            },
+        );
+        resolver.sources.insert(
+            "/src/final.ts".to_string(),
+            "export interface InnerProps { label: string }".to_string(),
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+
+        let actual = resolve_external_type_request(
+            &resolver,
+            "/src/owner.ts",
+            "./dep",
+            "Props",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            true,
+            ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("cold registry route should resolve directly from the target source");
+
+        assert!(actual.is_some());
+        assert!(tracked.contains("/src/dep.ts"));
+        assert!(tracked.contains("/src/registry.ts"));
+        let stored_routes = resolver.stored_routes.borrow();
+        let route_entry = stored_routes
+            .get(&(
+                "/src/owner.ts".to_string(),
+                "./dep".to_string(),
+                "Props".to_string(),
+                ResolveRequestKind::TypeImport,
+            ))
+            .expect("cold registry route should still persist the final route");
+        let target = route_entry
+            .target
+            .as_ref()
+            .expect("successful registry-target resolution should store a target");
+        assert_eq!(target.final_canonical_id, "/src/final.ts");
+        assert_eq!(target.exported_name, "InnerProps");
+        assert!(
+            resolver
+                .resolved_cache
+                .borrow()
+                .keys()
+                .any(|(dep, _, ty, _)| dep == "/src/final.ts" && ty == "InnerProps"),
+            "cold registry route should cache the resolved payload under the final target",
+        );
     }
 
     #[test]

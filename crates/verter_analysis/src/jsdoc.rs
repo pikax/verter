@@ -26,8 +26,7 @@ fn find_leading_jsdoc_from_comments<'a>(
     None
 }
 
-fn find_leading_jsdoc_near_offset(source: &str, target_start: u32) -> Option<&str> {
-    let start = target_start as usize;
+fn find_leading_jsdoc_immediately_before(source: &str, start: usize) -> Option<&str> {
     if start == 0 || start > source.len() {
         return None;
     }
@@ -45,6 +44,72 @@ fn find_leading_jsdoc_near_offset(source: &str, target_start: u32) -> Option<&st
     } else {
         None
     }
+}
+
+fn previous_identifier_token(source: &str, end: usize) -> Option<(usize, &str)> {
+    if end == 0 || end > source.len() {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    let mut token_end = end;
+    while token_end > 0 && bytes[token_end - 1].is_ascii_whitespace() {
+        token_end -= 1;
+    }
+    if token_end == 0 {
+        return None;
+    }
+
+    let mut token_start = token_end;
+    while token_start > 0 {
+        let byte = bytes[token_start - 1];
+        if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' {
+            token_start -= 1;
+            continue;
+        }
+        break;
+    }
+
+    (token_start != token_end).then_some((token_start, &source[token_start..token_end]))
+}
+
+fn is_jsdoc_prefix_token(token: &str) -> bool {
+    matches!(
+        token,
+        "export"
+            | "default"
+            | "declare"
+            | "abstract"
+            | "async"
+            | "public"
+            | "private"
+            | "protected"
+            | "readonly"
+            | "static"
+            | "override"
+            | "accessor"
+    )
+}
+
+fn find_leading_jsdoc_near_offset(source: &str, target_start: u32) -> Option<&str> {
+    let start = target_start as usize;
+    if let Some(raw) = find_leading_jsdoc_immediately_before(source, start) {
+        return Some(raw);
+    }
+
+    let mut cursor = start;
+    for _ in 0..8 {
+        let (token_start, token) = previous_identifier_token(source, cursor)?;
+        if !is_jsdoc_prefix_token(token) {
+            return None;
+        }
+        if let Some(raw) = find_leading_jsdoc_immediately_before(source, token_start) {
+            return Some(raw);
+        }
+        cursor = token_start;
+    }
+
+    None
 }
 
 pub fn parse_jsdoc(raw: &str) -> (Option<String>, Vec<JsdocTag>) {
@@ -124,5 +189,50 @@ pub fn extract_jsdoc_near_offset(
     match find_leading_jsdoc_near_offset(source, target_start) {
         Some(raw) => parse_jsdoc(raw),
         None => (None, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_jsdoc_near_offset;
+
+    #[test]
+    fn extract_jsdoc_near_offset_skips_export_modifier_tokens() {
+        let source = r#"
+/** Description of the Props interface.
+ * @deprecated Use NewProps instead.
+ */
+export interface Props { a: string }
+"#;
+        let target_start = source
+            .find("interface Props")
+            .expect("interface keyword should exist") as u32;
+
+        let (description, tags) = extract_jsdoc_near_offset(source, target_start);
+
+        assert_eq!(
+            description.as_deref(),
+            Some("Description of the Props interface.")
+        );
+        assert!(tags.iter().any(|tag| tag.name == "deprecated"));
+    }
+
+    #[test]
+    fn extract_jsdoc_near_offset_skips_multiple_declaration_modifiers() {
+        let source = r#"
+/** Description of the Value class. */
+export declare abstract class Value {}
+"#;
+        let target_start = source
+            .find("class Value")
+            .expect("class keyword should exist") as u32;
+
+        let (description, tags) = extract_jsdoc_near_offset(source, target_start);
+
+        assert_eq!(
+            description.as_deref(),
+            Some("Description of the Value class.")
+        );
+        assert!(tags.is_empty());
     }
 }

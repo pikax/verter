@@ -1144,8 +1144,12 @@ defineSlots<{
     let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
     let result = evaluate_macro_types(&snapshot.macros, source);
 
-    // The new expander evaluates slot binding types that the old code skipped.
-    // Button['ui'] resolves to string because Button = { ui: string }.
+    // Slot names and required-ness already come from the parsed slot surface,
+    // so macro evaluation should only expand the binding payload lazily here.
+    assert!(
+        result.define_slots.is_empty(),
+        "inline defineSlots surfaces should not trigger a second full object-shape expansion"
+    );
     assert!(
         !result.slot_bindings.is_empty(),
         "slot binding types should now be expanded"
@@ -1154,5 +1158,162 @@ defineSlots<{
         result.slot_bindings[0].r#type,
         TypeExpr::Primitive(PrimitiveName::String),
         "Button['ui'] should resolve to string"
+    );
+}
+
+#[test]
+fn expand_macro_types_with_lookup_keeps_define_slots_shape_when_slot_fields_are_missing() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+defineSlots<RemoteSlots>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    assert!(
+        snapshot
+            .macros
+            .first()
+            .is_some_and(|mac| mac.slot_fields.is_empty()),
+        "type-reference defineSlots macro should not have eager slot fields"
+    );
+
+    let mut env = parse_and_build_env(source);
+    let mut lookup = BuildLookup::default();
+    lookup.type_decls.insert(
+        "RemoteSlots".to_string(),
+        TypeDeclInfo {
+            name: "RemoteSlots".to_string(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "default".to_string(),
+                    ty: TypeExpr::Function(Arc::new(FunctionExpr {
+                        parameters: vec![FunctionParam {
+                            name: Some("props".to_string()),
+                            ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                                properties: vec![ObjectMember::Property(ObjectProperty {
+                                    name: "label".to_string(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: false,
+                                    readonly: false,
+                                })],
+                            })),
+                            optional: false,
+                            rest: false,
+                        }],
+                        return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                        type_parameters: Vec::new(),
+                    })),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+        },
+    );
+
+    let budget = super::type_expand::ExpansionBudget::default();
+    let result = expand_macro_types_with_lookup(
+        &snapshot.macros,
+        Some(source),
+        &mut env,
+        None,
+        &budget,
+        &mut lookup,
+    );
+
+    assert_eq!(
+        result.define_slots.len(),
+        1,
+        "fallback defineSlots shape expansion is still required when no eager slot surface exists"
+    );
+}
+
+#[test]
+fn expand_macro_types_with_lookup_materializes_imported_mapped_slot_binding_shapes() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let app_source = r#"
+import type { PricingPlansSlots } from './slots'
+
+defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
+"#;
+    let slots_source = r#"
+export interface PricingPlan {
+  id: string
+}
+
+export interface PricingPlanSlots {
+  badge(props: { planId: string }): any
+  title(props: { planId: string }): any
+}
+
+export type ExtendSlotWithPlan<TPlan, TKey extends keyof PricingPlanSlots> =
+  PricingPlanSlots[TKey] extends (props: infer P) => any
+    ? (props: P & { plan: TPlan }) => any
+    : PricingPlanSlots[TKey]
+
+export type PricingPlansSlots<TPlan extends PricingPlan = PricingPlan> = {
+  [K in keyof PricingPlanSlots]?: ExtendSlotWithPlan<TPlan, K>
+} & {
+  default?(props?: {}): any
+}
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(app_source, oxc_span::SourceType::tsx(), &allocator);
+    let mut env = parse_and_build_env(app_source);
+    let dep_env = parse_and_build_env(slots_source);
+    let mut lookup = BuildLookup::default();
+    lookup.type_decls.extend(dep_env.type_symbols.clone());
+
+    let budget = super::type_expand::ExpansionBudget::default();
+    let result = expand_macro_types_with_lookup(
+        &snapshot.macros,
+        Some(app_source),
+        &mut env,
+        None,
+        &budget,
+        &mut lookup,
+    );
+
+    assert_eq!(result.define_slots.len(), 1);
+    let shape = &result.define_slots[0].result.value;
+    let badge = shape
+        .properties
+        .iter()
+        .find(|prop| prop.name == "badge")
+        .expect("badge slot should be materialized");
+    let TypeExpr::Function(func) = &badge.ty else {
+        panic!(
+            "badge slot should expand to a function type, got {:?}",
+            badge.ty
+        );
+    };
+    let Some(first_param) = func.parameters.first() else {
+        panic!("badge slot function should have one parameter");
+    };
+    let TypeExpr::Object(obj) = &first_param.ty else {
+        panic!(
+            "badge slot parameter should be an object type, got {:?}",
+            first_param.ty
+        );
+    };
+    let binding_names: std::collections::BTreeSet<_> = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        binding_names,
+        std::collections::BTreeSet::from(["plan", "planId"])
     );
 }

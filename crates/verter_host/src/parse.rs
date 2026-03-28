@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::Program;
+use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 
 use verter_core::compile::parse_sfc;
@@ -99,10 +101,30 @@ pub(crate) fn parse_vue_snapshot(
     source: &str,
     analysis_scope: verter_analysis::AnalysisScope,
 ) -> (ParseSnapshot, ParsedSfc) {
-    let whole_hash = hash_16(source.as_bytes());
-
-    // Single parse — cached ParsedSfc is returned alongside the snapshot.
     let parsed = parse_sfc(source, None, None);
+    let snapshot = build_vue_snapshot_from_parsed(canonical_id, source, analysis_scope, &parsed);
+
+    (snapshot, parsed)
+}
+
+pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
+    if canonical_id.ends_with(".d.ts")
+        || canonical_id.ends_with(".d.mts")
+        || canonical_id.ends_with(".d.cts")
+    {
+        SourceType::d_ts()
+    } else {
+        SourceType::ts()
+    }
+}
+
+pub(crate) fn build_vue_snapshot_from_parsed(
+    canonical_id: &str,
+    source: &str,
+    analysis_scope: verter_analysis::AnalysisScope,
+    parsed: &ParsedSfc,
+) -> ParseSnapshot {
+    let whole_hash = hash_16(source.as_bytes());
 
     let mut script_hashes = Vec::new();
     let mut script_attrs_fp = Vec::new();
@@ -399,32 +421,29 @@ pub(crate) fn parse_vue_snapshot(
         source,
     );
 
-    (
-        ParseSnapshot {
-            whole_hash,
-            semantic_hash,
-            slices,
-            descriptor,
-            meta: FileMeta {
-                has_script,
-                has_template,
-                has_scoped_style,
-                script_lang,
-                template_lang,
-                style_langs,
-                custom_types,
-                custom_langs,
-            },
-            external_requests,
-            src_blocks,
-            parse_diagnostics,
-            script_analysis,
-            export_signatures,
-            style_analyses,
-            preprocessor_requests,
+    ParseSnapshot {
+        whole_hash,
+        semantic_hash,
+        slices,
+        descriptor,
+        meta: FileMeta {
+            has_script,
+            has_template,
+            has_scoped_style,
+            script_lang,
+            template_lang,
+            style_langs,
+            custom_types,
+            custom_langs,
         },
-        parsed,
-    )
+        external_requests,
+        src_blocks,
+        parse_diagnostics,
+        script_analysis,
+        export_signatures,
+        style_analyses,
+        preprocessor_requests,
+    }
 }
 
 /// Build preprocessor requests for blocks that use non-native languages.
@@ -919,71 +938,32 @@ pub(crate) fn build_style_analyses_from_parsed(
         .collect()
 }
 
-pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseSnapshot {
+pub(crate) fn build_non_sfc_snapshot_from_program(
+    _canonical_id: &str,
+    source: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
     let slices = SliceHashes::default();
     let descriptor = DescriptorMin::default();
-    // Use whole_hash as semantic_hash so content changes in non-SFC files
-    // (e.g. .ts files imported for type resolution) are properly detected
-    // and trigger dependent SFC recompilation.
     let semantic_hash = whole_hash;
 
-    // Use SourceType::d_ts() for declaration files — OXC parses them differently
-    // and panics on certain constructs (e.g. tuple types) with the wrong mode.
-    let source_type = if canonical_id.ends_with(".d.ts")
-        || canonical_id.ends_with(".d.mts")
-        || canonical_id.ends_with(".d.cts")
-    {
-        SourceType::d_ts()
-    } else {
-        SourceType::ts()
-    };
-
-    let alloc = Allocator::new();
-    let (export_signatures, panic_diag) = catch_analysis_panic(
-        "export signature analysis",
-        std::panic::AssertUnwindSafe(|| {
-            verter_analysis::build_export_signatures(source, source_type, &alloc)
-        }),
+    let export_signatures = verter_analysis::build_export_signatures_from_program(source, program);
+    let script_analysis = verter_analysis::build_script_analysis_with_scope_from_program(
+        source,
+        source_type,
+        program,
+        verter_analysis::AnalysisScope::IMPORTS
+            | verter_analysis::AnalysisScope::BINDINGS
+            | verter_analysis::AnalysisScope::FUNC_RETURNS
+            | verter_analysis::AnalysisScope::REACTIVITY
+            | verter_analysis::AnalysisScope::MACROS
+            | verter_analysis::AnalysisScope::MACRO_TYPE_DEPS
+            | verter_analysis::AnalysisScope::VUE_API_USAGE
+            | verter_analysis::AnalysisScope::EXPORT_SIGNATURES
+            | verter_analysis::AnalysisScope::SCRIPT_USAGES,
     );
-
-    // Run script analysis for non-SFC files to populate exported_functions
-    // (composable return shape data used by cross-file binding enrichment).
-    let alloc2 = Allocator::new();
-    let (script_analysis, script_panic_diag) = catch_analysis_panic(
-        "script analysis (non-SFC)",
-        std::panic::AssertUnwindSafe(|| {
-            // All script-applicable flags (skip template/style flags since they're SFC-specific).
-            // TODO: may reduce to a lighter scope if analysis of non-SFC files becomes a performance bottleneck
-            verter_analysis::build_script_analysis_with_scope(
-                source,
-                source_type,
-                &alloc2,
-                verter_analysis::AnalysisScope::IMPORTS
-                    | verter_analysis::AnalysisScope::BINDINGS
-                    | verter_analysis::AnalysisScope::FUNC_RETURNS
-                    | verter_analysis::AnalysisScope::REACTIVITY
-                    | verter_analysis::AnalysisScope::MACROS
-                    | verter_analysis::AnalysisScope::MACRO_TYPE_DEPS
-                    | verter_analysis::AnalysisScope::VUE_API_USAGE
-                    | verter_analysis::AnalysisScope::EXPORT_SIGNATURES
-                    | verter_analysis::AnalysisScope::SCRIPT_USAGES,
-            )
-        }),
-    );
-
-    let mut diags = Vec::new();
-    if let Some(d) = panic_diag {
-        diags.push(d);
-    }
-    if let Some(d) = script_panic_diag {
-        diags.push(d);
-    }
-    let parse_diagnostics = if diags.is_empty() {
-        DiagnosticsSnapshot::default()
-    } else {
-        DiagnosticsSnapshot::from_vec(diags)
-    };
 
     ParseSnapshot {
         whole_hash,
@@ -993,12 +973,40 @@ pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseS
         meta: FileMeta::default(),
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
-        parse_diagnostics,
+        parse_diagnostics: DiagnosticsSnapshot::default(),
         script_analysis,
         export_signatures,
         style_analyses: Vec::new(),
         preprocessor_requests: Vec::new(),
     }
+}
+
+pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseSnapshot {
+    let source_type = non_sfc_source_type(canonical_id);
+    let alloc = Allocator::new();
+    let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
+        parse_regular_expression: false,
+        ..ParseOptions::default()
+    });
+    let result = parser.parse();
+    if result.panicked {
+        return ParseSnapshot {
+            whole_hash: hash_16(source.as_bytes()),
+            semantic_hash: hash_16(source.as_bytes()),
+            slices: SliceHashes::default(),
+            descriptor: DescriptorMin::default(),
+            meta: FileMeta::default(),
+            external_requests: Vec::new(),
+            src_blocks: Vec::new(),
+            parse_diagnostics: DiagnosticsSnapshot::default(),
+            script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+            export_signatures: Vec::new(),
+            style_analyses: Vec::new(),
+            preprocessor_requests: Vec::new(),
+        };
+    }
+
+    build_non_sfc_snapshot_from_program(canonical_id, source, source_type, &result.program)
 }
 
 #[cfg(test)]

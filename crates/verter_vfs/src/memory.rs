@@ -87,6 +87,7 @@ impl MemoryWorkspace {
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
         self.engine.invalidate_package_manifest(&canonical_id);
         self.engine.snapshot.write().inject(canonical_id, source);
+        self.engine.bump_content_generation();
     }
 
     /// Remove a file from the snapshot.
@@ -94,6 +95,7 @@ impl MemoryWorkspace {
         self.engine.invalidate_package_manifest(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
+        self.engine.bump_content_generation();
     }
 
     /// Apply a batch of workspace changes.
@@ -178,6 +180,10 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.owner_for_file(canonical_id)
     }
 
+    fn content_generation(&self) -> u64 {
+        self.engine.current_content_generation()
+    }
+
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
         self.engine.record_parsed_edges(self, canonical_id, edges);
     }
@@ -204,11 +210,13 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .overlay
             .write()
             .set(canonical_id.to_string(), source);
+        self.engine.bump_content_generation();
     }
 
     fn notify_close(&self, canonical_id: &str) {
         self.engine.invalidate_package_manifest(canonical_id);
         self.engine.overlay.write().clear(canonical_id);
+        self.engine.bump_content_generation();
     }
 
     fn notify_delete(&self, canonical_id: &str) {
@@ -216,6 +224,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
+        self.engine.bump_content_generation();
     }
 
     fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {

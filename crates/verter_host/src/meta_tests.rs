@@ -72,6 +72,20 @@ fn evaluated_define_props_type<'a>(types: &'a ExpandedComponentTypes, name: &str
         .ty
 }
 
+fn resolved_imported_alias_body(
+    host: &VerterHost,
+    alias: &verter_resolver::ImportedTypeAlias,
+) -> TypeExpr {
+    let view = host.resolver_store_view();
+    host.resolve_shallow_symbol_dependency_alias_in_view(
+        alias.source_canonical_id.as_str(),
+        alias.exported_name.as_str(),
+        Some(&view),
+    )
+    .map(|prepared| prepared.2.decl.body)
+    .expect("imported alias should materialize through the host cache")
+}
+
 fn assert_union_string_literals(expr: &TypeExpr, expected: &[&str]) {
     let mut actual = BTreeSet::new();
     match expr {
@@ -3826,6 +3840,264 @@ fn get_component_meta_provenance_uses_single_resolver_path() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn repeated_declared_component_meta_queries_reuse_cached_resolved_state_for_workspace_type_deps() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/types.ts".to_string(),
+        Arc::from(
+            r#"export interface Base { id?: string }
+export interface Props extends Base { msg: string; count?: number }"#,
+        ),
+    );
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "owner SFC should load into the host"
+    );
+    assert!(
+        project
+            .host()
+            .get_whole_hash("/workspace/types.ts")
+            .is_none(),
+        "workspace dependency should not be eagerly loaded before the first query"
+    );
+
+    let session = project.open_session().unwrap();
+    let first = session
+        .get_declared_component_meta("/workspace/App.vue")
+        .unwrap()
+        .expect("first declared query should return component meta");
+    assert!(
+        first.props.iter().any(|prop| prop.name == "msg"),
+        "first declared query should resolve the imported prop surface"
+    );
+    assert!(
+        first.props.iter().any(|prop| prop.name == "count"),
+        "first declared query should resolve optional imported props"
+    );
+
+    project.host().provenance().reset();
+    let second = session
+        .get_declared_component_meta("/workspace/App.vue")
+        .unwrap()
+        .expect("second declared query should return component meta");
+    let p = provenance(&project);
+
+    assert_eq!(
+        second.props.len(),
+        first.props.len(),
+        "repeated declared query should keep the same prop surface"
+    );
+    assert_eq!(
+        p.component_meta_resolved_state_recomputes, 0,
+        "second declared query should reuse the cached resolved state instead of recomputing it, got provenance={p:?}"
+    );
+    assert_eq!(
+        p.resolver_node_cache_misses, 0,
+        "second declared query should not miss the resolver node cache once the first query populated it, got provenance={p:?}"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn repeated_full_component_meta_queries_reuse_cached_resolved_state_for_workspace_type_deps() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/types.ts".to_string(),
+        Arc::from(
+            r#"export interface Base { id?: string }
+export interface Props extends Base { msg: string; count?: number }"#,
+        ),
+    );
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "owner SFC should load into the host"
+    );
+    assert!(
+        project
+            .host()
+            .get_whole_hash("/workspace/types.ts")
+            .is_none(),
+        "workspace dependency should not be eagerly loaded before the first query"
+    );
+
+    let session = project.open_session().unwrap();
+    let first = session
+        .get_component_meta("/workspace/App.vue")
+        .unwrap()
+        .expect("first full query should return component meta");
+    assert!(
+        first.props.iter().any(|prop| prop.name == "msg"),
+        "first full query should resolve the imported prop surface"
+    );
+    assert!(
+        first.props.iter().any(|prop| prop.name == "count"),
+        "first full query should resolve optional imported props"
+    );
+
+    project.host().provenance().reset();
+    let second = session
+        .get_component_meta("/workspace/App.vue")
+        .unwrap()
+        .expect("second full query should return component meta");
+    let p = provenance(&project);
+
+    assert_eq!(
+        second.props.len(),
+        first.props.len(),
+        "repeated full query should keep the same prop surface"
+    );
+    assert_eq!(
+        p.component_meta_resolved_state_recomputes, 0,
+        "second full query should reuse the cached resolved state instead of recomputing it, got provenance={p:?}"
+    );
+    assert_eq!(
+        p.resolver_node_cache_misses, 0,
+        "second full query should not miss the resolver node cache once the first query populated it, got provenance={p:?}"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn repeated_full_component_meta_queries_reuse_cached_resolved_state_for_imported_dependency_graph()
+{
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(
+            r#"<script setup lang="ts">
+import type { Props } from 'pkg'
+defineProps<Props>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
+        Arc::from(r#"export { Props } from "./shared";"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/shared.d.ts".to_string(),
+        Arc::from(
+            r#"import type { Base } from "./base"
+export interface Props extends Base { msg: string }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/base.d.ts".to_string(),
+        Arc::from(r#"export interface Base { id?: string }"#),
+    );
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "owner SFC should load into the host"
+    );
+    project.host().set_import_dependencies(
+        "/workspace/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "pkg".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./shared".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/shared.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/shared.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./base".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/pkg/dist/base.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    assert!(
+        project
+            .host()
+            .get_whole_hash("/workspace/node_modules/pkg/dist/shared.d.ts")
+            .is_none(),
+        "imported dependency should not be eagerly loaded before the first query"
+    );
+
+    let session = project.open_session().unwrap();
+    let first = session
+        .get_component_meta("/workspace/App.vue")
+        .unwrap()
+        .expect("first imported-dependency query should return component meta");
+    assert!(
+        first.props.iter().any(|prop| prop.name == "msg"),
+        "first query should resolve the package prop surface"
+    );
+    assert!(
+        first.props.iter().any(|prop| prop.name == "id"),
+        "first query should resolve transitive imported base props"
+    );
+
+    project.host().provenance().reset();
+    let second = session
+        .get_component_meta("/workspace/App.vue")
+        .unwrap()
+        .expect("second imported-dependency query should return component meta");
+    let p = provenance(&project);
+
+    assert_eq!(
+        second.props.len(),
+        first.props.len(),
+        "repeated imported-dependency query should keep the same prop surface"
+    );
+    assert_eq!(
+        p.component_meta_resolved_state_recomputes, 0,
+        "second imported-dependency query should reuse the cached resolved state instead of recomputing it, got provenance={p:?}"
+    );
+    assert_eq!(
+        p.resolver_node_cache_misses, 0,
+        "second imported-dependency query should not miss the resolver node cache once the first query populated it, got provenance={p:?}"
+    );
+}
+
 #[test]
 fn get_component_meta_does_not_call_public_evaluate_types_workflow() {
     let project = make_project();
@@ -4062,10 +4334,11 @@ defineProps<Props>()
         .iter()
         .find(|alias| alias.local_name == "ButtonHTMLAttributes")
         .expect("ButtonHTMLAttributes should be prepared as an imported alias");
+    let alias_body = resolved_imported_alias_body(project.host(), alias);
     assert!(
-        matches!(alias.decl.body, TypeExpr::Object(_)),
+        matches!(alias_body, TypeExpr::Object(_)),
         "prepared imported alias body should already be materialized, got {:?}",
-        alias.decl.body
+        alias_body
     );
 
     let session = project.open_session().unwrap();
@@ -4200,10 +4473,10 @@ defineProps<Props>()
         .expect("RouteLocationRaw should be prepared as an imported alias");
     assert_eq!(
         alias.source_canonical_id,
-        "/workspace/node_modules/vue-router/dist/index-typed.d.ts"
+        "/workspace/node_modules/vue-router/dist/vue-router.d.ts"
     );
     assert_eq!(alias.exported_name, "RouteLocationRaw");
-    assert_route_union_surface(&alias.decl.body);
+    assert_route_union_surface(&resolved_imported_alias_body(project.host(), alias));
     let registry_entry = resolved
         .resolved_type_registry
         .iter()
@@ -4336,7 +4609,7 @@ defineProps<Props>()
         .iter()
         .find(|alias| alias.local_name == "RouteLocationRaw")
         .expect("RouteLocationRaw should be prepared as an imported alias");
-    assert_route_union_surface(&alias.decl.body);
+    assert_route_union_surface(&resolved_imported_alias_body(project.host(), alias));
     let registry_entry = resolved
         .resolved_type_registry
         .iter()
@@ -5892,6 +6165,32 @@ defineProps<Props>()
 #[test]
 fn link_props_keep_inherited_html_attrs_across_vue_ignore_utility_heritage() {
     let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue-router/index.d.ts",
+            r#"
+export { R as RouterLinkProps } from './dist/index.js'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/vue-router/dist/index.d.ts",
+            r#"
+export interface RouterLinkOptions {
+  to?: string
+  replace?: boolean
+  viewTransition?: boolean
+}
+
+export interface R extends RouterLinkOptions {
+  activeClass?: string
+  exactActiveClass?: string
+  ariaCurrentValue?: 'page'
+}
+"#,
+        )
+        .unwrap();
     project
         .upsert_base(
             "/src/types/html.ts",

@@ -26,6 +26,7 @@ import {
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
 import { configureProjectHtmlIntrinsics } from "./project-html-intrinsics.js";
 import {
+  createMetaRuntime,
   computeEngineKey,
   extractPathAliases,
   getMetaRuntime,
@@ -67,6 +68,7 @@ export class ComponentMetaSession {
   private readonly _options: MetaCheckerOptions;
   private readonly _workspace: CheckerWorkspace | undefined;
   private readonly _runtime: MetaRuntimeImpl;
+  private readonly _ownsRuntime: boolean;
   private readonly _touchedFiles = new Set<string>();
   private readonly _baseFiles = new Set<string>();
   private readonly _deletedFiles = new Set<string>();
@@ -79,12 +81,14 @@ export class ComponentMetaSession {
     options?: MetaCheckerOptions,
     workspace?: CheckerWorkspace,
     runtime?: MetaRuntimeImpl,
+    ownsRuntime = false,
   ) {
     this._session = session;
     this._root = root;
     this._options = options ?? {};
     this._workspace = workspace;
     this._runtime = runtime ?? getMetaRuntime();
+    this._ownsRuntime = ownsRuntime;
   }
 
   private ensureOpen(): void {
@@ -196,6 +200,9 @@ export class ComponentMetaSession {
     this._baseFiles.clear();
     this._deletedFiles.clear();
     this._runtime.closeSession(this._session);
+    if (this._ownsRuntime) {
+      this._runtime.shutdownNow();
+    }
   }
 }
 
@@ -235,7 +242,9 @@ async function openComponentMetaSessionInternal(
   options: ComponentMetaSessionConfig,
   checkerOptions?: MetaCheckerOptions,
 ): Promise<ComponentMetaSession> {
-  const runtime = getMetaRuntime();
+  const runtime =
+    checkerOptions?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
+  const ownsRuntime = checkerOptions?.runtimeMode === "dedicated";
   const root = resolve(options.root);
   const native = loadNative();
   const workspace: CheckerWorkspace = new native.Workspace([normalizePath(root)]);
@@ -274,7 +283,7 @@ async function openComponentMetaSessionInternal(
 
   const engine = await runtime.getOrCreateEngine(input, bootstrap);
   const session = runtime.openSession(engine);
-  return new ComponentMetaSession(session, root, checkerOptions, workspace, runtime);
+  return new ComponentMetaSession(session, root, checkerOptions, workspace, runtime, ownsRuntime);
 }
 
 /**

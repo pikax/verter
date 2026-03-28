@@ -16,18 +16,22 @@
     "bench:lsp": "node --import tsx src/lsp-bench.ts",
     "bench:lsp:json": "node --import tsx src/lsp-bench.ts --json",
     "bench:meta": "node --import tsx src/meta-bench.ts",
-    "bench:meta:json": "node --import tsx src/meta-bench.ts --json"
+    "bench:meta:json": "node --import tsx src/meta-bench.ts --json",
+    "bench:meta:ui": "node --expose-gc --import tsx src/meta-ui-bench.ts",
+    "bench:meta:ui:json": "node --expose-gc --import tsx src/meta-ui-bench.ts --json",
+    "bench:meta:ui:report": "node --import tsx src/meta-ui-report.ts",
+    "bench:meta:ui:setup": "node ../../scripts/benchmark/setup-meta-ui.mjs"
   },
   "dependencies": {
     "@verter/component-meta": "workspace:*",
     "@verter/native": "workspace:*",
     "@verter/wasm": "workspace:*",
     "@vue/compiler-sfc": "^3.5.30",
-    "@vue/language-server": "^2.2.10",
+    "@vue/language-server": "^3.2.6",
     "magic-string": "^0.30.21",
     "tinybench": "^6.0.0",
     "vue": "^3.5.30",
-    "vue-component-meta": "^2.2.10"
+    "vue-component-meta": "^3.2.6"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

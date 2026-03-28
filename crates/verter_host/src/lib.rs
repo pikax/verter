@@ -83,12 +83,84 @@ pub use verter_core::VERTER_TYPES_STANDALONE_DTS;
 pub use verter_core::compile::CompileTarget;
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use id::canonicalize_id;
 pub use id::resolve_external;
 use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
+
+type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
+type CachedTypeResolutionContext<'a> =
+    verter_core::utils::oxc::vue::resolve_type::TypeResolutionContext<'a, 'a>;
+
+struct ParsedEvalProgramOwner {
+    allocator: oxc_allocator::Allocator,
+    source: Arc<str>,
+    source_type: oxc_span::SourceType,
+}
+
+self_cell::self_cell!(
+    pub(crate) struct ParsedEvalProgram {
+        owner: ParsedEvalProgramOwner,
+
+        #[covariant]
+        dependent: CachedEvalProgramAst,
+    }
+);
+
+self_cell::self_cell!(
+    pub(crate) struct ParsedTypeResolutionContext {
+        owner: Rc<ParsedEvalProgram>,
+
+        #[covariant]
+        dependent: CachedTypeResolutionContext,
+    }
+);
+
+impl ParsedEvalProgram {
+    pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
+        let mut panicked = false;
+        let parsed = Self::new(
+            ParsedEvalProgramOwner {
+                allocator: oxc_allocator::Allocator::new(),
+                source,
+                source_type,
+            },
+            |owner| {
+                let result = oxc_parser::Parser::new(
+                    &owner.allocator,
+                    owner.source.as_ref(),
+                    owner.source_type,
+                )
+                .with_options(oxc_parser::ParseOptions {
+                    parse_regular_expression: false,
+                    ..oxc_parser::ParseOptions::default()
+                })
+                .parse();
+                panicked = result.panicked;
+                result.program
+            },
+        );
+        (!panicked).then_some(parsed)
+    }
+
+    pub(crate) fn empty(source_type: oxc_span::SourceType) -> Self {
+        Self::parse(Arc::<str>::from(""), source_type)
+            .expect("empty eval program should always parse")
+    }
+
+    pub(crate) fn source_bytes(&self) -> &[u8] {
+        self.borrow_owner().source.as_bytes()
+    }
+}
+
+fn next_host_instance_id() -> u64 {
+    static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    NEXT_HOST_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Consolidated resolver state: bundles the unified sub-node resolver runtime
 /// with host-level top caches and singleflight groups.
@@ -126,6 +198,37 @@ pub(crate) struct RawAnalysisSnapshotCacheEntry {
     pub snapshot: Arc<FileAnalysisSnapshot>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ImportedDependencyCacheEntry {
+    pub workspace_generation: u64,
+    pub whole_hash: Hash16,
+    pub resolved_canonical_id: String,
+    pub raw_source: Arc<str>,
+    pub cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub external_type_analysis:
+        Option<Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
+    pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
+    pub eval_source: Option<Arc<str>>,
+    pub env: Option<Arc<verter_analysis::type_eval::EvalEnv>>,
+    pub required_owner_import_names: Option<Arc<rustc_hash::FxHashSet<String>>>,
+    pub exported_required_import_names:
+        rustc_hash::FxHashMap<String, Arc<rustc_hash::FxHashSet<String>>>,
+    pub resolved_type_roots: rustc_hash::FxHashMap<String, ImportedTypeRootCacheEntry>,
+    pub resolved_type_declarations:
+        rustc_hash::FxHashMap<String, verter_resolver::ResolvedTypeDeclaration>,
+    pub prepared_type_aliases:
+        rustc_hash::FxHashMap<String, verter_resolver::CachedPreparedImportedTypeAlias>,
+    pub evaluated_type_decls:
+        rustc_hash::FxHashMap<String, verter_resolver::CachedEvaluatedImportedDecl>,
+    pub dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportedTypeRootCacheEntry {
+    pub canonical_source: String,
+    pub resolved_name: String,
+}
+
 /// Central file store and compile cache for Vue SFC compilation.
 ///
 /// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
@@ -138,6 +241,7 @@ pub(crate) struct RawAnalysisSnapshotCacheEntry {
 ///
 /// Internal state is protected by `RwLock` for thread-safe concurrent access.
 pub struct VerterHost {
+    pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
     /// VFS workspace providing file reads, import resolution, and edge recording.
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
@@ -191,6 +295,10 @@ pub struct VerterHost {
     /// Cleared whenever the host store-view epoch advances.
     pub(crate) raw_analysis_snapshot_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<String, RawAnalysisSnapshotCacheEntry>>,
+    /// Cached parsed imported dependency state keyed by canonical id.
+    /// Each entry is valid only for its exact whole_hash.
+    pub(crate) imported_dependency_cache:
+        parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<ImportedDependencyCacheEntry>>>,
     /// Optional project-local HTML intrinsic override extracted from the
     /// consumer project's installed TS/Vue JSX surface.
     pub(crate) html_intrinsics_catalog: parking_lot::RwLock<
@@ -228,6 +336,7 @@ impl VerterHost {
         };
 
         Self {
+            instance_id: next_host_instance_id(),
             config,
             workspace: workspace_lock,
             #[cfg(not(feature = "scheduler"))]
@@ -248,6 +357,7 @@ impl VerterHost {
             resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
@@ -259,6 +369,7 @@ impl VerterHost {
             verter_vfs::MemoryOptions::default(),
         ));
         Self {
+            instance_id: next_host_instance_id(),
             config,
             workspace: Arc::new(parking_lot::RwLock::new(ws)),
             files: default_shared(FxHashMap::default()),
@@ -274,6 +385,7 @@ impl VerterHost {
             resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
@@ -338,6 +450,8 @@ impl VerterHost {
 
     pub(crate) fn bump_store_view_epoch(&self) -> u64 {
         self.raw_analysis_snapshot_cache.lock().clear();
+        self.imported_dependency_cache.lock().clear();
+        self.clear_thread_local_parsed_eval_program_cache();
         self.store_view_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1
@@ -609,6 +723,7 @@ impl VerterHost {
         self.resolved_type_cache.lock().clear();
         self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
+        self.imported_dependency_cache.lock().clear();
         self.bump_store_view_epoch();
     }
 
@@ -698,6 +813,7 @@ impl VerterHost {
         self.resolved_type_cache.lock().clear();
         self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
+        self.imported_dependency_cache.lock().clear();
         self.provenance.reset();
         self.bump_store_view_epoch();
     }
@@ -718,6 +834,21 @@ impl VerterHost {
         projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
+        #[cfg(feature = "scheduler")]
+        {
+            for mut entry in self.compile_cache.iter_mut() {
+                entry.dependency_resolutions.clear();
+                entry.dependencies.clear();
+            }
+        }
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let mut files = crate::shared::write_lock(&self.files);
+            for entry in files.values_mut() {
+                entry.dependency_resolutions.clear();
+                entry.dependencies.clear();
+            }
+        }
         self.bump_store_view_epoch();
     }
 

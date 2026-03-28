@@ -2,13 +2,70 @@ use std::collections::BTreeSet;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_core::utils::oxc::vue::resolve_type::{
-    collect_required_import_names_for_external_type, extract_imported_type_bindings,
-    imported_member_name_for_required_alias, required_import_alias_names_for_binding,
-    resolve_external_type_with_companion, ResolvedElements,
+    analyze_external_type_source, imported_member_name_for_required_alias,
+    required_import_alias_names_for_binding, AnalyzedExternalTypeSource, ResolvedElements,
 };
 use verter_vfs::ResolveRequestKind;
 
-pub type ExternalTypeBodyCache = FxHashMap<(String, String), Option<ResolvedElements>>;
+#[derive(Debug, Clone, Default)]
+pub struct ExternalTypeBodyCache {
+    resolved: FxHashMap<(String, String), Option<ResolvedElements>>,
+    source_analysis: FxHashMap<(String, verter_analysis::Hash16), AnalyzedExternalTypeSource>,
+    barrel_states: FxHashMap<String, crate::BarrelResolutionState>,
+}
+
+impl ExternalTypeBodyCache {
+    pub fn len(&self) -> usize {
+        self.resolved.len()
+    }
+
+    pub fn get(&self, key: &(String, String)) -> Option<&Option<ResolvedElements>> {
+        self.resolved.get(key)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: (String, String),
+        value: Option<ResolvedElements>,
+    ) -> Option<Option<ResolvedElements>> {
+        self.resolved.insert(key, value)
+    }
+
+    pub fn source_analysis_len(&self) -> usize {
+        self.source_analysis.len()
+    }
+
+    pub fn source_analysis(
+        &mut self,
+        dep_canonical: &str,
+        effective_source: &str,
+    ) -> (&AnalyzedExternalTypeSource, bool) {
+        let key = (
+            dep_canonical.to_string(),
+            verter_analysis::hash_16(effective_source.as_bytes()),
+        );
+        let mut inserted = false;
+        let analysis = self.source_analysis.entry(key).or_insert_with(|| {
+            inserted = true;
+            let alloc = oxc_allocator::Allocator::new();
+            analyze_external_type_source(effective_source, &alloc)
+        });
+        (analysis, inserted)
+    }
+
+    pub fn barrel_state(&self, barrel_canonical: &str) -> Option<&crate::BarrelResolutionState> {
+        self.barrel_states.get(barrel_canonical)
+    }
+
+    pub fn store_barrel_state(
+        &mut self,
+        barrel_canonical: &str,
+        state: crate::BarrelResolutionState,
+    ) {
+        self.barrel_states
+            .insert(barrel_canonical.to_string(), state);
+    }
+}
 
 pub trait ExternalTypeBodyResolver {
     type Error;
@@ -35,6 +92,15 @@ pub trait ExternalTypeBodyResolver {
         _tracked_deps: &[String],
     ) {
     }
+
+    fn resolve_external_type_from_analysis(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        effective_source: &str,
+        analysis: &AnalyzedExternalTypeSource,
+        imported_companions: &FxHashMap<String, ResolvedElements>,
+    ) -> Option<ResolvedElements>;
 
     #[allow(clippy::too_many_arguments)]
     fn resolve_external_type_recursive(
@@ -72,6 +138,7 @@ pub trait ExternalTypeBodyResolver {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
     resolver: &R,
     dep_canonical: &str,
@@ -103,10 +170,24 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
         return Ok(None);
     }
 
-    let alloc = oxc_allocator::Allocator::new();
-    let extracted = extract_imported_type_bindings(effective_source, &alloc);
-    let required_import_names =
-        collect_required_import_names_for_external_type(type_name, effective_source, &alloc);
+    let analysis_before = cache.source_analysis_len();
+    let (analysis, extracted, required_import_names) = {
+        let (analysis, inserted) = cache.source_analysis(dep_canonical, effective_source);
+        if resolver.debug_enabled() {
+            resolver.debug_log(format!(
+                "resolve_external_type source-analysis dep={} type={} hit={} cache_entries={}",
+                dep_canonical,
+                type_name,
+                !inserted,
+                analysis_before + usize::from(inserted),
+            ));
+        }
+        (
+            analysis.clone(),
+            analysis.extracted.clone(),
+            analysis.required_import_names(type_name),
+        )
+    };
     let projected_steps = cache.len() + visiting.len() + required_import_names.len();
     if projected_steps > resolver.max_external_type_resolve_steps() {
         visiting.remove(&cache_key);
@@ -155,6 +236,7 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
     }
 
     let mut companion_types = FxHashMap::default();
+    let mut attempted_companion_requests = FxHashSet::default();
     for binding in &extracted.bindings {
         let required_aliases =
             required_import_alias_names_for_binding(binding, &required_import_names);
@@ -164,6 +246,14 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
             else {
                 continue;
             };
+            let request_key = (
+                required_alias.clone(),
+                binding.source.clone(),
+                imported_name.clone(),
+            );
+            if !attempted_companion_requests.insert(request_key) {
+                continue;
+            }
             if resolver.debug_enabled() {
                 resolver.debug_log(format!(
                     "resolve_external_type companion-binding dep={} type={} binding={} -> {}:{}",
@@ -189,18 +279,24 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
         }
     }
 
-    let resolve_alloc = oxc_allocator::Allocator::new();
-    let mut resolved = resolve_external_type_with_companion(
+    let used_local_symbol_cache = analysis.has_local_symbol_target(type_name);
+    let mut resolved = resolver.resolve_external_type_from_analysis(
+        dep_canonical,
         type_name,
         effective_source,
+        &analysis,
         &companion_types,
-        &resolve_alloc,
     );
     if resolver.debug_enabled() {
         resolver.debug_log(format!(
-            "resolve_external_type local-eval dep={} type={} companion_keys={} resolved={}",
+            "resolve_external_type local-eval dep={} type={} strategy={} companion_keys={} resolved={}",
             dep_canonical,
             type_name,
+            if used_local_symbol_cache {
+                "symbol-cache"
+            } else {
+                "full-source"
+            },
             companion_types.len(),
             resolved.is_some(),
         ));
@@ -248,16 +344,19 @@ mod tests {
     use super::{
         resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
     };
-    use rustc_hash::FxHashSet;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
-    use verter_core::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
+    use verter_core::utils::oxc::vue::resolve_type::{
+        AnalyzedExternalTypeSource, ResolvedElements, RuntimeType,
+    };
     use verter_vfs::ResolveRequestKind;
 
     #[derive(Default)]
     struct TestResolver {
         recursive_results: BTreeMap<(String, String, String), Option<ResolvedElements>>,
         barrel_results: BTreeMap<(String, String), Option<ResolvedElements>>,
+        recursive_calls: RefCell<Vec<(String, String, String)>>,
         logs: RefCell<Vec<String>>,
     }
 
@@ -280,6 +379,29 @@ mod tests {
             self.logs.borrow_mut().push(message);
         }
 
+        fn resolve_external_type_from_analysis(
+            &self,
+            _dep_canonical: &str,
+            type_name: &str,
+            effective_source: &str,
+            analysis: &AnalyzedExternalTypeSource,
+            imported_companions: &FxHashMap<String, ResolvedElements>,
+        ) -> Option<ResolvedElements> {
+            let allocator = oxc_allocator::Allocator::new();
+            let parsed =
+                oxc_parser::Parser::new(&allocator, effective_source, oxc_span::SourceType::ts())
+                    .parse();
+            (!parsed.panicked).then(|| {
+                verter_core::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+                    type_name,
+                    &parsed.program,
+                    effective_source.as_bytes(),
+                    analysis,
+                    imported_companions,
+                )
+            })?
+        }
+
         fn resolve_external_type_recursive(
             &self,
             owner_canonical: &str,
@@ -295,6 +417,11 @@ mod tests {
             _profile_hash: Option<u64>,
             _depth: usize,
         ) -> Result<Option<ResolvedElements>, Self::Error> {
+            self.recursive_calls.borrow_mut().push((
+                owner_canonical.to_string(),
+                import_source.to_string(),
+                type_name.to_string(),
+            ));
             Ok(self
                 .recursive_results
                 .get(&(
@@ -408,5 +535,111 @@ mod tests {
         .expect("companion resolution should succeed");
 
         assert!(actual.is_some());
+    }
+
+    #[test]
+    fn resolve_external_type_from_source_body_reuses_source_analysis_for_same_dep() {
+        let mut resolver = TestResolver::default();
+        resolver.recursive_results.insert(
+            (
+                "/src/types.ts".to_string(),
+                "./dep".to_string(),
+                "Dep".to_string(),
+            ),
+            Some(empty_elements()),
+        );
+
+        let source = "\
+import type { Dep } from './dep'\n\
+export type Props = Dep\n\
+export type Emits = Dep\n";
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+
+        let props = resolve_external_type_from_source_body(
+            &resolver,
+            "/src/types.ts",
+            "Props",
+            source,
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("first external type resolution should succeed");
+
+        assert!(props.is_some());
+        assert_eq!(cache.source_analysis_len(), 1);
+
+        let emits = resolve_external_type_from_source_body(
+            &resolver,
+            "/src/types.ts",
+            "Emits",
+            source,
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("second external type resolution should succeed");
+
+        assert!(emits.is_some());
+        assert_eq!(cache.source_analysis_len(), 1);
+    }
+
+    #[test]
+    fn resolve_external_type_from_source_body_dedupes_duplicate_companion_requests() {
+        let mut resolver = TestResolver::default();
+        resolver.recursive_results.insert(
+            (
+                "/src/types.ts".to_string(),
+                "./dep".to_string(),
+                "Dep".to_string(),
+            ),
+            Some(empty_elements()),
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+
+        let actual = resolve_external_type_from_source_body(
+            &resolver,
+            "/src/types.ts",
+            "Props",
+            "import type { Dep } from './dep'\nimport type { Dep } from './dep'\nexport type Props = Dep",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("duplicate companion resolution should succeed");
+
+        assert!(actual.is_some());
+        assert_eq!(
+            resolver.recursive_calls.borrow().as_slice(),
+            &[(
+                "/src/types.ts".to_string(),
+                "./dep".to_string(),
+                "Dep".to_string(),
+            )],
+            "duplicate companion requests should only resolve once per alias/source/import tuple",
+        );
     }
 }

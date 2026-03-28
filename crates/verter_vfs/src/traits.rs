@@ -85,6 +85,12 @@ pub trait WorkspaceAccess: Send + Sync {
         None
     }
 
+    /// Monotonic content generation. Bumped when workspace file content or
+    /// overlays change, so long-lived consumers can invalidate cached reads.
+    fn content_generation(&self) -> u64 {
+        0
+    }
+
     /// Compute the preferred alias-based import specifier for a target file.
     ///
     /// Returns the shortest tsconfig-path or workspace-alias specifier that

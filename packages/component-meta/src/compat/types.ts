@@ -74,4 +74,10 @@ export interface MetaCheckerOptions {
   forceUseTs?: boolean;
   /** Select the type expansion backend used for component metadata queries. */
   typeExpansionBackend?: "verter" | "tsserver" | "tsgo" | "auto";
+  /**
+   * Runtime ownership mode.
+   * `shared` reuses the process-global pooled runtime.
+   * `dedicated` creates an isolated runtime for one checker/session instance.
+   */
+  runtimeMode?: "shared" | "dedicated";
 }

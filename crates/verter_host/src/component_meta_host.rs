@@ -2055,56 +2055,50 @@ defineSlots<Slots>()
 
     #[test]
     fn non_verter_backend_passes_trace_cursor_to_external_expander() {
-        unsafe {
-            std::env::set_var("VERTER_COMPONENT_META_TRACE", "1");
-        }
-
-        let mut config = crate::types::HostConfig::default();
-        config.type_expansion_backend = TypeExpansionBackend::Tsgo;
-        let host = ComponentMetaHost::new_standalone(config);
-        let fake = Arc::new(FakeTypeExpander::object_with_members(vec![(
-            "msg",
-            TypeExpr::primitive(PrimitiveName::String),
-            false,
-        )]));
-        host.set_type_expander(fake.clone());
-        host.upsert_base("/src/types.ts", "export interface Props { msg: string }")
-            .unwrap();
-        host.upsert_base(
-            "/src/Button.vue",
-            r#"<script setup lang="ts">
+        crate::host_manage::with_component_meta_trace_enabled_for_test(true, || {
+            let mut config = crate::types::HostConfig::default();
+            config.type_expansion_backend = TypeExpansionBackend::Tsgo;
+            let host = ComponentMetaHost::new_standalone(config);
+            let fake = Arc::new(FakeTypeExpander::object_with_members(vec![(
+                "msg",
+                TypeExpr::primitive(PrimitiveName::String),
+                false,
+            )]));
+            host.set_type_expander(fake.clone());
+            host.upsert_base("/src/types.ts", "export interface Props { msg: string }")
+                .unwrap();
+            host.upsert_base(
+                "/src/Button.vue",
+                r#"<script setup lang="ts">
 import type { Props } from "./types"
 defineProps<Props>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
-        )
-        .unwrap();
-        host.host().set_import_dependencies(
-            "/src/Button.vue",
-            vec![crate::types::DependencyResolution {
-                specifier: "./types".to_string(),
-                resolved_canonical_id: Some("/src/types.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            }],
-        );
+            )
+            .unwrap();
+            host.host().set_import_dependencies(
+                "/src/Button.vue",
+                vec![crate::types::DependencyResolution {
+                    specifier: "./types".to_string(),
+                    resolved_canonical_id: Some("/src/types.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                }],
+            );
 
-        let session = host.open_session().unwrap();
-        let result = session.get_component_meta("/src/Button.vue").unwrap();
-        assert!(result.is_some());
+            let session = host.open_session().unwrap();
+            let result = session.get_component_meta("/src/Button.vue").unwrap();
+            assert!(result.is_some());
 
-        let cursor = fake
-            .trace_cursors
-            .lock()
-            .first()
-            .and_then(|cursor| *cursor)
-            .expect("external expander should receive a trace cursor");
-        assert!(cursor.request_id > 0);
-        assert!(cursor.span_id > 0);
-        assert!(cursor.depth > 0);
-
-        unsafe {
-            std::env::remove_var("VERTER_COMPONENT_META_TRACE");
-        }
+            let cursor = fake
+                .trace_cursors
+                .lock()
+                .first()
+                .and_then(|cursor| *cursor)
+                .expect("external expander should receive a trace cursor");
+            assert!(cursor.request_id > 0);
+            assert!(cursor.span_id > 0);
+            assert!(cursor.depth > 0);
+        });
     }
 
     #[test]

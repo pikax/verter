@@ -25,13 +25,15 @@ interface LeaseReleaseToken {
   incarnation: number;
 }
 
-class MetaRuntimeImpl {
+export class MetaRuntimeImpl {
   private engines = new Map<string, ProjectEngine>();
   private pendingEngines = new Map<string, Promise<ProjectEngine>>();
   private weakSessions = new Map<string, WeakRef<ProjectSession>>();
   private registry: FinalizationRegistry<LeaseReleaseToken> | null = null;
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
   private hooksRegistered = false;
+  private beforeExitHook: (() => void) | null = null;
+  private exitHook: (() => void) | null = null;
   private _shuttingDown = false;
   private _incarnationCounter = 0;
 
@@ -84,9 +86,25 @@ class MetaRuntimeImpl {
     if (this.hooksRegistered) return;
     if (typeof process === "undefined") return;
     this.hooksRegistered = true;
-    const shutdown = () => this.shutdownNow();
-    process.once("beforeExit", shutdown);
-    process.once("exit", shutdown);
+    this.beforeExitHook = () => this.shutdownNow();
+    this.exitHook = () => this.shutdownNow();
+    process.once("beforeExit", this.beforeExitHook);
+    process.once("exit", this.exitHook);
+  }
+
+  private removeProcessHooks(): void {
+    if (!this.hooksRegistered) return;
+    if (typeof process !== "undefined") {
+      if (this.beforeExitHook) {
+        process.removeListener("beforeExit", this.beforeExitHook);
+      }
+      if (this.exitHook) {
+        process.removeListener("exit", this.exitHook);
+      }
+    }
+    this.beforeExitHook = null;
+    this.exitHook = null;
+    this.hooksRegistered = false;
   }
 
   /**
@@ -252,6 +270,7 @@ class MetaRuntimeImpl {
     // Stop timer if no engines left
     if (this.engines.size === 0 && this.pendingEngines.size === 0) {
       this.stopTimer();
+      this.removeProcessHooks();
     }
   }
 
@@ -270,6 +289,7 @@ class MetaRuntimeImpl {
     if (this._shuttingDown) return;
     this._shuttingDown = true;
     this.stopTimer();
+    this.removeProcessHooks();
 
     // Shutdown all engines
     for (const [key, engine] of this.engines) {
@@ -298,9 +318,13 @@ class MetaRuntimeImpl {
 // Process-global singleton
 let instance: MetaRuntimeImpl | null = null;
 
+export function createMetaRuntime(): MetaRuntimeImpl {
+  return new MetaRuntimeImpl();
+}
+
 export function getMetaRuntime(): MetaRuntimeImpl {
   if (!instance) {
-    instance = new MetaRuntimeImpl();
+    instance = createMetaRuntime();
   }
   return instance;
 }
@@ -315,5 +339,3 @@ export function shutdownMetaRuntime(): void {
     instance = null;
   }
 }
-
-export type { MetaRuntimeImpl };

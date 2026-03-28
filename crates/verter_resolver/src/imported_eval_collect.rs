@@ -55,7 +55,7 @@ impl ImportedEvalTraversalBudget {
         }
 
         self.set_overflow(format!(
-            "component-meta imported type merge budget exceeded (maxTypeRoots={}) while resolving '{}#{}' for '{}'",
+            "component-meta external type resolution step budget exceeded (maxTypeRoots={}) while resolving '{}#{}' for '{}'",
             self.max_type_roots, canonical_id, exported_name, self.owner_canonical_id,
         ));
         false
@@ -127,7 +127,22 @@ pub trait ImportedEvalSourceMergeResolver {
         canonical_dependencies: &mut BTreeSet<String>,
     );
 
-    fn load_eval_source_for_merge(&mut self, canonical_id: &str) -> Option<String>;
+    fn load_eval_source_for_merge(&mut self, canonical_id: &str) -> Option<std::sync::Arc<str>>;
+
+    fn required_import_names_for_exported_type(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        eval_source: &str,
+    ) -> FxHashSet<String> {
+        let _ = canonical_id;
+        let alloc = oxc_allocator::Allocator::new();
+        verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
+            exported_name,
+            eval_source,
+            &alloc,
+        )
+    }
 
     fn import_bindings_for_merge(
         &mut self,
@@ -146,6 +161,34 @@ pub trait ImportedEvalSourceMergeResolver {
         dep_canonical: &str,
         imported_name: &str,
     ) -> crate::ResolvedTypeDeclaration;
+
+    fn resolve_imported_type_root(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (String, String) {
+        let declaration = self.resolve_imported_type_declaration(dep_canonical, imported_name);
+        let mut canonical = if declaration.canonical_source.is_empty() {
+            dep_canonical.to_string()
+        } else {
+            declaration.canonical_source
+        };
+        let mut exported_name = if declaration.resolved_name.is_empty() {
+            imported_name.to_string()
+        } else {
+            declaration.resolved_name
+        };
+
+        let declaration = self.resolve_imported_type_declaration(&canonical, &exported_name);
+        if !declaration.canonical_source.is_empty() {
+            canonical = declaration.canonical_source;
+        }
+        if !declaration.resolved_name.is_empty() {
+            exported_name = declaration.resolved_name;
+        }
+
+        (canonical, exported_name)
+    }
 }
 
 pub trait ImportedEvalCollectorResolver:
@@ -168,6 +211,7 @@ pub trait ImportedEvalCollectorResolver:
 pub trait ImportedEvalOwnerResolver: ImportedEvalCollectorResolver {
     fn collect_required_owner_import_names(
         &self,
+        owner_canonical_id: &str,
         owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
         owner_eval_source: &str,
         owner_env: &EvalEnv,
@@ -201,30 +245,30 @@ fn normalized_imported_type_root<R: ImportedEvalSourceMergeResolver>(
     dep_canonical: &str,
     imported_name: &str,
 ) -> (String, String) {
-    let declaration = resolver.resolve_imported_type_declaration(dep_canonical, imported_name);
-    let mut canonical = if declaration.canonical_source.is_empty() {
-        dep_canonical.to_string()
-    } else {
-        declaration.canonical_source
-    };
-    let mut exported_name = if declaration.resolved_name.is_empty() {
-        imported_name.to_string()
-    } else {
-        declaration.resolved_name
-    };
+    resolver.resolve_imported_type_root(dep_canonical, imported_name)
+}
 
-    let declaration = resolver.resolve_imported_type_declaration(&canonical, &exported_name);
-    if !declaration.canonical_source.is_empty() {
-        canonical = declaration.canonical_source;
-    }
-    if !declaration.resolved_name.is_empty() {
-        exported_name = declaration.resolved_name;
-    }
-
-    (canonical, exported_name)
+fn requires_source_merge_inputs<R: ImportedEvalSourceMergeResolver>(
+    resolver: &mut R,
+    canonical_id: &str,
+    exported_name: &str,
+) -> bool {
+    resolver
+        .load_eval_source_for_merge(canonical_id)
+        .map(|eval_source| {
+            !resolver
+                .required_import_names_for_exported_type(
+                    canonical_id,
+                    exported_name,
+                    eval_source.as_ref(),
+                )
+                .is_empty()
+        })
+        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn record_required_source_merge_inputs_recursive<R: ImportedEvalSourceMergeResolver>(
     resolver: &mut R,
     canonical_id: &str,
@@ -255,18 +299,16 @@ pub fn record_required_source_merge_inputs_recursive<R: ImportedEvalSourceMergeR
         return;
     };
 
-    let alloc = oxc_allocator::Allocator::new();
-    let required_import_names =
-        verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
-            exported_name,
-            eval_source.as_str(),
-            &alloc,
-        );
+    let required_import_names = resolver.required_import_names_for_exported_type(
+        canonical_id,
+        exported_name,
+        eval_source.as_ref(),
+    );
     if required_import_names.is_empty() || budget.is_exhausted() {
         return;
     }
 
-    let bindings = resolver.import_bindings_for_merge(canonical_id, &eval_source);
+    let bindings = resolver.import_bindings_for_merge(canonical_id, eval_source.as_ref());
     for binding in &bindings {
         if budget.is_exhausted() {
             break;
@@ -367,27 +409,30 @@ pub fn collect_imported_eval_inputs<R: ImportedEvalCollectorResolver>(
                     continue;
                 };
 
-                let (source_canonical_id, exported_name) =
+                let merge_root =
                     normalized_imported_type_root(resolver, &dep_canonical, &imported_name);
+                canonical_dependencies.insert(merge_root.0.clone());
 
                 if alias_names.insert(required_alias_name.clone()) {
-                    if let Some(alias) = resolver.collect_imported_type_alias(
+                    if let Some(mut alias) = resolver.collect_imported_type_alias(
                         ImportedTypeAliasResolveRequest {
                             owner_canonical_id: owner_canonical_id.to_string(),
                             import_source: import.source.clone(),
                             local_name: required_alias_name.clone(),
-                            imported_name,
-                            source_canonical_id: source_canonical_id.clone(),
-                            exported_name: exported_name.clone(),
+                            imported_name: imported_name.clone(),
+                            source_canonical_id: dep_canonical.clone(),
+                            exported_name: imported_name.clone(),
                         },
                         canonical_dependencies,
                         budget,
                     ) {
+                        alias.requires_source_merge = alias.requires_source_merge
+                            || requires_source_merge_inputs(resolver, &merge_root.0, &merge_root.1);
                         if alias.requires_source_merge {
                             record_required_source_merge_inputs_recursive(
                                 resolver,
-                                &source_canonical_id,
-                                &exported_name,
+                                &merge_root.0,
+                                &merge_root.1,
                                 seen_sources,
                                 inputs,
                                 canonical_dependencies,
@@ -403,6 +448,7 @@ pub fn collect_imported_eval_inputs<R: ImportedEvalCollectorResolver>(
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn build_imported_eval_inputs<R: ImportedEvalOwnerResolver>(
     resolver: &mut R,
     owner_canonical_id: &str,
@@ -417,8 +463,12 @@ pub fn build_imported_eval_inputs<R: ImportedEvalOwnerResolver>(
     let mut type_aliases = Vec::new();
     let mut canonical_dependencies = BTreeSet::new();
     let mut visited_type_roots = FxHashSet::default();
-    let mut required_import_names =
-        resolver.collect_required_owner_import_names(owner_snapshot, owner_eval_source, owner_env);
+    let mut required_import_names = resolver.collect_required_owner_import_names(
+        owner_canonical_id,
+        owner_snapshot,
+        owner_eval_source,
+        owner_env,
+    );
     if let Some(additional) = additional_required_import_names {
         required_import_names.extend(additional.iter().cloned());
     }
@@ -451,6 +501,7 @@ pub fn build_imported_eval_inputs<R: ImportedEvalOwnerResolver>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn build_imported_eval_inputs_with_owner_context<R: ImportedEvalOwnerContextResolver>(
     resolver: &mut R,
     owner_canonical_id: &str,
@@ -463,9 +514,14 @@ pub fn build_imported_eval_inputs_with_owner_context<R: ImportedEvalOwnerContext
     let owner_eval_source = owner_eval_source
         .map(str::to_string)
         .unwrap_or_else(|| resolver.load_owner_eval_source(owner_canonical_id, owner_snapshot));
-    let owner_env = owner_env_override.cloned().unwrap_or_else(|| {
-        resolver.load_owner_eval_env(owner_canonical_id, owner_snapshot, &owner_eval_source)
-    });
+    let owned_owner_env;
+    let owner_env = if let Some(owner_env) = owner_env_override {
+        owner_env
+    } else {
+        owned_owner_env =
+            resolver.load_owner_eval_env(owner_canonical_id, owner_snapshot, &owner_eval_source);
+        &owned_owner_env
+    };
 
     build_imported_eval_inputs(
         resolver,
@@ -497,8 +553,7 @@ mod tests {
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
-    use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
-    use verter_analysis::type_expr::{PrimitiveName, TypeExpr};
+    use verter_analysis::type_eval::EvalEnv;
     use verter_analysis::types::ImportBindingKind;
     use verter_analysis::{AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, MacroTypeDep};
     use verter_span::Span;
@@ -549,6 +604,7 @@ mod tests {
         import_targets: BTreeMap<String, String>,
         export_targets: BTreeMap<(String, String), ResolvedExportTarget>,
         declarations: BTreeMap<(String, String), ResolvedTypeDeclaration>,
+        root_targets: BTreeMap<(String, String), (String, String)>,
         source_texts: BTreeMap<String, String>,
         merge_bindings: BTreeMap<String, Vec<ImportedEvalBinding>>,
         prepared_requests: Vec<ImportedTypeAliasResolveRequest>,
@@ -557,6 +613,8 @@ mod tests {
         owner_env: EvalEnv,
         owner_eval_source_loads: Cell<usize>,
         owner_eval_env_loads: Cell<usize>,
+        imported_root_lookups: Cell<usize>,
+        declaration_lookups: Cell<usize>,
     }
 
     impl DeclarationMetadataResolver for TestCollectorResolver {
@@ -620,8 +678,13 @@ mod tests {
             }
         }
 
-        fn load_eval_source_for_merge(&mut self, canonical_id: &str) -> Option<String> {
-            self.source_texts.get(canonical_id).cloned()
+        fn load_eval_source_for_merge(
+            &mut self,
+            canonical_id: &str,
+        ) -> Option<std::sync::Arc<str>> {
+            self.source_texts
+                .get(canonical_id)
+                .map(|source| Arc::<str>::from(source.as_str()))
         }
 
         fn import_bindings_for_merge(
@@ -652,6 +715,8 @@ mod tests {
             dep_canonical: &str,
             imported_name: &str,
         ) -> ResolvedTypeDeclaration {
+            self.declaration_lookups
+                .set(self.declaration_lookups.get() + 1);
             self.declarations
                 .get(&(dep_canonical.to_string(), imported_name.to_string()))
                 .cloned()
@@ -664,6 +729,19 @@ mod tests {
                     kind: ResolvedDeclarationKind::Unknown,
                     text: None,
                 })
+        }
+
+        fn resolve_imported_type_root(
+            &self,
+            dep_canonical: &str,
+            imported_name: &str,
+        ) -> (String, String) {
+            self.imported_root_lookups
+                .set(self.imported_root_lookups.get() + 1);
+            self.root_targets
+                .get(&(dep_canonical.to_string(), imported_name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| (dep_canonical.to_string(), imported_name.to_string()))
         }
     }
 
@@ -691,13 +769,6 @@ mod tests {
                 local_name: request.local_name,
                 source_canonical_id: request.source_canonical_id,
                 exported_name: request.exported_name,
-                decl: TypeDeclInfo {
-                    name: "Alias".to_string(),
-                    declaration_id: 0,
-                    kind: TypeDeclKind::Alias,
-                    type_parameters: Vec::new(),
-                    body: TypeExpr::Primitive(PrimitiveName::String),
-                },
                 requires_source_merge: true,
             })
         }
@@ -706,6 +777,7 @@ mod tests {
     impl ImportedEvalOwnerResolver for TestCollectorResolver {
         fn collect_required_owner_import_names(
             &self,
+            _owner_canonical_id: &str,
             _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
             _owner_eval_source: &str,
             _owner_env: &EvalEnv,
@@ -798,6 +870,10 @@ mod tests {
                 source_name: "User".to_string(),
             },
         );
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/real.ts".to_string(), "User".to_string()),
+        );
         resolver.declarations.insert(
             ("/src/dep.ts".to_string(), "User".to_string()),
             ResolvedTypeDeclaration {
@@ -840,8 +916,9 @@ mod tests {
         assert_eq!(resolver.prepared_requests[0].imported_name, "User");
         assert_eq!(
             resolver.prepared_requests[0].source_canonical_id,
-            "/src/real.ts"
+            "/src/dep.ts"
         );
+        assert_eq!(resolver.prepared_requests[0].exported_name, "User");
         assert_eq!(resolver.recorded_sources, vec!["/src/real.ts".to_string()]);
         assert_eq!(type_aliases.len(), 1);
         assert_eq!(inputs.len(), 1);
@@ -866,6 +943,10 @@ mod tests {
         resolver
             .import_targets
             .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/real.ts".to_string(), "User".to_string()),
+        );
         resolver.declarations.insert(
             ("/src/dep.ts".to_string(), "User".to_string()),
             ResolvedTypeDeclaration {
@@ -922,6 +1003,10 @@ mod tests {
         resolver
             .import_targets
             .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/real.ts".to_string(), "User".to_string()),
+        );
         resolver.declarations.insert(
             ("/src/dep.ts".to_string(), "User".to_string()),
             ResolvedTypeDeclaration {
@@ -952,6 +1037,64 @@ mod tests {
 
         assert_eq!(resolver.owner_eval_source_loads.get(), 1);
         assert_eq!(resolver.owner_eval_env_loads.get(), 1);
+        assert_eq!(inputs.type_aliases.len(), 1);
+        assert_eq!(inputs.sources.len(), 1);
+    }
+
+    #[test]
+    fn build_imported_eval_inputs_with_owner_context_uses_owner_overrides_without_loading() {
+        let imports = vec![analyzed_import(
+            "./dep",
+            vec![binding("Types", ImportBindingKind::Namespace, None, true)],
+            true,
+        )];
+        let owner_snapshot = ImportedEvalOwnerSnapshot {
+            imports: &imports,
+            macros: &[] as &[AnalyzedMacro],
+            bindings: &[],
+            macro_type_deps: &[] as &[MacroTypeDep],
+        };
+        let mut resolver = TestCollectorResolver::default();
+        resolver.owner_eval_source = "defineProps<Types.User>()".to_string();
+        resolver.owner_env = EvalEnv::new();
+        resolver
+            .import_targets
+            .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/real.ts".to_string(), "User".to_string()),
+        );
+        resolver.declarations.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ResolvedTypeDeclaration {
+                requested_name: "User".to_string(),
+                declaration_id: None,
+                resolved_name: "User".to_string(),
+                canonical_source: "/src/real.ts".to_string(),
+                span: Span::new(0, 0),
+                kind: ResolvedDeclarationKind::Interface,
+                text: None,
+            },
+        );
+        resolver.source_texts.insert(
+            "/src/real.ts".to_string(),
+            "export interface User {}".to_string(),
+        );
+        let owner_env = EvalEnv::new();
+        let mut budget = ImportedEvalTraversalBudget::new("/src/App.vue", 8);
+
+        let inputs = build_imported_eval_inputs_with_owner_context(
+            &mut resolver,
+            "/src/App.vue",
+            &owner_snapshot,
+            Some("defineProps<Types.User>()"),
+            Some(&owner_env),
+            None,
+            &mut budget,
+        );
+
+        assert_eq!(resolver.owner_eval_source_loads.get(), 0);
+        assert_eq!(resolver.owner_eval_env_loads.get(), 0);
         assert_eq!(inputs.type_aliases.len(), 1);
         assert_eq!(inputs.sources.len(), 1);
     }
@@ -992,6 +1135,10 @@ export interface Props extends Local {}"#
                 text: None,
             },
         );
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/real.ts".to_string(), "User".to_string()),
+        );
 
         let mut seen_sources = FxHashSet::default();
         let mut inputs = Vec::new();
@@ -1016,6 +1163,71 @@ export interface Props extends Local {}"#
         );
         assert_eq!(inputs.len(), 2);
         assert!(canonical_dependencies.contains("/src/root.ts"));
+        assert!(canonical_dependencies.contains("/src/dep.ts"));
+        assert!(canonical_dependencies.contains("/src/real.ts"));
+    }
+
+    #[test]
+    fn source_merge_prefers_resolve_imported_type_root_fast_path() {
+        let mut resolver = TestCollectorResolver::default();
+        resolver.source_texts.insert(
+            "/src/root.ts".to_string(),
+            r#"import type { User as ImportedUser } from "./dep";
+type Local = ImportedUser;
+export interface Props extends Local {}"#
+                .to_string(),
+        );
+        resolver.source_texts.insert(
+            "/src/real.ts".to_string(),
+            "export interface RealUser {}".to_string(),
+        );
+        resolver.merge_bindings.insert(
+            "/src/root.ts".to_string(),
+            vec![ImportedEvalBinding {
+                local_name: "ImportedUser".to_string(),
+                imported_name: Some("User".to_string()),
+                source: "./dep".to_string(),
+                resolved_canonical_id: Some("/src/dep.ts".to_string()),
+                is_namespace: false,
+            }],
+        );
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/real.ts".to_string(), "RealUser".to_string()),
+        );
+
+        let mut seen_sources = FxHashSet::default();
+        let mut inputs = Vec::new();
+        let mut canonical_dependencies = BTreeSet::new();
+        let mut visited_type_roots = FxHashSet::default();
+        let mut budget = ImportedEvalTraversalBudget::new("/src/App.vue", 8);
+
+        record_required_source_merge_inputs_recursive(
+            &mut resolver,
+            "/src/root.ts",
+            "Props",
+            &mut seen_sources,
+            &mut inputs,
+            &mut canonical_dependencies,
+            &mut visited_type_roots,
+            &mut budget,
+        );
+
+        assert_eq!(
+            resolver.recorded_sources,
+            vec!["/src/root.ts".to_string(), "/src/real.ts".to_string()]
+        );
+        assert_eq!(
+            resolver.imported_root_lookups.get(),
+            1,
+            "source merge should use the resolver's direct root lookup once for the imported alias"
+        );
+        assert_eq!(
+            resolver.declaration_lookups.get(),
+            0,
+            "source merge should not force full declaration metadata when a direct root lookup is available"
+        );
+        assert_eq!(inputs.len(), 2);
         assert!(canonical_dependencies.contains("/src/dep.ts"));
         assert!(canonical_dependencies.contains("/src/real.ts"));
     }

@@ -4,7 +4,10 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::cache;
-use super::deps::{import_resolves_to_dep, strip_configured_extension};
+use super::deps::{
+    import_resolves_to_dep, should_invalidate_dependent_view, strip_configured_extension,
+    DependentView,
+};
 use super::id::canonicalize_id;
 use super::parse::parse_vue_snapshot;
 use super::shared::{read_lock, write_lock};
@@ -917,6 +920,76 @@ fn import_resolves_to_dep_relative_extension_strip() {
         "/src/types.ts",
         &exts
     ));
+}
+
+#[test]
+fn should_invalidate_dependent_promotes_workspace_resolution_into_cache() {
+    let ws = verter_vfs::MemoryWorkspace::new(verter_vfs::MemoryOptions::default());
+    ws.set_exact_resolutions(
+        "/src/App.vue",
+        vec![verter_vfs::ExactResolution {
+            specifier: "@/dep".to_string(),
+            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+            kind: verter_vfs::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("/src/dep.ts".to_string()),
+            possible_canonical_ids: vec!["/src/dep.ts".to_string()],
+        }],
+    );
+
+    let mut view = DependentView {
+        canonical_id: "/src/App.vue".to_string(),
+        dependency_resolutions: FxHashMap::default(),
+        dependencies: BTreeSet::default(),
+        script_lang: Some("ts".to_string()),
+        macro_type_deps: Vec::new(),
+        imports: vec![verter_analysis::AnalyzedImport {
+            source: "@/dep".to_string(),
+            is_type_only: false,
+            bindings: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        }],
+        resolved_type_hashes: FxHashMap::default(),
+    };
+    let changed_exports = BTreeSet::from(["value".to_string()]);
+    let resolve_extensions = vec![".ts".to_string()];
+
+    let first = should_invalidate_dependent_view(
+        &mut view,
+        "/src/dep.ts",
+        &changed_exports,
+        false,
+        None,
+        &resolve_extensions,
+        Some(&ws),
+    );
+
+    assert!(
+        first,
+        "runtime invalidation should resolve aliased imports through the workspace when the cache is cold"
+    );
+    assert_eq!(
+        view.dependency_resolutions
+            .get("@/dep")
+            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        Some("/src/dep.ts"),
+        "workspace-resolved alias routes should be promoted into dependency_resolutions for future checks"
+    );
+
+    let second = should_invalidate_dependent_view(
+        &mut view,
+        "/src/dep.ts",
+        &changed_exports,
+        false,
+        None,
+        &resolve_extensions,
+        None,
+    );
+
+    assert!(
+        second,
+        "once promoted into dependency_resolutions, the same invalidation check should succeed without a live workspace resolver"
+    );
 }
 
 /// @ai-generated - invalidate_nodes removes last_good_outputs for targeted nodes

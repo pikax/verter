@@ -94,7 +94,7 @@ pub fn project_macro_surfaces(
                 .props
                 .iter()
                 .filter(|prop| prop.visibility.is_public())
-                .map(|prop| {
+                .filter_map(|prop| {
                     let name = prop
                         .key_name
                         .clone()
@@ -103,7 +103,16 @@ pub fn project_macro_surfaces(
                     let raw_type_text = raw_prop_type_text(source, prop);
                     let (bindings, return_type) =
                         extract_slot_info_from_type_text(source, raw_type_text.as_deref());
-                    AnalyzedSlotField {
+                    let resolved_as_slot = prop.types.iter().any(|runtime| {
+                        matches!(
+                            runtime,
+                            verter_core::utils::oxc::vue::resolve_type::RuntimeType::Function
+                        )
+                    });
+                    if bindings.is_empty() && return_type.is_none() && !resolved_as_slot {
+                        return None;
+                    }
+                    Some(AnalyzedSlotField {
                         name,
                         is_required: !prop.optional,
                         span: verter_span::Span::default(),
@@ -111,7 +120,7 @@ pub fn project_macro_surfaces(
                         return_type,
                         description,
                         tags,
-                    }
+                    })
                 })
                 .collect();
 
@@ -849,6 +858,45 @@ export interface CalendarSlots {
     }
 
     #[test]
+    fn project_define_slots_ignores_non_callable_helper_members() {
+        let elements = ResolvedElements {
+            props: vec![
+                prop(
+                    "default",
+                    false,
+                    ResolvedMemberVisibility::Public,
+                    Some("(props: { item: string }) => any"),
+                    0,
+                ),
+                prop(
+                    "appConfig",
+                    false,
+                    ResolvedMemberVisibility::Public,
+                    Some("{ ui?: { variant: string } }"),
+                    0,
+                ),
+                prop(
+                    "slots",
+                    false,
+                    ResolvedMemberVisibility::Public,
+                    Some("{ leading?: string; trailing?: string }"),
+                    0,
+                ),
+            ],
+            ..ResolvedElements::default()
+        };
+
+        let projected = project_macro_surfaces(None, AnalyzedMacroKind::DefineSlots, &elements);
+        let names: Vec<_> = projected
+            .slots
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect();
+
+        assert_eq!(names, vec!["default"]);
+    }
+
+    #[test]
     fn project_local_source_define_props_does_not_resolve_imported_utility_heritage() {
         let source = r#"
 import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from './types/html'
@@ -883,7 +931,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             .collect();
         assert_eq!(
             names,
-            vec!["replace", "to", "href", "as", "type", "disabled"]
+            vec!["as", "type", "disabled", "to", "href", "replace"]
         );
     }
 }

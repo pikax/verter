@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { getMetaRuntime, shutdownMetaRuntime } from "./meta-runtime.js";
+import { createMetaRuntime, getMetaRuntime, shutdownMetaRuntime } from "./meta-runtime.js";
 import { ProjectEngine } from "./project-engine.js";
 import type { NativeMetaProject, NativeMetaSession } from "./project-engine.js";
 import type { EngineKeyInput } from "./engine-key.js";
@@ -245,5 +245,43 @@ describe("MetaRuntime", () => {
     // Retry succeeds
     const engine = await runtime.getOrCreateEngine(baseInput(), bootstrap);
     expect(engine.state).toBe("active");
+  });
+
+  it("createMetaRuntime returns an isolated runtime that does not share pooled engines", async () => {
+    const shared = getMetaRuntime();
+    const dedicated = createMetaRuntime();
+    const bootstrap = async () => ({
+      nativeProject: mockNativeProject(),
+      baseFileIds: [],
+    });
+
+    const sharedEngine = await shared.getOrCreateEngine(baseInput("/shared"), bootstrap);
+    const dedicatedEngine = await dedicated.getOrCreateEngine(baseInput("/shared"), bootstrap);
+
+    expect(sharedEngine).not.toBe(dedicatedEngine);
+    expect(shared.engineCount).toBe(1);
+    expect(dedicated.engineCount).toBe(1);
+
+    dedicated.shutdownNow();
+    expect(dedicatedEngine.state).toBe("closed");
+    expect(sharedEngine.state).toBe("active");
+  });
+
+  it("shutdownNow removes dedicated process hooks instead of leaking listeners", async () => {
+    const dedicated = createMetaRuntime();
+    const bootstrap = async () => ({
+      nativeProject: mockNativeProject(),
+      baseFileIds: [],
+    });
+    const beforeExitCount = process.listenerCount("beforeExit");
+    const exitCount = process.listenerCount("exit");
+
+    const engine = await dedicated.getOrCreateEngine(baseInput("/dedicated"), bootstrap);
+    const session = dedicated.openSession(engine);
+    dedicated.closeSession(session);
+    dedicated.shutdownNow();
+
+    expect(process.listenerCount("beforeExit")).toBe(beforeExitCount);
+    expect(process.listenerCount("exit")).toBe(exitCount);
   });
 });

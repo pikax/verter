@@ -217,33 +217,39 @@ impl EvalEnv {
     /// Merge declarations from another environment without overwriting
     /// declarations already present in `self`.
     pub fn extend_missing(&mut self, other: EvalEnv) {
-        for (name, decl) in other.type_symbols {
-            if !self.type_symbols.contains_key(&name) {
-                self.add_type(decl);
+        self.extend_missing_from_ref(&other);
+    }
+
+    /// Merge declarations from another environment by reference without
+    /// cloning the full environment up front.
+    pub fn extend_missing_from_ref(&mut self, other: &EvalEnv) {
+        for (name, decl) in &other.type_symbols {
+            if !self.type_symbols.contains_key(name) {
+                self.add_type(decl.clone());
             }
         }
-        for (name, decl) in other.value_symbols {
-            if !self.value_symbols.contains_key(&name) {
-                self.add_value(decl);
+        for (name, decl) in &other.value_symbols {
+            if !self.value_symbols.contains_key(name) {
+                self.add_value(decl.clone());
             }
         }
-        for (name, decl_id) in other.type_decl_ids {
-            if decl_id == 0 {
+        for (name, decl_id) in &other.type_decl_ids {
+            if *decl_id == 0 {
                 continue;
             }
-            let stable_id = self.stabilize_type_declaration_id(&name, decl_id);
-            if let Some(decl) = self.type_symbols.get_mut(&name) {
+            let stable_id = self.stabilize_type_declaration_id(name, *decl_id);
+            if let Some(decl) = self.type_symbols.get_mut(name) {
                 if decl.declaration_id == 0 {
                     decl.declaration_id = stable_id;
                 }
             }
         }
-        for (name, decl_id) in other.value_decl_ids {
-            if decl_id == 0 {
+        for (name, decl_id) in &other.value_decl_ids {
+            if *decl_id == 0 {
                 continue;
             }
-            let stable_id = self.stabilize_value_declaration_id(&name, decl_id);
-            if let Some(decl) = self.value_symbols.get_mut(&name) {
+            let stable_id = self.stabilize_value_declaration_id(name, *decl_id);
+            if let Some(decl) = self.value_symbols.get_mut(name) {
                 if decl.declaration_id == 0 {
                     decl.declaration_id = stable_id;
                 }
@@ -480,10 +486,17 @@ pub fn evaluate_with_lookup(
 fn evaluate_inner(expr: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup) -> TypeExpr {
     match expr {
         // Terminals — pass through
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::TypeParameter(_) => expr.clone(),
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => expr.clone(),
+
+        TypeExpr::TypeParameter(param) => {
+            if let Some(bound) = env.type_bindings.get(&param.name).cloned() {
+                if binding_requires_symbolic_preservation(&param.name, bound.as_ref()) {
+                    return (*bound).clone();
+                }
+                return evaluate_with_lookup(bound.as_ref(), env, lookup);
+            }
+            expr.clone()
+        }
 
         // Unwrap parenthesized
         TypeExpr::Parenthesized(inner) => evaluate_with_lookup(inner, env, lookup),

@@ -36,7 +36,7 @@ impl OptionsContext {
 
 /// Process statements for options mode and collect items
 pub fn process_options_statements<'a>(
-    statements: &[Statement<'a>],
+    statements: &'a [Statement<'a>],
     ctx: &ScriptParseContext<'a>,
     options_ctx: &mut OptionsContext,
     items: &mut Vec<ScriptItem<'a>>,
@@ -50,7 +50,7 @@ pub fn process_options_statements<'a>(
 
 /// Process a single statement in options mode
 pub fn process_options_statement<'a>(
-    stmt: &Statement<'a>,
+    stmt: &'a Statement<'a>,
     ctx: &ScriptParseContext<'a>,
     _options_ctx: &mut OptionsContext,
     items: &mut Vec<ScriptItem<'a>>,
@@ -124,7 +124,7 @@ pub fn process_options_statement<'a>(
 
 /// Process an export default declaration
 fn process_default_export<'a>(
-    export: &ExportDefaultDeclaration<'a>,
+    export: &'a ExportDefaultDeclaration<'a>,
     ctx: &ScriptParseContext<'a>,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
@@ -157,7 +157,7 @@ fn process_default_export<'a>(
 
 /// Analyze an expression used as default export
 fn analyze_default_export_expression<'a>(
-    expr: &Expression<'a>,
+    expr: &'a Expression<'a>,
     span: Span,
     ctx: &ScriptParseContext<'a>,
     items: &mut Vec<ScriptItem<'a>>,
@@ -230,7 +230,7 @@ fn analyze_default_export_expression<'a>(
 
 /// Find setup function in an object expression and process its body
 fn find_setup_in_object<'a>(
-    obj: &ObjectExpression<'a>,
+    obj: &'a ObjectExpression<'a>,
     ctx: &ScriptParseContext<'a>,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
@@ -269,7 +269,7 @@ fn find_setup_in_object<'a>(
 
 /// Process the setup function value and return its body span
 fn process_setup_value<'a>(
-    value: &Expression<'a>,
+    value: &'a Expression<'a>,
     ctx: &ScriptParseContext<'a>,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,

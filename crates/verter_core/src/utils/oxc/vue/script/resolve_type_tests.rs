@@ -454,6 +454,525 @@ interface Options { bar: number }"#;
 }
 
 #[test]
+fn repeated_named_interface_resolution_reuses_context_cache() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Base { foo: string }
+interface Props extends Base { bar: number }
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+    let mut guard = vec!["Props".to_string()];
+    let first = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut guard)
+        .expect("Props should resolve");
+    assert_eq!(
+        first.props.len(),
+        2,
+        "Props should include inherited members"
+    );
+
+    let cached_after_first = ctx.resolved_named_types.borrow().len();
+    assert!(
+        cached_after_first >= 1,
+        "the directly resolved root should be cached after first resolution"
+    );
+
+    let mut second_guard = vec!["Props".to_string()];
+    let second = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut second_guard)
+        .expect("Props should resolve from cache");
+    assert_eq!(
+        second.props.len(),
+        2,
+        "Cached resolution should stay correct"
+    );
+    assert_eq!(
+        ctx.resolved_named_types.borrow().len(),
+        cached_after_first,
+        "Repeated resolution should reuse the existing cache entries"
+    );
+}
+
+#[test]
+fn interface_resolution_caches_root_result_without_materializing_each_ancestor_closure() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Base { foo: string }
+interface Mid extends Base { bar: number }
+interface Props extends Mid { baz: boolean }
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+    let mut guard = vec!["Props".to_string()];
+    let resolved = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut guard)
+        .expect("Props should resolve");
+    assert_eq!(
+        resolved.props.len(),
+        3,
+        "Props should still include the full inherited surface",
+    );
+
+    assert_eq!(
+        ctx.resolved_named_types.borrow().len(),
+        1,
+        "resolving the root interface should cache the requested closure without materializing each ancestor closure",
+    );
+}
+
+#[test]
+fn repeated_nongeneric_interface_resolution_reuses_cache_inside_generic_context() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Base { foo: string }
+type Wrapper<T> = Base & { value: T }
+type Use = Wrapper<string>
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+    let wrapper_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "Wrapper" => Some(alias),
+            _ => None,
+        })
+        .expect("Wrapper alias should exist");
+    let use_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "Use" => Some(alias),
+            _ => None,
+        })
+        .expect("Use alias should exist");
+    let type_ref = match &use_alias.type_annotation {
+        TSType::TSTypeReference(type_ref) => type_ref,
+        _ => panic!("Use alias should reference Wrapper<string>"),
+    };
+
+    let child = instantiate_type_params_ctx(
+        &ctx,
+        wrapper_alias.type_parameters.as_deref(),
+        type_ref.type_arguments.as_deref(),
+    );
+
+    let mut first_guard = vec!["Base".to_string()];
+    let first = resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, &mut first_guard)
+        .expect("Base should resolve");
+    assert_eq!(
+        first.props.len(),
+        1,
+        "Base should resolve in generic child context"
+    );
+    let cached_after_first = child.resolved_named_types.borrow().len();
+    assert!(
+        cached_after_first >= 1,
+        "nongeneric Base should still be cached even when outer generic bindings are active",
+    );
+
+    let mut second_guard = vec!["Base".to_string()];
+    let second = resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, &mut second_guard)
+        .expect("Base should resolve from cache");
+    assert_eq!(
+        second.props.len(),
+        1,
+        "cached Base resolution should stay correct"
+    );
+    assert_eq!(
+        child.resolved_named_types.borrow().len(),
+        cached_after_first,
+        "repeated nongeneric resolution inside a generic context should reuse the same cache entry",
+    );
+}
+
+#[test]
+fn nongeneric_interface_cache_key_ignores_unrelated_outer_generic_bindings() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Base { foo: string }
+type Wrapper<T> = Base & { value: T }
+type UseA = Wrapper<string>
+type UseB = Wrapper<number>
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+    let wrapper_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "Wrapper" => Some(alias),
+            _ => None,
+        })
+        .expect("Wrapper alias should exist");
+    let use_a_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "UseA" => Some(alias),
+            _ => None,
+        })
+        .expect("UseA alias should exist");
+    let use_b_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "UseB" => Some(alias),
+            _ => None,
+        })
+        .expect("UseB alias should exist");
+
+    let use_a_ref = match &use_a_alias.type_annotation {
+        TSType::TSTypeReference(type_ref) => type_ref,
+        _ => panic!("UseA should reference Wrapper<string>"),
+    };
+    let use_b_ref = match &use_b_alias.type_annotation {
+        TSType::TSTypeReference(type_ref) => type_ref,
+        _ => panic!("UseB should reference Wrapper<number>"),
+    };
+
+    let child_a = instantiate_type_params_ctx(
+        &ctx,
+        wrapper_alias.type_parameters.as_deref(),
+        use_a_ref.type_arguments.as_deref(),
+    );
+    let child_b = instantiate_type_params_ctx(
+        &ctx,
+        wrapper_alias.type_parameters.as_deref(),
+        use_b_ref.type_arguments.as_deref(),
+    );
+
+    let mut first_guard = vec!["Base".to_string()];
+    let first = resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_a, &mut first_guard)
+        .expect("Base should resolve under Wrapper<string>");
+    assert_eq!(first.props.len(), 1);
+
+    let cached_after_first = ctx.resolved_named_types.borrow().len();
+
+    let mut second_guard = vec!["Base".to_string()];
+    let second =
+        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_b, &mut second_guard)
+            .expect("Base should resolve under Wrapper<number>");
+    assert_eq!(second.props.len(), 1);
+
+    assert_eq!(
+        ctx.resolved_named_types.borrow().len(),
+        cached_after_first,
+        "nongeneric Base should reuse the same cache entry across unrelated outer generic bindings",
+    );
+}
+
+#[test]
+fn generic_named_resolution_caches_by_effective_type_param_bindings() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Base<T> { value: T }
+type A = Base<string>
+type B = Base<number>
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+    let base_interface = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSInterfaceDeclaration(interface) if interface.id.name == "Base" => {
+                Some(interface)
+            }
+            _ => None,
+        })
+        .expect("Base interface should exist");
+    let a_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "A" => Some(alias),
+            _ => None,
+        })
+        .expect("A alias should exist");
+    let b_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "B" => Some(alias),
+            _ => None,
+        })
+        .expect("B alias should exist");
+
+    let a_ref = match &a_alias.type_annotation {
+        TSType::TSTypeReference(type_ref) => type_ref,
+        _ => panic!("A should reference Base<string>"),
+    };
+    let b_ref = match &b_alias.type_annotation {
+        TSType::TSTypeReference(type_ref) => type_ref,
+        _ => panic!("B should reference Base<number>"),
+    };
+
+    let string_child = instantiate_type_params_ctx(
+        &ctx,
+        base_interface.type_parameters.as_deref(),
+        a_ref.type_arguments.as_deref(),
+    );
+    let number_child = instantiate_type_params_ctx(
+        &ctx,
+        base_interface.type_parameters.as_deref(),
+        b_ref.type_arguments.as_deref(),
+    );
+    let string_key = string_child.cache_key_for_name(b"Base", 0);
+    let number_key = number_child.cache_key_for_name(b"Base", 0);
+
+    assert_ne!(
+        string_key, number_key,
+        "distinct generic bindings should produce distinct cache keys",
+    );
+    assert!(
+        !ctx.resolved_named_types.borrow().contains_key(&string_key),
+        "cache should start empty for Base<string>",
+    );
+    assert!(
+        !ctx.resolved_named_types.borrow().contains_key(&number_key),
+        "cache should start empty for Base<number>",
+    );
+
+    let mut string_guard = vec!["Base".to_string()];
+    let resolved_string = resolve_named_local_type_with_ctx_ref(
+        "Base",
+        a_ref.type_arguments.as_deref(),
+        0,
+        &ctx,
+        &mut string_guard,
+    )
+    .expect("Base<string> should resolve");
+    assert_eq!(
+        resolved_string.props.len(),
+        1,
+        "Base<string> should expose one inherited member",
+    );
+    let cache_after_string = ctx.resolved_named_types.borrow();
+    assert!(
+        cache_after_string.contains_key(&string_key),
+        "Base<string> should be cached under its bound-parameter key",
+    );
+    assert!(
+        !cache_after_string.contains_key(&number_key),
+        "Base<number> should not share the Base<string> cache entry",
+    );
+    drop(cache_after_string);
+
+    let mut number_guard = vec!["Base".to_string()];
+    let resolved_number = resolve_named_local_type_with_ctx_ref(
+        "Base",
+        b_ref.type_arguments.as_deref(),
+        0,
+        &ctx,
+        &mut number_guard,
+    )
+    .expect("Base<number> should resolve");
+    assert_eq!(
+        resolved_number.props.len(),
+        1,
+        "Base<number> should expose one inherited member",
+    );
+    let cache_after_number = ctx.resolved_named_types.borrow();
+    assert!(
+        cache_after_number.contains_key(&string_key),
+        "Base<string> cache entry should remain available after Base<number>",
+    );
+    assert!(
+        cache_after_number.contains_key(&number_key),
+        "Base<number> should be cached under its own bound-parameter key",
+    );
+    assert!(
+        cache_after_number.len() >= 2,
+        "distinct generic instantiations should keep distinct cache entries",
+    );
+}
+
+#[test]
+fn generic_named_resolution_reuses_cache_for_semantically_identical_bindings() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Base<T> { value: T }
+type A = Base<string>
+type B = Base<string>
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+    let base_interface = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSInterfaceDeclaration(interface) if interface.id.name == "Base" => {
+                Some(interface)
+            }
+            _ => None,
+        })
+        .expect("Base interface should exist");
+    let a_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "A" => Some(alias),
+            _ => None,
+        })
+        .expect("A alias should exist");
+    let b_alias = result
+        .program
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "B" => Some(alias),
+            _ => None,
+        })
+        .expect("B alias should exist");
+
+    let a_ref = match &a_alias.type_annotation {
+        TSType::TSTypeReference(type_ref) => type_ref,
+        _ => panic!("A should reference Base<string>"),
+    };
+    let b_ref = match &b_alias.type_annotation {
+        TSType::TSTypeReference(type_ref) => type_ref,
+        _ => panic!("B should reference Base<string>"),
+    };
+
+    let a_child = instantiate_type_params_ctx(
+        &ctx,
+        base_interface.type_parameters.as_deref(),
+        a_ref.type_arguments.as_deref(),
+    );
+    let b_child = instantiate_type_params_ctx(
+        &ctx,
+        base_interface.type_parameters.as_deref(),
+        b_ref.type_arguments.as_deref(),
+    );
+    let a_key = a_child.cache_key_for_name(b"Base", 0);
+    let b_key = b_child.cache_key_for_name(b"Base", 0);
+
+    assert_eq!(
+        a_key, b_key,
+        "semantically identical bindings should produce the same cache key",
+    );
+
+    let mut first_guard = vec!["Base".to_string()];
+    let first = resolve_named_local_type_with_ctx_ref(
+        "Base",
+        a_ref.type_arguments.as_deref(),
+        0,
+        &ctx,
+        &mut first_guard,
+    )
+    .expect("Base<string> should resolve");
+    assert_eq!(first.props.len(), 1);
+
+    let cached_after_first = ctx.resolved_named_types.borrow().len();
+
+    let mut second_guard = vec!["Base".to_string()];
+    let second = resolve_named_local_type_with_ctx_ref(
+        "Base",
+        b_ref.type_arguments.as_deref(),
+        0,
+        &ctx,
+        &mut second_guard,
+    )
+    .expect("second Base<string> should reuse cache");
+    assert_eq!(second.props.len(), 1);
+    assert_eq!(
+        ctx.resolved_named_types.borrow().len(),
+        cached_after_first,
+        "second semantically identical binding should reuse the first cache entry",
+    );
+}
+
+#[test]
+fn named_resolution_cache_separates_distinct_companion_sets() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Props extends Imported {
+  local: string
+}
+"#;
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut with_companion = ctx.clone();
+    let mut imported = ResolvedElements::default();
+    imported.props.push(ResolvedProp {
+        span: Span { start: 0, end: 0 },
+        key: Span { start: 0, end: 0 },
+        key_name: Some("inherited".to_string()),
+        optional: false,
+        types: vec![RuntimeType::String],
+        visibility: ResolvedMemberVisibility::Public,
+        type_span: None,
+        type_text: None,
+        map_local: true,
+        span_is_absolute: false,
+    });
+    with_companion
+        .extend_companion_types(&FxHashMap::from_iter([("Imported".to_string(), imported)]));
+
+    let without_key = ctx.cache_key_for_name(b"Props", 0);
+    let with_key = with_companion.cache_key_for_name(b"Props", 0);
+    assert_ne!(
+        without_key, with_key,
+        "named-type cache keys must separate different companion availability sets",
+    );
+
+    let mut rich_guard = vec!["Props".to_string()];
+    let rich =
+        resolve_named_local_type_with_ctx_ref("Props", None, 0, &with_companion, &mut rich_guard)
+            .expect("Props should resolve with imported companion");
+    assert_eq!(
+        rich.props.len(),
+        2,
+        "Props should include imported and local members when the companion exists",
+    );
+
+    let mut lean_guard = vec!["Props".to_string()];
+    let lean = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut lean_guard)
+        .expect("Props should still resolve without a companion");
+    assert_eq!(
+        lean.props.len(),
+        1,
+        "Props without the companion should not reuse the richer cached expansion",
+    );
+}
+
+#[test]
 fn test_resolve_type_alias_with_context() {
     let (resolved, diagnostics) = resolve_with_ctx(
         r#"type Props = { foo: string; bar: number };
@@ -707,6 +1226,31 @@ type Test = C;"#,
         3,
         "C extends B extends A should have 3 props (a + b + c)"
     );
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn interface_extends_generic_base_preserves_bound_members() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface Base<T> { value: T }
+interface Child extends Base<string> { count: number }
+type Test = Child;"#,
+    );
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "Child should include the inherited generic member and its own member",
+    );
+    let names: Vec<_> = resolved
+        .props
+        .iter()
+        .filter_map(|prop| prop.key_name.as_deref())
+        .collect();
+    assert!(
+        names.contains(&"value"),
+        "inherited generic member should resolve"
+    );
+    assert!(names.contains(&"count"), "local member should resolve");
     assert!(diagnostics.is_empty());
 }
 
@@ -1298,6 +1842,165 @@ fn extract_bindings_follows_default_import_then_export_local() {
                 && binding.source == "./dep"),
         "re-exporting a default-imported local should preserve the default symbol: {:?}",
         result.reexport_bindings
+    );
+}
+
+#[test]
+fn analyze_external_type_source_tracks_local_export_symbol_targets_and_stats() {
+    let allocator = Allocator::new();
+    let source = "\
+import type { Foo as LocalFoo } from './dep';\n\
+type Inner = { label: string };\n\
+export { LocalFoo as Props, Inner as Alias };\n\
+export * from './barrel';\n";
+    let analysis = analyze_external_type_source(source, &allocator);
+    let stats = analysis.stats();
+
+    assert_eq!(
+        analysis.local_export_symbol_target("Props"),
+        Some("LocalFoo")
+    );
+    assert_eq!(analysis.local_export_symbol_target("Alias"), Some("Inner"));
+    assert_eq!(analysis.local_symbol_target_name("Alias"), "Inner");
+    assert!(analysis.has_local_symbol_target("Alias"));
+    assert!(analysis.local_symbol_span("Inner").is_some());
+    assert_eq!(stats.top_level_statement_count, 4);
+    assert_eq!(stats.binding_count, 1);
+    assert_eq!(stats.direct_reexport_count, 1);
+    assert_eq!(stats.wildcard_reexport_count, 1);
+    assert_eq!(stats.local_export_symbol_count, 2);
+}
+
+#[test]
+fn analyze_external_type_source_builds_shallow_symbol_graph_once() {
+    let allocator = Allocator::new();
+    let source = "\
+import type { Foo as ImportedFoo } from './dep';\n\
+type Inner = ImportedFoo & { local: string };\n\
+export interface Props extends Inner { id: string }\n";
+    let analysis = analyze_external_type_source(source, &allocator);
+    let inner = analysis
+        .local_type_symbol("Inner")
+        .expect("inner symbol should be cached");
+    let props = analysis
+        .local_type_symbol("Props")
+        .expect("props symbol should be cached");
+
+    assert_eq!(inner.kind, AnalyzedExternalTypeSymbolKind::TypeAlias);
+    assert!(
+        inner.dependency_names.contains("ImportedFoo"),
+        "inner should keep shallow imported refs, got {:?}",
+        inner.dependency_names
+    );
+    assert!(
+        props.dependency_names.contains("Inner"),
+        "props should keep shallow local refs, got {:?}",
+        props.dependency_names
+    );
+    assert_eq!(
+        analysis.local_import_symbol_target("ImportedFoo"),
+        Some(("./dep", "Foo"))
+    );
+}
+
+#[test]
+fn resolve_external_type_with_analyzed_symbol_companion_resolves_local_symbol_chain() {
+    let allocator = Allocator::new();
+    let source = r#"
+import type { ImportedBase } from './dep'
+
+type Inner = ImportedBase & {
+  localLabel: string
+}
+
+export interface Props extends Inner {
+  id: string
+}
+"#;
+    let analysis = analyze_external_type_source(source, &allocator);
+    let mut companion_types = FxHashMap::default();
+    companion_types.insert(
+        "ImportedBase".to_string(),
+        parse_type("{ imported: number }")
+            .expect("companion type should parse")
+            .resolved,
+    );
+
+    let program_alloc = Allocator::new();
+    let parsed = Parser::new(&program_alloc, source, SourceType::ts()).parse();
+
+    let resolved = resolve_external_type_in_program_with_analyzed_symbol_companion(
+        "Props",
+        &parsed.program,
+        source.as_bytes(),
+        &analysis,
+        &companion_types,
+    )
+    .expect("local symbol targeted resolution should succeed");
+
+    let prop_names = resolved
+        .props
+        .iter()
+        .map(|prop| prop.key_name.clone().unwrap_or_default())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(prop_names.contains("id"));
+    assert!(prop_names.contains("localLabel"));
+    assert!(prop_names.contains("imported"));
+}
+
+#[test]
+fn default_export_named_interface_populates_named_resolution_cache() {
+    let allocator = Allocator::new();
+    let source = r#"
+interface Base {
+  base: string
+}
+
+export default interface Props extends Base {
+  id: string
+}
+"#;
+    let analysis = analyze_external_type_source(source, &allocator);
+
+    let program_alloc = Allocator::new();
+    let parsed = Parser::new(&program_alloc, source, SourceType::ts()).parse();
+    let base_ctx = build_type_context(&parsed.program, source.as_bytes(), 0);
+    let companions = FxHashMap::default();
+
+    let resolved = resolve_external_type_in_context_with_analyzed_symbol_companion(
+        "default",
+        &parsed.program,
+        source.as_bytes(),
+        &base_ctx,
+        &analysis,
+        &companions,
+    )
+    .expect("default-exported interface should resolve");
+
+    let prop_names = resolved
+        .props
+        .iter()
+        .map(|prop| prop.key_name.clone().unwrap_or_default())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(prop_names.contains("id"));
+    assert!(prop_names.contains("base"));
+
+    let cached_names = base_ctx
+        .resolved_named_types
+        .borrow()
+        .keys()
+        .map(|key| String::from_utf8_lossy(&key.name).to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(
+        cached_names.contains("Props"),
+        "default-exported interface should populate named cache, got {:?}",
+        cached_names
+    );
+    assert!(
+        !cached_names.contains("Base"),
+        "walking a default-exported interface should not materialize each inherited ancestor closure, got {:?}",
+        cached_names
     );
 }
 

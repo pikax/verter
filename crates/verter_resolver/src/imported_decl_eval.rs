@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo};
@@ -29,6 +30,12 @@ impl PreparedImportedDeclContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedEvaluatedImportedDecl {
+    pub body: Arc<TypeExpr>,
+    pub canonical_dependencies: BTreeSet<String>,
+}
+
 pub trait ImportedDeclEvalResolver {
     fn budget_is_exhausted(&self) -> bool;
 
@@ -44,8 +51,25 @@ pub trait ImportedDeclEvalResolver {
         exported_name: &str,
     ) -> Option<PreparedImportedDeclContext>;
 
+    fn required_import_names_for_exported_type(
+        &self,
+        source_canonical_id: &str,
+        exported_name: &str,
+        eval_source: &str,
+    ) -> FxHashSet<String> {
+        let _ = source_canonical_id;
+        let alloc = oxc_allocator::Allocator::new();
+        verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
+            exported_name,
+            eval_source,
+            &alloc,
+        )
+    }
+
     fn required_import_names_for_decl(
         &self,
+        source_canonical_id: &str,
+        exported_name: &str,
         decl: &TypeDeclInfo,
         owner_env: &EvalEnv,
     ) -> FxHashSet<String>;
@@ -63,8 +87,25 @@ pub trait ImportedDeclEvalResolver {
         context: &PreparedImportedDeclContext,
         imported_inputs: &ImportedEvalInputs,
     ) -> Option<EvalEnv>;
+
+    fn cached_evaluated_decl(
+        &self,
+        _source_canonical_id: &str,
+        _exported_name: &str,
+    ) -> Option<CachedEvaluatedImportedDecl> {
+        None
+    }
+
+    fn cache_evaluated_decl(
+        &self,
+        _source_canonical_id: &str,
+        _exported_name: &str,
+        _cached: CachedEvaluatedImportedDecl,
+    ) {
+    }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
     resolver: &mut R,
     source_canonical_id: &str,
@@ -76,6 +117,12 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
     }
 
     let resolved_source_canonical_id = resolver.canonicalize_imported_source(source_canonical_id);
+    if let Some(cached) =
+        resolver.cached_evaluated_decl(&resolved_source_canonical_id, exported_name)
+    {
+        canonical_dependencies.extend(cached.canonical_dependencies.iter().cloned());
+        return Some((*cached.body).clone());
+    }
     if !resolver.enter_alias_env(&resolved_source_canonical_id) {
         return None;
     }
@@ -83,16 +130,18 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
     let result = (|| {
         let context =
             resolver.load_imported_decl_context(&resolved_source_canonical_id, exported_name)?;
-        let import_alloc = oxc_allocator::Allocator::new();
-        let mut decl_required_import_names =
-            verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
-                exported_name,
-                context.eval_source.as_str(),
-                &import_alloc,
-            );
+        let mut decl_required_import_names = resolver.required_import_names_for_exported_type(
+            &resolved_source_canonical_id,
+            exported_name,
+            context.eval_source.as_str(),
+        );
         if decl_required_import_names.is_empty() && !context.imports.is_empty() {
-            decl_required_import_names =
-                resolver.required_import_names_for_decl(&context.decl, &context.env);
+            decl_required_import_names = resolver.required_import_names_for_decl(
+                &resolved_source_canonical_id,
+                exported_name,
+                &context.decl,
+                &context.env,
+            );
         }
         let imported_inputs = resolver.build_imported_inputs_for_decl(
             &resolved_source_canonical_id,
@@ -119,10 +168,13 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
                 std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
-        Some(verter_analysis::type_eval::evaluate(
-            &decl.body,
-            &mut dep_env,
-        ))
+        let evaluated = verter_analysis::type_eval::evaluate(&decl.body, &mut dep_env);
+        let cached = CachedEvaluatedImportedDecl {
+            body: Arc::new(evaluated.clone()),
+            canonical_dependencies: canonical_dependencies.clone(),
+        };
+        resolver.cache_evaluated_decl(&resolved_source_canonical_id, exported_name, cached);
+        Some(evaluated)
     })();
 
     resolver.leave_alias_env(&resolved_source_canonical_id);
@@ -132,8 +184,8 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate_imported_decl_with_owner_env, ImportedDeclEvalResolver,
-        PreparedImportedDeclContext,
+        evaluate_imported_decl_with_owner_env, CachedEvaluatedImportedDecl,
+        ImportedDeclEvalResolver, PreparedImportedDeclContext,
     };
     use crate::{ImportedEvalInputs, ImportedEvalOverflow};
     use rustc_hash::FxHashSet;
@@ -149,6 +201,9 @@ mod tests {
         entered: RefCell<Vec<String>>,
         left: RefCell<Vec<String>>,
         built_inputs: ImportedEvalInputs,
+        cached: RefCell<std::collections::BTreeMap<(String, String), CachedEvaluatedImportedDecl>>,
+        build_inputs_calls: RefCell<u32>,
+        build_env_calls: RefCell<u32>,
     }
 
     impl ImportedDeclEvalResolver for TestResolver {
@@ -181,6 +236,8 @@ mod tests {
 
         fn required_import_names_for_decl(
             &self,
+            _source_canonical_id: &str,
+            _exported_name: &str,
             _decl: &TypeDeclInfo,
             _owner_env: &EvalEnv,
         ) -> FxHashSet<String> {
@@ -193,6 +250,7 @@ mod tests {
             _context: &PreparedImportedDeclContext,
             _additional_required_import_names: &FxHashSet<String>,
         ) -> ImportedEvalInputs {
+            *self.build_inputs_calls.borrow_mut() += 1;
             self.built_inputs.clone()
         }
 
@@ -202,7 +260,31 @@ mod tests {
             context: &PreparedImportedDeclContext,
             _imported_inputs: &ImportedEvalInputs,
         ) -> Option<EvalEnv> {
+            *self.build_env_calls.borrow_mut() += 1;
             Some(context.env.clone())
+        }
+
+        fn cached_evaluated_decl(
+            &self,
+            source_canonical_id: &str,
+            exported_name: &str,
+        ) -> Option<CachedEvaluatedImportedDecl> {
+            self.cached
+                .borrow()
+                .get(&(source_canonical_id.to_string(), exported_name.to_string()))
+                .cloned()
+        }
+
+        fn cache_evaluated_decl(
+            &self,
+            source_canonical_id: &str,
+            exported_name: &str,
+            cached: CachedEvaluatedImportedDecl,
+        ) {
+            self.cached.borrow_mut().insert(
+                (source_canonical_id.to_string(), exported_name.to_string()),
+                cached,
+            );
         }
     }
 
@@ -259,6 +341,9 @@ mod tests {
                 ),
                 overflow: None,
             },
+            cached: RefCell::new(std::collections::BTreeMap::new()),
+            build_inputs_calls: RefCell::new(0),
+            build_env_calls: RefCell::new(0),
         };
         let mut deps = BTreeSet::new();
 
@@ -308,6 +393,9 @@ mod tests {
                     message: "overflow".to_string(),
                 }),
             },
+            cached: RefCell::new(std::collections::BTreeMap::new()),
+            build_inputs_calls: RefCell::new(0),
+            build_env_calls: RefCell::new(0),
         };
 
         let actual = evaluate_imported_decl_with_owner_env(
@@ -363,6 +451,9 @@ mod tests {
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
             },
+            cached: RefCell::new(std::collections::BTreeMap::new()),
+            build_inputs_calls: RefCell::new(0),
+            build_env_calls: RefCell::new(0),
         };
 
         let actual = evaluate_imported_decl_with_owner_env(
@@ -460,6 +551,9 @@ mod tests {
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
             },
+            cached: RefCell::new(std::collections::BTreeMap::new()),
+            build_inputs_calls: RefCell::new(0),
+            build_env_calls: RefCell::new(0),
         };
 
         let actual = evaluate_imported_decl_with_owner_env(
@@ -496,5 +590,80 @@ mod tests {
             }),
             _ => false,
         }));
+    }
+
+    #[test]
+    fn evaluate_imported_decl_with_owner_env_reuses_cached_body_and_dependencies() {
+        let mut env = EvalEnv::new();
+        env.add_type(decl("Props", TypeExpr::Primitive(PrimitiveName::String)));
+        let mut contexts = std::collections::BTreeMap::new();
+        contexts.insert(
+            ("/src/types.ts".to_string(), "Props".to_string()),
+            PreparedImportedDeclContext {
+                imports: Vec::new(),
+                macros: Vec::new(),
+                bindings: Vec::new(),
+                macro_type_deps: Vec::new(),
+                eval_source: "export interface Props {}".to_string(),
+                env,
+                decl: decl("Props", TypeExpr::Primitive(PrimitiveName::String)),
+            },
+        );
+        let mut resolver = TestResolver {
+            exhausted: false,
+            allow_alias_enter: true,
+            contexts,
+            entered: RefCell::new(Vec::new()),
+            left: RefCell::new(Vec::new()),
+            built_inputs: ImportedEvalInputs {
+                sources: Vec::new(),
+                type_aliases: Vec::new(),
+                canonical_dependencies: BTreeSet::from_iter(
+                    ["/src/dep.ts".to_string()].into_iter(),
+                ),
+                overflow: None,
+            },
+            cached: RefCell::new(std::collections::BTreeMap::new()),
+            build_inputs_calls: RefCell::new(0),
+            build_env_calls: RefCell::new(0),
+        };
+
+        let first = evaluate_imported_decl_with_owner_env(
+            &mut resolver,
+            "/src/types.ts",
+            "Props",
+            &mut BTreeSet::new(),
+        );
+        let mut second_deps = BTreeSet::new();
+        let second = evaluate_imported_decl_with_owner_env(
+            &mut resolver,
+            "/src/types.ts",
+            "Props",
+            &mut second_deps,
+        );
+
+        assert_eq!(first, Some(TypeExpr::Primitive(PrimitiveName::String)));
+        assert_eq!(second, first);
+        assert!(second_deps.contains("/src/dep.ts"));
+        assert_eq!(
+            *resolver.build_inputs_calls.borrow(),
+            1,
+            "cached imported decl bodies should skip rebuilding imported inputs on repeat lookups",
+        );
+        assert_eq!(
+            *resolver.build_env_calls.borrow(),
+            1,
+            "cached imported decl bodies should skip rebuilding owner eval env on repeat lookups",
+        );
+        assert_eq!(
+            resolver.entered.borrow().as_slice(),
+            ["/src/types.ts"],
+            "cache hits should bypass alias-env entry entirely",
+        );
+        assert_eq!(
+            resolver.left.borrow().as_slice(),
+            ["/src/types.ts"],
+            "cache hits should bypass alias-env entry entirely",
+        );
     }
 }

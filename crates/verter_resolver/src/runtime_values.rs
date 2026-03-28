@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_analysis::type_eval::EvalEnv;
 use verter_analysis::types::{AnalyzedImport, ImportBindingKind};
 
 pub trait ImportedRuntimeValueResolver {
-    fn dependency_eval_env(&self, canonical_id: &str) -> Option<EvalEnv>;
+    fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>>;
 }
 
 pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResolver>(
@@ -12,7 +14,7 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
     env: &mut EvalEnv,
     resolver: &R,
 ) {
-    let mut dep_env_cache: FxHashMap<String, Option<EvalEnv>> = FxHashMap::default();
+    let mut dep_env_cache: FxHashMap<String, Option<Arc<EvalEnv>>> = FxHashMap::default();
 
     for import in imports {
         if import.is_type_only {
@@ -56,17 +58,18 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
 mod tests {
     use super::{materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver};
     use rustc_hash::{FxHashMap, FxHashSet};
+    use std::sync::Arc;
     use verter_analysis::type_eval::{EvalEnv, ValueDeclInfo, ValueDeclKind};
     use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
     use verter_span::Span;
 
     #[derive(Default)]
     struct TestResolver {
-        dep_envs: FxHashMap<String, EvalEnv>,
+        dep_envs: FxHashMap<String, Arc<EvalEnv>>,
     }
 
     impl ImportedRuntimeValueResolver for TestResolver {
-        fn dependency_eval_env(&self, canonical_id: &str) -> Option<EvalEnv> {
+        fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>> {
             self.dep_envs.get(canonical_id).cloned()
         }
     }
@@ -98,7 +101,9 @@ mod tests {
         });
 
         let mut resolver = TestResolver::default();
-        resolver.dep_envs.insert("/src/dep.ts".to_string(), dep_env);
+        resolver
+            .dep_envs
+            .insert("/src/dep.ts".to_string(), Arc::new(dep_env));
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
@@ -138,7 +143,9 @@ mod tests {
         });
 
         let mut resolver = TestResolver::default();
-        resolver.dep_envs.insert("/src/dep.ts".to_string(), dep_env);
+        resolver
+            .dep_envs
+            .insert("/src/dep.ts".to_string(), Arc::new(dep_env));
 
         let mut env = EvalEnv::new();
         env.add_value(ValueDeclInfo {

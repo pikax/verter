@@ -136,6 +136,42 @@ fn extend_missing_preserves_and_synchronizes_declaration_ids() {
     assert_eq!(base.value_declaration_id("remoteValue"), Some(23));
 }
 
+#[test]
+fn extend_missing_from_ref_preserves_and_synchronizes_declaration_ids() {
+    let mut base = EvalEnv::new();
+    base.add_type(TypeDeclInfo {
+        name: "Local".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Primitive(PrimitiveName::String),
+    });
+
+    let mut imported = EvalEnv::new();
+    imported.add_type(TypeDeclInfo {
+        name: "Remote".to_string(),
+        declaration_id: 17,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Primitive(PrimitiveName::Number),
+    });
+    imported.add_value(ValueDeclInfo {
+        name: "remoteValue".to_string(),
+        declaration_id: 23,
+        kind: ValueDeclKind::Const,
+        type_annotation: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+        function_signature: None,
+        object_shape: None,
+    });
+
+    base.extend_missing_from_ref(&imported);
+
+    assert_eq!(base.type_symbols["Remote"].declaration_id, 17);
+    assert_eq!(base.type_declaration_id("Remote"), Some(17));
+    assert_eq!(base.value_symbols["remoteValue"].declaration_id, 23);
+    assert_eq!(base.value_declaration_id("remoteValue"), Some(23));
+}
+
 #[derive(Default)]
 struct TestLookup {
     type_decls: FxHashMap<String, TypeDeclInfo>,
@@ -577,6 +613,41 @@ fn eval_generic_alias() {
         }
         _ => panic!("expected object, got {result:?}"),
     }
+}
+
+#[test]
+fn eval_generic_alias_substitutes_normalized_type_parameter_nodes() {
+    let mut env = EvalEnv::new();
+    let generic = TypeParam {
+        name: "T".to_string(),
+        constraint: None,
+        default: None,
+    };
+    env.add_type(TypeDeclInfo {
+        name: "Box".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![generic.clone()],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "value".to_string(),
+                ty: TypeExpr::type_parameter(generic),
+                optional: false,
+                readonly: false,
+            })],
+        })),
+    });
+
+    let expr = TypeExpr::named_with_args("Box", vec![TypeExpr::Primitive(PrimitiveName::String)]);
+    let result = evaluate(&expr, &mut env);
+    let TypeExpr::Object(obj) = result else {
+        panic!("expected object result for generic alias");
+    };
+    let ObjectMember::Property(prop) = &obj.properties[0] else {
+        panic!("expected object property");
+    };
+    assert_eq!(prop.name, "value");
+    assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::String));
 }
 
 #[test]

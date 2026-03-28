@@ -1,11 +1,14 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_core::utils::oxc::vue::resolve_type::{extract_export_surface, ResolvedElements};
+use verter_core::utils::oxc::vue::resolve_type::{
+    extract_export_surface, AnalyzedExternalTypeSource, ResolvedElements,
+};
 use verter_vfs::ResolveRequestKind;
 
 use crate::{
-    resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
+    resolve_external_type_from_source_body, ExportRegistryView, ExternalTypeBodyCache,
+    ExternalTypeBodyResolver, RegistryExportEntry, ResolverHash16,
 };
 
 pub trait ExternalTypeGraphResolver {
@@ -23,6 +26,8 @@ pub trait ExternalTypeGraphResolver {
         import_source: &str,
         kind: ResolveRequestKind,
     ) -> Option<String>;
+
+    fn source_hash(&self, dep_canonical: &str) -> ResolverHash16;
 
     fn read_source_for_type_resolution(
         &self,
@@ -44,6 +49,19 @@ pub trait ExternalTypeGraphResolver {
     }
 
     fn debug_log(&self, _message: String) {}
+
+    fn cached_barrel_state(&self, _barrel_canonical: &str) -> Option<crate::BarrelResolutionState> {
+        None
+    }
+
+    fn persist_barrel_state(&self, _barrel_canonical: &str, _state: &crate::BarrelResolutionState) {
+    }
+
+    fn note_barrel_fact_reuse(&self) {}
+
+    fn ensure_export_registry(&self, _canonical: &str) -> Option<ExportRegistryView> {
+        None
+    }
 
     /// Look up a previously resolved type in the host-level cache.
     fn lookup_resolved_type_cache(
@@ -67,6 +85,15 @@ pub trait ExternalTypeGraphResolver {
         _tracked_deps: &[String],
     ) {
     }
+
+    fn resolve_external_type_from_analysis(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        effective_source: &str,
+        analysis: &AnalyzedExternalTypeSource,
+        imported_companions: &FxHashMap<String, ResolvedElements>,
+    ) -> Option<ResolvedElements>;
 }
 
 struct GraphBodyResolver<'a, R> {
@@ -104,6 +131,23 @@ where
     ) {
         self.resolver
             .note_resolved_type(dep_canonical, type_name, resolved, tracked_deps);
+    }
+
+    fn resolve_external_type_from_analysis(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        effective_source: &str,
+        analysis: &AnalyzedExternalTypeSource,
+        imported_companions: &FxHashMap<String, ResolvedElements>,
+    ) -> Option<ResolvedElements> {
+        self.resolver.resolve_external_type_from_analysis(
+            dep_canonical,
+            type_name,
+            effective_source,
+            analysis,
+            imported_companions,
+        )
     }
 
     fn resolve_external_type_recursive(
@@ -171,6 +215,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn resolve_external_type_from_graph<R: ExternalTypeGraphResolver>(
     resolver: &R,
     owner_canonical: &str,
@@ -284,6 +329,7 @@ pub fn resolve_external_type_from_graph<R: ExternalTypeGraphResolver>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_type_through_barrel_from_graph<R: ExternalTypeGraphResolver>(
     resolver: &R,
     barrel_canonical: &str,
@@ -298,18 +344,44 @@ fn resolve_type_through_barrel_from_graph<R: ExternalTypeGraphResolver>(
     profile_hash: Option<u64>,
     depth: usize,
 ) -> Result<Option<ResolvedElements>, R::Error> {
+    let cached_barrel = cache
+        .barrel_state(barrel_canonical)
+        .cloned()
+        .or_else(|| resolver.cached_barrel_state(barrel_canonical));
+    let barrel_source_hash = resolver.source_hash(barrel_canonical);
+    let valid_barrel = cached_barrel.as_ref().and_then(|state| {
+        if state.source_hash != barrel_source_hash {
+            return None;
+        }
+        for (child_canonical, expected_hash) in &state.scanned_sources {
+            if resolver.source_hash(child_canonical) != *expected_hash {
+                return None;
+            }
+        }
+        Some(state.clone())
+    });
     let specifier_to_canonical: Vec<(String, String)> = wildcard_sources
         .iter()
         .filter_map(|spec| {
             resolver
                 .resolve_dependency_canonical(barrel_canonical, spec, kind)
-                .map(|canonical| (spec.clone(), canonical))
+                .map(|canonical| (spec.to_string(), canonical))
         })
         .collect();
 
-    let mut export_map = FxHashMap::default();
-    let mut scanned = FxHashSet::default();
-    let mut transitive_deps = BTreeSet::new();
+    if let Some(ref state) = valid_barrel {
+        resolver.note_barrel_fact_reuse();
+        cache.store_barrel_state(barrel_canonical, state.clone());
+    }
+    let mut state = valid_barrel.unwrap_or_else(|| crate::BarrelResolutionState {
+        export_map: FxHashMap::default(),
+        source_hash: barrel_source_hash,
+        wildcard_sources: wildcard_sources.to_vec(),
+        scanned_sources: FxHashMap::default(),
+        tracked_deps: FxHashSet::default(),
+        fully_resolved: false,
+        generation: 0,
+    });
 
     for (child_specifier, child_canonical) in &specifier_to_canonical {
         let mut visited = FxHashSet::default();
@@ -317,17 +389,18 @@ fn resolve_type_through_barrel_from_graph<R: ExternalTypeGraphResolver>(
             resolver,
             child_specifier,
             child_canonical,
-            &mut export_map,
-            &mut scanned,
-            &mut transitive_deps,
+            type_name,
+            &mut state,
             &mut visited,
             kind,
             profile_hash,
         );
+        cache.store_barrel_state(barrel_canonical, state.clone());
+        resolver.persist_barrel_state(barrel_canonical, &state);
 
-        if export_map.contains_key(type_name) {
-            tracked_deps.extend(transitive_deps.iter().cloned());
-            resolution_deps.extend(transitive_deps.iter().cloned());
+        if state.export_map.contains_key(type_name) {
+            tracked_deps.extend(state.tracked_deps.iter().cloned());
+            resolution_deps.extend(state.tracked_deps.iter().cloned());
             return resolve_external_type_from_graph(
                 resolver,
                 barrel_canonical,
@@ -346,8 +419,13 @@ fn resolve_type_through_barrel_from_graph<R: ExternalTypeGraphResolver>(
         }
     }
 
-    tracked_deps.extend(transitive_deps.iter().cloned());
-    resolution_deps.extend(transitive_deps.iter().cloned());
+    state.fully_resolved = specifier_to_canonical
+        .iter()
+        .all(|(_, canonical)| state.scanned_sources.contains_key(canonical));
+    cache.store_barrel_state(barrel_canonical, state.clone());
+    resolver.persist_barrel_state(barrel_canonical, &state);
+    tracked_deps.extend(state.tracked_deps.iter().cloned());
+    resolution_deps.extend(state.tracked_deps.iter().cloned());
 
     for (child_specifier, _child_canonical) in &specifier_to_canonical {
         if let Some(found) = resolve_external_type_from_graph(
@@ -377,9 +455,8 @@ fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>
     resolver: &R,
     root_specifier: &str,
     current_canonical: &str,
-    export_map: &mut FxHashMap<String, (String, String)>,
-    scanned: &mut FxHashSet<String>,
-    tracked_deps: &mut BTreeSet<String>,
+    type_name: &str,
+    state: &mut crate::BarrelResolutionState,
     visited: &mut FxHashSet<String>,
     kind: ResolveRequestKind,
     profile_hash: Option<u64>,
@@ -387,27 +464,53 @@ fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>
     if !visited.insert(current_canonical.to_string()) {
         return;
     }
-    if !scanned.insert(current_canonical.to_string()) {
+    if state.scanned_sources.contains_key(current_canonical) {
         return;
     }
 
-    tracked_deps.insert(current_canonical.to_string());
-    let Some(current_source) =
-        resolver.read_source_for_type_resolution(current_canonical, profile_hash)
-    else {
-        return;
-    };
+    let current_hash = resolver.source_hash(current_canonical);
+    state.tracked_deps.insert(current_canonical.to_string());
+    let wildcard_sources =
+        if let Some(registry) = resolver.ensure_export_registry(current_canonical) {
+            for (name, entry) in &registry.named {
+                match entry {
+                    RegistryExportEntry::Defined | RegistryExportEntry::Alias { .. } => {
+                        state.export_map.entry(name.clone()).or_insert_with(|| {
+                            (root_specifier.to_string(), current_canonical.to_string())
+                        });
+                    }
+                }
+            }
+            state
+                .scanned_sources
+                .insert(current_canonical.to_string(), current_hash);
+            registry.wildcard_edges
+        } else {
+            let Some(current_source) =
+                resolver.read_source_for_type_resolution(current_canonical, profile_hash)
+            else {
+                state
+                    .scanned_sources
+                    .insert(current_canonical.to_string(), current_hash);
+                return;
+            };
 
-    let alloc = oxc_allocator::Allocator::new();
-    let surface = extract_export_surface(&current_source, &alloc);
+            let alloc = oxc_allocator::Allocator::new();
+            let surface = extract_export_surface(&current_source, &alloc);
 
-    for name in &surface.exported_names {
-        export_map
-            .entry(name.clone())
-            .or_insert_with(|| (root_specifier.to_string(), current_canonical.to_string()));
-    }
+            for name in &surface.exported_names {
+                state
+                    .export_map
+                    .entry(name.clone())
+                    .or_insert_with(|| (root_specifier.to_string(), current_canonical.to_string()));
+            }
+            state
+                .scanned_sources
+                .insert(current_canonical.to_string(), current_hash);
+            surface.wildcard_reexport_sources
+        };
 
-    for nested_specifier in &surface.wildcard_reexport_sources {
+    for nested_specifier in &wildcard_sources {
         let Some(nested_canonical) =
             resolver.resolve_dependency_canonical(current_canonical, nested_specifier, kind)
         else {
@@ -417,9 +520,8 @@ fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>
             resolver,
             root_specifier,
             &nested_canonical,
-            export_map,
-            scanned,
-            tracked_deps,
+            type_name,
+            state,
             visited,
             kind,
             profile_hash,
@@ -430,17 +532,26 @@ fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>
 #[cfg(test)]
 mod tests {
     use super::{resolve_external_type_from_graph, ExternalTypeGraphResolver};
+    use crate::{ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16};
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::BTreeSet;
+    use verter_analysis::hash_16;
+    use verter_core::utils::oxc::vue::resolve_type::{
+        AnalyzedExternalTypeSource, ResolvedElements,
+    };
     use verter_vfs::ResolveRequestKind;
 
     #[derive(Default)]
     struct TestResolver {
         routes: FxHashMap<(String, String), String>,
         sources: FxHashMap<String, String>,
+        registries: FxHashMap<String, ExportRegistryView>,
         named_export_targets: FxHashMap<(String, String, ResolveRequestKind), (String, String)>,
+        analysis_results: FxHashMap<(String, String), Option<ResolvedElements>>,
         logs: RefCell<Vec<String>>,
+        source_reads: RefCell<FxHashMap<String, usize>>,
+        analysis_calls: RefCell<Vec<(String, String)>>,
     }
 
     impl ExternalTypeGraphResolver for TestResolver {
@@ -477,11 +588,23 @@ mod tests {
                 .cloned()
         }
 
+        fn source_hash(&self, dep_canonical: &str) -> ResolverHash16 {
+            self.sources
+                .get(dep_canonical)
+                .map(|source| hash_16(source.as_bytes()))
+                .unwrap_or_else(|| hash_16(dep_canonical.as_bytes()))
+        }
+
         fn read_source_for_type_resolution(
             &self,
             dep_canonical: &str,
             _profile_hash: Option<u64>,
         ) -> Option<String> {
+            *self
+                .source_reads
+                .borrow_mut()
+                .entry(dep_canonical.to_string())
+                .or_default() += 1;
             self.sources.get(dep_canonical).cloned()
         }
 
@@ -502,6 +625,45 @@ mod tests {
 
         fn debug_log(&self, message: String) {
             self.logs.borrow_mut().push(message);
+        }
+
+        fn ensure_export_registry(&self, canonical: &str) -> Option<ExportRegistryView> {
+            self.registries.get(canonical).cloned()
+        }
+
+        fn resolve_external_type_from_analysis(
+            &self,
+            dep_canonical: &str,
+            type_name: &str,
+            effective_source: &str,
+            analysis: &AnalyzedExternalTypeSource,
+            imported_companions: &FxHashMap<String, ResolvedElements>,
+        ) -> Option<ResolvedElements> {
+            self.analysis_calls
+                .borrow_mut()
+                .push((dep_canonical.to_string(), type_name.to_string()));
+            if let Some(result) = self
+                .analysis_results
+                .get(&(dep_canonical.to_string(), type_name.to_string()))
+                .cloned()
+                .flatten()
+            {
+                return Some(result);
+            }
+
+            let allocator = oxc_allocator::Allocator::new();
+            let parsed =
+                oxc_parser::Parser::new(&allocator, effective_source, oxc_span::SourceType::ts())
+                    .parse();
+            (!parsed.panicked).then(|| {
+                verter_core::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+                    type_name,
+                    &parsed.program,
+                    effective_source.as_bytes(),
+                    analysis,
+                    imported_companions,
+                )
+            })?
         }
     }
 
@@ -527,7 +689,7 @@ mod tests {
 
         let mut tracked = BTreeSet::new();
         let mut resolution = BTreeSet::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = ExternalTypeBodyCache::default();
         let mut visiting = FxHashSet::default();
         let actual = resolve_external_type_from_graph(
             &resolver,
@@ -573,7 +735,7 @@ mod tests {
 
         let mut tracked = BTreeSet::new();
         let mut resolution = BTreeSet::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = ExternalTypeBodyCache::default();
         let mut visiting = FxHashSet::default();
         let actual = resolve_external_type_from_graph(
             &resolver,
@@ -621,7 +783,7 @@ mod tests {
 
         let mut tracked = BTreeSet::new();
         let mut resolution = BTreeSet::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = ExternalTypeBodyCache::default();
         let mut visiting = FxHashSet::default();
         let actual = resolve_external_type_from_graph(
             &resolver,
@@ -644,5 +806,258 @@ mod tests {
         assert!(tracked.contains("/src/types/index.ts"));
         assert!(tracked.contains("/src/components/Button.vue"));
         assert!(!tracked.contains("/src/deep.ts"));
+    }
+
+    #[test]
+    fn resolve_external_type_from_graph_reuses_request_local_barrel_state_across_lookups() {
+        let mut resolver = TestResolver::default();
+        resolver.routes.insert(
+            ("/src/Consumer.vue".to_string(), "./barrel".to_string()),
+            "/src/barrel.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/barrel.ts".to_string(), "./a".to_string()),
+            "/src/a.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/barrel.ts".to_string(), "./b".to_string()),
+            "/src/b.ts".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/barrel.ts".to_string(),
+            "export * from './a'\nexport * from './b'".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/a.ts".to_string(),
+            "export interface Foo { one: string }".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/b.ts".to_string(),
+            "export interface Bar { two: string }".to_string(),
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+        let first = resolve_external_type_from_graph(
+            &resolver,
+            "/src/Consumer.vue",
+            "./barrel",
+            "Foo",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            true,
+            ResolveRequestKind::TypeImport,
+            false,
+            None,
+            0,
+        )
+        .expect("first wildcard lookup should resolve");
+        assert!(first.is_some());
+        let reads_after_first = resolver.source_reads.borrow().clone();
+
+        let second = resolve_external_type_from_graph(
+            &resolver,
+            "/src/Consumer.vue",
+            "./barrel",
+            "Bar",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            true,
+            ResolveRequestKind::TypeImport,
+            false,
+            None,
+            0,
+        )
+        .expect("second wildcard lookup should reuse the local barrel state");
+        assert!(second.is_some());
+
+        let reads = resolver.source_reads.borrow();
+        assert_eq!(
+            reads.get("/src/a.ts").copied().unwrap_or_default(),
+            reads_after_first
+                .get("/src/a.ts")
+                .copied()
+                .unwrap_or_default(),
+            "later lookups in the same request should not rescan the already-checked sibling",
+        );
+        assert_eq!(
+            reads.get("/src/b.ts").copied().unwrap_or_default(),
+            reads_after_first.get("/src/b.ts").copied().unwrap_or_default() + 2,
+            "the second lookup should only add one scan read and one body read for the newly-relevant sibling",
+        );
+    }
+
+    #[test]
+    fn resolve_external_type_from_graph_uses_export_registry_for_barrel_scans() {
+        let mut resolver = TestResolver::default();
+        resolver.routes.insert(
+            ("/src/Consumer.vue".to_string(), "./barrel".to_string()),
+            "/src/barrel.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/barrel.ts".to_string(), "./child".to_string()),
+            "/src/child.ts".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/barrel.ts".to_string(),
+            "export * from './child'".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/child.ts".to_string(),
+            "export interface Props { msg: string }".to_string(),
+        );
+        resolver.registries.insert(
+            "/src/child.ts".to_string(),
+            ExportRegistryView {
+                source_hash: hash_16(b"export interface Props { msg: string }"),
+                named: FxHashMap::from_iter([("Props".to_string(), RegistryExportEntry::Defined)]),
+                wildcard_edges: Vec::new(),
+            },
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+        let actual = resolve_external_type_from_graph(
+            &resolver,
+            "/src/Consumer.vue",
+            "./barrel",
+            "Props",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            true,
+            ResolveRequestKind::TypeImport,
+            false,
+            None,
+            0,
+        )
+        .expect("registry-backed wildcard lookup should resolve");
+
+        assert!(actual.is_some());
+        assert_eq!(
+            resolver
+                .source_reads
+                .borrow()
+                .get("/src/child.ts")
+                .copied()
+                .unwrap_or_default(),
+            1,
+            "graph barrel scanning should use cached export registries so the child source is only read for the final body resolution",
+        );
+    }
+
+    #[test]
+    fn resolve_external_type_from_graph_preserves_barrel_wildcard_source_order() {
+        let mut resolver = TestResolver::default();
+        resolver.routes.insert(
+            ("/src/Consumer.vue".to_string(), "./barrel".to_string()),
+            "/src/barrel.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/barrel.ts".to_string(), "./legacy".to_string()),
+            "/src/legacy.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/barrel.ts".to_string(), "./Button".to_string()),
+            "/src/Button.ts".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/barrel.ts".to_string(),
+            "export * from './legacy'\nexport * from './Button'".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/legacy.ts".to_string(),
+            "export interface ButtonProps { source: 'legacy' }".to_string(),
+        );
+        resolver.sources.insert(
+            "/src/Button.ts".to_string(),
+            "export interface ButtonProps { source: 'button' }".to_string(),
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+        let actual = resolve_external_type_from_graph(
+            &resolver,
+            "/src/Consumer.vue",
+            "./barrel",
+            "ButtonProps",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            true,
+            ResolveRequestKind::TypeImport,
+            false,
+            None,
+            0,
+        )
+        .expect("graph barrel lookup should resolve");
+
+        assert!(actual.is_some());
+        let reads = resolver.source_reads.borrow();
+        assert_eq!(
+            reads.get("/src/Button.ts").copied().unwrap_or_default(),
+            0,
+            "later wildcard siblings should not win over an earlier duplicate export purely because their path matches the requested name",
+        );
+        assert_eq!(
+            reads.get("/src/legacy.ts").copied().unwrap_or_default(),
+            2,
+            "graph barrel resolution should follow the first declared matching wildcard child",
+        );
+    }
+
+    #[test]
+    fn resolve_external_type_from_graph_delegates_analysis_resolution_to_resolver() {
+        let mut resolver = TestResolver::default();
+        resolver.routes.insert(
+            ("/src/Consumer.vue".to_string(), "./types".to_string()),
+            "/src/types.ts".to_string(),
+        );
+        resolver
+            .sources
+            .insert("/src/types.ts".to_string(), "const nope = 1".to_string());
+        resolver.analysis_results.insert(
+            ("/src/types.ts".to_string(), "Props".to_string()),
+            Some(ResolvedElements::default()),
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+        let actual = resolve_external_type_from_graph(
+            &resolver,
+            "/src/Consumer.vue",
+            "./types",
+            "Props",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            true,
+            ResolveRequestKind::TypeImport,
+            false,
+            None,
+            0,
+        )
+        .expect("graph resolution should delegate analysis resolution to the resolver");
+
+        assert!(actual.is_some());
+        assert_eq!(
+            resolver.analysis_calls.borrow().as_slice(),
+            &[("/src/types.ts".to_string(), "Props".to_string())],
+        );
     }
 }
