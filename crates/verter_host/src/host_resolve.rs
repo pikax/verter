@@ -1646,11 +1646,59 @@ impl VerterHost {
                 {
                     return Some(resolved);
                 }
-                return self.fallback_relative_type_companion_in_view(
+                if let Some(resolved) = self.fallback_relative_type_companion_in_view(
                     owner_canonical,
                     import_source,
                     Some(view),
-                );
+                ) {
+                    return Some(resolved);
+                }
+                return self
+                    .ws()
+                    .resolve_import(
+                        owner_canonical,
+                        import_source,
+                        verter_vfs::ResolutionContext {
+                            phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                            kind: verter_vfs::ResolveRequestKind::EsmImport,
+                        },
+                    )
+                    .map(|resolution| {
+                        self.normalize_live_type_dependency_target_in_view(
+                            owner_canonical,
+                            import_source,
+                            resolution.source_id.as_str(),
+                            Some(view),
+                        )
+                    })
+                    .filter(|resolved| {
+                        self.store_view_allows_current_whole_hash(
+                            resolved,
+                            self.get_whole_hash(resolved).unwrap_or_default(),
+                            Some(view),
+                        )
+                    });
+            }
+            if let Some(resolved) = self
+                .ws()
+                .resolve_import(
+                    owner_canonical,
+                    import_source,
+                    verter_vfs::ResolutionContext {
+                        phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                        kind: verter_vfs::ResolveRequestKind::TypeImport,
+                    },
+                )
+                .map(|resolution| {
+                    self.normalize_live_type_dependency_target_in_view(
+                        owner_canonical,
+                        import_source,
+                        resolution.source_id.as_str(),
+                        Some(view),
+                    )
+                })
+            {
+                return Some(resolved);
             }
             return self
                 .ws()
@@ -1659,7 +1707,7 @@ impl VerterHost {
                     import_source,
                     verter_vfs::ResolutionContext {
                         phase: verter_vfs::ResolvePhase::CodegenBlocker,
-                        kind: verter_vfs::ResolveRequestKind::TypeImport,
+                        kind: verter_vfs::ResolveRequestKind::EsmImport,
                     },
                 )
                 .map(|resolution| {
@@ -1695,9 +1743,6 @@ impl VerterHost {
                 .and_then(|resolution| Self::dependency_resolution_target(&resolution))
             {
                 return Some(resolved);
-            }
-            if import_source.starts_with('.') {
-                return None;
             }
             return self
                 .ws()
@@ -1954,8 +1999,8 @@ impl VerterHost {
             let imported_entry = self.clone_current_imported_dependency_entry(canonical, None);
             let imported_export_sigs = imported_entry
                 .as_ref()
-                .and_then(|entry| entry.snapshot.as_ref())
-                .map(|snapshot| snapshot.export_signatures.as_ref().clone());
+                .and_then(|entry| entry.export_signatures.as_ref())
+                .map(|export_signatures| export_signatures.as_ref().clone());
             let imported_whole_hash = imported_entry.as_ref().map(|entry| entry.whole_hash);
 
             let source_hash = self
@@ -1968,15 +2013,14 @@ impl VerterHost {
             } else {
                 // File is only known through cached imported dependency state or disk — parse
                 // once to seed the export registry instead of returning an empty surface.
-                let source = self.read_dep_source_for_type_resolution(canonical, None)?;
-                let disk_hash = crate::hash::hash_16(source.as_bytes());
-                let alloc = oxc_allocator::Allocator::new();
-                let sigs = verter_analysis::extract_export_signatures(
-                    &source,
-                    oxc_span::SourceType::ts(),
-                    &alloc,
-                );
-                Some(Self::build_export_registry(&sigs, disk_hash))
+                let entry =
+                    self.ensure_shallow_imported_dependency_state_in_view(canonical, None)?;
+                let export_sigs = entry
+                    .export_signatures
+                    .as_ref()
+                    .map(|export_signatures| export_signatures.as_ref().clone())
+                    .unwrap_or_default();
+                Some(Self::build_export_registry(&export_sigs, entry.whole_hash))
             }
         };
 
@@ -2086,6 +2130,8 @@ impl VerterHost {
                 &mut visited,
             )
         {
+            let _ = self
+                .ensure_shallow_imported_dependency_state_in_view(canonical.as_str(), store_view);
             component_meta_trace_event!(
                 "resolve_named_type_export_target_in_view_result",
                 format!(
@@ -2107,6 +2153,10 @@ impl VerterHost {
                 store_view,
             );
             if let Some(target) = route.target {
+                let _ = self.ensure_shallow_imported_dependency_state_in_view(
+                    target.final_canonical_id.as_str(),
+                    store_view,
+                );
                 component_meta_trace_event!(
                     "resolve_named_type_export_target_in_view_result",
                     format!(
@@ -2133,6 +2183,8 @@ impl VerterHost {
                 .unwrap_or_else(|| dep_canonical.to_string()),
             resolved.source_name,
         );
+        let _ =
+            self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
         component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
             format!(
@@ -2196,7 +2248,11 @@ impl VerterHost {
                 }
             }
         }
-        let entry = self.materialize_imported_dependency_base_in_view(dep_canonical, store_view)?;
+        let entry = self
+            .ensure_shallow_imported_dependency_state_in_view(dep_canonical, store_view)
+            .or_else(|| {
+                self.materialize_imported_dependency_base_in_view(dep_canonical, store_view)
+            })?;
         let eval_source = entry.eval_source.clone().unwrap_or_else(|| {
             Arc::<str>::from(
                 extract_vue_script_content(
@@ -2322,6 +2378,86 @@ impl VerterHost {
     ///
     /// Returns `Ok(())` on success (cache hit or successful compilation).
     /// Returns `Err(HostError)` if the file is missing or compilation fails.
+    fn hydrate_compile_blockers(&self, canonical_id: &str) {
+        let Some(blockers) = self.get_compile_blockers(canonical_id) else {
+            return;
+        };
+
+        let workspace = self.workspace();
+        let mut blocker_ids = std::collections::BTreeSet::new();
+
+        for request in blockers.external_source_requests {
+            let resolved = workspace
+                .resolve_import(
+                    canonical_id,
+                    &request.specifier,
+                    verter_vfs::ResolutionContext {
+                        phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                        kind: verter_vfs::ResolveRequestKind::SfcSrcAttr,
+                    },
+                )
+                .map(|resolution| {
+                    self.cache_dependency_resolution_result(
+                        canonical_id,
+                        &request.specifier,
+                        &resolution.source_id,
+                    );
+                    resolution.source_id
+                })
+                .unwrap_or(request.resolved_canonical_id);
+            if resolved != canonical_id {
+                blocker_ids.insert(resolved);
+            }
+        }
+
+        for dep in blockers.macro_type_deps.iter() {
+            let resolved = workspace
+                .resolve_import(
+                    canonical_id,
+                    &dep.import_source,
+                    verter_vfs::ResolutionContext {
+                        phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                        kind: verter_vfs::ResolveRequestKind::TypeImport,
+                    },
+                )
+                .map(|resolution| {
+                    self.cache_dependency_resolution_result(
+                        canonical_id,
+                        &dep.import_source,
+                        &resolution.source_id,
+                    );
+                    resolution
+                })
+                .or_else(|| {
+                    workspace
+                        .resolve_import(
+                            canonical_id,
+                            &dep.import_source,
+                            verter_vfs::ResolutionContext {
+                                phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                                kind: verter_vfs::ResolveRequestKind::EsmImport,
+                            },
+                        )
+                        .map(|resolution| {
+                            self.cache_dependency_resolution_result(
+                                canonical_id,
+                                &dep.import_source,
+                                &resolution.source_id,
+                            );
+                            resolution
+                        })
+                })
+                .map(|resolution| resolution.source_id);
+            if let Some(resolved) = resolved.filter(|resolved| resolved != canonical_id) {
+                blocker_ids.insert(resolved);
+            }
+        }
+
+        for blocker_id in blocker_ids {
+            let _ = self.ensure_loaded(&blocker_id);
+        }
+    }
+
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn ensure_compiled(
         &self,
@@ -2388,6 +2524,8 @@ impl VerterHost {
                 }
             }
         }
+
+        self.hydrate_compile_blockers(&canonical);
 
         // Cache miss — compile by requesting the Main virtual file.
         // This populates ALL cached outputs (script, template, styles, TSX, etc.)

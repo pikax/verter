@@ -91,6 +91,7 @@ thread_local! {
 struct ParsedEvalProgramCacheKey {
     host_instance_id: u64,
     canonical_id: String,
+    source_type: oxc_span::SourceType,
 }
 
 #[derive(Clone)]
@@ -2400,6 +2401,20 @@ impl VerterHost {
             .unwrap_or_else(|| source.to_string())
     }
 
+    fn imported_eval_source_type(
+        canonical_id: &str,
+        raw_source: &str,
+        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+    ) -> oxc_span::SourceType {
+        if canonical_id.ends_with(".vue") {
+            cached_parse
+                .map(|parsed| crate::parse::sfc_script_source_type(parsed, raw_source))
+                .unwrap_or_else(oxc_span::SourceType::ts)
+        } else {
+            crate::parse::non_sfc_source_type(canonical_id)
+        }
+    }
+
     pub(crate) fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
         let _trace =
             component_meta_trace_scope!("read_analysis_source", format!("owner={canonical_id}"));
@@ -2621,10 +2636,12 @@ impl VerterHost {
         canonical_id: &str,
         whole_hash: Hash16,
         eval_source: &Arc<str>,
+        source_type: oxc_span::SourceType,
     ) -> ParsedEvalProgramCacheEntry {
         let cache_key = ParsedEvalProgramCacheKey {
             host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
+            source_type,
         };
         HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -2643,15 +2660,10 @@ impl VerterHost {
                 }
             }
 
-            let parsed = crate::ParsedEvalProgram::parse(
-                Arc::clone(eval_source),
-                oxc_span::SourceType::ts(),
-            );
+            let parsed = crate::ParsedEvalProgram::parse(Arc::clone(eval_source), source_type);
             let parse_failed = parsed.is_none();
             let program =
-                Rc::new(parsed.unwrap_or_else(|| {
-                    crate::ParsedEvalProgram::empty(oxc_span::SourceType::ts())
-                }));
+                Rc::new(parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)));
             let type_context = (!parse_failed).then_some({
                 Rc::new(crate::ParsedTypeResolutionContext::new(
                     Rc::clone(&program),
@@ -2700,11 +2712,17 @@ impl VerterHost {
             .as_ref()
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(&entry.raw_source));
+        let source_type = Self::imported_eval_source_type(
+            &entry.resolved_canonical_id,
+            entry.raw_source.as_ref(),
+            entry.cached_parse.as_deref(),
+        );
         Some(
             self.cached_parsed_eval_program_entry(
                 &entry.resolved_canonical_id,
                 entry.whole_hash,
                 &eval_source,
+                source_type,
             )
             .program,
         )
@@ -2722,10 +2740,16 @@ impl VerterHost {
             .as_ref()
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(&entry.raw_source));
+        let source_type = Self::imported_eval_source_type(
+            &entry.resolved_canonical_id,
+            entry.raw_source.as_ref(),
+            entry.cached_parse.as_deref(),
+        );
         self.cached_parsed_eval_program_entry(
             &entry.resolved_canonical_id,
             entry.whole_hash,
             &eval_source,
+            source_type,
         )
         .type_context
     }
@@ -2737,6 +2761,103 @@ impl VerterHost {
                 .borrow_mut()
                 .retain(|key, _| key.host_instance_id != host_instance_id);
         });
+    }
+
+    pub(crate) fn ensure_shallow_imported_dependency_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
+        if let Some(entry) = self.clone_current_imported_dependency_entry(canonical_id, store_view)
+        {
+            if entry.external_type_analysis.is_some()
+                && entry.script_analysis.is_some()
+                && entry.export_signatures.is_some()
+            {
+                return Some(entry);
+            }
+        }
+
+        let (raw_source, cached_parse, whole_hash) =
+            self.current_eval_state_in_view(canonical_id, store_view)?;
+        let source_type = Self::imported_eval_source_type(
+            canonical_id,
+            raw_source.as_ref(),
+            cached_parse.as_deref(),
+        );
+        let (eval_source, block_ranges) = if let Some(parsed) = cached_parse.as_deref() {
+            let (script_source, ranges) =
+                crate::parse::collect_sfc_script_content(parsed, raw_source.as_ref());
+            (Arc::<str>::from(script_source), Some(ranges))
+        } else {
+            (
+                Arc::<str>::from(Self::build_eval_script_source(
+                    raw_source.as_ref(),
+                    cached_parse.as_deref(),
+                )),
+                None,
+            )
+        };
+
+        let (script_analysis, export_signatures, external_type_analysis) = if eval_source.is_empty()
+        {
+            (
+                verter_analysis::ScriptAnalysisSnapshot::default(),
+                Vec::new(),
+                verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            )
+        } else {
+            let parsed_eval_program = self.cached_parsed_eval_program_entry(
+                canonical_id,
+                whole_hash,
+                &eval_source,
+                source_type,
+            );
+            if parsed_eval_program.parse_failed {
+                (
+                    verter_analysis::ScriptAnalysisSnapshot::default(),
+                    Vec::new(),
+                    verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                    ),
+                )
+            } else {
+                let program = parsed_eval_program.program.borrow_dependent();
+                let mut snapshot = crate::parse::build_non_sfc_snapshot_from_program(
+                    canonical_id,
+                    eval_source.as_ref(),
+                    source_type,
+                    program,
+                );
+                if let Some(block_ranges) = block_ranges.as_deref() {
+                    crate::parse::adjust_analysis_spans(
+                        &mut snapshot.script_analysis,
+                        block_ranges,
+                    );
+                    crate::parse::adjust_export_signature_spans(
+                        &mut snapshot.export_signatures,
+                        block_ranges,
+                    );
+                }
+                (
+                    snapshot.script_analysis,
+                    snapshot.export_signatures,
+                    verter_core::utils::oxc::vue::resolve_type::analyze_external_type_program(
+                        program,
+                    ),
+                )
+            }
+        };
+
+        Some(self.cache_imported_dependency_shallow_state(
+            canonical_id,
+            whole_hash,
+            raw_source,
+            cached_parse,
+            Some(eval_source),
+            Some(Arc::new(script_analysis)),
+            Some(Arc::new(export_signatures)),
+            Some(Arc::new(external_type_analysis)),
+        ))
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -2793,6 +2914,11 @@ impl VerterHost {
                 &base.resolved_canonical_id,
                 base.whole_hash,
                 &eval_source,
+                Self::imported_eval_source_type(
+                    &base.resolved_canonical_id,
+                    base.raw_source.as_ref(),
+                    base.cached_parse.as_deref(),
+                ),
             );
             if !parsed_eval_program.parse_failed {
                 let program = parsed_eval_program.program.borrow_dependent();
@@ -2938,8 +3064,12 @@ impl VerterHost {
         Arc<verter_analysis::type_eval::EvalEnv>,
         Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
     ) {
-        let parsed_eval_program =
-            self.cached_parsed_eval_program_entry(canonical_id, whole_hash, eval_source);
+        let parsed_eval_program = self.cached_parsed_eval_program_entry(
+            canonical_id,
+            whole_hash,
+            eval_source,
+            Self::imported_eval_source_type(canonical_id, raw_source, cached_parse),
+        );
         if parsed_eval_program.parse_failed {
             let mut env =
                 verter_analysis::type_eval_build::parse_and_build_env(eval_source.as_ref());
@@ -3158,7 +3288,8 @@ impl VerterHost {
             return Some(cached);
         }
 
-        let entry = self.materialize_imported_dependency_state_in_view(canonical_id, store_view)?;
+        let entry =
+            self.ensure_shallow_imported_dependency_state_in_view(canonical_id, store_view)?;
         let analysis = entry.external_type_analysis.clone()?;
         let stats = analysis.stats();
         component_meta_trace_event!(
@@ -3209,6 +3340,11 @@ impl VerterHost {
             &entry.resolved_canonical_id,
             entry.whole_hash,
             &eval_source,
+            Self::imported_eval_source_type(
+                &entry.resolved_canonical_id,
+                entry.raw_source.as_ref(),
+                entry.cached_parse.as_deref(),
+            ),
         );
         if parsed_eval_program.parse_failed {
             component_meta_trace_event!(
@@ -3473,7 +3609,7 @@ impl VerterHost {
             .load_eval_dependency_canonical_with_fallback_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
 
-        let _ = self.materialize_imported_dependency_state_in_view(
+        let _ = self.ensure_shallow_imported_dependency_state_in_view(
             normalized_canonical.as_str(),
             store_view,
         );
@@ -3542,7 +3678,7 @@ impl VerterHost {
             .load_eval_dependency_canonical_with_fallback_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
 
-        let _ = self.materialize_imported_dependency_state_in_view(
+        let _ = self.ensure_shallow_imported_dependency_state_in_view(
             normalized_canonical.as_str(),
             store_view,
         );
@@ -3590,6 +3726,12 @@ impl VerterHost {
                 }
                 if cached_entry.cached_parse.is_none() && entry.cached_parse.is_some() {
                     cached_entry.cached_parse = entry.cached_parse.clone();
+                }
+                if cached_entry.script_analysis.is_none() && entry.script_analysis.is_some() {
+                    cached_entry.script_analysis = entry.script_analysis.clone();
+                }
+                if cached_entry.export_signatures.is_none() && entry.export_signatures.is_some() {
+                    cached_entry.export_signatures = entry.export_signatures.clone();
                 }
                 if cached_entry.external_type_analysis.is_none()
                     && entry.external_type_analysis.is_some()
@@ -3841,9 +3983,49 @@ impl VerterHost {
                 resolved_canonical_id: canonical_id.to_string(),
                 raw_source,
                 cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
                 external_type_analysis: None,
                 snapshot: None,
                 eval_source: None,
+                env: None,
+                required_owner_import_names: None,
+                exported_required_import_names: rustc_hash::FxHashMap::default(),
+                resolved_type_roots: rustc_hash::FxHashMap::default(),
+                resolved_type_declarations: rustc_hash::FxHashMap::default(),
+                prepared_type_aliases: rustc_hash::FxHashMap::default(),
+                evaluated_type_decls: rustc_hash::FxHashMap::default(),
+                dependency_resolutions: rustc_hash::FxHashMap::default(),
+            },
+        )
+    }
+
+    fn cache_imported_dependency_shallow_state(
+        &self,
+        canonical_id: &str,
+        whole_hash: Hash16,
+        raw_source: Arc<str>,
+        cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        eval_source: Option<Arc<str>>,
+        script_analysis: Option<Arc<verter_analysis::ScriptAnalysisSnapshot>>,
+        export_signatures: Option<Arc<Vec<verter_analysis::ExportSignature>>>,
+        external_type_analysis: Option<
+            Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        >,
+    ) -> Arc<crate::ImportedDependencyCacheEntry> {
+        self.cache_imported_dependency(
+            canonical_id,
+            crate::ImportedDependencyCacheEntry {
+                workspace_generation: self.ws().content_generation(),
+                whole_hash,
+                resolved_canonical_id: canonical_id.to_string(),
+                raw_source,
+                cached_parse,
+                script_analysis,
+                export_signatures,
+                external_type_analysis,
+                snapshot: None,
+                eval_source,
                 env: None,
                 required_owner_import_names: None,
                 exported_required_import_names: rustc_hash::FxHashMap::default(),
@@ -3878,6 +4060,13 @@ impl VerterHost {
                 resolved_canonical_id: canonical_id.to_string(),
                 raw_source,
                 cached_parse,
+                script_analysis: self
+                    .effective_file_state(canonical_id, None)
+                    .filter(|state| state.whole_hash == whole_hash)
+                    .map(|state| Arc::new(state.script_analysis)),
+                export_signatures: snapshot
+                    .as_ref()
+                    .map(|snapshot| Arc::clone(&snapshot.export_signatures)),
                 external_type_analysis,
                 snapshot,
                 eval_source,
@@ -4573,7 +4762,7 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<(String, Arc<str>)> {
         let read_candidate = |candidate: &str| -> Option<Arc<str>> {
-            self.materialize_imported_dependency_base_in_view(candidate, store_view)
+            self.ensure_shallow_imported_dependency_state_in_view(candidate, store_view)
                 .and_then(|entry| entry.eval_source.clone())
         };
 
@@ -7336,35 +7525,25 @@ impl VerterHost {
         resolved_canonical_id: &str,
         specifier: &str,
     ) -> Option<Arc<str>> {
-        #[cfg(feature = "scheduler")]
-        {
-            if let Some(source) = self.read_analysis_source(resolved_canonical_id) {
-                return Some(source);
-            }
-            let dep_id = self.resolve_loaded_dependency_canonical(
-                owner_canonical,
-                specifier,
-                verter_vfs::ResolveRequestKind::EsmImport,
-            )?;
-            (dep_id != resolved_canonical_id)
-                .then_some(dep_id)
-                .and_then(|id| self.read_analysis_source(&id))
+        if let Some(source) = self.read_analysis_source(resolved_canonical_id) {
+            return Some(source);
         }
 
-        #[cfg(not(feature = "scheduler"))]
-        {
-            if let Some(source) = self.read_analysis_source(resolved_canonical_id) {
-                return Some(source);
-            }
-            let dep_id = self.resolve_loaded_dependency_canonical(
+        let dep_id = self
+            .resolve_loaded_dependency_canonical(
                 owner_canonical,
                 specifier,
-                verter_vfs::ResolveRequestKind::EsmImport,
-            )?;
-            (dep_id != resolved_canonical_id)
-                .then_some(dep_id)
-                .and_then(|id| self.read_analysis_source(&id))
-        }
+                verter_vfs::ResolveRequestKind::SfcSrcAttr,
+            )
+            .or_else(|| {
+                self.resolve_loaded_dependency_canonical(
+                    owner_canonical,
+                    specifier,
+                    verter_vfs::ResolveRequestKind::EsmImport,
+                )
+            })?;
+
+        self.read_analysis_source(&dep_id)
     }
 
     /// Populate `resolved_canonical_id` on each import in the snapshot
@@ -8154,6 +8333,25 @@ impl VerterHost {
                         analysis.export_signatures.clone(),
                     ));
                 }
+            }
+        }
+
+        if let Some(entry) =
+            self.ensure_shallow_imported_dependency_state_in_view(&canonical, store_view)
+        {
+            if let (Some(script_analysis), Some(export_signatures)) = (
+                entry.script_analysis.as_ref(),
+                entry.export_signatures.as_ref(),
+            ) {
+                return Some((
+                    if canonical.ends_with(".vue") {
+                        FileKind::VueSfc
+                    } else {
+                        FileKind::NonSfc
+                    },
+                    script_analysis.as_ref().clone(),
+                    export_signatures.as_ref().clone(),
+                ));
             }
         }
 

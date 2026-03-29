@@ -648,7 +648,10 @@ fn catch_analysis_panic<T: Default>(
     }
 }
 
-fn collect_sfc_script_content(parsed: &ParsedSfc, source: &str) -> (String, Vec<(u32, u32)>) {
+pub(crate) fn collect_sfc_script_content(
+    parsed: &ParsedSfc,
+    source: &str,
+) -> (String, Vec<(u32, u32)>) {
     let mut combined_content = String::new();
     let mut block_ranges: Vec<(u32, u32)> = Vec::new();
 
@@ -669,7 +672,7 @@ fn collect_sfc_script_content(parsed: &ParsedSfc, source: &str) -> (String, Vec<
     (combined_content, block_ranges)
 }
 
-fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
+pub(crate) fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
     let lang = [parsed.script(), parsed.script_setup()]
         .into_iter()
         .flatten()
@@ -757,7 +760,7 @@ fn combined_offset_to_sfc(offset: u32, block_ranges: &[(u32, u32)]) -> u32 {
 
 /// Adjust all span fields in a `ScriptAnalysisSnapshot` from script-content-relative
 /// to SFC-absolute byte offsets.
-fn adjust_analysis_spans(
+pub(crate) fn adjust_analysis_spans(
     analysis: &mut verter_analysis::ScriptAnalysisSnapshot,
     block_ranges: &[(u32, u32)],
 ) {
@@ -876,7 +879,7 @@ fn adjust_analysis_spans(
     }
 }
 
-fn adjust_export_signature_spans(
+pub(crate) fn adjust_export_signature_spans(
     export_signatures: &mut [verter_analysis::ExportSignature],
     block_ranges: &[(u32, u32)],
 ) {

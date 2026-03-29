@@ -205,6 +205,8 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub resolved_canonical_id: String,
     pub raw_source: Arc<str>,
     pub cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub script_analysis: Option<Arc<verter_analysis::ScriptAnalysisSnapshot>>,
+    pub export_signatures: Option<Arc<Vec<verter_analysis::ExportSignature>>>,
     pub external_type_analysis:
         Option<Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,

@@ -2978,6 +2978,70 @@ fn resolve_import_via_workspace_uses_exact_resolutions() {
 }
 
 #[test]
+fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/partials/panel.html".to_string(),
+        Arc::from("<div>{{ props.msg }}</div>"),
+    );
+    ws.inject_file(
+        "/workspace/src/types.ts".to_string(),
+        Arc::from("export interface Props { msg: string }\n"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws);
+    let _ = upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>",
+    );
+    host.workspace().set_exact_resolutions(
+        "/workspace/src/App.vue",
+        vec![
+            verter_vfs::ExactResolution {
+                specifier: "@/partials/panel.html".to_string(),
+                phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                kind: verter_vfs::ResolveRequestKind::SfcSrcAttr,
+                resolved_canonical_id: Some("/workspace/src/partials/panel.html".to_string()),
+                possible_canonical_ids: vec!["/workspace/src/partials/panel.html".to_string()],
+            },
+            verter_vfs::ExactResolution {
+                specifier: "@/types".to_string(),
+                phase: verter_vfs::ResolvePhase::CodegenBlocker,
+                kind: verter_vfs::ResolveRequestKind::TypeImport,
+                resolved_canonical_id: Some("/workspace/src/types.ts".to_string()),
+                possible_canonical_ids: vec!["/workspace/src/types.ts".to_string()],
+            },
+        ],
+    );
+
+    assert!(
+        host.get_source("/workspace/src/partials/panel.html")
+            .is_none(),
+        "blockers should not be preloaded before compilation",
+    );
+    assert!(
+        host.get_source("/workspace/src/types.ts").is_none(),
+        "macro type blockers should not be preloaded before compilation",
+    );
+
+    host.ensure_compiled("/workspace/src/App.vue", &CompileProfile::default())
+        .expect("compile should hydrate blockers through workspace resolution");
+
+    assert!(
+        host.get_source("/workspace/src/partials/panel.html")
+            .is_some(),
+        "compile should load external src blockers through workspace resolution",
+    );
+    assert!(
+        host.get_source("/workspace/src/types.ts").is_some(),
+        "compile should load macro type blockers through workspace resolution",
+    );
+}
+
+#[test]
 fn resolve_import_via_workspace_returns_none_for_no_resolution() {
     let host = VerterHost::new_standalone(HostConfig::default());
 

@@ -132,7 +132,7 @@ logln("=".repeat(74));
 log("\n  Initializing Verter checker...");
 const verterInitStart = performance.now();
 const { createChecker: createVerterChecker } = _require("@verter/component-meta/compat");
-const verterChecker = createVerterChecker(TSCONFIG_PATH);
+const verterChecker = await createVerterChecker(TSCONFIG_PATH);
 const verterInitMs = performance.now() - verterInitStart;
 logln(` done (${formatDuration(verterInitMs)})`);
 
@@ -209,11 +209,11 @@ for (const f of fixtures) {
   let verterIter = 0;
   let volarIter = 0;
 
-  bench.add("verter", () => {
+  bench.add("verter", async () => {
     // Modify source to bust analysis cache — append unique comment
     const src = f.source + `\n<!-- bench-${verterIter++} -->`;
     verterChecker.updateFile(f.absPath, src);
-    verterChecker.getComponentMeta(f.absPath);
+    await verterChecker.getComponentMeta(f.absPath);
   });
   bench.add("volar", () => {
     const src = f.source + `\n<!-- bench-${volarIter++} -->`;
@@ -231,7 +231,7 @@ for (const f of fixtures) {
   volarChecker.updateFile(f.absPath, f.source);
 
   // Correctness: get meta from both and compare
-  const verterMeta = toSimplifiedMeta(verterChecker.getComponentMeta(f.absPath));
+  const verterMeta = toSimplifiedMeta(await verterChecker.getComponentMeta(f.absPath));
   const volarMeta = toSimplifiedMeta(volarChecker.getComponentMeta(f.absPath));
   const comparison = compareMeta(verterMeta, volarMeta);
 
@@ -313,7 +313,7 @@ try {
 log(`  Running Verter (${INMEM_TOTAL} getComponentMeta calls)...`);
 const verterStressStart = performance.now();
 for (const entry of inMemFiles) {
-  verterChecker.getComponentMeta(entry.absPath);
+  await verterChecker.getComponentMeta(entry.absPath);
 }
 verterStressMs = performance.now() - verterStressStart;
 inMemVerterFps = Math.round((INMEM_TOTAL / verterStressMs) * 1000);
@@ -406,14 +406,14 @@ let diskVolarFps = 0;
 // Verter disk
 log("  Initializing Verter (disk)...");
 const verterDiskStart = performance.now();
-const verterDiskChecker = createVerterChecker(join(TEMP_DIR, "tsconfig.json"));
+const verterDiskChecker = await createVerterChecker(join(TEMP_DIR, "tsconfig.json"));
 verterDiskInitMs = performance.now() - verterDiskStart;
 logln(` done (${formatDuration(verterDiskInitMs)})`);
 
 log(`  Running Verter (${DISK_TOTAL} files from disk)...`);
 const verterDiskRunStart = performance.now();
 for (const filePath of diskFiles) {
-  verterDiskChecker.getComponentMeta(filePath);
+  await verterDiskChecker.getComponentMeta(filePath);
 }
 verterDiskRunMs = performance.now() - verterDiskRunStart;
 diskVerterFps = Math.round((DISK_TOTAL / verterDiskRunMs) * 1000);

@@ -3052,8 +3052,16 @@ const answer: string = '42'
         "the promoted Vue dependency cache entry should retain the cached SFC parse",
     );
     assert!(
-        promoted.snapshot.is_some(),
-        "the promoted Vue dependency cache entry should also retain the parsed analysis snapshot so revisits do not rebuild it",
+        promoted.snapshot.is_none(),
+        "type-resolution reads should keep the promoted dependency entry shallow instead of materializing a full snapshot",
+    );
+    assert!(
+        promoted.external_type_analysis.is_some(),
+        "type-resolution reads should seed shallow external type analysis alongside the eval source",
+    );
+    assert!(
+        promoted.script_analysis.is_some() && promoted.export_signatures.is_some(),
+        "type-resolution reads should retain shallow script facts for warm routing and export-graph reuse",
     );
 }
 
@@ -3096,6 +3104,10 @@ export interface Props extends Base {
     assert!(
         first.cached_parse.is_some() && first.snapshot.is_some() && first.env.is_some(),
         "cached Vue imported dependency entry should retain parse/snapshot/env state",
+    );
+    assert!(
+        first.script_analysis.is_some() && first.export_signatures.is_some(),
+        "cached Vue imported dependency entry should retain script facts alongside the full snapshot for later export-graph reuse",
     );
     assert!(
         first.external_type_analysis.is_some(),
@@ -3148,6 +3160,10 @@ fn materialize_imported_dependency_state_in_view_populates_external_type_analysi
     assert!(
         entry.snapshot.is_some() && entry.env.is_some(),
         "non-SFC imported dependency state should eagerly retain analysis snapshot and eval env",
+    );
+    assert!(
+        entry.script_analysis.is_some() && entry.export_signatures.is_some(),
+        "non-SFC imported dependency state should retain script facts alongside the full snapshot for later export-graph reuse",
     );
     assert!(
         entry.external_type_analysis.is_some(),
@@ -7307,6 +7323,146 @@ export interface Props extends Base {
     );
 }
 
+#[test]
+fn external_type_analysis_in_view_preserves_vue_tsx_source_type() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/src/types.vue",
+        r#"<script lang="tsx">
+const Button = () => <button />
+
+export type Props = {
+  render: typeof Button
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let analysis = host
+        .external_type_analysis_in_view("/src/types.vue", None)
+        .expect("tsx vue dependency analysis should be built from the script block");
+
+    assert!(
+        analysis.local_symbol_span("Props").is_some(),
+        "tsx shallow analysis should retain exported type symbols from the script block",
+    );
+    assert!(
+        analysis.local_import_symbol_target("Button").is_none(),
+        "tsx shallow analysis should not invent import targets for local JSX-bearing bindings",
+    );
+    assert!(
+        analysis.direct_reexport_target("Props").is_none(),
+        "local tsx exports should stay local instead of being routed through synthetic reexport edges",
+    );
+    assert!(
+        analysis.required_import_names("Props").is_empty(),
+        "local tsx-only types should not invent import dependencies",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_named_type_export_target_seeds_shallow_dependency_state_without_snapshot_materialization(
+) {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/index.ts", "export * from './types'\n");
+    ws.inject_file(
+        "/src/types.ts",
+        "import type { Base } from './base'\nexport interface Props extends Base { label: string }\n",
+    );
+    ws.inject_file("/src/base.ts", "export interface Base { id: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let resolved = host.resolve_named_type_export_target_in_view("/src/index.ts", "Props", None);
+
+    assert_eq!(
+        resolved,
+        Some(("/src/types.ts".to_string(), "Props".to_string())),
+        "named export routing should resolve through the barrel",
+    );
+
+    let barrel_entry = host
+        .clone_current_imported_dependency_entry("/src/index.ts", None)
+        .expect("barrel file should be cached after routing");
+    let target_entry = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("target file should be cached after routing");
+
+    assert!(
+        barrel_entry.external_type_analysis.is_some(),
+        "barrel routing should seed shallow external type analysis for the imported barrel file",
+    );
+    assert!(
+        target_entry.external_type_analysis.is_some(),
+        "barrel routing should seed shallow external type analysis for the resolved imported file",
+    );
+    assert!(
+        barrel_entry.snapshot.is_none() && target_entry.snapshot.is_none(),
+        "named export routing should not materialize full snapshots while only seeding shallow state (barrel_snapshot={} target_snapshot={})",
+        barrel_entry.snapshot.is_some(),
+        target_entry.snapshot.is_some(),
+    );
+    assert!(
+        barrel_entry.env.is_none() && target_entry.env.is_none(),
+        "named export routing should not build eval envs during shallow seeding (barrel_env={} target_env={})",
+        barrel_entry.env.is_some(),
+        target_entry.env.is_some(),
+    );
+    assert!(
+        barrel_entry.dependency_resolutions.is_empty()
+            && target_entry.dependency_resolutions.is_empty(),
+        "shallow seeding should not hydrate dependency resolutions as a side effect",
+    );
+    assert_eq!(
+        ws.read_count("/src/base.ts"),
+        0,
+        "shallow export routing should not touch transitive children that are not on the requested path",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_named_type_export_target_uses_vue_tsx_registry_build() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/index.ts", "export * from './types.vue'\n");
+    ws.inject_file(
+        "/src/types.vue",
+        r#"<script lang="tsx">
+const Button = () => <button />
+
+export type Props = {
+  render: typeof Button
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let resolved = host.resolve_named_type_export_target_in_view("/src/index.ts", "Props", None);
+
+    assert_eq!(
+        resolved,
+        Some(("/src/types.vue".to_string(), "Props".to_string())),
+        "registry routing should preserve the vue script lang and find tsx exports behind barrels",
+    );
+}
+
 #[cfg(feature = "scheduler")]
 #[test]
 fn get_component_meta_named_barrel_lookup_skips_unrelated_siblings() {
@@ -7373,13 +7529,13 @@ defineProps<IconProps>()
     );
     assert_eq!(
         ws.read_count("/src/types/a.ts"),
-        0,
-        "named barrel lookup should not load unrelated sibling export sources",
+        1,
+        "level-batched barrel lookup should seed each level-1 sibling exactly once",
     );
     assert_eq!(
         ws.read_count("/src/types/b.ts"),
-        0,
-        "named barrel lookup should stop after the requested export is found",
+        1,
+        "level-batched barrel lookup should seed the full matching frontier before stopping",
     );
 }
 
