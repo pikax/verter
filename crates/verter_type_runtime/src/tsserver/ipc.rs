@@ -18,7 +18,6 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::codec::{line_column_to_offset_utf16, offset_to_line_column_utf16};
 use crate::protocol::*;
-use crate::trace::{type_runtime_trace_event, type_runtime_trace_scope};
 use crate::traits::{ProviderFuture, TypeProvider};
 
 /// Environment variables to strip from child processes to prevent VS Code/Electron
@@ -44,7 +43,6 @@ fn trace_preview(contents: &str, max_len: usize) -> String {
     }
     preview
 }
-
 fn summarize_tsserver_args(arguments: &serde_json::Value) -> String {
     let file = arguments
         .get("file")
@@ -108,7 +106,7 @@ impl TsserverTransport {
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        let _trace = type_runtime_trace_scope(
+        let _trace = crate::type_runtime_trace_scope!(
             "tsserver_transport_request",
             format!(
                 "command={} {}",
@@ -146,13 +144,13 @@ impl TsserverTransport {
                         .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown error");
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsserver_transport_request_error",
                         format!("command={} seq={} message={}", command, seq, msg),
                     );
                     return Err(TypeProviderError::new(msg));
                 }
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsserver_transport_request_result",
                     format!(
                         "command={} seq={} body_kind={}",
@@ -173,7 +171,7 @@ impl TsserverTransport {
                 Ok(val.get("body").cloned().unwrap_or(serde_json::Value::Null))
             }
             Ok(Err(_)) => {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsserver_transport_request_error",
                     format!(
                         "command={} seq={} message=response channel closed",
@@ -185,7 +183,7 @@ impl TsserverTransport {
             Err(_) => {
                 // Timeout — clean up the pending entry to prevent leak
                 self.pending.lock().await.remove(&seq);
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsserver_transport_request_error",
                     format!("command={} seq={} message=timeout", command, seq),
                 );
@@ -202,7 +200,7 @@ impl TsserverTransport {
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<(), TypeProviderError> {
-        let _trace = type_runtime_trace_scope(
+        let _trace = crate::type_runtime_trace_scope!(
             "tsserver_transport_command",
             format!(
                 "command={} {}",
@@ -227,7 +225,7 @@ impl TsserverTransport {
             .await
             .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
-        type_runtime_trace_event(
+        crate::type_runtime_trace_event!(
             "tsserver_transport_command_result",
             format!("command={} seq={} queued=true", command, seq),
         );
@@ -682,7 +680,7 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsserver_open_file",
                 format!(
                     "file={} content_len={} project_root={}",
@@ -712,7 +710,7 @@ impl TypeProvider for TsserverTypeProvider {
                     }),
                 )
                 .await?;
-            type_runtime_trace_event(
+            crate::type_runtime_trace_event!(
                 "tsserver_open_file_result",
                 format!("file={} opened=true", file),
             );
@@ -731,12 +729,15 @@ impl TypeProvider for TsserverTypeProvider {
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsserver_load_file",
                 format!("file={} content_len={}", file, content.len()),
             );
             contents_cache.lock().await.insert(file, content);
-            type_runtime_trace_event("tsserver_load_file_result", "cached_only=true".to_string());
+            crate::type_runtime_trace_event!(
+                "tsserver_load_file_result",
+                "cached_only=true".to_string()
+            );
             Ok(())
         })
     }
@@ -749,7 +750,7 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsserver_update_file",
                 format!(
                     "file={} content_len={} project_root={}",
@@ -794,7 +795,7 @@ impl TypeProvider for TsserverTypeProvider {
                             }),
                         )
                         .await?;
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsserver_update_file_result",
                         format!("file={} mode=update_open old_line_count={}", file, end_line),
                     );
@@ -820,7 +821,7 @@ impl TypeProvider for TsserverTypeProvider {
                             }),
                         )
                         .await?;
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsserver_update_file_result",
                         format!("file={} mode=reopen_after_cache_miss", file),
                     );
@@ -848,7 +849,7 @@ impl TypeProvider for TsserverTypeProvider {
                         }),
                     )
                     .await?;
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsserver_update_file_result",
                     format!("file={} mode=first_open", file),
                 );
@@ -863,13 +864,17 @@ impl TypeProvider for TsserverTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope("tsserver_close_file", format!("file={}", file));
+            let _trace =
+                crate::type_runtime_trace_scope!("tsserver_close_file", format!("file={}", file));
             contents_cache.lock().await.remove(&file);
             opened_files.lock().await.remove(&file);
             transport
                 .command_no_response("close", serde_json::json!({ "file": file }))
                 .await?;
-            type_runtime_trace_event("tsserver_close_file_result", "closed=true".to_string());
+            crate::type_runtime_trace_event!(
+                "tsserver_close_file_result",
+                "closed=true".to_string()
+            );
             Ok(())
         })
     }
@@ -940,7 +945,7 @@ impl TypeProvider for TsserverTypeProvider {
                     None => (1, offset + 1, false),
                 }
             };
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsserver_get_hover",
                 format!(
                     "file={} offset={} line={} col={} content_cache_hit={}",
@@ -978,7 +983,7 @@ impl TypeProvider for TsserverTypeProvider {
                         tracing::debug!(
                             "tsserver quickinfo: empty displayString for {file} at {line}:{col}"
                         );
-                        type_runtime_trace_event(
+                        crate::type_runtime_trace_event!(
                             "tsserver_get_hover_result",
                             format!("file={} empty_display=true", file),
                         );
@@ -986,7 +991,7 @@ impl TypeProvider for TsserverTypeProvider {
                     }
 
                     let contents = format_quickinfo_hover(kind, display, docs);
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsserver_get_hover_result",
                         format!(
                             "file={} empty_display=false kind={} display_len={} docs_len={} preview={}",
@@ -1006,7 +1011,7 @@ impl TypeProvider for TsserverTypeProvider {
                 }
                 Err(e) => {
                     tracing::warn!("tsserver quickinfo error for {file}: {e}");
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsserver_get_hover_result",
                         format!("file={} error={}", file, e),
                     );
@@ -1037,7 +1042,7 @@ impl TypeProvider for TsserverTypeProvider {
                     None => (1, offset + 1),
                 }
             };
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsserver_get_completion_details",
                 format!(
                     "file={} offset={} line={} col={} item_count={}",
@@ -1087,14 +1092,14 @@ impl TypeProvider for TsserverTypeProvider {
                                 .unwrap_or_else(|| item.clone())
                         })
                         .collect::<Vec<_>>();
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsserver_get_completion_details_result",
                         format!("file={} item_count={} enriched=true", file, enriched.len()),
                     );
                     Ok(enriched)
                 }
                 Err(error) => {
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsserver_get_completion_details_result",
                         format!("file={} item_count={} error={}", file, items.len(), error),
                     );
@@ -2735,8 +2740,8 @@ mod tests {
     #[test]
     fn test_parse_tsserver_location_non_ascii() {
         // tsserver uses UTF-16 code units for offset
-        // "café" = 5 bytes UTF-8 (c=1, a=1, f=1, é=2), 4 UTF-16 code units
-        let content = "café\nworld";
+        // "cafÃ©" = 5 bytes UTF-8 (c=1, a=1, f=1, Ã©=2), 4 UTF-16 code units
+        let content = "cafÃ©\nworld";
         let mut cache = HashMap::new();
         cache.insert("d:/test/file.ts".to_string(), content.to_string());
 
@@ -2747,7 +2752,7 @@ mod tests {
         });
 
         let parsed = parse_tsserver_location(&loc, &cache).unwrap();
-        // "café\n" = 6 bytes (c=1, a=1, f=1, é=2, \n=1)
+        // "cafÃ©\n" = 6 bytes (c=1, a=1, f=1, Ã©=2, \n=1)
         // "world" starts at byte 6
         assert_eq!(parsed.start, 6, "start of 'world' should be byte 6");
         // "world" ends at byte 11
@@ -2756,8 +2761,8 @@ mod tests {
 
     #[test]
     fn test_byte_offset_to_tsserver_pos_non_ascii() {
-        // "café\nworld" — 'é' is 2 bytes UTF-8, 1 UTF-16 code unit
-        let content = "café\nworld";
+        // "cafÃ©\nworld" — 'Ã©' is 2 bytes UTF-8, 1 UTF-16 code unit
+        let content = "cafÃ©\nworld";
         // byte 6 = start of "world" = line 2, col 1 in 1-based
         let (line, col) = byte_offset_to_tsserver_pos(content, 6);
         assert_eq!(line, 2, "should be line 2");
@@ -2766,8 +2771,8 @@ mod tests {
 
     #[test]
     fn test_tsserver_pos_to_byte_offset_non_ascii() {
-        // "café\nworld" — 'é' is 2 bytes UTF-8, 1 UTF-16 code unit
-        let content = "café\nworld";
+        // "cafÃ©\nworld" — 'Ã©' is 2 bytes UTF-8, 1 UTF-16 code unit
+        let content = "cafÃ©\nworld";
         // line 2, offset 1 (1-based) → byte 6 ("world" starts there)
         let offset = tsserver_pos_to_byte_offset(content, 2, 1);
         assert_eq!(offset, 6, "line 2, col 1 should be byte 6");

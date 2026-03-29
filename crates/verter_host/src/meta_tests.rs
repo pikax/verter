@@ -78,8 +78,8 @@ fn resolved_imported_alias_body(
 ) -> TypeExpr {
     let view = host.resolver_store_view();
     host.resolve_shallow_symbol_dependency_alias_in_view(
-        alias.source_canonical_id.as_str(),
-        alias.exported_name.as_str(),
+        alias.merge_root_canonical.as_str(),
+        alias.merge_root_exported.as_str(),
         Some(&view),
     )
     .map(|prepared| prepared.2.decl.body)

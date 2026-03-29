@@ -91,6 +91,14 @@ pub trait WorkspaceAccess: Send + Sync {
         0
     }
 
+    /// Point-in-time VFS provenance counters for observability and benchmarks.
+    fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
+        crate::types::VfsProvenanceSnapshot::default()
+    }
+
+    /// Reset VFS provenance counters.
+    fn reset_vfs_provenance(&self) {}
+
     /// Compute the preferred alias-based import specifier for a target file.
     ///
     /// Returns the shortest tsconfig-path or workspace-alias specifier that

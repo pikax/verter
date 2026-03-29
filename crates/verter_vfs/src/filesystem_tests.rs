@@ -118,6 +118,118 @@ fn file_exists_overlay_only() {
     );
 }
 
+#[test]
+fn file_exists_does_not_treat_directory_entries_as_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let child_dir = dir.path().join("nested.vue");
+    std::fs::create_dir_all(&child_dir).unwrap();
+
+    let canonical = child_dir.to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    assert!(
+        !ws.file_exists(&canonical),
+        "directory entries must not seed positive file-exists results"
+    );
+}
+
+#[test]
+fn delete_file_invalidates_parent_dir_index_for_removed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("delete-me.vue");
+    std::fs::write(&file_path, "content").unwrap();
+
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    assert!(
+        ws.file_exists(&canonical),
+        "existing file should seed a positive dir-index entry"
+    );
+
+    ws.delete_file(&canonical).expect("delete should succeed");
+
+    assert!(
+        !ws.file_exists(&canonical),
+        "delete_file must invalidate the parent dir index so the removed file is not reported as present"
+    );
+}
+
+#[test]
+fn copy_file_invalidates_parent_dir_index_for_new_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("source.vue");
+    let dst_path = dir.path().join("copied.vue");
+    std::fs::write(&src_path, "content").unwrap();
+
+    let src_canonical = src_path.to_string_lossy().replace('\\', "/");
+    let dst_canonical = dst_path.to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    assert!(
+        !ws.file_exists(&dst_canonical),
+        "missing destination should seed a negative dir-index entry"
+    );
+
+    ws.copy_file(&src_canonical, &dst_canonical)
+        .expect("copy should succeed");
+
+    assert!(
+        ws.file_exists(&dst_canonical),
+        "copy_file must invalidate the destination parent dir index so the copied file becomes visible"
+    );
+}
+
+#[test]
+fn create_dir_all_invalidates_stale_missing_directory_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let child_dir = dir.path().join("nested");
+    let child_file = child_dir.join("created.vue");
+
+    let canonical = child_file.to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    assert!(
+        !ws.file_exists(&canonical),
+        "missing child path should seed a negative listing for the missing directory"
+    );
+
+    ws.create_dir_all(&child_dir.to_string_lossy().replace('\\', "/"))
+        .expect("create_dir_all should succeed");
+    std::fs::write(&child_file, "content").unwrap();
+
+    assert!(
+        ws.file_exists(&canonical),
+        "create_dir_all must invalidate the cached empty listing for the newly created directory"
+    );
+}
+
+#[test]
+fn delete_dir_all_invalidates_cached_children_under_removed_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let child_dir = dir.path().join("nested");
+    let child_file = child_dir.join("removed.vue");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    std::fs::write(&child_file, "content").unwrap();
+
+    let child_canonical = child_file.to_string_lossy().replace('\\', "/");
+    let dir_canonical = child_dir.to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    assert!(
+        ws.file_exists(&child_canonical),
+        "existing child should seed a positive dir-index entry"
+    );
+
+    ws.delete_dir_all(&dir_canonical)
+        .expect("delete_dir_all should succeed");
+
+    assert!(
+        !ws.file_exists(&child_canonical),
+        "delete_dir_all must invalidate cached directory membership for removed children"
+    );
+}
+
 // ── FilesystemWorkspace::classify_file ──
 
 #[test]
@@ -304,5 +416,171 @@ fn notify_delete_removes_snapshot_and_edges() {
     assert!(
         ws.read_file(&canonical).is_none(),
         "deleted file must not be readable"
+    );
+}
+
+#[test]
+fn file_exists_seeds_parent_dir_index_for_present_and_missing_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let present_path = dir.path().join("present.vue");
+    std::fs::write(&present_path, "<template>ok</template>").unwrap();
+
+    let present = present_path.to_string_lossy().replace('\\', "/");
+    let missing = dir
+        .path()
+        .join("missing.vue")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    assert!(
+        ws.file_exists(&present),
+        "seed lookup should still report the real on-disk file as present"
+    );
+    assert!(
+        !ws.file_exists(&missing),
+        "missing sibling should still report false"
+    );
+    assert_eq!(
+        ws.engine.dir_index.read().file_exists(&present),
+        Some(true),
+        "dir index should cache present siblings after the first lookup"
+    );
+    assert_eq!(
+        ws.engine.dir_index.read().file_exists(&missing),
+        Some(false),
+        "dir index should cache missing siblings without probing the file path again"
+    );
+}
+
+#[test]
+fn directory_tree_dirty_forces_dir_index_rescan_on_next_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let original_path = dir.path().join("original.vue");
+    let late_path = dir.path().join("late.vue");
+    std::fs::write(&original_path, "<template>original</template>").unwrap();
+
+    let original = original_path.to_string_lossy().replace('\\', "/");
+    let late = late_path.to_string_lossy().replace('\\', "/");
+    let prefix = dir.path().to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    assert!(
+        ws.file_exists(&original),
+        "initial lookup should seed the directory index"
+    );
+    assert!(
+        !ws.file_exists(&late),
+        "late file should be absent before it exists on disk"
+    );
+
+    std::fs::write(&late_path, "<template>late</template>").unwrap();
+
+    assert!(
+        !ws.file_exists(&late),
+        "clean directory index should keep returning the cached negative result until invalidated"
+    );
+
+    ws.apply_changes(vec![WorkspaceChange::DirectoryTreeDirty { prefix }]);
+
+    assert!(
+        ws.file_exists(&late),
+        "directory dirty invalidation should force one rescan so new siblings become visible"
+    );
+}
+
+#[test]
+fn vfs_provenance_tracks_dir_index_hits_refreshes_and_dirty_rescans() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_path = dir.path().join("App.vue");
+    std::fs::write(&app_path, "<template>ok</template>").unwrap();
+
+    let canonical = app_path.to_string_lossy().replace('\\', "/");
+    let prefix = dir.path().to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    ws.reset_vfs_provenance();
+
+    assert!(
+        ws.file_exists(&canonical),
+        "first lookup should seed the parent directory listing from disk"
+    );
+    let after_seed = ws.vfs_provenance_snapshot();
+    assert_eq!(
+        after_seed.dir_index_refresh_count, 1,
+        "the initial directory lookup should refresh once"
+    );
+    assert_eq!(
+        after_seed.native_fs_read_dir_count, 1,
+        "refreshing the parent directory should use one read_dir call"
+    );
+    assert_eq!(
+        after_seed.dir_index_hit_count, 0,
+        "the first lookup should not be counted as a dir-index hit"
+    );
+
+    assert!(
+        ws.file_exists(&canonical),
+        "second lookup should reuse the indexed directory membership"
+    );
+    let after_hit = ws.vfs_provenance_snapshot();
+    assert_eq!(
+        after_hit.dir_index_hit_count, 1,
+        "clean indexed directories should satisfy repeat lookups without another disk scan"
+    );
+    assert_eq!(
+        after_hit.dir_index_refresh_count, 1,
+        "dir-index hits should not trigger another refresh"
+    );
+
+    ws.apply_changes(vec![WorkspaceChange::DirectoryTreeDirty { prefix }]);
+    assert!(
+        ws.file_exists(&canonical),
+        "a dirty directory should rescan and still report the existing file as present"
+    );
+    let after_dirty = ws.vfs_provenance_snapshot();
+    assert_eq!(
+        after_dirty.dir_index_dirty_rescan_count, 1,
+        "the next lookup after DirectoryTreeDirty should be counted as a dirty rescan"
+    );
+    assert_eq!(
+        after_dirty.dir_index_refresh_count, 2,
+        "dirty rescans should refresh the directory exactly once"
+    );
+    assert_eq!(
+        after_dirty.native_fs_read_dir_count, 2,
+        "dirty rescans should issue one more read_dir call"
+    );
+}
+
+#[test]
+fn vfs_provenance_tracks_native_read_file_misses_after_stale_positive_index_hits() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("stale.vue");
+    std::fs::write(&file_path, "<template>ok</template>").unwrap();
+
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    ws.reset_vfs_provenance();
+    assert!(
+        ws.file_exists(&canonical),
+        "the initial lookup should seed a positive dir-index entry"
+    );
+
+    std::fs::remove_file(&file_path).unwrap();
+
+    assert!(
+        ws.read_file(&canonical).is_none(),
+        "read_file should return None after the backing file disappears"
+    );
+    let snapshot = ws.vfs_provenance_snapshot();
+    assert_eq!(
+        snapshot.native_fs_read_file_miss_count, 1,
+        "stale positive dir-index entries should still count the resulting disk read miss"
+    );
+    assert_eq!(
+        snapshot.dir_index_hit_count, 1,
+        "read_file should reuse the stale positive dir-index entry before attempting disk"
     );
 }

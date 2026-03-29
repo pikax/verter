@@ -1280,7 +1280,7 @@ impl VerterHost {
         if let Some(view) = store_view {
             self.current_eval_state_in_view(owner_canonical, Some(view))?;
             if let Some(resolution) = view.dependency_resolution(owner_canonical, import_source) {
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "cached_dependency_resolution_in_view_result",
                     format!(
                         "owner={} import={} source=store_view target={}",
@@ -1302,7 +1302,7 @@ impl VerterHost {
                 .get(owner_canonical)
                 .and_then(|entry| entry.dependency_resolutions.get(import_source).cloned())
             {
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "cached_dependency_resolution_in_view_result",
                     format!(
                         "owner={} import={} source=compile_cache target={}",
@@ -1326,7 +1326,7 @@ impl VerterHost {
                     .and_then(|entry| entry.dependency_resolutions.get(import_source).cloned())
             };
             if resolution.is_some() {
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "cached_dependency_resolution_in_view_result",
                     format!(
                         "owner={} import={} source=host_files target={}",
@@ -1346,7 +1346,7 @@ impl VerterHost {
         let resolution = self
             .clone_current_imported_dependency_entry(owner_canonical, store_view)
             .and_then(|entry| entry.dependency_resolutions.get(import_source).cloned());
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "cached_dependency_resolution_in_view_result",
             format!(
                 "owner={} import={} source={} target={}",
@@ -1772,7 +1772,7 @@ impl VerterHost {
         Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_external_type_from_loaded_files",
             format!(
                 "owner={} import={} type={} depth={} required_root_dep={} kind={kind:?} store_view={} cache_entries={} visiting={} use_host_cache={}",
@@ -1832,7 +1832,7 @@ impl VerterHost {
                 depth,
             )
         };
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "resolve_external_type_from_loaded_files_result",
             format!(
                 "owner={} import={} type={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={} store_view={}",
@@ -2086,7 +2086,7 @@ impl VerterHost {
                 &mut visited,
             )
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_named_type_export_target_in_view_result",
                 format!(
                     "owner={} requested={} source=analysis target={} exported={}",
@@ -2107,7 +2107,7 @@ impl VerterHost {
                 store_view,
             );
             if let Some(target) = route.target {
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "resolve_named_type_export_target_in_view_result",
                     format!(
                         "owner={} requested={} source=registry target={} exported={}",
@@ -2133,7 +2133,7 @@ impl VerterHost {
                 .unwrap_or_else(|| dep_canonical.to_string()),
             resolved.source_name,
         );
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
             format!(
                 "owner={} requested={} source=export-span target={} exported={}",
@@ -2163,7 +2163,7 @@ impl VerterHost {
         profile_hash: Option<u64>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<String> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "read_dep_source_for_type_resolution",
             format!(
                 "owner={} store_view={}",
@@ -2182,7 +2182,7 @@ impl VerterHost {
                         state.source.as_ref(),
                         state.cached_parse.as_deref(),
                     ));
-                    component_meta_trace_event(
+                    component_meta_trace_event!(
                         "read_dep_source_for_type_resolution_result",
                         format!(
                             "owner={} source=effective-file-state bytes={} has_cached_parse={} whole_hash={:?}",
@@ -2206,7 +2206,7 @@ impl VerterHost {
                 .unwrap_or_else(|| entry.raw_source.to_string()),
             )
         });
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "read_dep_source_for_type_resolution_result",
             format!(
                 "owner={} source=host-materialized-cache bytes={} has_cached_parse={} whole_hash={:?}",

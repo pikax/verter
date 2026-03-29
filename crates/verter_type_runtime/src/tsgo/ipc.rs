@@ -16,7 +16,6 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::codec::{LineIndex, PositionEncoding};
 use crate::protocol::*;
-use crate::trace::{type_runtime_trace_event, type_runtime_trace_scope};
 use crate::traits::{ProviderFuture, TypeProvider};
 #[cfg(all(test, feature = "__lsp_tests"))]
 use crate::uri::percent_decode;
@@ -37,7 +36,6 @@ fn trace_preview(contents: &str, max_len: usize) -> String {
     }
     preview
 }
-
 fn summarize_lsp_params(params: &serde_json::Value) -> String {
     let uri = params
         .get("textDocument")
@@ -297,7 +295,7 @@ impl LspTransport {
         timeout_secs: u64,
         priority: ProviderPriority,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        let _trace = type_runtime_trace_scope(
+        let _trace = crate::type_runtime_trace_scope!(
             "tsgo_transport_request",
             format!(
                 "method={} priority={:?} {}",
@@ -337,13 +335,13 @@ impl LspTransport {
                         .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown error");
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "tsgo_transport_request_error",
                         format!("method={} id={} message={}", method, id, msg),
                     );
                     return Err(TypeProviderError::new(msg));
                 }
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_transport_request_result",
                     format!(
                         "method={} id={} result_kind={}",
@@ -367,7 +365,7 @@ impl LspTransport {
                     .unwrap_or(serde_json::Value::Null))
             }
             Ok(Err(_)) => {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_transport_request_error",
                     format!(
                         "method={} id={} message=response channel closed",
@@ -388,7 +386,7 @@ impl LspTransport {
                         notify.notify_waiters();
                     }
                 }
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_transport_request_error",
                     format!("method={} id={} message=timeout", method, id),
                 );
@@ -407,7 +405,7 @@ impl LspTransport {
         params: serde_json::Value,
         priority: ProviderPriority,
     ) -> Result<(), TypeProviderError> {
-        let _trace = type_runtime_trace_scope(
+        let _trace = crate::type_runtime_trace_scope!(
             "tsgo_transport_notify",
             format!(
                 "method={} priority={:?} {}",
@@ -430,7 +428,7 @@ impl LspTransport {
             .try_send(StdinMessage::Frame(frame.into_bytes()))
         {
             Ok(()) => {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_transport_notify_result",
                     format!("method={} queued=true", method),
                 );
@@ -438,14 +436,14 @@ impl LspTransport {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!("TSGO stdin channel full — dropping notification '{method}'");
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_transport_notify_result",
                     format!("method={} queued=false reason=full", method),
                 );
                 Err(TypeProviderError::new("channel full"))
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_transport_notify_result",
                     format!("method={} queued=false reason=closed", method),
                 );
@@ -1168,7 +1166,7 @@ impl TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsgo_update_file",
                 format!(
                     "path={} uri={} content_len={}",
@@ -1339,7 +1337,7 @@ impl TypeProvider for TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsgo_open_file",
                 format!(
                     "path={} uri={} content_len={}",
@@ -1367,7 +1365,10 @@ impl TypeProvider for TsgoTypeProvider {
                     }),
                 )
                 .await?;
-            type_runtime_trace_event("tsgo_open_file_result", "opened=true version=1".to_string());
+            crate::type_runtime_trace_event!(
+                "tsgo_open_file_result",
+                "opened=true version=1".to_string()
+            );
             Ok(())
         })
     }
@@ -1384,7 +1385,7 @@ impl TypeProvider for TsgoTypeProvider {
         let content_owned = rewrite_vue_imports_for_tsgo(content, path);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsgo_load_file",
                 format!("path={} content_len={}", path_owned, content_owned.len()),
             );
@@ -1392,7 +1393,10 @@ impl TypeProvider for TsgoTypeProvider {
                 .lock()
                 .await
                 .insert(path_owned, content_owned);
-            type_runtime_trace_event("tsgo_load_file_result", "cached_only=true".to_string());
+            crate::type_runtime_trace_event!(
+                "tsgo_load_file_result",
+                "cached_only=true".to_string()
+            );
             Ok(())
         })
     }
@@ -1440,7 +1444,7 @@ impl TypeProvider for TsgoTypeProvider {
                         }),
                     )
                     .await?;
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_update_file_result",
                     format!("path={} mode=didChange version={}", path_owned, version),
                 );
@@ -1464,7 +1468,7 @@ impl TypeProvider for TsgoTypeProvider {
                         }),
                     )
                     .await?;
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_update_file_result",
                     format!("path={} mode=didOpen version=1", path_owned),
                 );
@@ -1481,7 +1485,7 @@ impl TypeProvider for TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
             );
@@ -1495,7 +1499,7 @@ impl TypeProvider for TsgoTypeProvider {
                     }),
                 )
                 .await?;
-            type_runtime_trace_event("tsgo_close_file_result", "closed=true".to_string());
+            crate::type_runtime_trace_event!("tsgo_close_file_result", "closed=true".to_string());
             Ok(())
         })
     }
@@ -1597,7 +1601,7 @@ impl TypeProvider for TsgoTypeProvider {
                     None => (0, offset, false),
                 }
             };
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "tsgo_get_hover",
                 format!(
                     "path={} uri={} offset={} line={} character={} content_cache_hit={}",
@@ -1615,7 +1619,7 @@ impl TypeProvider for TsgoTypeProvider {
                 .await?;
 
             if result.is_null() {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_get_hover_result",
                     format!("path={} has_hover=false", path_owned),
                 );
@@ -1663,14 +1667,14 @@ impl TypeProvider for TsgoTypeProvider {
                     format!("{c}")
                 }
             } else {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "tsgo_get_hover_result",
                     format!("path={} has_hover=false missing_contents=true", path_owned),
                 );
                 return Ok(None);
             };
 
-            type_runtime_trace_event(
+            crate::type_runtime_trace_event!(
                 "tsgo_get_hover_result",
                 format!(
                     "path={} has_hover=true contents_len={} preview={}",
@@ -4306,31 +4310,31 @@ const props = withDefaults(defineProps({ bar: String }), {})
 
     #[test]
     fn test_position_to_offset_utf16_bmp() {
-        // "café\nworld" — 'é' is 2 bytes UTF-8, 1 UTF-16 code unit
-        let content = "café\nworld";
-        // UTF-16 char 4 = end of "café" = byte 5
+        // "cafÃ©\nworld" — 'Ã©' is 2 bytes UTF-8, 1 UTF-16 code unit
+        let content = "cafÃ©\nworld";
+        // UTF-16 char 4 = end of "cafÃ©" = byte 5
         assert_eq!(position_to_offset(content, 0, 4), 5);
         assert_eq!(position_to_offset(content, 1, 0), 6);
     }
 
     #[test]
     fn test_position_to_offset_utf16_supplementary() {
-        // "a😀b" — '😀' is 4 bytes UTF-8, 2 UTF-16 code units
-        let content = "a😀b";
-        // UTF-16: 'a'=1, '😀'=2 (surrogate pair), 'b' at char 3 = byte 5
+        // "aðŸ˜€b" — 'ðŸ˜€' is 4 bytes UTF-8, 2 UTF-16 code units
+        let content = "aðŸ˜€b";
+        // UTF-16: 'a'=1, 'ðŸ˜€'=2 (surrogate pair), 'b' at char 3 = byte 5
         assert_eq!(position_to_offset(content, 0, 3), 5);
     }
 
     #[test]
     fn test_offset_to_position_utf16_bmp() {
-        // byte 5 = end of "café" = UTF-16 char 4
-        assert_eq!(offset_to_position("café\nworld", 5), (0, 4));
+        // byte 5 = end of "cafÃ©" = UTF-16 char 4
+        assert_eq!(offset_to_position("cafÃ©\nworld", 5), (0, 4));
     }
 
     #[test]
     fn test_offset_to_position_utf16_supplementary() {
         // 'b' at byte 5 = UTF-16 char 3
-        assert_eq!(offset_to_position("a😀b", 5), (0, 3));
+        assert_eq!(offset_to_position("aðŸ˜€b", 5), (0, 3));
     }
 
     /// @ai-generated — parse_completion_item parses a JSON completion item

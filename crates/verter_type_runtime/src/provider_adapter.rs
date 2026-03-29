@@ -12,7 +12,6 @@ use tokio::sync::Mutex;
 
 use crate::backend::*;
 use crate::protocol::Completion;
-use crate::trace::{type_runtime_trace_event, type_runtime_trace_scope};
 use crate::traits::TypeProvider;
 use crate::tsgo::ipc::rewrite_vue_imports_for_tsgo;
 
@@ -26,7 +25,6 @@ pub struct TypeProviderAdapter {
     synced_revisions: Mutex<HashMap<String, SyncedFileState>>,
     loaded_definition_files: Mutex<HashSet<String>>,
 }
-
 impl TypeProviderAdapter {
     pub fn new(provider: Arc<dyn TypeProvider>, backend_label: impl Into<String>) -> Self {
         Self {
@@ -71,7 +69,7 @@ impl TypeProviderAdapter {
         } else {
             &detailed
         });
-        type_runtime_trace_event(
+        crate::type_runtime_trace_event!(
             "runtime_query_type_data_members",
             format!(
                 "backend={} path={} has_members={} member_count={} preview={}",
@@ -104,7 +102,7 @@ impl TypeProviderAdapter {
             .get_definition(path, generated_offset)
             .await
             .map_err(|e| BackendError::BackendReported(e.message))?;
-        type_runtime_trace_event(
+        crate::type_runtime_trace_event!(
             "runtime_query_type_data_definition_locations",
             format!(
                 "backend={} path={} offset={} definition_count={}",
@@ -124,7 +122,7 @@ impl TypeProviderAdapter {
                 .await
                 .map_err(|e| BackendError::BackendReported(e.message))?;
             if let Some(hover) = hover.filter(|item| !item.contents.trim().is_empty()) {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "runtime_query_type_data_definition_hover",
                     format!(
                         "backend={} source_path={} definition_path={} definition_offset={} text_len={} preview={}",
@@ -172,7 +170,7 @@ impl TypeProviderAdapter {
         let content = match std::fs::read_to_string(definition_path) {
             Ok(content) => content,
             Err(error) => {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "runtime_query_type_data_definition_load",
                     format!(
                         "backend={} path={} loaded=false error={error}",
@@ -193,7 +191,7 @@ impl TypeProviderAdapter {
             .lock()
             .await
             .insert(definition_path.to_string());
-        type_runtime_trace_event(
+        crate::type_runtime_trace_event!(
             "runtime_query_type_data_definition_load",
             format!(
                 "backend={} path={} loaded=true content_len={}",
@@ -218,7 +216,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
             let content_hash = Self::content_hash(content);
             let offset_translation =
                 OffsetTranslation::for_backend_content(&self.backend_label, &path, content);
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "runtime_sync_file",
                 format!(
                     "backend={} path={} profile={:?} runtime_key={} revision={} content_len={} content_hash={:016x}",
@@ -240,7 +238,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                         offset_translation: offset_translation.clone(),
                     })
                 {
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "runtime_sync_file_result",
                         format!(
                             "backend={} path={} cache_hit=true provider_op=skip revision={} content_hash={:016x}",
@@ -277,7 +275,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                     offset_translation,
                 },
             );
-            type_runtime_trace_event(
+            crate::type_runtime_trace_event!(
                 "runtime_sync_file_result",
                 format!(
                     "backend={} path={} cache_hit=false provider_op={} previous_state={:?} next_revision={} next_content_hash={:016x}",
@@ -291,7 +289,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
     fn close_file<'a>(&'a self, file_id: &'a GeneratedFileId) -> BackendFuture<'a, ()> {
         Box::pin(async move {
             let path = Self::virtual_path(file_id);
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "runtime_close_file",
                 format!(
                     "backend={} path={} profile={:?} runtime_key={}",
@@ -303,7 +301,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                 .await
                 .map_err(|e| BackendError::BackendReported(e.message))?;
             self.synced_revisions.lock().await.remove(&path);
-            type_runtime_trace_event(
+            crate::type_runtime_trace_event!(
                 "runtime_close_file_result",
                 format!("backend={} path={}", self.backend_label, path),
             );
@@ -324,7 +322,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
     ) -> BackendFuture<'a, BackendTypeData> {
         Box::pin(async move {
             let path = Self::virtual_path(file_id);
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "runtime_query_type_data",
                 format!(
                     "backend={} path={} profile={:?} runtime_key={} revision={} query={:?} offset={}",
@@ -342,7 +340,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                 let revisions = self.synced_revisions.lock().await;
                 match revisions.get(&path) {
                     Some(state) if state.revision != expected_revision => {
-                        type_runtime_trace_event(
+                        crate::type_runtime_trace_event!(
                             "runtime_query_type_data_stale",
                             format!(
                                 "backend={} path={} expected_revision={} synced_revision={} synced_content_hash={:016x}",
@@ -355,7 +353,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                         )));
                     }
                     None => {
-                        type_runtime_trace_event(
+                        crate::type_runtime_trace_event!(
                             "runtime_query_type_data_unsynced",
                             format!(
                                 "backend={} path={} expected_revision={}",
@@ -378,7 +376,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                     .unwrap_or(generated_offset)
             };
             if translated_offset != generated_offset {
-                type_runtime_trace_event(
+                crate::type_runtime_trace_event!(
                     "runtime_query_type_data_offset_translation",
                     format!(
                         "backend={} path={} original_offset={} translated_offset={}",
@@ -397,7 +395,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
 
                     match hover {
                         Some(info) => {
-                            type_runtime_trace_event(
+                            crate::type_runtime_trace_event!(
                                 "runtime_query_type_data_hover",
                                 format!(
                                     "backend={} path={} has_hover=true text_len={} preview={}",
@@ -415,7 +413,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                             })
                         }
                         None => {
-                            type_runtime_trace_event(
+                            crate::type_runtime_trace_event!(
                                 "runtime_query_type_data_hover",
                                 format!(
                                     "backend={} path={} has_hover=false",
@@ -440,7 +438,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                         .await
                         .map_err(|e| BackendError::BackendReported(e.message))?;
 
-                    type_runtime_trace_event(
+                    crate::type_runtime_trace_event!(
                         "runtime_query_type_data_hover",
                         format!(
                             "backend={} path={} has_hover={} documentation_len={}",
@@ -464,7 +462,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
 
     fn shutdown(&self) -> BackendFuture<'_, ()> {
         Box::pin(async move {
-            let _trace = type_runtime_trace_scope(
+            let _trace = crate::type_runtime_trace_scope!(
                 "runtime_backend_shutdown",
                 format!("backend={}", self.backend_label),
             );

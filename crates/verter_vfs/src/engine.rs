@@ -5,13 +5,14 @@ use arc_swap::ArcSwapOption;
 use parking_lot::RwLock;
 
 use crate::changes::{ChangeResult, WorkspaceChange};
+use crate::dir_index::DirIndex;
 use crate::exact_resolution::EdgeStore;
 use crate::memory::MemorySnapshot;
 use crate::overlay::OverlayStore;
 use crate::package_index::PackageIndex;
 use crate::project_graph::ProjectGraph;
 use crate::published_state::PublishedRoot;
-use crate::types::{ExactResolution, ExactResolutionResult};
+use crate::types::{ExactResolution, ExactResolutionResult, VfsProvenance};
 use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
 
 /// Shared internal engine used by both `FilesystemWorkspace` and `MemoryWorkspace`.
@@ -38,6 +39,7 @@ use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
 /// 3. `edges` (read or write)
 /// 4. `project_graph` (read only — write is rare)
 /// 5. `package_index` (read or write)
+/// 6. `dir_index` (read or write)
 ///
 /// `published_state` uses lock-free `ArcSwap` — no ordering constraints.
 pub(crate) struct Engine {
@@ -52,6 +54,8 @@ pub(crate) struct Engine {
     pub(crate) project_graph: RwLock<ProjectGraph>,
     #[allow(dead_code)]
     pub(crate) package_index: RwLock<PackageIndex>,
+    pub(crate) dir_index: RwLock<DirIndex>,
+    pub(crate) vfs_provenance: VfsProvenance,
 
     /// Atomic published workspace state — primary source of truth for
     /// ownership and resolution.
@@ -72,6 +76,8 @@ impl Engine {
             content_generation: AtomicU64::new(1),
             project_graph: RwLock::new(ProjectGraph::new()),
             package_index: RwLock::new(PackageIndex::new()),
+            dir_index: RwLock::new(DirIndex::new()),
+            vfs_provenance: VfsProvenance::default(),
             published_state: ArcSwapOption::new(None),
         };
         // Publish an initial snapshot from the empty project graph so that
@@ -168,6 +174,12 @@ impl Engine {
         }
     }
 
+    fn mark_parent_dir_dirty(&self, canonical_id: &str) {
+        if let Some((parent, _)) = canonical_id.rsplit_once('/') {
+            self.dir_index.write().mark_dirty(parent);
+        }
+    }
+
     /// Apply a batch of workspace changes.
     pub(crate) fn apply_changes(&self, changes: Vec<WorkspaceChange>) -> ChangeResult {
         let mut result = ChangeResult::default();
@@ -196,6 +208,7 @@ impl Engine {
                     source,
                 } => {
                     self.invalidate_package_manifest(&canonical_id);
+                    self.mark_parent_dir_dirty(&canonical_id);
                     if !self.overlay.read().has_overlay(&canonical_id) {
                         if let Some(content) = source {
                             self.snapshot.write().inject(canonical_id.clone(), content);
@@ -208,10 +221,15 @@ impl Engine {
                 }
                 WorkspaceChange::FileDeleted { canonical_id } => {
                     self.invalidate_package_manifest(&canonical_id);
+                    self.mark_parent_dir_dirty(&canonical_id);
                     self.edges.write().remove_file(&canonical_id);
                     self.snapshot.write().remove(&canonical_id);
                     result.invalidated_files.push(canonical_id);
                     content_changed = true;
+                }
+                WorkspaceChange::DirectoryTreeDirty { prefix } => {
+                    self.package_index.write().invalidate_under(&prefix);
+                    self.dir_index.write().mark_dirty_under(&prefix);
                 }
                 WorkspaceChange::ConfigChanged { canonical_id: _ } => {
                     result.graph_rebuilt = true;

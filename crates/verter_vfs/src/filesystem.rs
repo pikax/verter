@@ -133,6 +133,12 @@ struct ComponentMetaTraceGuard {
     state: Option<ComponentMetaTraceGuardState>,
 }
 
+impl ComponentMetaTraceGuard {
+    fn noop() -> Self {
+        Self { state: None }
+    }
+}
+
 impl Drop for ComponentMetaTraceGuard {
     fn drop(&mut self) {
         let Some(state) = self.state.take() else {
@@ -227,6 +233,24 @@ fn component_meta_trace_event(name: &'static str, detail: impl Into<String>) {
     ));
 }
 
+macro_rules! component_meta_trace_scope {
+    ($name:expr, $detail:expr $(,)?) => {{
+        if component_meta_trace_enabled() {
+            crate::filesystem::component_meta_trace_scope($name, $detail)
+        } else {
+            ComponentMetaTraceGuard::noop()
+        }
+    }};
+}
+
+macro_rules! component_meta_trace_event {
+    ($name:expr, $detail:expr $(,)?) => {{
+        if component_meta_trace_enabled() {
+            crate::filesystem::component_meta_trace_event($name, $detail);
+        }
+    }};
+}
+
 /// Options for creating a `FilesystemWorkspace`.
 #[derive(Debug, Clone, Default)]
 pub struct FilesystemOptions {
@@ -239,9 +263,9 @@ pub struct FilesystemOptions {
 /// Filesystem-backed workspace with overlay support.
 ///
 /// File reads follow the three-layer priority:
-/// 1. Override (overlay) — active editor content
-/// 2. Snapshot (cache) — previously read content
-/// 3. Disk — fallback for cache misses (Filesystem mode only)
+/// 1. Override (overlay) â€” active editor content
+/// 2. Snapshot (cache) â€” previously read content
+/// 3. Disk â€” fallback for cache misses (Filesystem mode only)
 #[derive(Debug)]
 pub struct FilesystemWorkspace {
     pub(crate) options: FilesystemOptions,
@@ -263,6 +287,74 @@ impl FilesystemWorkspace {
     /// Access the workspace options.
     pub fn options(&self) -> &FilesystemOptions {
         &self.options
+    }
+
+    pub fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
+        self.engine.vfs_provenance.snapshot()
+    }
+
+    pub fn reset_vfs_provenance(&self) {
+        self.engine.vfs_provenance.reset();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ensure_parent_dir_indexed(&self, canonical_id: &str) -> Option<bool> {
+        let (parent, _basename) = split_parent_basename(canonical_id)?;
+        let was_dirty = {
+            let dir_index = self.engine.dir_index.read();
+            match dir_index.lookup(canonical_id) {
+                crate::dir_index::DirIndexLookup::Hit(exists) => {
+                    self.engine
+                        .vfs_provenance
+                        .dir_index_hit_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Some(exists);
+                }
+                crate::dir_index::DirIndexLookup::Dirty => true,
+                crate::dir_index::DirIndexLookup::Unindexed => false,
+            }
+        };
+
+        self.engine
+            .vfs_provenance
+            .native_fs_read_dir_count
+            .fetch_add(1, Ordering::Relaxed);
+        match self.native_fs.read_dir(parent) {
+            Ok(entries) => {
+                let basenames = entries
+                    .into_iter()
+                    .filter(|entry| !entry.is_dir)
+                    .filter_map(|entry| basename_from_path(&entry.path))
+                    .collect();
+                self.engine.dir_index.write().refresh(parent, basenames);
+                self.engine
+                    .vfs_provenance
+                    .dir_index_refresh_count
+                    .fetch_add(1, Ordering::Relaxed);
+                if was_dirty {
+                    self.engine
+                        .vfs_provenance
+                        .dir_index_dirty_rescan_count
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                self.engine.dir_index.read().file_exists(canonical_id)
+            }
+            Err(crate::error::VfsError::NotFound(_)) => {
+                self.engine.dir_index.write().refresh(parent, Vec::new());
+                self.engine
+                    .vfs_provenance
+                    .dir_index_refresh_count
+                    .fetch_add(1, Ordering::Relaxed);
+                if was_dirty {
+                    self.engine
+                        .vfs_provenance
+                        .dir_index_dirty_rescan_count
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Some(false)
+            }
+            Err(_) => None,
+        }
     }
 
     /// Inject a file directly into the snapshot cache.
@@ -318,15 +410,15 @@ impl FilesystemWorkspace {
     }
 }
 
-// ── WorkspaceAccess implementation ──
+// â”€â”€ WorkspaceAccess implementation â”€â”€
 
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
-        let _trace = component_meta_trace_scope("vfs_read_file", format!("path={canonical_id}"));
+        let _trace = component_meta_trace_scope!("vfs_read_file", format!("path={canonical_id}"));
         // 1. Overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "vfs_read_file_result",
                 format!(
                     "path={} layer=overlay cache=hit bytes={}",
@@ -338,7 +430,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         }
         // 2. Snapshot cache
         if let Some(content) = self.engine.snapshot.read().read(canonical_id) {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "vfs_read_file_result",
                 format!(
                     "path={} layer=snapshot cache=hit bytes={}",
@@ -348,21 +440,33 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             );
             return Some(content);
         }
-        // 3. Disk fallback — read and cache in snapshot
+        // 3. Disk fallback â€” read and cache in snapshot
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let indexed_exists = self.ensure_parent_dir_indexed(canonical_id);
             let _disk_trace =
-                component_meta_trace_scope("vfs_read_file_disk", format!("path={canonical_id}"));
+                component_meta_trace_scope!("vfs_read_file_disk", format!("path={canonical_id}"));
+            if matches!(indexed_exists, Some(false)) {
+                component_meta_trace_event!(
+                    "vfs_read_file_disk_result",
+                    format!("path={} found=false bytes=0", canonical_id),
+                );
+                component_meta_trace_event!(
+                    "vfs_read_file_result",
+                    format!("path={} layer=missing cache=miss bytes=0", canonical_id),
+                );
+                return None;
+            }
             if let Some(content) = self.native_fs.read_file(canonical_id) {
                 self.engine
                     .snapshot
                     .write()
                     .inject(canonical_id.to_string(), content.clone());
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "vfs_read_file_disk_result",
                     format!("path={} found=true bytes={}", canonical_id, content.len(),),
                 );
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "vfs_read_file_result",
                     format!(
                         "path={} layer=disk cache=miss bytes={}",
@@ -372,12 +476,16 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
                 );
                 return Some(content);
             }
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "vfs_read_file_disk_result",
                 format!("path={} found=false bytes=0", canonical_id),
             );
+            self.engine
+                .vfs_provenance
+                .native_fs_read_file_miss_count
+                .fetch_add(1, Ordering::Relaxed);
         }
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "vfs_read_file_result",
             format!("path={} layer=missing cache=miss bytes=0", canonical_id),
         );
@@ -393,6 +501,9 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some(exists) = self.ensure_parent_dir_indexed(canonical_id) {
+                return exists;
+            }
             if self.native_fs.file_exists(canonical_id) {
                 return true;
             }
@@ -447,6 +558,14 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.current_content_generation()
     }
 
+    fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
+        FilesystemWorkspace::vfs_provenance_snapshot(self)
+    }
+
+    fn reset_vfs_provenance(&self) {
+        FilesystemWorkspace::reset_vfs_provenance(self);
+    }
+
     fn preferred_specifier(&self, importer_id: &str, target_id: &str) -> Option<String> {
         self.engine
             .preferred_specifier(self, importer_id, target_id)
@@ -492,6 +611,9 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
 
     fn notify_delete(&self, canonical_id: &str) {
         self.engine.invalidate_package_manifest(canonical_id);
+        if let Some((parent, _)) = split_parent_basename(canonical_id) {
+            self.engine.dir_index.write().mark_dirty(parent);
+        }
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
@@ -519,7 +641,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.rebuild_and_publish();
     }
 
-    // ── Directory and mutation operations (delegate to NativeFs) ──
+    // â”€â”€ Directory and mutation operations (delegate to NativeFs) â”€â”€
 
     #[cfg(not(target_arch = "wasm32"))]
     fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
@@ -540,6 +662,8 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
         self.native_fs.write_file(path, content)?;
         self.engine.invalidate_package_manifest(path);
+        mark_parent_dir_dirty(&self.engine, path);
+        self.engine.edges.write().remove_file(path);
         // Inject into snapshot so subsequent reads see the new content
         self.engine
             .snapshot
@@ -551,32 +675,78 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn create_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.create_dir_all(path)
+        self.native_fs.create_dir_all(path)?;
+        {
+            let mut dir_index = self.engine.dir_index.write();
+            dir_index.mark_dirty(path);
+        }
+        mark_parent_dir_dirty(&self.engine, path);
+        self.engine.bump_content_generation();
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn delete_file(&self, path: &str) -> Result<(), crate::error::VfsError> {
         self.native_fs.delete_file(path)?;
         self.engine.invalidate_package_manifest(path);
+        mark_parent_dir_dirty(&self.engine, path);
         self.engine.snapshot.write().remove(path);
+        self.engine.edges.write().remove_file(path);
         self.engine.bump_content_generation();
         Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn delete_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.delete_dir_all(path)
+        self.native_fs.delete_dir_all(path)?;
+        self.engine.package_index.write().invalidate_under(path);
+        {
+            let mut dir_index = self.engine.dir_index.write();
+            dir_index.mark_dirty_under(path);
+        }
+        mark_parent_dir_dirty(&self.engine, path);
+        self.engine.snapshot.write().remove_under(path);
+        self.engine.edges.write().remove_under(path);
+        self.engine.bump_content_generation();
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn copy_file(&self, src: &str, dst: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.copy_file(src, dst)
+        self.native_fs.copy_file(src, dst)?;
+        self.engine.invalidate_package_manifest(dst);
+        mark_parent_dir_dirty(&self.engine, dst);
+        self.engine.snapshot.write().remove(dst);
+        self.engine.edges.write().remove_file(dst);
+        self.engine.bump_content_generation();
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn is_dir(&self, path: &str) -> bool {
         self.native_fs.is_dir(path)
     }
+}
+
+fn split_parent_basename(canonical_id: &str) -> Option<(&str, &str)> {
+    let (parent, basename) = canonical_id.rsplit_once('/')?;
+    if parent.is_empty() || basename.is_empty() {
+        return None;
+    }
+    Some((parent, basename))
+}
+
+fn mark_parent_dir_dirty(engine: &crate::engine::Engine, canonical_id: &str) {
+    if let Some((parent, _)) = split_parent_basename(canonical_id) {
+        engine.dir_index.write().mark_dirty(parent);
+    }
+}
+
+fn basename_from_path(path: &str) -> Option<String> {
+    path.rsplit('/')
+        .next()
+        .filter(|basename| !basename.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]

@@ -1554,6 +1554,14 @@ pub struct MetaProvenance {
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
     pub imported_eval_inputs_calls: std::sync::atomic::AtomicU64,
+    pub imported_eval_worklist_seed_count: std::sync::atomic::AtomicU64,
+    pub imported_eval_worklist_resolved_count: std::sync::atomic::AtomicU64,
+    pub imported_eval_worklist_enqueued_from_symbol_deps_count: std::sync::atomic::AtomicU64,
+    pub imported_eval_reached_merge_roots_count: std::sync::atomic::AtomicU64,
+    pub imported_eval_sources_count: std::sync::atomic::AtomicU64,
+    pub imported_eval_normalized_type_root_calls: std::sync::atomic::AtomicU64,
+    pub imported_eval_prepare_failures: std::sync::atomic::AtomicU64,
+    pub imported_eval_dropped_unreached_aliases: std::sync::atomic::AtomicU64,
     pub resolver_node_cache_hits: std::sync::atomic::AtomicU64,
     pub resolver_node_cache_misses: std::sync::atomic::AtomicU64,
     pub resolver_singleflight_coalesced: std::sync::atomic::AtomicU64,
@@ -1561,6 +1569,11 @@ pub struct MetaProvenance {
     pub resolver_cycle_detections: std::sync::atomic::AtomicU64,
     pub resolver_route_fact_reuse: std::sync::atomic::AtomicU64,
     pub resolver_barrel_fact_reuse: std::sync::atomic::AtomicU64,
+    pub dir_index_hit_count: std::sync::atomic::AtomicU64,
+    pub dir_index_refresh_count: std::sync::atomic::AtomicU64,
+    pub dir_index_dirty_rescan_count: std::sync::atomic::AtomicU64,
+    pub native_fs_read_dir_count: std::sync::atomic::AtomicU64,
+    pub native_fs_read_file_miss_count: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1575,6 +1588,15 @@ impl Default for MetaProvenance {
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
             imported_eval_inputs_calls: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_worklist_seed_count: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_worklist_resolved_count: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_worklist_enqueued_from_symbol_deps_count:
+                std::sync::atomic::AtomicU64::new(0),
+            imported_eval_reached_merge_roots_count: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_sources_count: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_normalized_type_root_calls: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_prepare_failures: std::sync::atomic::AtomicU64::new(0),
+            imported_eval_dropped_unreached_aliases: std::sync::atomic::AtomicU64::new(0),
             resolver_node_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolver_node_cache_misses: std::sync::atomic::AtomicU64::new(0),
             resolver_singleflight_coalesced: std::sync::atomic::AtomicU64::new(0),
@@ -1582,6 +1604,11 @@ impl Default for MetaProvenance {
             resolver_cycle_detections: std::sync::atomic::AtomicU64::new(0),
             resolver_route_fact_reuse: std::sync::atomic::AtomicU64::new(0),
             resolver_barrel_fact_reuse: std::sync::atomic::AtomicU64::new(0),
+            dir_index_hit_count: std::sync::atomic::AtomicU64::new(0),
+            dir_index_refresh_count: std::sync::atomic::AtomicU64::new(0),
+            dir_index_dirty_rescan_count: std::sync::atomic::AtomicU64::new(0),
+            native_fs_read_dir_count: std::sync::atomic::AtomicU64::new(0),
+            native_fs_read_file_miss_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1624,6 +1651,40 @@ impl std::fmt::Debug for MetaProvenance {
                 &self.imported_eval_inputs_calls.load(Relaxed),
             )
             .field(
+                "imported_eval_worklist_seed_count",
+                &self.imported_eval_worklist_seed_count.load(Relaxed),
+            )
+            .field(
+                "imported_eval_worklist_resolved_count",
+                &self.imported_eval_worklist_resolved_count.load(Relaxed),
+            )
+            .field(
+                "imported_eval_worklist_enqueued_from_symbol_deps_count",
+                &self
+                    .imported_eval_worklist_enqueued_from_symbol_deps_count
+                    .load(Relaxed),
+            )
+            .field(
+                "imported_eval_reached_merge_roots_count",
+                &self.imported_eval_reached_merge_roots_count.load(Relaxed),
+            )
+            .field(
+                "imported_eval_sources_count",
+                &self.imported_eval_sources_count.load(Relaxed),
+            )
+            .field(
+                "imported_eval_normalized_type_root_calls",
+                &self.imported_eval_normalized_type_root_calls.load(Relaxed),
+            )
+            .field(
+                "imported_eval_prepare_failures",
+                &self.imported_eval_prepare_failures.load(Relaxed),
+            )
+            .field(
+                "imported_eval_dropped_unreached_aliases",
+                &self.imported_eval_dropped_unreached_aliases.load(Relaxed),
+            )
+            .field(
                 "resolver_node_cache_hits",
                 &self.resolver_node_cache_hits.load(Relaxed),
             )
@@ -1651,6 +1712,26 @@ impl std::fmt::Debug for MetaProvenance {
                 "resolver_barrel_fact_reuse",
                 &self.resolver_barrel_fact_reuse.load(Relaxed),
             )
+            .field(
+                "dir_index_hit_count",
+                &self.dir_index_hit_count.load(Relaxed),
+            )
+            .field(
+                "dir_index_refresh_count",
+                &self.dir_index_refresh_count.load(Relaxed),
+            )
+            .field(
+                "dir_index_dirty_rescan_count",
+                &self.dir_index_dirty_rescan_count.load(Relaxed),
+            )
+            .field(
+                "native_fs_read_dir_count",
+                &self.native_fs_read_dir_count.load(Relaxed),
+            )
+            .field(
+                "native_fs_read_file_miss_count",
+                &self.native_fs_read_file_miss_count.load(Relaxed),
+            )
             .finish()
     }
 }
@@ -1675,6 +1756,24 @@ impl MetaProvenance {
                 .resolved_external_type_cache_misses
                 .load(Relaxed),
             imported_eval_inputs_calls: self.imported_eval_inputs_calls.load(Relaxed),
+            imported_eval_worklist_seed_count: self.imported_eval_worklist_seed_count.load(Relaxed),
+            imported_eval_worklist_resolved_count: self
+                .imported_eval_worklist_resolved_count
+                .load(Relaxed),
+            imported_eval_worklist_enqueued_from_symbol_deps_count: self
+                .imported_eval_worklist_enqueued_from_symbol_deps_count
+                .load(Relaxed),
+            imported_eval_reached_merge_roots_count: self
+                .imported_eval_reached_merge_roots_count
+                .load(Relaxed),
+            imported_eval_sources_count: self.imported_eval_sources_count.load(Relaxed),
+            imported_eval_normalized_type_root_calls: self
+                .imported_eval_normalized_type_root_calls
+                .load(Relaxed),
+            imported_eval_prepare_failures: self.imported_eval_prepare_failures.load(Relaxed),
+            imported_eval_dropped_unreached_aliases: self
+                .imported_eval_dropped_unreached_aliases
+                .load(Relaxed),
             resolver_node_cache_hits: self.resolver_node_cache_hits.load(Relaxed),
             resolver_node_cache_misses: self.resolver_node_cache_misses.load(Relaxed),
             resolver_singleflight_coalesced: self.resolver_singleflight_coalesced.load(Relaxed),
@@ -1682,6 +1781,11 @@ impl MetaProvenance {
             resolver_cycle_detections: self.resolver_cycle_detections.load(Relaxed),
             resolver_route_fact_reuse: self.resolver_route_fact_reuse.load(Relaxed),
             resolver_barrel_fact_reuse: self.resolver_barrel_fact_reuse.load(Relaxed),
+            dir_index_hit_count: self.dir_index_hit_count.load(Relaxed),
+            dir_index_refresh_count: self.dir_index_refresh_count.load(Relaxed),
+            dir_index_dirty_rescan_count: self.dir_index_dirty_rescan_count.load(Relaxed),
+            native_fs_read_dir_count: self.native_fs_read_dir_count.load(Relaxed),
+            native_fs_read_file_miss_count: self.native_fs_read_file_miss_count.load(Relaxed),
         }
     }
 
@@ -1698,6 +1802,18 @@ impl MetaProvenance {
         self.resolved_external_type_cache_hits.store(0, Relaxed);
         self.resolved_external_type_cache_misses.store(0, Relaxed);
         self.imported_eval_inputs_calls.store(0, Relaxed);
+        self.imported_eval_worklist_seed_count.store(0, Relaxed);
+        self.imported_eval_worklist_resolved_count.store(0, Relaxed);
+        self.imported_eval_worklist_enqueued_from_symbol_deps_count
+            .store(0, Relaxed);
+        self.imported_eval_reached_merge_roots_count
+            .store(0, Relaxed);
+        self.imported_eval_sources_count.store(0, Relaxed);
+        self.imported_eval_normalized_type_root_calls
+            .store(0, Relaxed);
+        self.imported_eval_prepare_failures.store(0, Relaxed);
+        self.imported_eval_dropped_unreached_aliases
+            .store(0, Relaxed);
         self.resolver_node_cache_hits.store(0, Relaxed);
         self.resolver_node_cache_misses.store(0, Relaxed);
         self.resolver_singleflight_coalesced.store(0, Relaxed);
@@ -1705,6 +1821,11 @@ impl MetaProvenance {
         self.resolver_cycle_detections.store(0, Relaxed);
         self.resolver_route_fact_reuse.store(0, Relaxed);
         self.resolver_barrel_fact_reuse.store(0, Relaxed);
+        self.dir_index_hit_count.store(0, Relaxed);
+        self.dir_index_refresh_count.store(0, Relaxed);
+        self.dir_index_dirty_rescan_count.store(0, Relaxed);
+        self.native_fs_read_dir_count.store(0, Relaxed);
+        self.native_fs_read_file_miss_count.store(0, Relaxed);
     }
 }
 
@@ -1743,6 +1864,14 @@ pub struct MetaProvenanceSnapshot {
     pub resolved_external_type_cache_hits: u64,
     pub resolved_external_type_cache_misses: u64,
     pub imported_eval_inputs_calls: u64,
+    pub imported_eval_worklist_seed_count: u64,
+    pub imported_eval_worklist_resolved_count: u64,
+    pub imported_eval_worklist_enqueued_from_symbol_deps_count: u64,
+    pub imported_eval_reached_merge_roots_count: u64,
+    pub imported_eval_sources_count: u64,
+    pub imported_eval_normalized_type_root_calls: u64,
+    pub imported_eval_prepare_failures: u64,
+    pub imported_eval_dropped_unreached_aliases: u64,
     pub resolver_node_cache_hits: u64,
     pub resolver_node_cache_misses: u64,
     pub resolver_singleflight_coalesced: u64,
@@ -1750,6 +1879,11 @@ pub struct MetaProvenanceSnapshot {
     pub resolver_cycle_detections: u64,
     pub resolver_route_fact_reuse: u64,
     pub resolver_barrel_fact_reuse: u64,
+    pub dir_index_hit_count: u64,
+    pub dir_index_refresh_count: u64,
+    pub dir_index_dirty_rescan_count: u64,
+    pub native_fs_read_dir_count: u64,
+    pub native_fs_read_file_miss_count: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

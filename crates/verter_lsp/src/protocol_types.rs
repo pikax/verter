@@ -179,6 +179,14 @@ pub struct OnFileChangedParams {
     pub change_type: String,
 }
 
+/// Params for `$/verter/watcherStateChanged` notification.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatcherStateChangedParams {
+    pub workspace_root: String,
+    pub reason: String,
+}
+
 /// Params for `$/getCompiledCode` request.
 #[derive(Debug, Deserialize)]
 pub struct GetCompiledCodeParams {

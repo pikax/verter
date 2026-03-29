@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Classification of a file by its role in the VFS.
@@ -141,4 +142,46 @@ pub struct PackageManifest {
     pub imports: Option<serde_json::Value>,
     /// Raw source for re-parsing if needed.
     pub raw: Option<Arc<str>>,
+}
+
+#[derive(Debug, Default)]
+pub struct VfsProvenance {
+    pub dir_index_hit_count: AtomicU64,
+    pub dir_index_refresh_count: AtomicU64,
+    pub dir_index_dirty_rescan_count: AtomicU64,
+    pub native_fs_read_dir_count: AtomicU64,
+    pub native_fs_read_file_miss_count: AtomicU64,
+}
+
+impl VfsProvenance {
+    pub fn snapshot(&self) -> VfsProvenanceSnapshot {
+        VfsProvenanceSnapshot {
+            dir_index_hit_count: self.dir_index_hit_count.load(Ordering::Relaxed),
+            dir_index_refresh_count: self.dir_index_refresh_count.load(Ordering::Relaxed),
+            dir_index_dirty_rescan_count: self.dir_index_dirty_rescan_count.load(Ordering::Relaxed),
+            native_fs_read_dir_count: self.native_fs_read_dir_count.load(Ordering::Relaxed),
+            native_fs_read_file_miss_count: self
+                .native_fs_read_file_miss_count
+                .load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn reset(&self) {
+        self.dir_index_hit_count.store(0, Ordering::Relaxed);
+        self.dir_index_refresh_count.store(0, Ordering::Relaxed);
+        self.dir_index_dirty_rescan_count
+            .store(0, Ordering::Relaxed);
+        self.native_fs_read_dir_count.store(0, Ordering::Relaxed);
+        self.native_fs_read_file_miss_count
+            .store(0, Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VfsProvenanceSnapshot {
+    pub dir_index_hit_count: u64,
+    pub dir_index_refresh_count: u64,
+    pub dir_index_dirty_rescan_count: u64,
+    pub native_fs_read_dir_count: u64,
+    pub native_fs_read_file_miss_count: u64,
 }

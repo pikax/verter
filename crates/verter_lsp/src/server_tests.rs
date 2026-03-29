@@ -7445,6 +7445,102 @@ fn vfs_workspace_with_project_graph() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
+    use verter_vfs::WorkspaceAccess;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    let src_dir = workspace.join("src");
+    std::fs::create_dir_all(&src_dir).expect("create src dir");
+
+    let root_id = crate::test_utils::canonical_test_path(&workspace);
+    let file_id = format!("{root_id}/src/NewFile.vue");
+    let file_uri = crate::uri::path_to_file_uri_string(&file_id);
+
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(provider);
+    let server = service.inner();
+    let vfs_workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
+        verter_vfs::FilesystemOptions {
+            roots: vec![root_id.clone()],
+            eager_preload: false,
+        },
+    ));
+    server.install_vfs_workspace(Arc::clone(&vfs_workspace));
+
+    assert!(
+        !vfs_workspace.file_exists(&file_id),
+        "missing file should seed a negative dir-index entry"
+    );
+
+    std::fs::write(
+        workspace.join("src/NewFile.vue"),
+        "<template><div/></template>",
+    )
+    .expect("write new file");
+
+    server
+        .on_file_changed(OnFileChangedParams {
+            uri: file_uri,
+            change_type: "create".to_string(),
+        })
+        .await;
+
+    assert!(
+        vfs_workspace.file_exists(&file_id),
+        "create watcher events should invalidate the cached missing sibling result"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_watcher_state_changed_invalidates_vfs_negative_cache_under_workspace_root() {
+    use verter_vfs::WorkspaceAccess;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    let src_dir = workspace.join("src");
+    std::fs::create_dir_all(&src_dir).expect("create src dir");
+
+    let root_id = crate::test_utils::canonical_test_path(&workspace);
+    let file_id = format!("{root_id}/src/Recovered.vue");
+    let root_uri = crate::uri::path_to_file_uri_string(&root_id);
+
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(provider);
+    let server = service.inner();
+    let vfs_workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
+        verter_vfs::FilesystemOptions {
+            roots: vec![root_id.clone()],
+            eager_preload: false,
+        },
+    ));
+    server.install_vfs_workspace(Arc::clone(&vfs_workspace));
+
+    assert!(
+        !vfs_workspace.file_exists(&file_id),
+        "missing file should seed a negative dir-index entry"
+    );
+
+    std::fs::write(
+        workspace.join("src/Recovered.vue"),
+        "<template><span/></template>",
+    )
+    .expect("write recovered file");
+
+    server
+        .on_watcher_state_changed(WatcherStateChangedParams {
+            workspace_root: root_uri,
+            reason: "overflow".to_string(),
+        })
+        .await;
+
+    assert!(
+        vfs_workspace.file_exists(&file_id),
+        "watcher overflow should invalidate cached directory membership under the workspace root"
+    );
+}
+
 #[test]
 fn standalone_host_cannot_resolve_disk_files() {
     let tmp = tempfile::tempdir().expect("temp dir");

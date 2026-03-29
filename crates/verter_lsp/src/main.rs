@@ -104,6 +104,10 @@ async fn main() {
         VerterLanguageServer::on_did_change_ts_or_js_file,
     )
     .custom_method("$/onFileChanged", VerterLanguageServer::on_file_changed)
+    .custom_method(
+        "$/verter/watcherStateChanged",
+        VerterLanguageServer::on_watcher_state_changed,
+    )
     .custom_method("$/getCompiledCode", VerterLanguageServer::get_compiled_code)
     .custom_method(
         "$/verter/getStatistics",

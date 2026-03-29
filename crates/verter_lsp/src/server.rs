@@ -2857,6 +2857,23 @@ impl VerterLanguageServer {
             return;
         }
 
+        if let Some(ws) = self.vfs_workspace.read().as_ref() {
+            let change = match params.change_type.as_str() {
+                "create" | "update" => verter_vfs::WorkspaceChange::FileChanged {
+                    canonical_id: canonical_id.clone(),
+                    source: None,
+                },
+                "delete" => verter_vfs::WorkspaceChange::FileDeleted {
+                    canonical_id: canonical_id.clone(),
+                },
+                other => {
+                    tracing::warn!("on_file_changed: unexpected change_type {:?}", other);
+                    return;
+                }
+            };
+            ws.apply_changes(vec![change]);
+        }
+
         // Handle .vue file changes from the file watcher.
         // These are files not open in the editor — re-sync to type provider.
         if params.uri.ends_with(".vue") {
@@ -2914,6 +2931,26 @@ impl VerterLanguageServer {
                 canonical_id
             );
             self.trigger_registry_rebuild().await;
+        }
+    }
+
+    pub async fn on_watcher_state_changed(&self, params: WatcherStateChangedParams) {
+        tracing::warn!(
+            "$/verter/watcherStateChanged: workspace_root={} reason={}",
+            params.workspace_root,
+            params.reason
+        );
+
+        let workspace_root = if let Ok(uri) = params.workspace_root.parse::<Uri>() {
+            uri_to_canonical_id(&uri)
+        } else {
+            crate::documents::uri_to_canonical_id_from_str(&params.workspace_root)
+        };
+
+        if let Some(ws) = self.vfs_workspace.read().as_ref() {
+            ws.apply_changes(vec![verter_vfs::WorkspaceChange::DirectoryTreeDirty {
+                prefix: workspace_root,
+            }]);
         }
     }
 
@@ -3758,11 +3795,6 @@ impl VerterLanguageServer {
     /// Trigger interactive file sync to the type provider (test harness access).
     pub(crate) async fn test_ensure_synced(&self, uri: &tower_lsp_server::ls_types::Uri) {
         self.ensure_current_file_synced(uri).await;
-    }
-
-    /// Access the VFS workspace (test harness access).
-    pub(crate) fn test_vfs_workspace(&self) -> Option<Arc<verter_vfs::FilesystemWorkspace>> {
-        self.vfs_workspace.read().clone()
     }
 
     /// Install a VFS workspace (test harness access).

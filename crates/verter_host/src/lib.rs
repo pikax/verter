@@ -438,6 +438,18 @@ impl VerterHost {
         &self.provenance
     }
 
+    /// Snapshot provenance counters, including VFS counters from the active workspace.
+    pub fn provenance_snapshot(&self) -> MetaProvenanceSnapshot {
+        let mut snapshot = self.provenance.snapshot();
+        let vfs = self.ws().vfs_provenance_snapshot();
+        snapshot.dir_index_hit_count = vfs.dir_index_hit_count;
+        snapshot.dir_index_refresh_count = vfs.dir_index_refresh_count;
+        snapshot.dir_index_dirty_rescan_count = vfs.dir_index_dirty_rescan_count;
+        snapshot.native_fs_read_dir_count = vfs.native_fs_read_dir_count;
+        snapshot.native_fs_read_file_miss_count = vfs.native_fs_read_file_miss_count;
+        snapshot
+    }
+
     /// Clone the workspace Arc for internal use.
     fn ws(&self) -> Arc<dyn verter_vfs::WorkspaceAccess> {
         self.workspace.read().clone()

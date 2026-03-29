@@ -103,8 +103,8 @@ pub use imported_eval_lookup::{
     ImportedEvalLookup, ImportedEvalLookupResolver, ImportedTypeAliasResolveRequest,
 };
 pub use imported_eval_types::{
-    ComputedEvaluatedTypes, ImportedEvalInputs, ImportedEvalOverflow, ImportedEvalSource,
-    ImportedSymbolDependency, ImportedTypeAlias,
+    CollectedImportedTypeAlias, ComputedEvaluatedTypes, ImportedEvalInputs, ImportedEvalOverflow,
+    ImportedEvalSource, ImportedEvalStats, ImportedSymbolDependency, ImportedTypeAlias,
 };
 pub use imported_type_alias::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,

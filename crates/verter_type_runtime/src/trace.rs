@@ -9,7 +9,6 @@ pub enum TypeRuntimeTraceEvent {
     End,
     Point,
 }
-
 impl TypeRuntimeTraceEvent {
     fn as_str(self) -> &'static str {
         match self {
@@ -135,6 +134,12 @@ struct TypeRuntimeTraceGuardState {
 
 pub struct TypeRuntimeTraceGuard {
     state: Option<TypeRuntimeTraceGuardState>,
+}
+
+impl TypeRuntimeTraceGuard {
+    pub fn noop() -> Self {
+        Self { state: None }
+    }
 }
 
 impl Drop for TypeRuntimeTraceGuard {
@@ -289,9 +294,30 @@ pub fn type_runtime_trace_event(name: &'static str, detail: impl Into<String>) {
     ));
 }
 
+#[macro_export]
+macro_rules! type_runtime_trace_scope {
+    ($name:expr, $detail:expr $(,)?) => {{
+        if $crate::trace::type_runtime_trace_enabled() {
+            $crate::trace::type_runtime_trace_scope($name, $detail)
+        } else {
+            $crate::trace::TypeRuntimeTraceGuard::noop()
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! type_runtime_trace_event {
+    ($name:expr, $detail:expr $(,)?) => {{
+        if $crate::trace::type_runtime_trace_enabled() {
+            $crate::trace::type_runtime_trace_event($name, $detail);
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn format_runtime_trace_line_uses_component_meta_shape() {
@@ -334,8 +360,8 @@ mod tests {
                 base_depth: 4,
             }),
             || {
-                let _trace = type_runtime_trace_scope("runtime_sync", "backend=tsserver");
-                type_runtime_trace_event("runtime_sync_result", "cache_hit=false");
+                let _trace = crate::type_runtime_trace_scope!("runtime_sync", "backend=tsserver");
+                crate::type_runtime_trace_event!("runtime_sync_result", "cache_hit=false");
             },
         );
 
@@ -350,5 +376,29 @@ mod tests {
             std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
             std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");
         }
+    }
+
+    #[test]
+    fn runtime_trace_macros_skip_detail_evaluation_when_disabled() {
+        unsafe {
+            std::env::remove_var("VERTER_COMPONENT_META_TRACE");
+            std::env::remove_var("VERTER_META_TRACE");
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");
+        }
+
+        let scope_detail_evaluated = Cell::new(false);
+        let _trace = crate::type_runtime_trace_scope!("runtime_disabled", {
+            scope_detail_evaluated.set(true);
+            "disabled scope detail".to_string()
+        });
+        assert!(!scope_detail_evaluated.get());
+
+        let event_detail_evaluated = Cell::new(false);
+        crate::type_runtime_trace_event!("runtime_disabled_result", {
+            event_detail_evaluated.set(true);
+            "disabled event detail".to_string()
+        });
+        assert!(!event_detail_evaluated.get());
     }
 }

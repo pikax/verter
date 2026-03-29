@@ -42,6 +42,7 @@ pub mod canonical_path;
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config;
+pub(crate) mod dir_index;
 pub mod error;
 pub mod exact_resolution;
 pub mod filesystem;
@@ -63,6 +64,18 @@ pub mod vite_config;
 pub mod workspace_snapshot;
 
 mod engine;
+
+/// Check whether `path` is equal to or nested under `prefix`.
+///
+/// Handles optional trailing `/` on `prefix` so callers don't need to
+/// normalize before calling.
+pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
 
 // ── Public re-exports ──
 
@@ -96,7 +109,7 @@ pub use traits::{EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, Workspac
 pub use types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
     ProjectOwnership, ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase,
-    ResolveRequest, ResolveRequestKind, ResolveResult,
+    ResolveRequest, ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use vite_config::{

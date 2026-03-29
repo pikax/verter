@@ -28,9 +28,8 @@ use verter_resolver::type_text_parser;
 use verter_type_runtime::tsgo::{find_tsgo_binary, TsgoTypeProvider};
 use verter_type_runtime::tsserver::TsserverTypeProvider;
 use verter_type_runtime::{
-    find_node, find_tsserver, path_to_file_uri_string, type_runtime_trace_event,
-    type_runtime_trace_scope, with_type_runtime_trace_context, BackendError,
-    BackendTypeCompleteness, BackendTypeData, BackendTypeQuery, GeneratedFileId,
+    find_node, find_tsserver, path_to_file_uri_string, with_type_runtime_trace_context,
+    BackendError, BackendTypeCompleteness, BackendTypeData, BackendTypeQuery, GeneratedFileId,
     GeneratedQueryBackend, TypeProvider, TypeProviderAdapter, TypeRuntimeTraceContext,
 };
 
@@ -39,7 +38,6 @@ use crate::{buffer_to_string, catch_panic, NapiHostConfig, NapiIdeProjectConfig}
 fn meta_err(e: ComponentMetaHostError) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeComponentMetaBackend {
     Tsserver,
@@ -115,7 +113,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
             base_depth: cursor.depth + 1,
         });
         with_type_runtime_trace_context(context, || {
-            let _trace = type_runtime_trace_scope(
+            let _trace = verter_type_runtime::type_runtime_trace_scope!(
                 "runtime_component_meta_expand_type",
                 format!(
                     "backend={} owner={} span={}..{} revision={}",
@@ -128,7 +126,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
             );
             let query_artifact =
                 build_component_meta_query_artifact(&request.canonical_id, &snapshot, request)?;
-            type_runtime_trace_event(
+            verter_type_runtime::type_runtime_trace_event!(
                 "runtime_component_meta_artifact",
                 format!(
                     "backend={} owner={} generated_len={} mappings={} revision={} members_offset={:?}",
@@ -140,7 +138,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                     query_artifact.members_offset,
                 ),
             );
-            type_runtime_trace_event(
+            verter_type_runtime::type_runtime_trace_event!(
                 "runtime_component_meta_generated_offset",
                 format!(
                     "backend={} owner={} generated_offset={} members_offset={:?}",
@@ -191,7 +189,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                             } else {
                                 data
                             };
-                            type_runtime_trace_event(
+                            verter_type_runtime::type_runtime_trace_event!(
                                 "runtime_component_meta_member_probe",
                                 format!(
                                     "backend={} owner={} member_count={} used=true",
@@ -203,7 +201,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                             return Ok(data);
                         }
                         Ok(data) => {
-                            type_runtime_trace_event(
+                            verter_type_runtime::type_runtime_trace_event!(
                                 "runtime_component_meta_member_probe",
                                 format!(
                                     "backend={} owner={} member_count={} used=false",
@@ -215,7 +213,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                             Some(data)
                         }
                         Err(error) => {
-                            type_runtime_trace_event(
+                            verter_type_runtime::type_runtime_trace_event!(
                                 "runtime_component_meta_member_probe",
                                 format!(
                                     "backend={} owner={} error={error}",
@@ -241,7 +239,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                 Ok(merge_component_meta_backend_data(hover_data, member_data))
             })?;
 
-            type_runtime_trace_event(
+            verter_type_runtime::type_runtime_trace_event!(
                 "runtime_component_meta_backend_result",
                 format!(
                     "backend={} owner={} type_text_len={} members={} completeness={:?}",
@@ -270,7 +268,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
             base_depth: cursor.depth + 1,
         });
         with_type_runtime_trace_context(context, || {
-            let _trace = type_runtime_trace_scope(
+            let _trace = verter_type_runtime::type_runtime_trace_scope!(
                 "runtime_component_meta_expand_slot_bindings",
                 format!(
                     "backend={} owner={} slot={} span={}..{} revision={}",
@@ -317,7 +315,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                 {
                     Ok(data) => data,
                     Err(error) => {
-                        type_runtime_trace_event(
+                        verter_type_runtime::type_runtime_trace_event!(
                             "runtime_component_meta_slot_binding_probe",
                             format!(
                                 "backend={} owner={} slot={} error={error}",
@@ -328,7 +326,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                     }
                 };
                 if !backend_members_are_useful(&data) {
-                    type_runtime_trace_event(
+                    verter_type_runtime::type_runtime_trace_event!(
                         "runtime_component_meta_slot_binding_probe",
                         format!(
                             "backend={} owner={} slot={} member_count={} used=false",
@@ -354,7 +352,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                 {
                     Ok(data) => data,
                     Err(error) => {
-                        type_runtime_trace_event(
+                        verter_type_runtime::type_runtime_trace_event!(
                             "runtime_component_meta_slot_binding_probe",
                             format!(
                                 "backend={} owner={} slot={} fill_error={error}",
@@ -364,7 +362,7 @@ impl ComponentMetaTypeExpander for RuntimeBackedComponentMetaExpander {
                         return Ok(None);
                     }
                 };
-                type_runtime_trace_event(
+                verter_type_runtime::type_runtime_trace_event!(
                     "runtime_component_meta_slot_binding_probe",
                     format!(
                         "backend={} owner={} slot={} member_count={} used=true",
@@ -477,7 +475,7 @@ async fn fill_missing_backend_member_types(
                 }
             }
             Err(error) => {
-                type_runtime_trace_event(
+                verter_type_runtime::type_runtime_trace_event!(
                     "runtime_component_meta_member_definition_fill",
                     format!("name={} error={error}", name),
                 );
@@ -511,7 +509,7 @@ async fn fill_missing_backend_member_types(
                 }
             }
             Err(error) => {
-                type_runtime_trace_event(
+                verter_type_runtime::type_runtime_trace_event!(
                     "runtime_component_meta_member_hover_fill",
                     format!("name={} error={error}", name),
                 );

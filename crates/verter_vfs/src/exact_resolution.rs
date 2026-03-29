@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
+use crate::path_matches_prefix;
 use crate::types::{
     ExactResolution, ExactResolutionResult, ResolutionContext, ResolvePhase, ResolveRequestKind,
 };
@@ -218,6 +219,19 @@ impl EdgeStore {
 
         // Remove reverse dep entry for this file
         self.reverse_deps.remove(canonical_id);
+    }
+
+    /// Remove all state for files under a directory prefix.
+    pub fn remove_under(&mut self, prefix: &str) {
+        let to_remove: Vec<String> = self
+            .files
+            .keys()
+            .filter(|path| path_matches_prefix(path, prefix))
+            .cloned()
+            .collect();
+        for canonical_id in to_remove {
+            self.remove_file(&canonical_id);
+        }
     }
 
     /// Get stored bare specifiers for a file (for lazy resolution).

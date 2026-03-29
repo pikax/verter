@@ -49,7 +49,6 @@ pub enum ComponentMetaHostError {
     #[error("host error: {0}")]
     Host(String),
 }
-
 impl From<crate::meta::MetaError> for ComponentMetaHostError {
     fn from(value: crate::meta::MetaError) -> Self {
         match value {
@@ -400,7 +399,7 @@ impl ComponentMetaSession {
         Option<verter_analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "component_meta_session_query",
             format!(
                 "backend={:?} owner={} include_fallthrough={}",
@@ -472,7 +471,7 @@ impl ComponentMetaSession {
         canonical_or_alias: &str,
         include_fallthrough: bool,
     ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "component_meta_auto_policy",
             format!(
                 "owner={} include_fallthrough={}",
@@ -492,7 +491,7 @@ impl ComponentMetaSession {
         };
 
         let exceeds_threshold = resolved_state_exceeds_verter_complexity_threshold(&resolved);
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "component_meta_auto_policy_decision",
             format!(
                 "owner={} exceeds_threshold={} resolved_macros={} resolved_types={} has_evaluated_types={}",
@@ -549,7 +548,7 @@ impl ComponentMetaSession {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         include_fallthrough: bool,
     ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "component_meta_external_backend",
             format!(
                 "backend={:?} owner={} include_fallthrough={} resolved_macros={} resolved_types={}",
@@ -592,7 +591,7 @@ impl ComponentMetaSession {
         )?;
         let include_fallthrough =
             include_fallthrough && should_include_fallthrough_surface(resolved);
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "component_meta_external_backend_result",
             format!(
                 "backend={:?} owner={} expanded_props={} expanded_events={} expanded_slots={} include_fallthrough={}",
@@ -826,7 +825,7 @@ fn build_external_component_types(
             span: type_span,
             profile: verter_resolver::type_expansion::ExpansionProfile::ComponentMeta,
         };
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "component_meta_external_macro",
             format!(
                 "owner={} macro_index={} macro_kind={:?} span={}..{}",
@@ -877,7 +876,7 @@ fn collect_external_slot_binding_fields(
         .into_iter()
         .map(|member| member.name)
         .collect::<Vec<_>>();
-    component_meta_trace_event(
+    component_meta_trace_event!(
         "component_meta_external_slot_binding_slots",
         format!(
             "owner={} slot_count={} slots={}",
@@ -887,7 +886,7 @@ fn collect_external_slot_binding_fields(
         ),
     );
     for slot_name in slot_names {
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "component_meta_external_slot_binding_query",
             format!("owner={} slot={slot_name}", request.canonical_id),
         );

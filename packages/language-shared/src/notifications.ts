@@ -36,6 +36,7 @@ export function createNotificationHelper<T extends GenericNotificationHelper>(
 export enum NotificationType {
   OnDidChangeTsOrJsFile = "$/onDidChangeTsOrJsFile",
   OnFileChanged = "$/onFileChanged",
+  WatcherStateChanged = "$/verter/watcherStateChanged",
   TsgoStarted = "$/verter/tsgoStarted",
   TypeProviderStarted = "$/verter/typeProviderStarted",
   Heartbeat = "$/verter/heartbeat",
@@ -68,6 +69,10 @@ export type NotificationParams = {
   [NotificationType.OnFileChanged]: {
     uri: string;
     type: FileNotificationChange;
+  };
+  [NotificationType.WatcherStateChanged]: {
+    workspaceRoot: string;
+    reason: "overflow" | "restart" | "dropped_state";
   };
   [NotificationType.TsgoStarted]: {
     pid: number;

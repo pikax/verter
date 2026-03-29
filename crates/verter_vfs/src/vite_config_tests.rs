@@ -9,6 +9,8 @@ fn config_discovery_priority_order() {
         crate::filesystem::FilesystemOptions::default(),
     );
     let tmp = tempfile::TempDir::new().unwrap();
+    let project_root =
+        crate::resolver::normalize_canonical_id(&tmp.path().to_string_lossy().replace('\\', "/"));
 
     // Create multiple config files
     for name in VITE_CONFIG_NAMES {
@@ -16,7 +18,7 @@ fn config_discovery_priority_order() {
     }
 
     // Should find vite.config.ts first (highest priority)
-    let found = find_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/"));
+    let found = find_vite_config(&ws, &project_root);
     assert!(found.is_some(), "should find vite config");
     assert!(
         found.unwrap().ends_with("vite.config.ts"),
@@ -25,7 +27,16 @@ fn config_discovery_priority_order() {
 
     // Remove .ts, should fall back to .js
     std::fs::remove_file(tmp.path().join("vite.config.ts")).unwrap();
-    let found = find_vite_config(&ws, &tmp.path().to_string_lossy().replace('\\', "/"));
+    let deleted_path = crate::resolver::normalize_canonical_id(
+        &tmp.path()
+            .join("vite.config.ts")
+            .to_string_lossy()
+            .replace('\\', "/"),
+    );
+    ws.apply_changes(vec![crate::changes::WorkspaceChange::FileDeleted {
+        canonical_id: deleted_path,
+    }]);
+    let found = find_vite_config(&ws, &project_root);
     assert!(
         found.unwrap().ends_with("vite.config.js"),
         "should fall back to .js"

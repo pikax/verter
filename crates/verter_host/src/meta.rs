@@ -741,7 +741,7 @@ impl MetaSession {
     /// Return provenance counters for this session's host.
     pub fn get_provenance(&self) -> Result<crate::types::MetaProvenanceSnapshot, MetaError> {
         self.check_alive()?;
-        Ok(self.project.host.provenance().snapshot())
+        Ok(self.project.host.provenance_snapshot())
     }
 
     /// Get the effective source for a file (overlay → base).

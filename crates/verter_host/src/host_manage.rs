@@ -28,16 +28,16 @@ use verter_resolver::{
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
     resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
     resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
-    resolve_usage_prop_type, DeclarationMetadataResolver, DynamicRootCandidate,
-    ExportGraphFileKind, ExportGraphResolver, ExportSurface, FallthroughComputeHost,
-    FallthroughRequestHost, FallthroughResolutionView, FallthroughResolverHost,
-    ImportedDeclEvalResolver, ImportedEvalBinding, ImportedEvalCollectorResolver,
-    ImportedEvalLookup, ImportedEvalLookupResolver, ImportedEvalOwnerContextResolver,
-    ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
-    ImportedEvalTraversalBudget, ImportedRuntimeValueResolver, ImportedSymbolDependency,
-    ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
-    OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource, ResolvedConsumedBindings,
-    ResolvedExportTarget, SingleflightRole, StoreView,
+    resolve_usage_prop_type, CollectedImportedTypeAlias, DeclarationMetadataResolver,
+    DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver, ExportSurface,
+    FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
+    FallthroughResolverHost, ImportedDeclEvalResolver, ImportedEvalBinding,
+    ImportedEvalCollectorResolver, ImportedEvalLookup, ImportedEvalLookupResolver,
+    ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
+    ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget, ImportedRuntimeValueResolver,
+    ImportedSymbolDependency, ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest,
+    ImportedTypeAliasResolver, OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource,
+    ResolvedConsumedBindings, ResolvedExportTarget, SingleflightRole, StoreView,
 };
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -232,6 +232,12 @@ pub(crate) struct ComponentMetaTraceGuard {
     state: Option<ComponentMetaTraceGuardState>,
 }
 
+impl ComponentMetaTraceGuard {
+    pub(crate) fn noop() -> Self {
+        Self { state: None }
+    }
+}
+
 impl Drop for ComponentMetaTraceGuard {
     fn drop(&mut self) {
         let Some(state) = self.state.take() else {
@@ -257,7 +263,7 @@ impl Drop for ComponentMetaTraceGuard {
     }
 }
 
-pub(crate) fn component_meta_trace_scope(
+pub(crate) fn component_meta_trace_scope_impl(
     name: &'static str,
     detail: impl Into<String>,
 ) -> ComponentMetaTraceGuard {
@@ -300,7 +306,7 @@ pub(crate) fn component_meta_trace_scope(
     }
 }
 
-pub(crate) fn component_meta_trace_event(name: &'static str, detail: impl Into<String>) {
+pub(crate) fn component_meta_trace_event_impl(name: &'static str, detail: impl Into<String>) {
     if !component_meta_trace_enabled() {
         return;
     }
@@ -325,6 +331,28 @@ pub(crate) fn component_meta_trace_event(name: &'static str, detail: impl Into<S
         None,
     ));
 }
+
+macro_rules! component_meta_trace_scope {
+    ($name:expr, $detail:expr $(,)?) => {{
+        if $crate::host_manage::component_meta_trace_enabled() {
+            $crate::host_manage::component_meta_trace_scope_impl($name, $detail)
+        } else {
+            $crate::host_manage::ComponentMetaTraceGuard::noop()
+        }
+    }};
+}
+
+pub(crate) use component_meta_trace_scope;
+
+macro_rules! component_meta_trace_event {
+    ($name:expr, $detail:expr $(,)?) => {{
+        if $crate::host_manage::component_meta_trace_enabled() {
+            $crate::host_manage::component_meta_trace_event_impl($name, $detail);
+        }
+    }};
+}
+
+pub(crate) use component_meta_trace_event;
 
 const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
 const COMPONENT_META_RETRY_MAX_SYMBOLIC_STEPS: usize = 50_000;
@@ -783,6 +811,7 @@ struct HostImportedEvalResolver<'a> {
     alias_env_stack: rustc_hash::FxHashSet<String>,
     budget: ImportedEvalTraversalBudget,
     external_type_cache: verter_resolver::ExternalTypeBodyCache,
+    prepare_failure_count: u64,
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
@@ -817,6 +846,7 @@ impl<'a> HostImportedEvalResolver<'a> {
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
             external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
+            prepare_failure_count: 0,
             store_view,
         }
     }
@@ -838,6 +868,7 @@ impl<'a> HostImportedEvalResolver<'a> {
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
             external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
+            prepare_failure_count: 0,
             store_view,
         }
     }
@@ -968,7 +999,7 @@ impl<'a> HostImportedEvalResolver<'a> {
         owner_eval_source: &str,
         owner_env: &verter_analysis::type_eval::EvalEnv,
     ) -> rustc_hash::FxHashSet<String> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "collect_required_owner_import_names",
             format!(
                 "owner={} macros={} bindings={} source_len={} type_symbols={} value_symbols={}",
@@ -984,7 +1015,7 @@ impl<'a> HostImportedEvalResolver<'a> {
             .host
             .clone_cached_required_owner_import_names(owner_canonical_id, self.store_view)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "collect_required_owner_import_names_result",
                 format!(
                     "owner={} hit=true required={}",
@@ -1007,7 +1038,7 @@ impl<'a> HostImportedEvalResolver<'a> {
                 self.store_view,
             );
         }
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "collect_required_owner_import_names_result",
             format!(
                 "owner={} hit=false required={}",
@@ -1500,7 +1531,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
     ) -> Result<Option<verter_analysis::type_expr::TypeExpr>, ImportedTypeAliasPrepareError> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_external_type_body",
             format!(
                 "owner={} import={} name={} tracked_deps={} resolution_deps={} cache_entries={}",
@@ -1545,7 +1576,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
             }),
             Err(_) => Err(ImportedTypeAliasPrepareError::Other),
         };
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "resolve_external_type_body_result",
             format!(
                 "owner={} import={} name={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={}",
@@ -1604,7 +1635,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
     ) -> Option<verter_resolver::CachedPreparedImportedTypeAlias> {
         let cached = self.cached_prepared_type_alias(source_canonical_id, exported_name);
         if cached.is_some() {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "prepare_imported_type_alias_cache_hit",
                 format!("source={} exported={}", source_canonical_id, exported_name),
             );
@@ -1640,8 +1671,8 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
         request: ImportedTypeAliasResolveRequest,
         canonical_dependencies: &mut std::collections::BTreeSet<String>,
         budget: &mut ImportedEvalTraversalBudget,
-    ) -> Option<ImportedTypeAlias> {
-        let _trace = component_meta_trace_scope(
+    ) -> Option<CollectedImportedTypeAlias> {
+        let _trace = component_meta_trace_scope!(
             "collect_imported_type_alias",
             format!(
                 "owner={} local={} imported={} source={} exported={}",
@@ -1657,61 +1688,42 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
         }
 
         canonical_dependencies.insert(request.source_canonical_id.clone());
-        let eval_source = self.cached_eval_source(request.source_canonical_id.as_str())?;
-        let analysis = self
-            .host
-            .external_type_analysis_in_view(request.source_canonical_id.as_str(), self.store_view);
-        let target_name = analysis
-            .as_ref()
-            .map(|analysis| analysis.local_symbol_target_name(request.exported_name.as_str()))
-            .unwrap_or_else(|| request.exported_name.clone());
-        let forwards_to_import = analysis.as_ref().is_some_and(|analysis| {
-            analysis
-                .direct_reexport_target(request.exported_name.as_str())
-                .is_some()
-                || analysis
-                    .local_import_symbol_target(target_name.as_str())
-                    .is_some()
-        });
-        let merge_root = self.host.resolve_imported_type_root_in_view(
-            request.source_canonical_id.as_str(),
-            request.exported_name.as_str(),
-            self.store_view,
+        let merge_root = (
+            request.source_canonical_id.clone(),
+            request.exported_name.clone(),
         );
-        let requires_source_merge = if merge_root.0 != request.source_canonical_id
-            || merge_root.1 != request.exported_name
-        {
-            true
-        } else if !forwards_to_import {
-            self.cached_dependency_eval_env(request.source_canonical_id.as_str())
-                .and_then(|env| env.type_symbols.get(target_name.as_str()).cloned())
-                .map(|decl| verter_resolver::prepare_local_imported_type_alias(&decl))
-                .map(|prepared| prepared.requires_source_merge)
-                .unwrap_or_else(|| {
-                    !self
-                        .cached_required_import_names_for_exported_type(
-                            request.source_canonical_id.as_str(),
-                            request.exported_name.as_str(),
-                            eval_source.as_ref(),
-                        )
-                        .is_empty()
-                })
-        } else {
-            !self
-                .cached_required_import_names_for_exported_type(
-                    request.source_canonical_id.as_str(),
-                    request.exported_name.as_str(),
-                    eval_source.as_ref(),
-                )
-                .is_empty()
+        let prepared = verter_resolver::prepare_imported_type_alias(
+            self,
+            ImportedTypeAliasResolveRequest {
+                owner_canonical_id: request.owner_canonical_id.clone(),
+                import_source: request.import_source.clone(),
+                local_name: merge_root.1.clone(),
+                imported_name: merge_root.1.clone(),
+                source_canonical_id: merge_root.0.clone(),
+                exported_name: merge_root.1.clone(),
+            },
+            canonical_dependencies,
+        );
+        let Some(prepared) = prepared else {
+            self.prepare_failure_count += 1;
+            return None;
         };
 
-        Some(ImportedTypeAlias {
-            local_name: request.local_name,
-            source_canonical_id: request.source_canonical_id,
-            exported_name: request.exported_name,
-            requires_source_merge,
+        Some(CollectedImportedTypeAlias {
+            alias: ImportedTypeAlias {
+                local_name: request.local_name,
+                source_canonical_id: request.source_canonical_id,
+                exported_name: request.exported_name,
+                requires_source_merge: prepared.requires_source_merge,
+                merge_root_canonical: merge_root.0,
+                merge_root_exported: merge_root.1,
+            },
+            symbol_dependencies: prepared.symbol_dependencies,
         })
+    }
+
+    fn prepare_imported_type_alias_failure_count(&self) -> u64 {
+        self.prepare_failure_count
     }
 }
 
@@ -1799,7 +1811,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         source_canonical_id: &str,
         exported_name: &str,
     ) -> Option<PreparedImportedDeclContext> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "load_imported_decl_context",
             format!("source={} exported={}", source_canonical_id, exported_name),
         );
@@ -1836,7 +1848,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         exported_name: &str,
         eval_source: &str,
     ) -> rustc_hash::FxHashSet<String> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "required_import_names_for_exported_type",
             format!(
                 "source={} exported={} source_len={}",
@@ -1888,7 +1900,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         context: &PreparedImportedDeclContext,
         additional_required_import_names: &rustc_hash::FxHashSet<String>,
     ) -> ImportedEvalInputs {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "build_imported_inputs_for_decl",
             format!(
                 "owner={} imports={} macros={} bindings={} additional_required={}",
@@ -1925,7 +1937,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         context: &PreparedImportedDeclContext,
         imported_inputs: &ImportedEvalInputs,
     ) -> Option<verter_analysis::type_eval::EvalEnv> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "build_owner_eval_env_for_decl",
             format!(
                 "owner={} imports={} bindings={} imported_sources={} imported_aliases={}",
@@ -1999,7 +2011,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         inputs: &mut Vec<ImportedEvalSource>,
         canonical_dependencies: &mut std::collections::BTreeSet<String>,
     ) {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "record_eval_input_source",
             format!(
                 "canonical={} seen_sources={} inputs={} canonical_dependencies={}",
@@ -2030,7 +2042,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
     }
 
     fn load_eval_source_for_merge(&mut self, canonical_id: &str) -> Option<Arc<str>> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "load_eval_source_for_merge",
             format!("canonical={canonical_id}"),
         );
@@ -2055,7 +2067,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         canonical_id: &str,
         eval_source: &str,
     ) -> Vec<ImportedEvalBinding> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "import_bindings_for_merge",
             format!(
                 "canonical={} source_len={}",
@@ -2119,7 +2131,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         binding: &ImportedEvalBinding,
     ) -> Option<String> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_import_binding_dependency",
             format!(
                 "owner={} local={} imported={} source={} namespace={}",
@@ -2390,9 +2402,9 @@ impl VerterHost {
 
     pub(crate) fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
         let _trace =
-            component_meta_trace_scope("read_analysis_source", format!("owner={canonical_id}"));
+            component_meta_trace_scope!("read_analysis_source", format!("owner={canonical_id}"));
         if let Some(source) = self.get_source(canonical_id) {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "read_analysis_source_result",
                 format!(
                     "owner={} source=host-cache bytes={}",
@@ -2407,7 +2419,7 @@ impl VerterHost {
         if let Some(cached) =
             self.clone_cached_imported_dependency(canonical_id, workspace_generation)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "read_analysis_source_result",
                 format!(
                     "owner={} source=imported-dependency-cache bytes={}",
@@ -2423,7 +2435,7 @@ impl VerterHost {
             let whole_hash = crate::hash::hash_16(source.as_bytes());
             let _ =
                 self.cache_imported_dependency_source(canonical_id, whole_hash, Arc::clone(source));
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "read_analysis_source_result",
                 format!(
                     "owner={} source=workspace bytes={}",
@@ -2432,7 +2444,7 @@ impl VerterHost {
                 ),
             );
         } else {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "read_analysis_source_result",
                 format!(
                     "owner={} source=workspace bytes=0 missing=true",
@@ -2448,14 +2460,14 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<str>> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "read_analysis_source_in_view",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
         let source = self.read_analysis_source(canonical_id)?;
         let whole_hash = crate::hash::hash_16(source.as_bytes());
         if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "read_analysis_source_in_view_result",
                 format!(
                     "owner={} accepted=false bytes={} whole_hash={whole_hash:?}",
@@ -2465,7 +2477,7 @@ impl VerterHost {
             );
             return None;
         }
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "read_analysis_source_in_view_result",
             format!(
                 "owner={} accepted=true bytes={} whole_hash={whole_hash:?}",
@@ -2519,13 +2531,13 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "materialize_imported_dependency_base_in_view",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
         if let Some(entry) = self.clone_current_imported_dependency_entry(canonical_id, store_view)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "materialize_imported_dependency_base_in_view_result",
                 format!(
                     "owner={} hit=true bytes={} has_cached_parse={} has_eval_source={} whole_hash={:?}",
@@ -2542,7 +2554,7 @@ impl VerterHost {
         let (raw_source, cached_parse, whole_hash) =
             self.current_eval_state_in_view(canonical_id, store_view)?;
         if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "materialize_imported_dependency_base_in_view_result",
                 format!(
                     "owner={} hit=false accepted=false bytes={} whole_hash={whole_hash:?}",
@@ -2591,7 +2603,7 @@ impl VerterHost {
             None,
             dependency_resolutions,
         );
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "materialize_imported_dependency_base_in_view_result",
             format!(
                 "owner={} hit=false accepted=true bytes={} eval_bytes={} has_cached_parse={} whole_hash={whole_hash:?}",
@@ -2618,7 +2630,7 @@ impl VerterHost {
             let mut cache = cache.borrow_mut();
             if let Some(entry) = cache.get(&cache_key) {
                 if entry.whole_hash == whole_hash {
-                    component_meta_trace_event(
+                    component_meta_trace_event!(
                         "cached_parsed_eval_program_hit",
                         format!(
                             "owner={} bytes={} whole_hash={whole_hash:?} parse_failed={}",
@@ -2662,7 +2674,7 @@ impl VerterHost {
                 program,
                 type_context,
             };
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "cached_parsed_eval_program_store",
                 format!(
                     "owner={} bytes={} whole_hash={whole_hash:?} parse_failed={}",
@@ -2733,7 +2745,7 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "materialize_imported_dependency_state_in_view",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
@@ -2749,7 +2761,7 @@ impl VerterHost {
             && base.eval_source.is_some()
             && base.external_type_analysis.is_some()
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "materialize_imported_dependency_state_in_view_result",
                 format!(
                     "owner={} hit=true imports={} type_symbols={} value_symbols={} whole_hash={:?}",
@@ -2832,7 +2844,7 @@ impl VerterHost {
                 if base.resolved_canonical_id != canonical_id {
                     let _ = self.cache_imported_dependency_arc(canonical_id, Arc::clone(&entry));
                 }
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "materialize_imported_dependency_state_in_view_result",
                     format!(
                         "owner={} hit=false imports={} type_symbols={} value_symbols={} whole_hash={:?} parsed_once=true",
@@ -2901,7 +2913,7 @@ impl VerterHost {
         if base.resolved_canonical_id != canonical_id {
             let _ = self.cache_imported_dependency_arc(canonical_id, Arc::clone(&entry));
         }
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "materialize_imported_dependency_state_in_view_result",
             format!(
                 "owner={} hit=false imports={} type_symbols={} value_symbols={} whole_hash={:?}",
@@ -3123,13 +3135,13 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "external_type_analysis_in_view",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
         if let Some(cached) = self.clone_cached_external_type_analysis(canonical_id, store_view) {
             let stats = cached.stats();
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "external_type_analysis_cache_hit",
                 format!(
                     "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
@@ -3149,7 +3161,7 @@ impl VerterHost {
         let entry = self.materialize_imported_dependency_state_in_view(canonical_id, store_view)?;
         let analysis = entry.external_type_analysis.clone()?;
         let stats = analysis.stats();
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "external_type_analysis_built",
             format!(
                 "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
@@ -3176,7 +3188,7 @@ impl VerterHost {
         >,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_external_type_from_cached_dependency_state_in_view",
             format!(
                 "owner={} type={} store_view={}",
@@ -3199,7 +3211,7 @@ impl VerterHost {
             &eval_source,
         );
         if parsed_eval_program.parse_failed {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_external_type_from_cached_dependency_state_in_view_result",
                 format!(
                     "owner={} type={} hit=false local_symbol_target={} parse_failed=true",
@@ -3211,7 +3223,7 @@ impl VerterHost {
             return None;
         }
         let Some(type_context) = parsed_eval_program.type_context.as_ref() else {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_external_type_from_cached_dependency_state_in_view_result",
                 format!(
                     "owner={} type={} hit=false local_symbol_target={} parse_failed=false missing_type_context=true",
@@ -3232,7 +3244,7 @@ impl VerterHost {
             analysis.as_ref(),
             imported_companions,
         );
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "resolve_external_type_from_cached_dependency_state_in_view_result",
             format!(
                 "owner={} type={} hit={} local_symbol_target={} parse_failed=false",
@@ -3251,7 +3263,7 @@ impl VerterHost {
         requested_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<(String, String)> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_direct_type_reexport_target_in_view",
             format!("owner={} requested={}", dep_canonical, requested_name),
         );
@@ -3262,7 +3274,7 @@ impl VerterHost {
             import_source,
             store_view,
         )?;
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "resolve_direct_type_reexport_target_in_view_result",
             format!(
                 "owner={} requested={} import_source={} target={} exported={}",
@@ -3278,7 +3290,7 @@ impl VerterHost {
         resolved_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<(String, String)> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_local_import_symbol_target_in_view",
             format!("owner={} requested={}", dep_canonical, resolved_name),
         );
@@ -3289,7 +3301,7 @@ impl VerterHost {
             import_source,
             store_view,
         )?;
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "resolve_local_import_symbol_target_in_view_result",
             format!(
                 "owner={} requested={} import_source={} target={} exported={}",
@@ -3305,7 +3317,7 @@ impl VerterHost {
         exported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<String> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_local_export_symbol_target_in_view",
             format!("owner={} requested={}", canonical_source, exported_name),
         );
@@ -3314,7 +3326,7 @@ impl VerterHost {
             .local_export_symbol_target(exported_name)
             .map(str::to_string);
         if let Some(target) = target.as_deref() {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_local_export_symbol_target_in_view_result",
                 format!(
                     "owner={} requested={} target={}",
@@ -3393,7 +3405,7 @@ impl VerterHost {
         dep_resolutions: Option<&rustc_hash::FxHashMap<String, DependencyResolution>>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<String> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_imported_dependency_canonical_in_view",
             format!(
                 "owner={} source={} hint={} store_view={}",
@@ -3425,7 +3437,7 @@ impl VerterHost {
                 (store_view.is_none() && import_source.starts_with('.'))
                     .then(|| crate::id::resolve_external(owner_canonical_id, import_source))
             });
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "resolve_imported_dependency_canonical_in_view_result",
             format!(
                 "owner={} source={} resolved={}",
@@ -3443,14 +3455,14 @@ impl VerterHost {
         imported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> (String, String) {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_imported_type_root",
             format!("canonical={} imported={}", dep_canonical, imported_name),
         );
         if let Some(cached) =
             self.clone_cached_imported_type_root(dep_canonical, imported_name, store_view)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_imported_type_root_cache_hit",
                 format!("canonical={} imported={}", dep_canonical, imported_name),
             );
@@ -3468,7 +3480,7 @@ impl VerterHost {
         if let Some(cached) =
             self.clone_cached_imported_type_root(dep_canonical, imported_name, store_view)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_imported_type_root_cache_hit",
                 format!(
                     "canonical={} imported={} source=host_imported_dep",
@@ -3512,14 +3524,14 @@ impl VerterHost {
         imported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> verter_resolver::ResolvedTypeDeclaration {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_imported_type_declaration",
             format!("canonical={} imported={}", dep_canonical, imported_name),
         );
         if let Some(cached) =
             self.clone_cached_imported_type_declaration(dep_canonical, imported_name, store_view)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_imported_type_declaration_cache_hit",
                 format!("canonical={} imported={}", dep_canonical, imported_name),
             );
@@ -3537,7 +3549,7 @@ impl VerterHost {
         if let Some(cached) =
             self.clone_cached_imported_type_declaration(dep_canonical, imported_name, store_view)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_imported_type_declaration_cache_hit",
                 format!(
                     "canonical={} imported={} source=host_imported_dep",
@@ -3937,7 +3949,7 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "base_eval_env",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
@@ -3946,7 +3958,7 @@ impl VerterHost {
         {
             let whole_hash = imported_entry.whole_hash;
             if let Some(cached_env) = self.clone_cached_eval_env_arc(canonical_id, whole_hash) {
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "base_eval_env_cache_hit",
                     format!("owner={} whole_hash={whole_hash:?}", canonical_id),
                 );
@@ -3954,7 +3966,7 @@ impl VerterHost {
             }
 
             if let Some(cached_env) = imported_entry.env.clone() {
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "base_eval_env_imported_cache_hit",
                     format!("owner={} whole_hash={whole_hash:?}", canonical_id),
                 );
@@ -3985,7 +3997,7 @@ impl VerterHost {
                     );
                     Arc::new(env)
                 });
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "base_eval_env_built",
                 format!(
                     "owner={} source_len={} eval_source_len={} type_symbols={} value_symbols={}",
@@ -4005,7 +4017,7 @@ impl VerterHost {
 
         if let Some(cached_env) = self.clone_cached_eval_env_arc(&resolved_canonical_id, whole_hash)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "base_eval_env_dependency_cache_hit",
                 format!(
                     "owner={} resolved_owner={} whole_hash={whole_hash:?}",
@@ -4018,7 +4030,7 @@ impl VerterHost {
         let env = Arc::new(verter_analysis::type_eval_build::parse_and_build_env(
             eval_source.as_ref(),
         ));
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "base_eval_env_dependency_built",
             format!(
                 "owner={} resolved_owner={} eval_source_len={} type_symbols={} value_symbols={}",
@@ -4208,16 +4220,16 @@ impl VerterHost {
         canonical: &str,
         source: &Arc<str>,
     ) -> FileAnalysisSnapshot {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "build_snapshot_from_source",
             format!("owner={} bytes={}", canonical, source.len()),
         );
         if canonical.ends_with(".vue") {
             let _parse_trace =
-                component_meta_trace_scope("parse_vue_snapshot", format!("owner={canonical}"));
+                component_meta_trace_scope!("parse_vue_snapshot", format!("owner={canonical}"));
             let (parse, _) =
                 crate::parse::parse_vue_snapshot(canonical, source, self.config.effective_scope());
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "parse_vue_snapshot_result",
                 format!(
                     "owner={} imports={} macros={} export_signatures={}",
@@ -4230,9 +4242,9 @@ impl VerterHost {
             Self::build_snapshot_from_parse(parse)
         } else {
             let _parse_trace =
-                component_meta_trace_scope("parse_non_sfc_snapshot", format!("owner={canonical}"));
+                component_meta_trace_scope!("parse_non_sfc_snapshot", format!("owner={canonical}"));
             let parse = crate::parse::parse_non_sfc_snapshot(canonical, source);
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "parse_non_sfc_snapshot_result",
                 format!(
                     "owner={} imports={} macros={} export_signatures={}",
@@ -4254,7 +4266,7 @@ impl VerterHost {
     ) -> FileAnalysisSnapshot {
         if canonical.ends_with(".vue") {
             if let Some(parsed) = cached_parse {
-                let _trace = component_meta_trace_scope(
+                let _trace = component_meta_trace_scope!(
                     "build_snapshot_from_cached_parse",
                     format!("owner={} bytes={}", canonical, source.len()),
                 );
@@ -4264,7 +4276,7 @@ impl VerterHost {
                     self.config.effective_scope(),
                     parsed,
                 );
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "parse_vue_snapshot_cached_result",
                     format!(
                         "owner={} imports={} macros={} export_signatures={}",
@@ -4326,7 +4338,7 @@ impl VerterHost {
         Option<Arc<verter_core::parser::types::ParsedSfc>>,
         Hash16,
     )> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "current_eval_state",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
@@ -4340,7 +4352,7 @@ impl VerterHost {
                 ) {
                     return None;
                 }
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "current_eval_state_scheduler_hit",
                     format!(
                         "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
@@ -4355,7 +4367,7 @@ impl VerterHost {
                 if let Some(imported_entry) =
                     self.clone_current_imported_dependency_entry(canonical_id, store_view)
                 {
-                    component_meta_trace_event(
+                    component_meta_trace_event!(
                         "current_eval_state_imported_cache_hit",
                         format!(
                             "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
@@ -4388,7 +4400,7 @@ impl VerterHost {
                     None,
                     rustc_hash::FxHashMap::default(),
                 );
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "current_eval_state_fallback_load",
                     format!(
                         "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
@@ -4412,7 +4424,7 @@ impl VerterHost {
                 ) {
                     return None;
                 }
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "current_eval_state_cache_hit",
                     format!(
                         "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
@@ -4432,7 +4444,7 @@ impl VerterHost {
                 if let Some(imported_entry) =
                     self.clone_current_imported_dependency_entry(canonical_id, store_view)
                 {
-                    component_meta_trace_event(
+                    component_meta_trace_event!(
                         "current_eval_state_imported_cache_hit",
                         format!(
                             "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
@@ -4465,7 +4477,7 @@ impl VerterHost {
                     None,
                     rustc_hash::FxHashMap::default(),
                 );
-                component_meta_trace_event(
+                component_meta_trace_event!(
                     "current_eval_state_disk_load",
                     format!(
                         "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
@@ -4493,7 +4505,7 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<rustc_hash::FxHashMap<String, DependencyResolution>> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "dependency_resolutions_for_eval",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
@@ -4503,7 +4515,7 @@ impl VerterHost {
                 .dependency_resolutions(canonical_id)
                 .cloned()
                 .unwrap_or_default();
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "dependency_resolutions_for_eval_result",
                 format!("owner={} count={}", canonical_id, resolutions.len()),
             );
@@ -4523,7 +4535,7 @@ impl VerterHost {
                 .get(canonical_id)
                 .map(|entry| entry.dependency_resolutions.clone())
                 .unwrap_or_default();
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "dependency_resolutions_for_eval_result",
                 format!("owner={} count={}", canonical_id, resolutions.len()),
             );
@@ -4542,7 +4554,7 @@ impl VerterHost {
                 .get(canonical_id)
                 .map(|entry| entry.dependency_resolutions.clone())
                 .unwrap_or_default();
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "dependency_resolutions_for_eval_result",
                 format!("owner={} count={}", canonical_id, resolutions.len()),
             );
@@ -4676,7 +4688,7 @@ impl VerterHost {
         owner_env: Option<&verter_analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> ImportedEvalInputs {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "imported_eval_inputs",
             format!(
                 "owner={} imports={} dep_resolutions={} owner_eval_source={} owner_env={} store_view={}",
@@ -4725,7 +4737,51 @@ impl VerterHost {
             None,
             &mut budget,
         );
-        component_meta_trace_event(
+        self.provenance.imported_eval_worklist_seed_count.fetch_add(
+            imported_inputs.stats.worklist_seed_count,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.provenance
+            .imported_eval_worklist_resolved_count
+            .fetch_add(
+                imported_inputs.stats.worklist_resolved_count,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        self.provenance
+            .imported_eval_worklist_enqueued_from_symbol_deps_count
+            .fetch_add(
+                imported_inputs
+                    .stats
+                    .worklist_enqueued_from_symbol_deps_count,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        self.provenance
+            .imported_eval_reached_merge_roots_count
+            .fetch_add(
+                imported_inputs.stats.reached_merge_roots_count,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        self.provenance.imported_eval_sources_count.fetch_add(
+            imported_inputs.stats.imported_sources_count,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.provenance
+            .imported_eval_normalized_type_root_calls
+            .fetch_add(
+                imported_inputs.stats.normalized_imported_type_root_calls,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        self.provenance.imported_eval_prepare_failures.fetch_add(
+            imported_inputs.stats.prepare_imported_type_alias_failures,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.provenance
+            .imported_eval_dropped_unreached_aliases
+            .fetch_add(
+                imported_inputs.stats.dropped_unreached_aliases,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        component_meta_trace_event!(
             "imported_eval_inputs_result",
             format!(
                 "owner={} type_aliases={} sources={} overflow={} canonical_dependencies={}",
@@ -4766,7 +4822,7 @@ impl VerterHost {
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         canonical_dependencies: &mut std::collections::BTreeSet<String>,
     ) {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "track_direct_eval_dependencies",
             format!(
                 "owner={} macro_type_deps={} imports={} allow_relative_fallback={} dep_resolutions={}",
@@ -4818,7 +4874,7 @@ impl VerterHost {
             }
         }
 
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "track_direct_eval_dependencies_result",
             format!(
                 "owner={} canonical_dependencies={}",
@@ -4936,7 +4992,7 @@ impl VerterHost {
         if COMPONENT_META_RETRY_MAX_SYMBOLIC_STEPS > COMPONENT_META_MAX_SYMBOLIC_STEPS
             && should_retry_component_meta_expansion(&computed)
         {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "compute_evaluated_types_retry",
                 format!(
                     "owner={} from={} to={}",
@@ -5157,7 +5213,7 @@ impl VerterHost {
     ) -> Option<crate::types::FallthroughResolution> {
         use verter_analysis::component_meta::*;
         let started = component_meta_debug_enabled().then(Instant::now);
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "resolve_fallthrough_surface",
             format!(
                 "owner={} overrides={} visiting={} store_view={}",
@@ -5175,7 +5231,7 @@ impl VerterHost {
             self.provenance
                 .resolver_cycle_detections
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_fallthrough_cycle",
                 format!("owner={} visiting={}", canonical_id, visiting.len()),
             );
@@ -5267,7 +5323,7 @@ impl VerterHost {
             }
         }
         if let Some(resolution) = result.value.as_ref() {
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "resolve_fallthrough_result",
                 format!(
                     "owner={} accepted_props={} accepted_events={} fact_versions={} completeness={:?}",
@@ -5424,7 +5480,7 @@ impl VerterHost {
         imported_inputs: &ImportedEvalInputs,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<verter_analysis::type_eval::EvalEnv> {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "build_fallthrough_eval_env",
             format!(
                 "owner={} imports={} imported_sources={} overrides={} store_view={}",
@@ -5465,7 +5521,7 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<OwnerEvalEnvBuild> {
         let _trace =
-            component_meta_trace_scope(
+            component_meta_trace_scope!(
                 "build_owner_eval_env",
                 format!(
                 "owner={} imports={} imported_sources={} overrides={} owner_env={} store_view={}",
@@ -5502,7 +5558,7 @@ impl VerterHost {
                 started.map(|start| start.elapsed()).unwrap_or_default(),
             ));
         }
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "build_owner_eval_env_result",
             format!(
                 "owner={} type_symbols={} value_symbols={} imported_sources={}",
@@ -5522,7 +5578,7 @@ impl VerterHost {
         env: &mut verter_analysis::type_eval::EvalEnv,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "materialize_imported_type_aliases",
             format!(
                 "aliases={} existing_type_symbols={} store_view={}",
@@ -5544,15 +5600,15 @@ impl VerterHost {
             if self.materialize_shallow_type_symbol_into_env_in_view(
                 env,
                 alias.local_name.as_str(),
-                alias.source_canonical_id.as_str(),
-                alias.exported_name.as_str(),
+                alias.merge_root_canonical.as_str(),
+                alias.merge_root_exported.as_str(),
                 store_view,
                 &mut visiting,
             ) {
                 inserted += 1;
             }
         }
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "materialize_imported_type_aliases_result",
             format!(
                 "aliases={} inserted={} final_type_symbols={}",
@@ -5720,7 +5776,7 @@ impl VerterHost {
         env: &mut verter_analysis::type_eval::EvalEnv,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
-        let _trace = component_meta_trace_scope(
+        let _trace = component_meta_trace_scope!(
             "materialize_runtime_values",
             format!(
                 "imports={} owner_local_values={} existing_value_symbols={} store_view={}",
@@ -5750,7 +5806,7 @@ impl VerterHost {
                 started.map(|start| start.elapsed()).unwrap_or_default(),
             ));
         }
-        component_meta_trace_event(
+        component_meta_trace_event!(
             "materialize_runtime_values_result",
             format!(
                 "imports={} owner_local_values={} value_symbols={}",
@@ -10479,7 +10535,7 @@ fn extract_component_meta_from_inputs(
 ) -> verter_analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-    let _trace = component_meta_trace_scope(
+    let _trace = component_meta_trace_scope!(
         "extract_component_meta",
         format!(
             "owner={} macros={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} include_fallthrough={}",
@@ -10509,7 +10565,7 @@ fn extract_component_meta_from_inputs(
         file_path: &canonical,
     };
     let mut meta = verter_analysis::component_meta::extract_component_meta(input);
-    component_meta_trace_event(
+    component_meta_trace_event!(
         "extract_component_meta_declared_surface",
         format!(
             "owner={} props={} events={} slots={}",
@@ -10526,7 +10582,7 @@ fn extract_component_meta_from_inputs(
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
             meta.fallthrough_surface = resolution.fallthrough_surface;
-            component_meta_trace_event(
+            component_meta_trace_event!(
                 "extract_component_meta_fallthrough_surface",
                 format!(
                     "owner={} accepted_props={} accepted_events={} completeness={:?}",

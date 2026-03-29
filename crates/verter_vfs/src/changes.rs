@@ -10,6 +10,8 @@ pub enum WorkspaceChange {
     },
     /// File was deleted.
     FileDeleted { canonical_id: String },
+    /// Mark a directory tree dirty so the next access refreshes cached membership.
+    DirectoryTreeDirty { prefix: String },
     /// Config file changed (triggers project graph rebuild).
     ConfigChanged { canonical_id: String },
     /// Set an overlay (active editor content, takes priority over disk/snapshot).

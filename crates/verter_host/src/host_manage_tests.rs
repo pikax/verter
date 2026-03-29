@@ -68,8 +68,8 @@ fn resolved_imported_alias_body(
 ) -> TypeExpr {
     let view = host.resolver_store_view();
     host.resolve_shallow_symbol_dependency_alias_in_view(
-        alias.source_canonical_id.as_str(),
-        alias.exported_name.as_str(),
+        alias.merge_root_canonical.as_str(),
+        alias.merge_root_exported.as_str(),
         Some(&view),
     )
     .map(|prepared| prepared.2.decl.body)
@@ -82,8 +82,8 @@ fn resolved_imported_alias_dependencies(
 ) -> Vec<verter_resolver::ImportedSymbolDependency> {
     let view = host.resolver_store_view();
     host.resolve_shallow_symbol_dependency_alias_in_view(
-        alias.source_canonical_id.as_str(),
-        alias.exported_name.as_str(),
+        alias.merge_root_canonical.as_str(),
+        alias.merge_root_exported.as_str(),
         Some(&view),
     )
     .map(|prepared| prepared.2.symbol_dependencies)
@@ -902,6 +902,54 @@ fn raw_analysis_snapshot_cache_tracks_hit_miss_and_invalidates_on_epoch_bump() {
         0,
         "the updated workspace file still has no imports after the reload"
     );
+}
+
+#[test]
+fn provenance_snapshot_includes_vfs_dir_index_counters_from_workspace() {
+    let unique = format!(
+        "verter-host-provenance-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let dir = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("Comp.vue");
+    std::fs::write(&file_path, "<template><div /></template>").unwrap();
+
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+    let ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
+        verter_vfs::FilesystemOptions::default(),
+    ));
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_vfs_provenance();
+    assert!(
+        ws.file_exists(&canonical),
+        "the filesystem workspace should seed its dir index from disk"
+    );
+
+    let snapshot = host.provenance_snapshot();
+    assert_eq!(
+        snapshot.dir_index_refresh_count, 1,
+        "host provenance snapshots should surface VFS dir-index refreshes for benchmark validation"
+    );
+    assert_eq!(
+        snapshot.native_fs_read_dir_count, 1,
+        "host provenance snapshots should include the VFS read_dir count"
+    );
+    assert_eq!(
+        snapshot.dir_index_hit_count, 0,
+        "the first dir-index seed should refresh, not hit a cached directory listing"
+    );
+    assert_eq!(
+        snapshot.native_fs_read_file_miss_count, 0,
+        "seeding the dir index for a present file should not record a disk read miss"
+    );
+
+    std::fs::remove_file(&file_path).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -1899,6 +1947,7 @@ defineProps<Props>()
         &mut deps,
         &mut budget,
     )
+    .map(|collected| collected.alias)
     .expect("imported alias should be collected");
 
     assert_eq!(
@@ -3510,6 +3559,7 @@ defineProps<Props>()
         &mut deps,
         &mut budget,
     )
+    .map(|collected| collected.alias)
     .expect("imported alias should be collected");
 
     assert_eq!(
@@ -3948,17 +3998,20 @@ fn collect_imported_type_alias_reuses_host_cached_prepared_alias_across_resolver
         &mut deps_a,
         &mut budget_a,
     )
+    .map(|collected| collected.alias)
     .expect("first imported alias should be collected");
 
     assert_eq!(alias_a.local_name, "LocalPropsA");
+    assert_eq!(alias_a.merge_root_canonical, "/src/types.ts");
+    assert_eq!(alias_a.merge_root_exported, "Props");
 
     {
         let cached = host
             .clone_current_imported_dependency_entry("/src/types.ts", Some(&view))
             .expect("types source should be present in the imported dependency cache");
         assert!(
-            !cached.prepared_type_aliases.contains_key("Props"),
-            "collecting shallow aliases should not eagerly populate prepared alias cache"
+            cached.prepared_type_aliases.contains_key("Props"),
+            "reached imported symbols should populate the prepared alias cache on first collection"
         );
     }
 
@@ -3978,18 +4031,63 @@ fn collect_imported_type_alias_reuses_host_cached_prepared_alias_across_resolver
         &mut deps_b,
         &mut budget_b,
     )
+    .map(|collected| collected.alias)
     .expect("second imported alias should still be collected through the shallow route");
 
     assert_eq!(alias_b.local_name, "LocalPropsB");
     assert_eq!(alias_b.exported_name, "Props");
+    assert_eq!(alias_b.merge_root_canonical, "/src/types.ts");
+    assert_eq!(alias_b.merge_root_exported, "Props");
 
     let cached = host
         .clone_current_imported_dependency_entry("/src/types.ts", Some(&view))
         .expect("types source should still be cached");
     assert_eq!(
         cached.prepared_type_aliases.len(),
-        0,
-        "shallow collection should leave prepared aliases cold until the builder materializes them",
+        1,
+        "multiple owner-local bindings should reuse the same defining-file prepared alias cache entry",
+    );
+}
+
+#[test]
+fn collect_imported_type_alias_does_not_reresolve_already_normalized_root() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label?: string }",
+    );
+
+    let view = host.resolver_store_view();
+    let mut resolver = HostImportedEvalResolver::new(&host, "/src/Consumer.ts", Some(&view));
+    let mut deps = BTreeSet::new();
+    let mut budget = verter_resolver::ImportedEvalTraversalBudget::new("/src/Consumer.ts", 16);
+
+    let alias = ImportedEvalCollectorResolver::collect_imported_type_alias(
+        &mut resolver,
+        verter_resolver::ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/Consumer.ts".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalProps".to_string(),
+            imported_name: "Props".to_string(),
+            source_canonical_id: "/src/types.ts".to_string(),
+            exported_name: "Props".to_string(),
+        },
+        &mut deps,
+        &mut budget,
+    )
+    .map(|collected| collected.alias)
+    .expect("normalized imported alias should be collected");
+
+    assert_eq!(alias.merge_root_canonical, "/src/types.ts");
+    assert_eq!(alias.merge_root_exported, "Props");
+
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", Some(&view))
+        .expect("types source should be cached");
+    assert!(
+        cached.resolved_type_roots.is_empty(),
+        "collector worklist items already carry normalized roots; collecting them should not repopulate the root cache with an identity mapping"
     );
 }
 

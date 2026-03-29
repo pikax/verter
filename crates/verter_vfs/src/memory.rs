@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::engine::Engine;
+use crate::path_matches_prefix;
 use crate::project_graph::{ProjectGraph, VfsProjectConfig};
 use crate::types::{ExactResolution, ExactResolutionResult};
 
@@ -39,6 +40,20 @@ impl MemorySnapshot {
     /// Remove a file from the snapshot. Returns `true` if the file existed.
     pub fn remove(&mut self, canonical_id: &str) -> bool {
         self.entries.remove(canonical_id).is_some()
+    }
+
+    /// Remove all snapshot entries under a directory prefix. Returns the removed IDs.
+    pub fn remove_under(&mut self, prefix: &str) -> Vec<String> {
+        let removed: Vec<String> = self
+            .entries
+            .keys()
+            .filter(|path| path_matches_prefix(path, prefix))
+            .cloned()
+            .collect();
+        for canonical_id in &removed {
+            self.entries.remove(canonical_id);
+        }
+        removed
     }
 
     /// Check if a file exists in the snapshot.

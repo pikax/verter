@@ -212,16 +212,21 @@ mod tests {
                     source_canonical_id: "/src/dep.ts".to_string(),
                     exported_name: "Local".to_string(),
                     requires_source_merge: false,
+                    merge_root_canonical: "/src/dep.ts".to_string(),
+                    merge_root_exported: "Local".to_string(),
                 },
                 ImportedTypeAlias {
                     local_name: "Imported".to_string(),
                     source_canonical_id: "/src/dep.ts".to_string(),
                     exported_name: "Imported".to_string(),
                     requires_source_merge: false,
+                    merge_root_canonical: "/src/dep.ts".to_string(),
+                    merge_root_exported: "Imported".to_string(),
                 },
             ],
             canonical_dependencies: BTreeSet::new(),
             overflow: None,
+            stats: crate::ImportedEvalStats::default(),
         };
 
         let mut assembler = TestAssembler::default();
@@ -329,9 +334,12 @@ mod tests {
                 source_canonical_id: "/src/dep.ts".to_string(),
                 exported_name: "Imported".to_string(),
                 requires_source_merge: false,
+                merge_root_canonical: "/src/dep.ts".to_string(),
+                merge_root_exported: "Imported".to_string(),
             }],
             canonical_dependencies: BTreeSet::new(),
             overflow: None,
+            stats: crate::ImportedEvalStats::default(),
         };
         assembler.type_aliases.insert(
             ("/src/dep.ts".to_string(), "Imported".to_string()),
@@ -457,6 +465,7 @@ mod tests {
                 type_aliases: Vec::new(),
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
+                stats: crate::ImportedEvalStats::default(),
             },
             None,
             None,
