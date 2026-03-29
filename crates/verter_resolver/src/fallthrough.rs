@@ -23,7 +23,8 @@ pub trait FallthroughResolutionView {
 pub trait FallthroughResolverHost {
     type ChildResolution: FallthroughResolutionView;
 
-    fn intrinsic_members_for_tag(&self, tag: &str) -> Vec<OwnedIntrinsicMember>;
+    fn intrinsic_members_for_tag(&self, canonical_id: &str, tag: &str)
+        -> Vec<OwnedIntrinsicMember>;
     fn resolve_child_component_canonical(
         &self,
         parent_canonical: &str,
@@ -145,6 +146,7 @@ pub fn hash_prop_type_overrides(overrides: &FxHashMap<String, TypeExpr>) -> u64 
 #[allow(clippy::too_many_arguments)]
 pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
     host: &H,
+    canonical_id: &str,
     tag: &str,
     branch_key: String,
     condition_text: Option<String>,
@@ -157,7 +159,7 @@ pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
     fallthrough_branches: &mut Vec<FallthroughBranch>,
     any_partial: &mut bool,
 ) {
-    let intrinsic_members = host.intrinsic_members_for_tag(tag);
+    let intrinsic_members = host.intrinsic_members_for_tag(canonical_id, tag);
 
     let mut inherited_props = Vec::new();
     let mut inherited_events = Vec::new();
@@ -650,6 +652,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                     RootTargetRef::NativeElement { tag, .. } => {
                         append_native_candidate_branch(
                             host,
+                            canonical_id,
                             tag,
                             branch_key,
                             branch.condition_text.clone(),
@@ -704,6 +707,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                                 DynamicRootCandidate::NativeTag { tag } => {
                                     append_native_candidate_branch(
                                         host,
+                                        canonical_id,
                                         &tag,
                                         candidate_key,
                                         branch.condition_text.clone(),
@@ -1282,7 +1286,11 @@ mod tests {
     impl FallthroughResolverHost for TestHost {
         type ChildResolution = TestResolution;
 
-        fn intrinsic_members_for_tag(&self, tag: &str) -> Vec<OwnedIntrinsicMember> {
+        fn intrinsic_members_for_tag(
+            &self,
+            _canonical_id: &str,
+            tag: &str,
+        ) -> Vec<OwnedIntrinsicMember> {
             self.intrinsic_members.get(tag).cloned().unwrap_or_default()
         }
 
@@ -1425,6 +1433,7 @@ mod tests {
         let mut any_partial = false;
         append_native_candidate_branch(
             &host,
+            "/src/App.vue",
             "button",
             "0".to_string(),
             None,

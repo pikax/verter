@@ -28,7 +28,6 @@ import {
   parseTsconfig,
   extractPathAliases,
 } from "../runtime/index.js";
-import { configureProjectHtmlIntrinsics } from "../project-html-intrinsics.js";
 import type {
   BootstrapFn,
   EngineKeyInput,
@@ -566,11 +565,8 @@ export class ComponentMetaChecker {
     const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
     await this.ensureFile(absPath);
     if (this._session) {
-      const useDeclaredFastPath = this.shouldUseDeclaredNativeMeta();
-      let nativeMeta = useDeclaredFastPath
-        ? this._session.getDeclaredComponentMeta(absPath)
-        : this._session.getComponentMeta(absPath);
-      if (!useDeclaredFastPath && nativeMeta && this.shouldRetryFullNativeMeta()) {
+      let nativeMeta = this._session.getComponentMeta(absPath);
+      if (nativeMeta && this.shouldRetryFullNativeMeta()) {
         const retriedMeta = this._session.getComponentMeta(absPath);
         if (
           retriedMeta &&
@@ -598,31 +594,6 @@ export class ComponentMetaChecker {
           nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
         ),
       );
-
-      if (useDeclaredFastPath) {
-        let fullMeta: ComponentMeta | null | undefined;
-        Object.defineProperty(result, "_verter", {
-          configurable: true,
-          enumerable: true,
-          get: () => {
-            if (fullMeta !== undefined) {
-              return fullMeta ?? mappedMeta;
-            }
-            if (this.disposed || this._session === null || this._session.closed) {
-              fullMeta = null;
-              return mappedMeta;
-            }
-            const nativeFullMeta = this._session.getComponentMeta(absPath);
-            fullMeta = nativeFullMeta
-              ? nativeComponentMetaToComponentMeta(
-                  nativeFullMeta as import("../native-component-meta.js").NativeComponentMetaResult,
-                )
-              : null;
-            return fullMeta ?? mappedMeta;
-          },
-        });
-      }
-
       return result;
     }
     throw new Error(
@@ -837,11 +808,6 @@ export class ComponentMetaChecker {
     }
   }
 
-  private shouldUseDeclaredNativeMeta(): boolean {
-    const backend = this.options.typeExpansionBackend;
-    return backend === undefined || backend === "verter";
-  }
-
   private shouldRetryFullNativeMeta(): boolean {
     const backend = this.options.typeExpansionBackend;
     return backend === "tsserver" || backend === "auto";
@@ -902,10 +868,6 @@ export async function createChecker(
       const aliases = extractPathAliases(parsed.config, runtimeNormalizePath(projectRoot));
       workspace.configureProjects([aliases]);
     }
-    await configureProjectHtmlIntrinsics(nativeProject, {
-      root: runtimeNormalizePath(projectRoot),
-      config: parsed?.config,
-    });
     return { nativeProject, baseFileIds: [] };
   };
   const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -986,10 +948,6 @@ export async function createCheckerByJson(
     );
     const aliases = extractPathAliases(config, runtimeNormalizePath(absRoot));
     workspace.configureProjects([aliases]);
-    await configureProjectHtmlIntrinsics(nativeProject, {
-      root: runtimeNormalizePath(absRoot),
-      config,
-    });
     return { nativeProject, baseFileIds: [] };
   };
   const engine = await runtime.getOrCreateEngine(input, bootstrap);

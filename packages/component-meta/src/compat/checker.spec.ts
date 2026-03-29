@@ -490,8 +490,11 @@ describe("ComponentMetaChecker", () => {
     const meta = await checker.getComponentMeta("Single.vue");
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getComponentMeta).not.toHaveBeenCalled();
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).toHaveBeenCalledWith(
+      runtimeNormalizePath(resolve("/tmp", "Single.vue")),
+    );
+    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
   });
 
   it("createCheckerByJson reuses one pooled engine across include differences in selective-loading mode", async () => {
@@ -819,8 +822,9 @@ describe("ComponentMetaChecker", () => {
 
     expect(ensureBaseFile).toHaveBeenCalledWith(canonicalId);
     expect(workspace.readFile).not.toHaveBeenCalled();
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(canonicalId);
-    expect(getComponentMeta).not.toHaveBeenCalled();
+    expect(getComponentMeta).toHaveBeenCalledWith(canonicalId);
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
 

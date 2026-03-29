@@ -182,6 +182,50 @@ fn extracts_interface_with_methods() {
     }
 }
 
+#[test]
+fn extracts_namespace_qualified_interfaces() {
+    let env = parse_and_build_env(
+        r#"
+        interface NativeElements {
+          div: { id?: string }
+        }
+
+        declare namespace JSX {
+          interface IntrinsicElements extends NativeElements {}
+          interface ElementChildrenAttribute {
+            children: {}
+          }
+        }
+        "#,
+    );
+
+    assert!(
+        env.type_symbols.contains_key("JSX.IntrinsicElements"),
+        "namespace interfaces should be registered under their qualified name"
+    );
+    assert!(
+        env.type_symbols
+            .contains_key("JSX.ElementChildrenAttribute"),
+        "nested namespace members should remain addressable from the eval env"
+    );
+
+    let decl = &env.type_symbols["JSX.IntrinsicElements"];
+    match &decl.body {
+        TypeExpr::Intersection(parts) => {
+            assert_eq!(
+                parts[0],
+                TypeExpr::named("NativeElements"),
+                "namespace interfaces should preserve their extends clauses"
+            );
+            assert!(
+                matches!(parts[1], TypeExpr::Object(_)),
+                "qualified namespace interfaces should still lower their local members structurally"
+            );
+        }
+        other => panic!("expected namespace interface intersection, got {other:?}"),
+    }
+}
+
 // =============================================================================
 // Function extraction
 // =============================================================================

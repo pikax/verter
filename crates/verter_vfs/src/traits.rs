@@ -79,6 +79,22 @@ pub trait WorkspaceAccess: Send + Sync {
         None
     }
 
+    /// Resolve an import specifier against an explicit owning project.
+    ///
+    /// This is used for project-scoped lookups that are not naturally rooted at
+    /// a real source file, such as resolving `vue/jsx` for fallthrough
+    /// intrinsics. Implementations should honor the same project-level tsconfig,
+    /// alias, and package resolution rules as `resolve_import()`, without
+    /// fabricating an importer path.
+    fn resolve_import_for_project(
+        &self,
+        _owner: &ProjectOwnership,
+        _specifier: &str,
+        _ctx: ResolutionContext,
+    ) -> Option<ResolveResult> {
+        None
+    }
+
     /// Find the owning project for a file.
     /// Default: `None` (no project ownership).
     fn owner_for_file(&self, _canonical_id: &str) -> Option<ProjectOwnership> {

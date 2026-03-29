@@ -191,6 +191,16 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .resolve_import(self, importer_id, specifier, ctx)
     }
 
+    fn resolve_import_for_project(
+        &self,
+        owner: &crate::types::ProjectOwnership,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> Option<crate::types::ResolveResult> {
+        self.engine
+            .resolve_import_for_project(self, owner, specifier, ctx)
+    }
+
     fn owner_for_file(&self, canonical_id: &str) -> Option<crate::types::ProjectOwnership> {
         self.engine.owner_for_file(canonical_id)
     }

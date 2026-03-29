@@ -24,7 +24,6 @@ import {
   nativeTypeRegistryToMap,
 } from "./native-component-meta.js";
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
-import { configureProjectHtmlIntrinsics } from "./project-html-intrinsics.js";
 import {
   createMetaRuntime,
   computeEngineKey,
@@ -270,11 +269,6 @@ async function openComponentMetaSessionInternal(
       const aliases = extractPathAliases(options.config, normalizePath(root));
       workspace.configureProjects([aliases]);
     }
-
-    await configureProjectHtmlIntrinsics(nativeProject, {
-      root: normalizePath(root),
-      config: options.tsconfig ? parsedConfig?.config : options.config,
-    });
 
     // Selective loading: no eager preload. Files are loaded on-demand
     // in getComponentMeta() when the file is first requested.

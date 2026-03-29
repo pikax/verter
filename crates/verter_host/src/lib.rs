@@ -185,11 +185,6 @@ impl HostResolverState {
     fn clear_all(&self) {
         self.runtime.clear_caches();
     }
-
-    fn clear_fallthrough(&self) {
-        self.runtime.top_level_fallthrough_singleflight.clear();
-        self.runtime.fallthrough.clear_cache();
-    }
 }
 
 #[derive(Clone)]
@@ -301,11 +296,6 @@ pub struct VerterHost {
     /// Each entry is valid only for its exact whole_hash.
     pub(crate) imported_dependency_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<ImportedDependencyCacheEntry>>>,
-    /// Optional project-local HTML intrinsic override extracted from the
-    /// consumer project's installed TS/Vue JSX surface.
-    pub(crate) html_intrinsics_catalog: parking_lot::RwLock<
-        Option<Arc<verter_analysis::html_intrinsics::ProjectHtmlIntrinsicCatalog>>,
-    >,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -360,7 +350,6 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
 
@@ -388,7 +377,6 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            html_intrinsics_catalog: parking_lot::RwLock::new(None),
         }
     }
 
@@ -741,41 +729,10 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
-    /// Clear only cached fallthrough surfaces.
-    pub(crate) fn clear_fallthrough_cache(&self) {
-        #[cfg(feature = "scheduler")]
-        {
-            for mut entry in self.compile_cache.iter_mut() {
-                entry.cached_fallthrough = None;
-            }
-        }
-        self.resolver.clear_fallthrough();
-        self.bump_store_view_epoch();
-    }
-
-    /// Install a project-local HTML intrinsic catalog for this host.
-    ///
-    /// The host remains the semantic owner. JavaScript only provides the raw
-    /// extracted tag/member surface from the project's installed types.
-    pub fn set_html_intrinsics_catalog(&self, catalog_json: &str) -> Result<(), String> {
-        let catalog =
-            verter_analysis::html_intrinsics::ProjectHtmlIntrinsicCatalog::from_json(catalog_json)
-                .map_err(|err| format!("invalid html intrinsics catalog: {err}"))?;
-        *self.html_intrinsics_catalog.write() = Some(Arc::new(catalog));
-        self.clear_fallthrough_cache();
-        Ok(())
-    }
-
     pub(crate) fn intrinsic_members_for_tag(
         &self,
         tag: &str,
     ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
-        if let Some(catalog) = self.html_intrinsics_catalog.read().as_ref() {
-            if let Some(members) = catalog.members_for_tag(tag) {
-                return members.to_vec();
-            }
-        }
-
         verter_analysis::html_intrinsics::owned_intrinsic_members_for_tag(tag)
     }
 
@@ -816,7 +773,6 @@ impl VerterHost {
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
-        *self.html_intrinsics_catalog.write() = None;
 
         #[cfg(feature = "scheduler")]
         {

@@ -31,6 +31,15 @@ struct ComponentMetaTraceContext {
     span_id: u64,
 }
 
+struct ComponentMetaTraceLine<'a> {
+    trace_id: u64,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    depth: usize,
+    name: &'a str,
+    detail: &'a str,
+}
+
 thread_local! {
     static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
 }
@@ -67,30 +76,26 @@ fn component_meta_trace_output_path() -> Option<&'static std::path::PathBuf> {
 
 fn format_component_meta_trace_line(
     event: ComponentMetaTraceEvent,
-    trace_id: u64,
-    span_id: u64,
-    parent_span_id: Option<u64>,
-    depth: usize,
-    name: &str,
-    detail: &str,
+    line: ComponentMetaTraceLine<'_>,
     duration: Option<Duration>,
 ) -> String {
-    let parent = parent_span_id
+    let parent = line
+        .parent_span_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| "-".to_string());
     let mut line = format!(
         "[verter-meta-trace] event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
         event.as_str(),
-        trace_id,
-        span_id,
+        line.trace_id,
+        line.span_id,
         parent,
-        trace_id,
-        span_id,
+        line.trace_id,
+        line.span_id,
         parent,
-        depth,
+        line.depth,
         std::thread::current().id(),
-        name,
-        detail,
+        line.name,
+        line.detail,
     );
     if let Some(duration) = duration {
         line.push_str(&format!(" dur_ms={:.3}", duration.as_secs_f64() * 1000.0));
@@ -153,12 +158,14 @@ impl Drop for ComponentMetaTraceGuard {
 
         component_meta_trace_write_line(&format_component_meta_trace_line(
             ComponentMetaTraceEvent::End,
-            state.trace_id,
-            state.span_id,
-            state.parent_span_id,
-            state.depth,
-            state.name,
-            &state.detail,
+            ComponentMetaTraceLine {
+                trace_id: state.trace_id,
+                span_id: state.span_id,
+                parent_span_id: state.parent_span_id,
+                depth: state.depth,
+                name: state.name,
+                detail: &state.detail,
+            },
             Some(state.started.elapsed()),
         ));
     }
@@ -185,12 +192,14 @@ fn component_meta_trace_scope(
 
     component_meta_trace_write_line(&format_component_meta_trace_line(
         ComponentMetaTraceEvent::Start,
-        trace_id,
-        span_id,
-        parent_span_id,
-        depth,
-        name,
-        &detail,
+        ComponentMetaTraceLine {
+            trace_id,
+            span_id,
+            parent_span_id,
+            depth,
+            name,
+            detail: &detail,
+        },
         None,
     ));
 
@@ -223,12 +232,14 @@ fn component_meta_trace_event(name: &'static str, detail: impl Into<String>) {
 
     component_meta_trace_write_line(&format_component_meta_trace_line(
         ComponentMetaTraceEvent::Point,
-        trace_id,
-        span_id,
-        parent_span_id,
-        depth,
-        name,
-        &detail,
+        ComponentMetaTraceLine {
+            trace_id,
+            span_id,
+            parent_span_id,
+            depth,
+            name,
+            detail: &detail,
+        },
         None,
     ));
 }
@@ -548,6 +559,16 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     ) -> Option<crate::types::ResolveResult> {
         self.engine
             .resolve_import(self, importer_id, specifier, ctx)
+    }
+
+    fn resolve_import_for_project(
+        &self,
+        owner: &crate::types::ProjectOwnership,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> Option<crate::types::ResolveResult> {
+        self.engine
+            .resolve_import_for_project(self, owner, specifier, ctx)
     }
 
     fn owner_for_file(&self, canonical_id: &str) -> Option<crate::types::ProjectOwnership> {

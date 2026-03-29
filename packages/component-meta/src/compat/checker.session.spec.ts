@@ -139,8 +139,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
   });
 
-  it("uses declared component metadata when available and fetches full _verter lazily", async () => {
-    const declaredMeta: any = {
+  it("uses one full native query for Verter compat output and _verter", async () => {
+    const fullMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [
@@ -173,14 +173,6 @@ describe("ComponentMetaChecker session requirement", () => {
         hasInheritAttrsFalse: false,
         hasStoreUsage: false,
       },
-      acceptedProps: [],
-      acceptedEvents: [],
-      acceptedSurfaceCompleteness: "lowerBound",
-      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
-      fallthroughSurface: { kind: "none", reason: "noTemplate" },
-    };
-    const fullMeta: any = {
-      ...declaredMeta,
       acceptedProps: [
         {
           name: "id",
@@ -192,11 +184,11 @@ describe("ComponentMetaChecker session requirement", () => {
           kind: "attr",
         },
       ],
+      acceptedEvents: [],
       acceptedSurfaceCompleteness: "exact",
       rootReachability: { kind: "branches", branches: [] },
       fallthroughSurface: { kind: "branches", branches: [] },
     };
-    const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
     const getComponentMeta = vi.fn(() => fullMeta);
 
     const checker = new ComponentMetaChecker(
@@ -211,7 +203,9 @@ describe("ComponentMetaChecker session requirement", () => {
         upsert() {},
         delete() {},
         getComponentMeta,
-        getDeclaredComponentMeta,
+        getDeclaredComponentMeta: vi.fn(() => {
+          throw new Error("declared query should not be used on the Verter compat path");
+        }),
         getProvenance() {
           return "{}";
         },
@@ -235,12 +229,12 @@ describe("ComponentMetaChecker session requirement", () => {
 
     const meta = await checker.getComponentMeta("src\\App.vue");
 
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
-    expect(getComponentMeta).not.toHaveBeenCalled();
-    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
-
-    expect(meta._verter?.acceptedProps.map((prop) => prop.name)).toEqual(["id"]);
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
     expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
+    expect(meta._verter?.acceptedProps.map((prop) => prop.name)).toEqual(["id"]);
+    expect(meta._verter?.acceptedSurfaceCompleteness).toBe("exact");
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
   });
 
   it("uses the full native query immediately for non-Verter backends even if declared metadata exists", async () => {

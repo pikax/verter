@@ -305,16 +305,6 @@ impl MetaProject {
         Ok(())
     }
 
-    /// Install a project-local HTML intrinsic catalog for fallthrough resolution.
-    pub fn set_html_intrinsics_catalog(&self, catalog_json: &str) -> Result<(), MetaError> {
-        self.check_alive()?;
-        let _gate = self.enter_base_context()?;
-        self.host
-            .set_html_intrinsics_catalog(catalog_json)
-            .map_err(MetaError::Host)?;
-        Ok(())
-    }
-
     /// Open a new session against this project.
     pub fn open_session(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
         self.check_alive()?;

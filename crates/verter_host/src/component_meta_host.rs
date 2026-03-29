@@ -263,18 +263,6 @@ impl ComponentMetaHost {
             .map_err(ComponentMetaHostError::from)
     }
 
-    /// Install HTML intrinsics catalog.
-    pub fn set_html_intrinsics_catalog(
-        &self,
-        catalog_json: &str,
-    ) -> Result<(), ComponentMetaHostError> {
-        self.check_alive()?;
-        self.inner
-            .project
-            .set_html_intrinsics_catalog(catalog_json)
-            .map_err(ComponentMetaHostError::from)
-    }
-
     /// Clear shared compile caches.
     pub fn clear_caches(&self) -> Result<(), ComponentMetaHostError> {
         self.check_alive()?;

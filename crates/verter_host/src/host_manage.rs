@@ -82,6 +82,15 @@ struct ComponentMetaTraceContext {
     span_id: u64,
 }
 
+pub(crate) struct ComponentMetaTraceLine<'a> {
+    trace_id: u64,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    depth: usize,
+    name: &'a str,
+    detail: &'a str,
+}
+
 thread_local! {
     static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
     static COMPONENT_META_TRACE_ENABLED_OVERRIDE: RefCell<Option<bool>> = const { RefCell::new(None) };
@@ -167,30 +176,26 @@ fn component_meta_trace_output_path() -> Option<std::path::PathBuf> {
 
 pub(crate) fn format_component_meta_trace_line(
     event: ComponentMetaTraceEvent,
-    trace_id: u64,
-    span_id: u64,
-    parent_span_id: Option<u64>,
-    depth: usize,
-    name: &str,
-    detail: &str,
+    line: ComponentMetaTraceLine<'_>,
     duration: Option<Duration>,
 ) -> String {
-    let parent = parent_span_id
+    let parent = line
+        .parent_span_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| "-".to_string());
     let mut line = format!(
         "[verter-meta-trace] event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
         event.as_str(),
-        trace_id,
-        span_id,
+        line.trace_id,
+        line.span_id,
         parent,
-        trace_id,
-        span_id,
+        line.trace_id,
+        line.span_id,
         parent,
-        depth,
+        line.depth,
         std::thread::current().id(),
-        name,
-        detail,
+        line.name,
+        line.detail,
     );
     if let Some(duration) = duration {
         line.push_str(&format!(" dur_ms={:.3}", duration.as_secs_f64() * 1000.0));
@@ -253,12 +258,14 @@ impl Drop for ComponentMetaTraceGuard {
 
         component_meta_trace_write_line(&format_component_meta_trace_line(
             ComponentMetaTraceEvent::End,
-            state.trace_id,
-            state.span_id,
-            state.parent_span_id,
-            state.depth,
-            state.name,
-            &state.detail,
+            ComponentMetaTraceLine {
+                trace_id: state.trace_id,
+                span_id: state.span_id,
+                parent_span_id: state.parent_span_id,
+                depth: state.depth,
+                name: state.name,
+                detail: &state.detail,
+            },
             Some(state.started.elapsed()),
         ));
     }
@@ -285,12 +292,14 @@ pub(crate) fn component_meta_trace_scope_impl(
 
     component_meta_trace_write_line(&format_component_meta_trace_line(
         ComponentMetaTraceEvent::Start,
-        trace_id,
-        span_id,
-        parent_span_id,
-        depth,
-        name,
-        &detail,
+        ComponentMetaTraceLine {
+            trace_id,
+            span_id,
+            parent_span_id,
+            depth,
+            name,
+            detail: &detail,
+        },
         None,
     ));
 
@@ -323,12 +332,14 @@ pub(crate) fn component_meta_trace_event_impl(name: &'static str, detail: impl I
 
     component_meta_trace_write_line(&format_component_meta_trace_line(
         ComponentMetaTraceEvent::Point,
-        trace_id,
-        span_id,
-        parent_span_id,
-        depth,
-        name,
-        &detail,
+        ComponentMetaTraceLine {
+            trace_id,
+            span_id,
+            parent_span_id,
+            depth,
+            name,
+            detail: &detail,
+        },
         None,
     ));
 }
@@ -517,9 +528,17 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
 
     fn intrinsic_members_for_tag(
         &self,
+        canonical_id: &str,
         tag: &str,
     ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
-        let cache_key = verter_resolver::fallthrough_resolver::intrinsic_surface_key(tag);
+        debug_assert_eq!(self.parent_canonical_id, canonical_id);
+        let (project_anchor, cache_generation) =
+            self.host.project_intrinsic_cache_anchor(canonical_id);
+        let cache_key = verter_resolver::fallthrough_resolver::intrinsic_surface_key(
+            &project_anchor,
+            cache_generation,
+            tag,
+        );
 
         if let Some(view) = self.store_view {
             if let Some(node) = self
@@ -534,7 +553,10 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             }
         }
 
-        let members = self.host.intrinsic_members_for_tag(tag);
+        let members = self
+            .host
+            .project_intrinsic_members_for_tag_in_view(canonical_id, tag, self.store_view)
+            .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
         self.host.resolver_runtime().fallthrough.store_node(
             cache_key,
             self.host.build_runtime_intrinsic_surface_node(&members),
@@ -3095,6 +3117,253 @@ impl VerterHost {
         )
     }
 
+    fn project_intrinsic_cache_anchor(&self, canonical_id: &str) -> (String, u64) {
+        let ws = self.ws();
+        let generation = ws.content_generation();
+        let anchor = ws
+            .owner_for_file(canonical_id)
+            .map(|owner| {
+                format!(
+                    "{}|{}",
+                    owner.project_root,
+                    owner.tsconfig_path.unwrap_or_default()
+                )
+            })
+            .unwrap_or_else(|| format!("host:{}", self.instance_id));
+        (anchor, generation)
+    }
+
+    fn project_intrinsic_members_for_tag_in_view(
+        &self,
+        owner_canonical_id: &str,
+        tag: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+        let vue_entry =
+            self.resolve_project_intrinsic_entry_in_view(owner_canonical_id, "vue", store_view)?;
+        let jsx_entry = self.resolve_project_intrinsic_entry_in_view(
+            owner_canonical_id,
+            "vue/jsx",
+            store_view,
+        )?;
+
+        let fallback_members = self.expand_project_intrinsic_members_for_type_in_view(
+            &vue_entry,
+            "HTMLAttributes",
+            store_view,
+        );
+        let tag_members =
+            self.expand_project_intrinsic_tag_members_in_view(&jsx_entry, tag, store_view);
+
+        match (
+            tag_members.filter(|members| !members.is_empty()),
+            fallback_members.filter(|members| !members.is_empty()),
+        ) {
+            (Some(tag_members), Some(fallback_members)) => {
+                Some(Self::merge_intrinsic_members(tag_members, fallback_members))
+            }
+            (Some(tag_members), None) => Some(tag_members),
+            (None, Some(fallback_members)) => Some(fallback_members),
+            (None, None) => None,
+        }
+    }
+
+    fn resolve_project_intrinsic_entry_in_view(
+        &self,
+        owner_canonical_id: &str,
+        specifier: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
+        let ws = self.ws();
+        let owner = ws.owner_for_file(owner_canonical_id)?;
+        let resolved = ws.resolve_import_for_project(
+            &owner,
+            specifier,
+            verter_vfs::ResolutionContext {
+                phase: verter_vfs::ResolvePhase::ProviderGraph,
+                kind: verter_vfs::ResolveRequestKind::TypeImport,
+            },
+        )?;
+        self.materialize_imported_dependency_state_in_view(&resolved.source_id, store_view)
+    }
+
+    fn expand_project_intrinsic_members_for_type_in_view(
+        &self,
+        entry: &crate::ImportedDependencyCacheEntry,
+        type_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+        let shape =
+            self.expand_project_intrinsic_shape_for_type_in_view(entry, type_name, store_view)?;
+        Some(Self::owned_intrinsic_members_from_shape(shape))
+    }
+
+    fn expand_project_intrinsic_tag_members_in_view(
+        &self,
+        entry: &crate::ImportedDependencyCacheEntry,
+        tag: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+        let intrinsics_shape = self.expand_project_intrinsic_shape_for_type_in_view(
+            entry,
+            "JSX.IntrinsicElements",
+            store_view,
+        )?;
+        let tag_type = intrinsics_shape
+            .properties
+            .into_iter()
+            .find(|property| property.name == tag)
+            .map(|property| property.ty)?;
+        let tag_shape =
+            self.expand_project_intrinsic_shape_for_expr_in_view(entry, &tag_type, store_view)?;
+        Some(Self::owned_intrinsic_members_from_shape(tag_shape))
+    }
+
+    fn expand_project_intrinsic_shape_for_type_in_view(
+        &self,
+        entry: &crate::ImportedDependencyCacheEntry,
+        type_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<verter_analysis::type_expand::ExpandedObjectShape> {
+        self.expand_project_intrinsic_shape_for_expr_in_view(
+            entry,
+            &verter_analysis::type_expr::TypeExpr::named(type_name),
+            store_view,
+        )
+    }
+
+    fn expand_project_intrinsic_shape_for_expr_in_view(
+        &self,
+        entry: &crate::ImportedDependencyCacheEntry,
+        expr: &verter_analysis::type_expr::TypeExpr,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<verter_analysis::type_expand::ExpandedObjectShape> {
+        let snapshot = entry.snapshot.as_ref()?;
+        let mut env = entry.env.as_ref()?.as_ref().clone();
+        let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
+            self,
+            &entry.resolved_canonical_id,
+            &entry.dependency_resolutions,
+            store_view,
+        );
+        let mut lookup = ImportedEvalLookup::new(
+            &mut resolver,
+            &entry.resolved_canonical_id,
+            snapshot.imports.as_slice(),
+        );
+        let expanded = verter_analysis::type_expand::expand_object_shape_with_lookup(
+            expr,
+            &mut env,
+            &component_meta_expansion_budget(),
+            &mut lookup,
+        );
+        Some(expanded.value)
+    }
+
+    fn owned_intrinsic_members_from_shape(
+        shape: verter_analysis::type_expand::ExpandedObjectShape,
+    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
+        let mut members = rustc_hash::FxHashMap::default();
+        for property in shape.properties {
+            if let Some(event_name) =
+                verter_analysis::html_intrinsics::on_prop_to_event_name(property.name.as_str())
+            {
+                members.entry(format!("listener:{event_name}")).or_insert(
+                    verter_analysis::html_intrinsics::OwnedIntrinsicMember {
+                        name: event_name,
+                        kind: verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener,
+                        type_expr: property.ty,
+                    },
+                );
+                continue;
+            }
+
+            if !verter_analysis::html_intrinsics::should_expose_intrinsic_member(
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr,
+                property.name.as_str(),
+            ) {
+                continue;
+            }
+
+            members.entry(format!("attr:{}", property.name)).or_insert(
+                verter_analysis::html_intrinsics::OwnedIntrinsicMember {
+                    name: property.name,
+                    kind: verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr,
+                    type_expr: property.ty,
+                },
+            );
+        }
+
+        let mut members: Vec<_> = members.into_values().collect();
+        members.sort_by(|left, right| {
+            let left_rank = match left.kind {
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+            };
+            let right_rank = match right.kind {
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+            };
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        members
+    }
+
+    fn merge_intrinsic_members(
+        primary: Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>,
+        fallback: Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>,
+    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
+        let mut members = rustc_hash::FxHashMap::default();
+        for member in fallback {
+            members.insert(
+                format!(
+                    "{}:{}",
+                    match member.kind {
+                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => "attr",
+                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
+                            "listener"
+                        }
+                    },
+                    member.name
+                ),
+                member,
+            );
+        }
+        for member in primary {
+            members.insert(
+                format!(
+                    "{}:{}",
+                    match member.kind {
+                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => "attr",
+                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
+                            "listener"
+                        }
+                    },
+                    member.name
+                ),
+                member,
+            );
+        }
+
+        let mut members: Vec<_> = members.into_values().collect();
+        members.sort_by(|left, right| {
+            let left_rank = match left.kind {
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+            };
+            let right_rank = match right.kind {
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+            };
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        members
+    }
+
     fn clone_cached_evaluated_imported_decl(
         &self,
         canonical_id: &str,
@@ -5167,7 +5436,6 @@ impl VerterHost {
                 },
             )
         })?;
-        let owner_env = owner_env;
         let mut computed = self.compute_evaluated_types_with_budget_from_owner_context_in_view(
             canonical,
             snapshot,
@@ -5940,11 +6208,10 @@ impl VerterHost {
                 true
             } else {
                 self.base_eval_env_in_view(canonical_id, store_view)
-                    .map(|dep_env| {
+                    .and_then(|dep_env| {
                         let target = dep_env.type_symbols.get(exported_name).cloned();
                         target
                     })
-                    .flatten()
                     .map(|mut decl| {
                         decl.name = local_name.to_string();
                         env.add_type(decl);

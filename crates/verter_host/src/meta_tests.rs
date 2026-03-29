@@ -7023,51 +7023,213 @@ const rootAttrs: Record<string, unknown> = {}
 }
 
 #[test]
-fn project_local_intrinsics_override_replaces_builtin_tag_surface() {
-    let project = make_project();
-    project
-        .set_html_intrinsics_catalog(
+fn project_local_intrinsics_load_from_vue_type_entrypoints() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue/package.json".to_string(),
+        Arc::from(
             r#"{
-  "tags": [
-    {
-      "tag": "div",
-      "members": [
-        { "name": "projectOnly", "kind": "attr", "rawType": "string" },
-        { "name": "click", "kind": "listener", "rawType": "ProjectClickEvent" }
-      ]
-    }
-  ]
+  "name": "vue",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./index.js" },
+    "./jsx": { "types": "./jsx.d.ts", "import": "./jsx.js" }
+  }
 }"#,
-        )
-        .unwrap();
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts".to_string(),
+        Arc::from(
+            r#"export interface HTMLAttributes {
+  fallbackOnly?: string
+  onProjectClick?: ProjectClickEvent
+}
+
+export interface ProjectClickEvent {
+  source: 'project'
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/jsx.d.ts".to_string(),
+        Arc::from(
+            r#"import type { NativeElements } from "./jsx-runtime"
+
+export namespace JSX {
+  export interface IntrinsicElements extends NativeElements {}
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/jsx-runtime.d.ts".to_string(),
+        Arc::from(
+            r#"import type { HTMLAttributes } from "./index"
+
+export interface NativeElements {
+  div: HTMLAttributes & { projectOnly?: string }
+}"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
     project
-        .upsert_base("/App.vue", r#"<template><div /></template>"#)
+        .upsert_base("/workspace/src/App.vue", r#"<template><div /></template>"#)
         .unwrap();
 
-    let meta = get_meta(&project, "/App.vue");
+    let meta = get_meta(&project, "/workspace/src/App.vue");
 
     assert!(
         meta.accepted_props
             .iter()
             .any(|prop| prop.name == "projectOnly"),
-        "project-local tag members must be used when a tag override is present"
+        "native intrinsics loading should surface tag-specific members from vue/jsx"
+    );
+    assert!(
+        meta.accepted_props
+            .iter()
+            .any(|prop| prop.name == "fallbackOnly"),
+        "native intrinsics loading should surface fallback HTMLAttributes members from vue"
+    );
+    assert!(
+        meta.accepted_events
+            .iter()
+            .any(|event| event.name == "projectClick"),
+        "native intrinsics loading should expose listeners derived from the project-local HTMLAttributes surface"
     );
     assert!(
         !meta.accepted_props.iter().any(|prop| prop.name == "id"),
-        "tag overrides should replace the built-in fallback surface for that tag"
+        "project-local intrinsic surfaces should replace the generated built-in tag surface when vue entrypoints resolve"
+    );
+}
+
+#[test]
+fn project_local_intrinsics_tag_members_override_fallback_duplicates() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue/package.json".to_string(),
+        Arc::from(
+            r#"{
+  "name": "vue",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./index.js" },
+    "./jsx": { "types": "./jsx.d.ts", "import": "./jsx.js" }
+  }
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts".to_string(),
+        Arc::from(
+            r#"export interface HTMLAttributes {
+  projectOnly?: number
+  onClick?: (payload: FallbackClickEvent) => void
+}
+
+export interface FallbackClickEvent {
+  source: 'fallback'
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/jsx.d.ts".to_string(),
+        Arc::from(
+            r#"import type { NativeElements } from "./jsx-runtime"
+
+export namespace JSX {
+  export interface IntrinsicElements extends NativeElements {}
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/jsx-runtime.d.ts".to_string(),
+        Arc::from(
+            r#"import type { HTMLAttributes } from "./index"
+
+export interface NativeElements {
+  div: HTMLAttributes & {
+    projectOnly?: string
+    onClick?: (payload: ProjectClickEvent) => void
+  }
+}
+
+export interface ProjectClickEvent {
+  source: 'project'
+}"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
+    project
+        .upsert_base("/workspace/src/App.vue", r#"<template><div /></template>"#)
+        .unwrap();
+
+    let meta = get_meta(&project, "/workspace/src/App.vue");
+
+    let project_only = meta
+        .accepted_props
+        .iter()
+        .find(|prop| prop.name == "projectOnly")
+        .expect("project-local tag members must still be present");
+    assert!(
+        matches!(
+            project_only.type_expr,
+            TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "tag-specific projectOnly should override the fallback type, got: {:?}",
+        project_only.type_expr
     );
 
     let click = meta
         .accepted_events
         .iter()
         .find(|event| event.name == "click")
-        .expect("project-local listeners must still appear on the accepted event surface");
+        .expect("tag-specific listeners must still appear on the accepted event surface");
     assert!(
         matches!(
             &click.payload,
-            TypeExpr::Unknown { raw } if raw == "(payload: ProjectClickEvent) => void"
+            TypeExpr::Function(function)
+                if function.parameters.len() == 1
+                    && matches!(
+                        &function.parameters[0].ty,
+                        TypeExpr::Ref { name, type_arguments }
+                            if name.as_ref() == "ProjectClickEvent" && type_arguments.is_empty()
+                    )
         ),
-        "project-local listener payloads must be preserved, got: {:?}",
+        "tag-specific listener payloads must override fallback listeners, got: {:?}",
         click.payload
     );
 }

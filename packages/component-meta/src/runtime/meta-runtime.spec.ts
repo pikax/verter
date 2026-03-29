@@ -50,7 +50,6 @@ function mockNativeProject(): NativeMetaProject {
       return false;
     },
     configureProjects() {},
-    setHtmlIntrinsicsCatalog() {},
     openSession: () => mockNativeSession(),
     clearCaches() {},
     shutdown() {

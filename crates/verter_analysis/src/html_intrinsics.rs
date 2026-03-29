@@ -3,12 +3,11 @@
 //! The raw catalog is generated from `@vue/runtime-dom/dist/runtime-dom.d.ts`
 //! by `scripts/generate-html-intrinsics.js`. This wrapper keeps the public
 //! Rust API stable while the generated file owns the source-of-truth member
-//! list and tag mapping. At runtime, hosts may also inject a project-local
-//! intrinsic catalog extracted from the consumer project's installed
-//! TypeScript/Vue JSX surface.
+//! list and tag mapping. Hosts may also materialize project-local intrinsic
+//! surfaces from the consumer project's installed TypeScript/Vue JSX
+//! entrypoints.
 
 use crate::type_expr::{PrimitiveName, TypeExpr};
-use rustc_hash::FxHashMap;
 
 /// Kind of intrinsic member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,51 +26,12 @@ pub struct IntrinsicMember {
     pub type_expr: TypeExpr,
 }
 
-/// Owned intrinsic member used by project-local override catalogs.
+/// Owned intrinsic member used by host/runtime intrinsic surfaces.
 #[derive(Debug, Clone)]
 pub struct OwnedIntrinsicMember {
     pub name: String,
     pub kind: IntrinsicMemberKind,
     pub type_expr: TypeExpr,
-}
-
-/// Runtime project-local intrinsic catalog derived from installed TS/Vue types.
-#[derive(Debug, Clone, Default)]
-pub struct ProjectHtmlIntrinsicCatalog {
-    fallback_members: Vec<OwnedIntrinsicMember>,
-    tag_members: FxHashMap<String, Vec<OwnedIntrinsicMember>>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectHtmlIntrinsicCatalogWire {
-    #[serde(default)]
-    fallback: Vec<ProjectHtmlIntrinsicMemberWire>,
-    #[serde(default)]
-    tags: Vec<ProjectHtmlIntrinsicTagWire>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectHtmlIntrinsicTagWire {
-    tag: String,
-    #[serde(default)]
-    members: Vec<ProjectHtmlIntrinsicMemberWire>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectHtmlIntrinsicMemberWire {
-    name: String,
-    kind: ProjectHtmlIntrinsicMemberKindWire,
-    raw_type: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ProjectHtmlIntrinsicMemberKindWire {
-    Attr,
-    Listener,
 }
 
 #[derive(Clone, Copy)]
@@ -110,7 +70,7 @@ fn raw_type_to_type_expr(kind: RawIntrinsicMemberKind, raw_type: &str) -> TypeEx
     }
 }
 
-fn should_expose_intrinsic_member(kind: IntrinsicMemberKind, name: &str) -> bool {
+pub fn should_expose_intrinsic_member(kind: IntrinsicMemberKind, name: &str) -> bool {
     if kind != IntrinsicMemberKind::Attr {
         return true;
     }
@@ -118,17 +78,6 @@ fn should_expose_intrinsic_member(kind: IntrinsicMemberKind, name: &str) -> bool
     !matches!(
         name,
         "innerHTML" | "innerText" | "key" | "ref" | "ref_for" | "ref_key" | "textContent"
-    )
-}
-
-/// Convert a raw project-local intrinsic type string into Verter's shared type IR.
-pub fn raw_intrinsic_type_to_type_expr(kind: IntrinsicMemberKind, raw_type: &str) -> TypeExpr {
-    raw_type_to_type_expr(
-        match kind {
-            IntrinsicMemberKind::Attr => RawIntrinsicMemberKind::Attr,
-            IntrinsicMemberKind::Listener => RawIntrinsicMemberKind::Listener,
-        },
-        raw_type,
     )
 }
 
@@ -142,60 +91,6 @@ fn convert_member(raw: &RawIntrinsicMember) -> IntrinsicMember {
         name: raw.name,
         kind,
         type_expr: raw_type_to_type_expr(raw.kind, raw.raw_type),
-    }
-}
-
-fn convert_owned_member(wire: ProjectHtmlIntrinsicMemberWire) -> OwnedIntrinsicMember {
-    let kind = match wire.kind {
-        ProjectHtmlIntrinsicMemberKindWire::Attr => IntrinsicMemberKind::Attr,
-        ProjectHtmlIntrinsicMemberKindWire::Listener => IntrinsicMemberKind::Listener,
-    };
-
-    OwnedIntrinsicMember {
-        name: wire.name,
-        kind,
-        type_expr: raw_intrinsic_type_to_type_expr(kind, &wire.raw_type),
-    }
-}
-
-impl ProjectHtmlIntrinsicCatalog {
-    /// Parse a project-local intrinsic override catalog encoded as JSON.
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        let wire: ProjectHtmlIntrinsicCatalogWire = serde_json::from_str(json)?;
-        Ok(Self {
-            fallback_members: wire
-                .fallback
-                .into_iter()
-                .map(convert_owned_member)
-                .filter(|member| should_expose_intrinsic_member(member.kind, &member.name))
-                .collect(),
-            tag_members: wire
-                .tags
-                .into_iter()
-                .map(|tag| {
-                    (
-                        tag.tag,
-                        tag.members
-                            .into_iter()
-                            .map(convert_owned_member)
-                            .filter(|member| {
-                                should_expose_intrinsic_member(member.kind, &member.name)
-                            })
-                            .collect(),
-                    )
-                })
-                .collect(),
-        })
-    }
-
-    /// Look up the project-local surface for a tag.
-    ///
-    /// Returns `fallback` members when present if the catalog does not define a
-    /// tag-specific entry.
-    pub fn members_for_tag(&self, tag: &str) -> Option<&[OwnedIntrinsicMember]> {
-        self.tag_members.get(tag).map(Vec::as_slice).or_else(|| {
-            (!self.fallback_members.is_empty()).then_some(self.fallback_members.as_slice())
-        })
     }
 }
 

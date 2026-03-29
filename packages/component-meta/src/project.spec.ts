@@ -126,7 +126,6 @@ function createMockProject(baseFiles: Map<string, string>): NativeMetaProject {
       return baseFiles.has(id);
     },
     configureProjects() {},
-    setHtmlIntrinsicsCatalog() {},
     openSession: () => createMockSession(baseFiles),
     clearCaches() {},
     shutdown() {

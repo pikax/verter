@@ -1426,15 +1426,6 @@ impl NapiMetaProject {
         }))?
     }
 
-    #[napi(js_name = "setHtmlIntrinsicsCatalog")]
-    pub fn set_html_intrinsics_catalog(&self, catalog_json: String) -> Result<()> {
-        catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner
-                .set_html_intrinsics_catalog(&catalog_json)
-                .map_err(meta_err)
-        }))?
-    }
-
     #[napi(js_name = "openSession")]
     pub fn open_session(&self) -> Result<NapiMetaSession> {
         catch_panic(std::panic::AssertUnwindSafe(|| {

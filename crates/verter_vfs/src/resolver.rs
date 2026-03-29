@@ -157,6 +157,37 @@ impl ProjectResolver {
         configured.or_else(|| (!fallback_ambiguous).then_some(fallback).flatten())
     }
 
+    fn project_for_ownership(
+        &self,
+        owner: &crate::types::ProjectOwnership,
+    ) -> Option<&IdeProjectConfig> {
+        let normalized_root = normalize_canonical_id(&owner.project_root);
+        let normalized_tsconfig = owner
+            .tsconfig_path
+            .as_ref()
+            .map(|path| normalize_canonical_id(path));
+        let mut matched: Option<&IdeProjectConfig> = None;
+
+        for project in &self.projects {
+            if normalize_canonical_id(&project.root) != normalized_root {
+                continue;
+            }
+            let project_tsconfig = project
+                .tsconfig_path
+                .as_ref()
+                .map(|path| normalize_canonical_id(path));
+            if project_tsconfig != normalized_tsconfig {
+                continue;
+            }
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some(project);
+        }
+
+        matched
+    }
+
     /// Map a source file path to the provider-graph path used by the type provider.
     ///
     /// For `.vue` files this appends `.ts` (the public API shim); for non-Vue
@@ -262,6 +293,19 @@ impl ProjectResolver {
         Some(self.build_resolve_result(request, source_id, resolution_kind))
     }
 
+    pub fn resolve_for_project_with_reader(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        owner: &crate::types::ProjectOwnership,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> Option<ResolveResult> {
+        let project = self.project_for_ownership(owner)?;
+        let (source_id, resolution_kind) =
+            self.resolve_source_id_for_project(reader, project, specifier, ctx)?;
+        Some(self.build_project_resolve_result(specifier, source_id, resolution_kind))
+    }
+
     /// Build a [`ResolveResult`] from a resolved source path.
     ///
     /// Looks up `owner_for_file()` on the **target** (not importer) for correct
@@ -309,6 +353,34 @@ impl ProjectResolver {
             source_id,
             provider_id,
             provider_specifier,
+            provider_target,
+            resolution_kind,
+        }
+    }
+
+    fn build_project_resolve_result(
+        &self,
+        specifier: &str,
+        source_id: String,
+        resolution_kind: ResolutionKind,
+    ) -> ResolveResult {
+        let target_owner = self.owner_for_file(&source_id);
+        let provider_id = target_owner
+            .and_then(|_| self.provider_id_for_source(&source_id))
+            .unwrap_or_else(|| source_id.clone());
+        let provider_target = match target_owner {
+            Some(_) if normalize_canonical_id(&source_id).ends_with(".vue") => {
+                ProviderTarget::VuePublicApi
+            }
+            Some(_) => ProviderTarget::ShadowSourceFile,
+            None => ProviderTarget::SourceFile,
+        };
+
+        ResolveResult {
+            owner_tsconfig_path: target_owner.and_then(|project| project.tsconfig_path.clone()),
+            source_id,
+            provider_id,
+            provider_specifier: specifier.to_string(),
             provider_target,
             resolution_kind,
         }
@@ -419,6 +491,67 @@ impl ProjectResolver {
 
         if let Some((resolved, resolution_kind)) =
             resolve_node_modules_package(reader, importer_id, specifier, ctx)
+        {
+            return Some((resolved, resolution_kind));
+        }
+
+        None
+    }
+
+    fn resolve_source_id_for_project(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        project: &IdeProjectConfig,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> Option<(String, ResolutionKind)> {
+        if is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
+            let base = if is_absolute_specifier(specifier) {
+                normalize_canonical_id(specifier)
+            } else {
+                join_paths(&project.root, specifier)
+            };
+            let resolved = probe_path_for_context(reader, &base, ctx)?;
+            return Some((resolved, ResolutionKind::Relative));
+        }
+
+        for alias in sorted_workspace_aliases(&project.workspace_aliases) {
+            if !specifier.starts_with(&alias.find) {
+                continue;
+            }
+            let remainder = &specifier[alias.find.len()..];
+            let base = join_paths(&alias.replacement, remainder);
+            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
+                return Some((resolved, ResolutionKind::WorkspaceAlias));
+            }
+        }
+
+        if let Some(resolved) = resolve_tsconfig_paths(reader, project, specifier, ctx) {
+            return Some((resolved, ResolutionKind::TsConfigPath));
+        }
+
+        if let Some(base_url) = project.compiler_options.base_url.as_deref() {
+            let base = join_paths(base_url, specifier);
+            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
+                return Some((resolved, ResolutionKind::TsConfigPath));
+            }
+        }
+
+        if let Some(resolved) = self.resolve_project_references(reader, project, specifier, ctx) {
+            return Some((resolved, ResolutionKind::ProjectReference));
+        }
+
+        if specifier.starts_with('#') {
+            if let Some(resolved) =
+                resolve_package_imports_from_dir(reader, &project.root, specifier, ctx)
+            {
+                return Some((resolved, ResolutionKind::PackageImports));
+            }
+            return None;
+        }
+
+        if let Some((resolved, resolution_kind)) =
+            resolve_node_modules_package_from_dir(reader, &project.root, specifier, ctx)
         {
             return Some((resolved, resolution_kind));
         }
@@ -1033,14 +1166,72 @@ fn resolve_package_imports(
     None
 }
 
+fn resolve_package_imports_from_dir(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    start_dir: &str,
+    specifier: &str,
+    ctx: ResolutionContext,
+) -> Option<String> {
+    for directory in ancestor_dirs_from_dir(start_dir) {
+        let Some(package_json) =
+            reader.read_package_manifest(&join_paths(&directory, "package.json"))
+        else {
+            continue;
+        };
+        let Some(imports) = package_json
+            .imports
+            .as_ref()
+            .and_then(|value| value.as_object())
+        else {
+            continue;
+        };
+        let Some((entry, captured)) = match_package_mapping(imports, specifier) else {
+            continue;
+        };
+        if let Some(resolved) =
+            resolve_package_target(reader, &directory, entry, captured.as_deref(), ctx)
+        {
+            return Some(resolved);
+        }
+    }
+
+    None
+}
+
 fn resolve_node_modules_package(
     reader: &dyn crate::traits::WorkspaceAccess,
     importer_id: &str,
     specifier: &str,
     ctx: ResolutionContext,
 ) -> Option<(String, ResolutionKind)> {
+    resolve_node_modules_package_from_dirs(reader, ancestor_dirs(importer_id), specifier, ctx)
+}
+
+fn resolve_node_modules_package_from_dir(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    start_dir: &str,
+    specifier: &str,
+    ctx: ResolutionContext,
+) -> Option<(String, ResolutionKind)> {
+    resolve_node_modules_package_from_dirs(
+        reader,
+        ancestor_dirs_from_dir(start_dir),
+        specifier,
+        ctx,
+    )
+}
+
+fn resolve_node_modules_package_from_dirs<I>(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    directories: I,
+    specifier: &str,
+    ctx: ResolutionContext,
+) -> Option<(String, ResolutionKind)>
+where
+    I: IntoIterator<Item = String>,
+{
     let (package_name, subpath) = split_package_specifier(specifier)?;
-    for directory in ancestor_dirs(importer_id) {
+    for directory in directories {
         let package_dir = join_paths(&join_paths(&directory, "node_modules"), &package_name);
         let package_json_path = join_paths(&package_dir, "package.json");
 
@@ -1256,6 +1447,20 @@ fn split_package_specifier(specifier: &str) -> Option<(String, &str)> {
 fn ancestor_dirs(path: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = parent_dir(path);
+    while !current.is_empty() {
+        result.push(current.clone());
+        let next = parent_dir(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    result
+}
+
+fn ancestor_dirs_from_dir(path: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = normalize_canonical_id(path);
     while !current.is_empty() {
         result.push(current.clone());
         let next = parent_dir(&current);

@@ -289,11 +289,15 @@ pub fn root_follow_key(
     }
 }
 
-pub fn intrinsic_surface_key(tag: &str) -> FallthroughNodeKey {
+pub fn intrinsic_surface_key(
+    project_anchor: &str,
+    cache_generation: u64,
+    tag: &str,
+) -> FallthroughNodeKey {
     FallthroughNodeKey {
-        canonical_component_id: String::new(),
+        canonical_component_id: project_anchor.to_string(),
         node_kind: FallthroughNodeKind::IntrinsicSurfaceLoad,
-        override_fingerprint: 0,
+        override_fingerprint: cache_generation,
         behavior_flags: 0,
         branch_selector: Some(tag.to_string()),
     }
@@ -467,12 +471,18 @@ mod tests {
 
     #[test]
     fn intrinsic_surface_key_keyed_by_tag() {
-        let key_div = intrinsic_surface_key("div");
-        let key_span = intrinsic_surface_key("span");
+        let key_div = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "div");
+        let key_span = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "span");
         assert_ne!(key_div, key_span);
 
-        let key_div2 = intrinsic_surface_key("div");
+        let key_div2 = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "div");
         assert_eq!(key_div, key_div2);
+
+        let key_other_project = intrinsic_surface_key("/other|/other/tsconfig.json", 7, "div");
+        assert_ne!(
+            key_div, key_other_project,
+            "project-owned intrinsic caches must not be shared across projects"
+        );
     }
 
     #[test]

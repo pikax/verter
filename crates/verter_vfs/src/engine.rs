@@ -311,6 +311,19 @@ impl Engine {
         result
     }
 
+    pub(crate) fn resolve_import_for_project(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        owner: &crate::types::ProjectOwnership,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> Option<crate::types::ResolveResult> {
+        let root = self.published_state.load_full()?;
+        root.snapshot
+            .resolver
+            .resolve_for_project_with_reader(reader, owner, specifier, ctx)
+    }
+
     /// Get the owning project for a file.
     pub(crate) fn owner_for_file(
         &self,

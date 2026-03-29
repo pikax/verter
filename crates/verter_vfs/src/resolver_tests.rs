@@ -281,6 +281,49 @@ fn ambiguous_configured_owner_returns_none() {
 }
 
 #[test]
+fn resolve_for_project_uses_owner_tsconfig_paths_without_importer_file() {
+    let mut configured = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    );
+    configured.compiler_options.base_url = Some("/workspace".to_string());
+    configured
+        .compiler_options
+        .paths
+        .push(("vue".to_string(), vec!["types/vue/index.d.ts".to_string()]));
+    configured
+        .compiler_options
+        .paths
+        .push(("vue/*".to_string(), vec!["types/vue/*.d.ts".to_string()]));
+
+    let resolver = ProjectResolver::new(vec![configured]);
+    let reader = TestReader::with_files(&[
+        "/workspace/types/vue/index.d.ts",
+        "/workspace/types/vue/jsx.d.ts",
+    ]);
+    let owner = crate::types::ProjectOwnership {
+        project_root: "/workspace".to_string(),
+        tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
+    };
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: crate::types::ResolveRequestKind::TypeImport,
+    };
+
+    let vue = resolver
+        .resolve_for_project_with_reader(&reader, &owner, "vue", ctx)
+        .expect("project-owned resolution should honor exact tsconfig path entries");
+    let vue_jsx = resolver
+        .resolve_for_project_with_reader(&reader, &owner, "vue/jsx", ctx)
+        .expect("project-owned resolution should honor wildcard tsconfig path entries");
+
+    assert_eq!(vue.source_id, "/workspace/types/vue/index.d.ts");
+    assert_eq!(vue_jsx.source_id, "/workspace/types/vue/jsx.d.ts");
+}
+
+#[test]
 fn provider_id_uses_original_path_for_non_vue() {
     let resolver = ProjectResolver::new(vec![
         project(

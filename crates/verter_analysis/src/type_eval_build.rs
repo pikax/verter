@@ -17,8 +17,9 @@ use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement,
     Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters, Function,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, Statement,
-    TSAccessibility, TSInterfaceDeclaration, TSSignature, TSTypeAliasDeclaration,
-    TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
+    TSAccessibility, TSInterfaceDeclaration, TSModuleDeclaration, TSModuleDeclarationBody,
+    TSModuleDeclarationName, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
+    VariableDeclarationKind, VariableDeclarator,
 };
 
 fn type_expand_debug_enabled() -> bool {
@@ -47,26 +48,30 @@ fn expansion_metadata_hit_budget(
         })
 }
 
-fn log_expand_stage(
+struct ExpandStageLog<'a> {
     macro_index: usize,
     macro_kind: crate::types::AnalyzedMacroKind,
-    stage: &str,
-    target: &str,
+    stage: &'a str,
+    target: &'a str,
     started: Instant,
+    start_steps: usize,
+}
+
+fn log_expand_stage(
+    log: ExpandStageLog<'_>,
     completeness: crate::type_expand::ExpansionCompleteness,
     diagnostics: &[crate::type_expand::ExpansionDiagnostic],
     env: &EvalEnv,
-    start_steps: usize,
 ) {
     type_expand_debug(|| {
         format!(
             "expand_macro_types:item macro_index={} macro_kind={:?} stage={} target={} took {:?} steps_delta={} completeness={:?} diagnostics={} budget_hit={}",
-            macro_index,
-            macro_kind,
-            stage,
-            target,
-            started.elapsed(),
-            env.steps().saturating_sub(start_steps),
+            log.macro_index,
+            log.macro_kind,
+            log.stage,
+            log.target,
+            log.started.elapsed(),
+            env.steps().saturating_sub(log.start_steps),
             completeness,
             diagnostics.len(),
             expansion_metadata_hit_budget(completeness, diagnostics),
@@ -101,6 +106,9 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
             }
             Statement::TSInterfaceDeclaration(decl) => {
                 extract_interface(decl, source, &mut env);
+            }
+            Statement::TSModuleDeclaration(module) => {
+                extract_module_declaration(module, source, &mut env, None);
             }
             Statement::ClassDeclaration(decl) => {
                 extract_class(decl, source, &mut env);
@@ -149,6 +157,9 @@ fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut Eval
         Declaration::TSInterfaceDeclaration(iface) => {
             extract_interface(iface, source, env);
         }
+        Declaration::TSModuleDeclaration(module) => {
+            extract_module_declaration(module, source, env, None);
+        }
         Declaration::ClassDeclaration(cls) => {
             extract_class(cls, source, env);
         }
@@ -170,6 +181,15 @@ fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut Eval
 
 fn extract_type_alias(decl: &TSTypeAliasDeclaration<'_>, source: &str, env: &mut EvalEnv) {
     let name = decl.id.name.to_string();
+    extract_named_type_alias(decl, source, env, name);
+}
+
+fn extract_named_type_alias(
+    decl: &TSTypeAliasDeclaration<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    name: String,
+) {
     let type_parameters = decl
         .type_parameters
         .as_ref()
@@ -188,6 +208,15 @@ fn extract_type_alias(decl: &TSTypeAliasDeclaration<'_>, source: &str, env: &mut
 
 fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut EvalEnv) {
     let name = decl.id.name.to_string();
+    extract_named_interface(decl, source, env, name);
+}
+
+fn extract_named_interface(
+    decl: &TSInterfaceDeclaration<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    name: String,
+) {
     let type_parameters = decl
         .type_parameters
         .as_ref()
@@ -236,6 +265,110 @@ fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut 
         type_parameters,
         body,
     });
+}
+
+fn extract_module_declaration(
+    decl: &TSModuleDeclaration<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    prefix: Option<&str>,
+) {
+    let Some(module_name) = qualified_module_name(prefix, &decl.id) else {
+        return;
+    };
+    let Some(body) = decl.body.as_ref() else {
+        return;
+    };
+
+    match body {
+        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            extract_module_declaration(inner, source, env, Some(module_name.as_str()));
+        }
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            for stmt in &block.body {
+                extract_namespaced_statement(stmt, source, env, module_name.as_str());
+            }
+        }
+    }
+}
+
+fn extract_namespaced_statement(
+    stmt: &Statement<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    namespace: &str,
+) {
+    match stmt {
+        Statement::TSTypeAliasDeclaration(alias) => {
+            extract_named_type_alias(
+                alias,
+                source,
+                env,
+                qualified_name(namespace, &alias.id.name),
+            );
+        }
+        Statement::TSInterfaceDeclaration(iface) => {
+            extract_named_interface(
+                iface,
+                source,
+                env,
+                qualified_name(namespace, &iface.id.name),
+            );
+        }
+        Statement::TSModuleDeclaration(module) => {
+            extract_module_declaration(module, source, env, Some(namespace));
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(ref decl) = export.declaration {
+                extract_namespaced_declaration(decl, source, env, namespace);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_namespaced_declaration(
+    decl: &Declaration<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    namespace: &str,
+) {
+    match decl {
+        Declaration::TSTypeAliasDeclaration(alias) => {
+            extract_named_type_alias(
+                alias,
+                source,
+                env,
+                qualified_name(namespace, &alias.id.name),
+            );
+        }
+        Declaration::TSInterfaceDeclaration(iface) => {
+            extract_named_interface(
+                iface,
+                source,
+                env,
+                qualified_name(namespace, &iface.id.name),
+            );
+        }
+        Declaration::TSModuleDeclaration(module) => {
+            extract_module_declaration(module, source, env, Some(namespace));
+        }
+        _ => {}
+    }
+}
+
+fn qualified_module_name(prefix: Option<&str>, id: &TSModuleDeclarationName<'_>) -> Option<String> {
+    match id {
+        TSModuleDeclarationName::Identifier(id) => Some(match prefix {
+            Some(prefix) => qualified_name(prefix, &id.name),
+            None => id.name.to_string(),
+        }),
+        TSModuleDeclarationName::StringLiteral(_) => None,
+    }
+}
+
+fn qualified_name(prefix: &str, name: &str) -> String {
+    format!("{prefix}.{name}")
 }
 
 fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
@@ -895,15 +1028,17 @@ pub fn expand_macro_types_with_lookup(
                     let item_start_steps = env.steps();
                     let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
                     log_expand_stage(
-                        macro_index,
-                        m.kind,
-                        "prop_field",
-                        field.name.as_str(),
-                        item_started,
+                        ExpandStageLog {
+                            macro_index,
+                            macro_kind: m.kind,
+                            stage: "prop_field",
+                            target: field.name.as_str(),
+                            started: item_started,
+                            start_steps: item_start_steps,
+                        },
                         expanded.completeness,
                         &expanded.diagnostics,
                         env,
-                        item_start_steps,
                     );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
@@ -929,15 +1064,17 @@ pub fn expand_macro_types_with_lookup(
                     let shape_result =
                         expand_object_shape_with_lookup(lowered, env, budget, lookup);
                     log_expand_stage(
-                        macro_index,
-                        m.kind,
-                        "define_props",
-                        "type_param",
-                        item_started,
+                        ExpandStageLog {
+                            macro_index,
+                            macro_kind: m.kind,
+                            stage: "define_props",
+                            target: "type_param",
+                            started: item_started,
+                            start_steps: item_start_steps,
+                        },
                         shape_result.completeness,
                         &shape_result.diagnostics,
                         env,
-                        item_start_steps,
                     );
                     if !shape_result.value.properties.is_empty()
                         || !shape_result.value.index_signatures.is_empty()
@@ -963,15 +1100,17 @@ pub fn expand_macro_types_with_lookup(
                     let shape_result =
                         expand_object_shape_with_lookup(lowered, env, budget, lookup);
                     log_expand_stage(
-                        macro_index,
-                        m.kind,
-                        "define_emits",
-                        "type_param",
-                        item_started,
+                        ExpandStageLog {
+                            macro_index,
+                            macro_kind: m.kind,
+                            stage: "define_emits",
+                            target: "type_param",
+                            started: item_started,
+                            start_steps: item_start_steps,
+                        },
                         shape_result.completeness,
                         &shape_result.diagnostics,
                         env,
-                        item_start_steps,
                     );
                     if has_named_shape_surface(&shape_result.value) {
                         result.define_emits.push(ExpandedMacroObjectShape {
@@ -993,15 +1132,17 @@ pub fn expand_macro_types_with_lookup(
                     let item_start_steps = env.steps();
                     let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
                     log_expand_stage(
-                        macro_index,
-                        m.kind,
-                        "emit_field",
-                        field.name.as_str(),
-                        item_started,
+                        ExpandStageLog {
+                            macro_index,
+                            macro_kind: m.kind,
+                            stage: "emit_field",
+                            target: field.name.as_str(),
+                            started: item_started,
+                            start_steps: item_start_steps,
+                        },
                         expanded.completeness,
                         &expanded.diagnostics,
                         env,
-                        item_start_steps,
                     );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
@@ -1027,15 +1168,17 @@ pub fn expand_macro_types_with_lookup(
                         let shape_result =
                             expand_object_shape_with_lookup(lowered, env, budget, lookup);
                         log_expand_stage(
-                            macro_index,
-                            m.kind,
-                            "define_slots",
-                            "type_param",
-                            item_started,
+                            ExpandStageLog {
+                                macro_index,
+                                macro_kind: m.kind,
+                                stage: "define_slots",
+                                target: "type_param",
+                                started: item_started,
+                                start_steps: item_start_steps,
+                            },
                             shape_result.completeness,
                             &shape_result.diagnostics,
                             env,
-                            item_start_steps,
                         );
                         if !shape_result.value.properties.is_empty() {
                             result.define_slots.push(ExpandedMacroObjectShape {
@@ -1066,15 +1209,17 @@ pub fn expand_macro_types_with_lookup(
                         let expanded =
                             expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
                         log_expand_stage(
-                            macro_index,
-                            m.kind,
-                            "slot_binding",
-                            &format!("{}.{}", slot.name, binding.name),
-                            item_started,
+                            ExpandStageLog {
+                                macro_index,
+                                macro_kind: m.kind,
+                                stage: "slot_binding",
+                                target: &format!("{}.{}", slot.name, binding.name),
+                                started: item_started,
+                                start_steps: item_start_steps,
+                            },
                             expanded.completeness,
                             &expanded.diagnostics,
                             env,
-                            item_start_steps,
                         );
                         result.slot_bindings.push(ExpandedField {
                             name: format!("{}.{}", slot.name, binding.name),
@@ -1110,15 +1255,17 @@ pub fn expand_macro_types_with_lookup(
         let item_start_steps = env.steps();
         let expanded = expand_normalized_expr_with_lookup(&type_ann, env, budget, lookup);
         log_expand_stage(
-            usize::MAX,
-            crate::types::AnalyzedMacroKind::DefineExpose,
-            "binding",
-            name.as_str(),
-            item_started,
+            ExpandStageLog {
+                macro_index: usize::MAX,
+                macro_kind: crate::types::AnalyzedMacroKind::DefineExpose,
+                stage: "binding",
+                target: name.as_str(),
+                started: item_started,
+                start_steps: item_start_steps,
+            },
             expanded.completeness,
             &expanded.diagnostics,
             env,
-            item_start_steps,
         );
         result.bindings.push(ExpandedField {
             name,

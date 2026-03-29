@@ -367,12 +367,14 @@ fn clear_cached_parse(host: &VerterHost) {
 fn component_meta_trace_line_formats_start_event() {
     let line = format_component_meta_trace_line(
         ComponentMetaTraceEvent::Start,
-        11,
-        11,
-        None,
-        0,
-        "resolve_component_meta",
-        r#"owner=/src/App.vue mode=Expanded"#,
+        ComponentMetaTraceLine {
+            trace_id: 11,
+            span_id: 11,
+            parent_span_id: None,
+            depth: 0,
+            name: "resolve_component_meta",
+            detail: r#"owner=/src/App.vue mode=Expanded"#,
+        },
         None,
     );
 
@@ -414,12 +416,14 @@ fn component_meta_trace_line_formats_start_event() {
 fn component_meta_trace_line_formats_end_event_with_duration() {
     let line = format_component_meta_trace_line(
         ComponentMetaTraceEvent::End,
-        11,
-        12,
-        Some(11),
-        1,
-        "resolve_external_type",
-        r#"owner=/src/App.vue import=vue type=Ref"#,
+        ComponentMetaTraceLine {
+            trace_id: 11,
+            span_id: 12,
+            parent_span_id: Some(11),
+            depth: 1,
+            name: "resolve_external_type",
+            detail: r#"owner=/src/App.vue import=vue type=Ref"#,
+        },
         Some(std::time::Duration::from_micros(123_456)),
     );
 
@@ -7527,15 +7531,15 @@ defineProps<IconProps>()
         "resolved props should include IconProps.name, got {:?}",
         meta.props,
     );
-    assert_eq!(
+    assert!(
+        ws.read_count("/src/types/a.ts") <= 1,
+        "flat barrel lookup should avoid fully seeding unrelated later siblings, got {} reads for /src/types/a.ts",
         ws.read_count("/src/types/a.ts"),
-        1,
-        "level-batched barrel lookup should seed each level-1 sibling exactly once",
     );
-    assert_eq!(
+    assert!(
+        ws.read_count("/src/types/b.ts") <= 1,
+        "flat barrel lookup should avoid rereading later same-level siblings, got {} reads for /src/types/b.ts",
         ws.read_count("/src/types/b.ts"),
-        1,
-        "level-batched barrel lookup should seed the full matching frontier before stopping",
     );
 }
 
