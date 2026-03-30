@@ -9,11 +9,16 @@ use std::sync::Arc;
 #[derive(Default)]
 struct BuildLookup {
     type_decls: FxHashMap<String, TypeDeclInfo>,
+    root_identities: FxHashMap<String, (String, String)>,
 }
 
 impl EvalLookup for BuildLookup {
     fn resolve_type_decl(&mut self, name: &str) -> Option<TypeDeclInfo> {
         self.type_decls.get(name).cloned()
+    }
+
+    fn resolve_type_root_identity(&mut self, name: &str) -> Option<(String, String)> {
+        self.root_identities.get(name).cloned()
     }
 }
 
@@ -1274,6 +1279,210 @@ defineSlots<RemoteSlots>()
         result.define_slots.len(),
         1,
         "fallback defineSlots shape expansion is still required when no eager slot surface exists"
+    );
+}
+
+#[test]
+fn expand_macro_types_with_lookup_keeps_canonical_vue_vnode_slot_returns_symbolic() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+defineSlots<RemoteSlots>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let mut env = parse_and_build_env(source);
+    let mut lookup = BuildLookup::default();
+    lookup.type_decls.insert(
+        "RemoteSlots".to_string(),
+        TypeDeclInfo {
+            name: "RemoteSlots".to_string(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "default".to_string(),
+                    ty: TypeExpr::Function(Arc::new(FunctionExpr {
+                        parameters: vec![FunctionParam {
+                            name: Some("props".to_string()),
+                            ty: TypeExpr::Object(Arc::new(ObjectExpr { properties: vec![] })),
+                            optional: false,
+                            rest: false,
+                        }],
+                        return_type: Some(Arc::new(TypeExpr::Array {
+                            element: Arc::new(TypeExpr::named("VNode")),
+                            readonly: false,
+                        })),
+                        type_parameters: Vec::new(),
+                    })),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+        },
+    );
+    lookup.type_decls.insert(
+        "VNode".to_string(),
+        TypeDeclInfo {
+            name: "VNode".to_string(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![],
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "children".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+        },
+    );
+    lookup.root_identities.insert(
+        "VNode".to_string(),
+        (
+            "/node_modules/vue/index.d.ts".to_string(),
+            "VNode".to_string(),
+        ),
+    );
+
+    let budget = super::type_expand::ExpansionBudget::default();
+    let result = expand_macro_types_with_lookup(
+        &snapshot.macros,
+        Some(source),
+        &mut env,
+        None,
+        &budget,
+        &mut lookup,
+    );
+
+    let shape = &result.define_slots[0].result.value;
+    let default_slot = shape
+        .properties
+        .iter()
+        .find(|prop| prop.name == "default")
+        .expect("default slot should exist");
+    let TypeExpr::Function(func) = &default_slot.ty else {
+        panic!(
+            "default slot should stay callable, got {:?}",
+            default_slot.ty
+        );
+    };
+
+    assert_eq!(
+        func.return_type.as_deref(),
+        Some(&TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VNode")),
+            readonly: false,
+        }),
+        "canonical vue VNode slot returns should stay symbolic through defineSlots expansion"
+    );
+    assert!(
+        result.define_slots[0].result.is_exact(),
+        "canonical vue VNode slot returns should not downgrade defineSlots expansion completeness"
+    );
+}
+
+#[test]
+fn expand_macro_types_with_lookup_does_not_short_circuit_same_name_local_vnode_slot_returns() {
+    use super::analysis::build_script_analysis;
+    use oxc_allocator::Allocator;
+
+    let source = r#"
+defineSlots<RemoteSlots>()
+"#;
+
+    let allocator = Allocator::default();
+    let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
+    let mut env = parse_and_build_env(source);
+    let mut lookup = BuildLookup::default();
+    lookup.type_decls.insert(
+        "RemoteSlots".to_string(),
+        TypeDeclInfo {
+            name: "RemoteSlots".to_string(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Interface,
+            type_parameters: vec![],
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "default".to_string(),
+                    ty: TypeExpr::Function(Arc::new(FunctionExpr {
+                        parameters: vec![FunctionParam {
+                            name: Some("props".to_string()),
+                            ty: TypeExpr::Object(Arc::new(ObjectExpr { properties: vec![] })),
+                            optional: false,
+                            rest: false,
+                        }],
+                        return_type: Some(Arc::new(TypeExpr::Array {
+                            element: Arc::new(TypeExpr::named("VNode")),
+                            readonly: false,
+                        })),
+                        type_parameters: Vec::new(),
+                    })),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+        },
+    );
+    lookup.type_decls.insert(
+        "VNode".to_string(),
+        TypeDeclInfo {
+            name: "VNode".to_string(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![],
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "children".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                })],
+            })),
+        },
+    );
+
+    let budget = super::type_expand::ExpansionBudget::default();
+    let result = expand_macro_types_with_lookup(
+        &snapshot.macros,
+        Some(source),
+        &mut env,
+        None,
+        &budget,
+        &mut lookup,
+    );
+
+    let shape = &result.define_slots[0].result.value;
+    let default_slot = shape
+        .properties
+        .iter()
+        .find(|prop| prop.name == "default")
+        .expect("default slot should exist");
+    let TypeExpr::Function(func) = &default_slot.ty else {
+        panic!(
+            "default slot should stay callable, got {:?}",
+            default_slot.ty
+        );
+    };
+
+    assert!(
+        matches!(
+            func.return_type.as_deref(),
+            Some(TypeExpr::Array { element, .. }) if matches!(element.as_ref(), TypeExpr::Object(_))
+        ),
+        "same-name local VNode slot returns must still expand through defineSlots"
+    );
+    assert_ne!(
+        func.return_type.as_deref(),
+        Some(&TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VNode")),
+            readonly: false,
+        }),
+        "same-name local VNode slot returns must not be short-circuited"
     );
 }
 

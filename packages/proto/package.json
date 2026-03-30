@@ -1,0 +1,39 @@
+{
+  "name": "@verter/proto",
+  "version": "0.0.1-beta.1",
+  "description": "Shared protobuf schemas for Verter packages",
+  "homepage": "https://verterjs.dev/",
+  "license": "MIT",
+  "author": "pikax",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true }); require('node:fs').rmSync('tsconfig.tsbuildinfo', { force: true });\" && tsc -p tsconfig.json",
+    "test": "vitest --run"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

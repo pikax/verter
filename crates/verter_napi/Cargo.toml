@@ -28,6 +28,7 @@ verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
 verter_analysis = { path = "../verter_analysis", version = "0.0.1-beta.1" }
+verter_proto = { path = "../verter_proto", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
 verter_scheduler = { path = "../verter_scheduler", optional = true }
 napi = { version = "2", default-features = false, features = ["napi8", "serde-json", "async"] }

@@ -22,4 +22,5 @@
 //!   each consumer converts via the `Display` impl to its native error type.
 
 pub mod convert;
+pub mod graph;
 pub mod types;

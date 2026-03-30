@@ -6,6 +6,7 @@
  */
 
 import type { ProjectEngine, LeaseId, NativeMetaSession } from "./project-engine.js";
+import { decodeComponentMetaPayload } from "../type-graph.js";
 
 type OverlayEntry = { kind: "upsert"; source: string } | { kind: "delete" };
 
@@ -118,16 +119,16 @@ export class ProjectSession {
   }
 
   /**
-   * Single native component-meta query. Returns parsed JSON or null.
+   * Single native component-meta query. Returns decoded protobuf metadata or null.
    * Uses the native `getComponentMeta` method which combines enriched analysis
    * + type evaluation in one call.
    */
   getComponentMeta(canonicalId: string): unknown | null {
     this.ensureOpen();
     this.engine.markActivity();
-    const json = this._nativeSession.getComponentMeta(canonicalId);
-    if (json === null || json === undefined) return null;
-    return JSON.parse(json);
+    const payload = this._nativeSession.getComponentMeta(canonicalId);
+    if (payload === null || payload === undefined) return null;
+    return decodeComponentMetaPayload(payload);
   }
 
   /**
@@ -136,9 +137,9 @@ export class ProjectSession {
   getDeclaredComponentMeta(canonicalId: string): unknown | null {
     this.ensureOpen();
     this.engine.markActivity();
-    const json = this._nativeSession.getDeclaredComponentMeta(canonicalId);
-    if (json === null || json === undefined) return null;
-    return JSON.parse(json);
+    const payload = this._nativeSession.getDeclaredComponentMeta(canonicalId);
+    if (payload === null || payload === undefined) return null;
+    return decodeComponentMetaPayload(payload);
   }
 
   /**

@@ -154,7 +154,15 @@ impl ComponentMetaHost {
         workspace: Arc<dyn verter_vfs::WorkspaceAccess>,
     ) -> Self {
         let backend = config.type_expansion_backend;
-        let project = crate::meta::MetaProject::new(VerterHost::new(config, workspace));
+        #[cfg(not(target_arch = "wasm32"))]
+        let host = VerterHost::new(config, workspace);
+        #[cfg(target_arch = "wasm32")]
+        let host = {
+            let host = VerterHost::new(config);
+            host.set_workspace(workspace);
+            host
+        };
+        let project = crate::meta::MetaProject::new(host);
         Self {
             inner: Arc::new(ComponentMetaHostInner {
                 project,

@@ -262,6 +262,17 @@ describe("component-meta native aliases", () => {
     expect(native.ComponentMetaHost).toBe(native.MetaProject);
     expect(native.ComponentMetaSession).toBe(native.MetaSession);
   });
+
+  it("does not expose removed transport benchmark methods on ComponentMetaSession", () => {
+    const native = require("./index.js");
+    const methods = Object.getOwnPropertyNames(native.ComponentMetaSession.prototype).sort();
+
+    expect(methods).toContain("getComponentMeta");
+    expect(methods).not.toContain("getComponentMetaBenchmarkPayloads");
+    expect(methods).not.toContain("getComponentMetaFlatbuffersBenchmark");
+    expect(methods).not.toContain("getComponentMetaProtobufBenchmark");
+    expect(methods).not.toContain("getComponentMetaJsonBenchmark");
+  });
 });
 
 describe("VerterHost type declarations in sync with native binary", () => {

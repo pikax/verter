@@ -111,6 +111,20 @@ describe("mapPropMeta", () => {
     expect(result.tags).toEqual([]);
   });
 
+  it("prefers raw indexed-access text over opaque graph placeholders", () => {
+    const prop: PropMeta = {
+      name: "label",
+      type: unknown("graphNode(13)"),
+      required: true,
+      hasDefault: false,
+      rawType: 'Fields["label"]',
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe('Fields["label"]');
+  });
+
   it("normalizes simple string defaults to JSON-style quoted strings", () => {
     const prop: PropMeta = {
       name: "type",

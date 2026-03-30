@@ -19,6 +19,42 @@ import {
   ref as typeRef,
   unknown,
 } from "./type-ir.js";
+import {
+  createGraphTypeExprRef,
+  DecodedTypeGraph,
+  isGraphTypeExprRef,
+  LITERAL_BIG_INT,
+  LITERAL_BOOLEAN,
+  LITERAL_NUMBER,
+  LITERAL_STRING,
+  MEMBER_CALL_SIGNATURE,
+  MEMBER_CONSTRUCT_SIGNATURE,
+  MEMBER_INDEX_SIGNATURE,
+  MEMBER_METHOD,
+  MEMBER_PROPERTY,
+  NODE_ARRAY,
+  NODE_CONDITIONAL,
+  NODE_FUNCTION,
+  NODE_INDEXED_ACCESS,
+  NODE_INFER,
+  NODE_INTERSECTION,
+  NODE_KEY_OF,
+  NODE_LITERAL,
+  NODE_MAPPED,
+  NODE_OBJECT,
+  NODE_PARENTHESIZED,
+  NODE_PRIMITIVE,
+  NODE_REF,
+  NODE_REST,
+  NODE_TEMPLATE_LITERAL,
+  NODE_TUPLE,
+  NODE_TYPE_OF,
+  NODE_TYPE_PARAMETER,
+  NODE_UNION,
+  NODE_UNKNOWN,
+  type GraphNodeRecord,
+  type GraphTypeExprRef,
+} from "./type-graph-core.js";
 
 // ── Native TypeExpr shape (mirrors Rust serde output) ─────────
 
@@ -129,7 +165,9 @@ export type NativeTypeExpr =
   | { kind: "infer"; name: string }
   | { kind: "rest"; inner: NativeTypeExpr };
 
-type NativeTypeRegistry = Map<string, NativeTypeExpr>;
+export type NativeTypeExprLike = NativeTypeExpr | GraphTypeExprRef;
+
+type NativeTypeRegistry = Map<string, NativeTypeExprLike>;
 
 interface NativeTupleElement {
   label?: string | null;
@@ -181,10 +219,15 @@ interface NativeTypeParameter {
  * JS type IR consumed by adapters (Storybook, Zod, JSON Schema, etc.).
  */
 export function typeExprToDescriptor(
-  expr: NativeTypeExpr,
+  expr: NativeTypeExprLike,
   nativeRegistry?: NativeTypeRegistry,
   visiting: Set<string> = new Set(),
+  graphVisiting: Set<number> = new Set(),
 ): TypeDescriptor {
+  if (isGraphTypeExprRef(expr)) {
+    return graphTypeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+  }
+
   switch (expr.kind) {
     case "primitive": {
       const validPrimitives = new Set([
@@ -216,18 +259,28 @@ export function typeExprToDescriptor(
       return literal(expr.value);
 
     case "union":
-      return union(expr.types.map((type) => typeExprToDescriptor(type, nativeRegistry, visiting)));
+      return union(
+        expr.types.map((type) =>
+          typeExprToDescriptor(type, nativeRegistry, visiting, graphVisiting),
+        ),
+      );
 
     case "intersection":
       return intersection(
-        expr.types.map((type) => typeExprToDescriptor(type, nativeRegistry, visiting)),
+        expr.types.map((type) =>
+          typeExprToDescriptor(type, nativeRegistry, visiting, graphVisiting),
+        ),
       );
 
     case "array":
-      return array(typeExprToDescriptor(expr.element, nativeRegistry, visiting));
+      return array(typeExprToDescriptor(expr.element, nativeRegistry, visiting, graphVisiting));
 
     case "tuple":
-      return tuple(expr.elements.map((e) => typeExprToDescriptor(e.ty, nativeRegistry, visiting)));
+      return tuple(
+        expr.elements.map((e) =>
+          typeExprToDescriptor(e.ty, nativeRegistry, visiting, graphVisiting),
+        ),
+      );
 
     case "object": {
       const props = expr.properties
@@ -236,9 +289,9 @@ export function typeExprToDescriptor(
           name: m.name ?? "",
           type:
             m.memberKind === "method" && m.function
-              ? nativeFunctionToDescriptor(m.function, nativeRegistry, visiting)
+              ? nativeFunctionToDescriptor(m.function, nativeRegistry, visiting, graphVisiting)
               : m.ty
-                ? typeExprToDescriptor(m.ty, nativeRegistry, visiting)
+                ? typeExprToDescriptor(m.ty, nativeRegistry, visiting, graphVisiting)
                 : primitive("any"),
           optional: m.optional ?? false,
         }));
@@ -247,19 +300,23 @@ export function typeExprToDescriptor(
         .map((m) => ({
           keyName: m.keyName ?? "key",
           keyType: m.keyType
-            ? typeExprToDescriptor(m.keyType, nativeRegistry, visiting)
+            ? typeExprToDescriptor(m.keyType, nativeRegistry, visiting, graphVisiting)
             : primitive("string"),
           valueType: m.valueType
-            ? typeExprToDescriptor(m.valueType, nativeRegistry, visiting)
+            ? typeExprToDescriptor(m.valueType, nativeRegistry, visiting, graphVisiting)
             : primitive("any"),
           ...(m.readonly ? { readonly: true } : {}),
         }));
       const callSignatures = expr.properties
         .filter((m) => m.memberKind === "callSignature" && m.function)
-        .map((m) => nativeFunctionToDescriptor(m.function!, nativeRegistry, visiting));
+        .map((m) =>
+          nativeFunctionToDescriptor(m.function!, nativeRegistry, visiting, graphVisiting),
+        );
       const constructSignatures = expr.properties
         .filter((m) => m.memberKind === "constructSignature" && m.function)
-        .map((m) => nativeFunctionToDescriptor(m.function!, nativeRegistry, visiting));
+        .map((m) =>
+          nativeFunctionToDescriptor(m.function!, nativeRegistry, visiting, graphVisiting),
+        );
       return object(props, {
         ...(indexSignatures.length > 0 ? { indexSignatures } : {}),
         ...(callSignatures.length > 0 ? { callSignatures } : {}),
@@ -270,15 +327,15 @@ export function typeExprToDescriptor(
     case "function": {
       const params = expr.parameters.map((p) => ({
         name: p.name ?? "",
-        type: typeExprToDescriptor(p.ty, nativeRegistry, visiting),
+        type: typeExprToDescriptor(p.ty, nativeRegistry, visiting, graphVisiting),
         optional: p.optional,
       }));
       const returnType = expr.returnType
-        ? typeExprToDescriptor(expr.returnType, nativeRegistry, visiting)
+        ? typeExprToDescriptor(expr.returnType, nativeRegistry, visiting, graphVisiting)
         : primitive("void");
       return func(params, returnType, {
         typeParameters: expr.typeParameters?.map((typeParam) =>
-          nativeTypeParameterToDescriptor(typeParam, nativeRegistry, visiting),
+          nativeTypeParameterToDescriptor(typeParam, nativeRegistry, visiting, graphVisiting),
         ),
       });
     }
@@ -288,14 +345,14 @@ export function typeExprToDescriptor(
         return typeRef(
           expr.name,
           expr.typeArguments.map((typeArgument) =>
-            typeExprToDescriptor(typeArgument, nativeRegistry, visiting),
+            typeExprToDescriptor(typeArgument, nativeRegistry, visiting, graphVisiting),
           ),
         );
       }
       return typeRef(expr.name);
 
     case "typeParameter":
-      return nativeTypeParameterToDescriptor(expr, nativeRegistry, visiting);
+      return nativeTypeParameterToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
 
     case "keyOf":
     case "typeOf":
@@ -310,16 +367,22 @@ export function typeExprToDescriptor(
 
     case "indexedAccess": {
       const resolved = nativeRegistry
-        ? resolveNativeIndexedAccess(expr, nativeRegistry, visiting)
+        ? resolveIndexedAccessDescriptor(
+            expr.object,
+            expr.index,
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          )
         : undefined;
       if (resolved) {
-        return typeExprToDescriptor(resolved, nativeRegistry, visiting);
+        return resolved;
       }
       return unknown(nativeTypeExprToString(expr));
     }
 
     case "parenthesized":
-      return typeExprToDescriptor(expr.inner, nativeRegistry, visiting);
+      return typeExprToDescriptor(expr.inner, nativeRegistry, visiting, graphVisiting);
 
     case "unknown":
       return unknown(expr.raw);
@@ -333,19 +396,20 @@ function nativeFunctionToDescriptor(
   expr: NativeFunctionExpr,
   nativeRegistry?: NativeTypeRegistry,
   visiting: Set<string> = new Set(),
+  graphVisiting: Set<number> = new Set(),
 ) {
   return func(
     (expr.parameters ?? []).map((p) => ({
       name: p.name ?? "",
-      type: typeExprToDescriptor(p.ty, nativeRegistry, visiting),
+      type: typeExprToDescriptor(p.ty, nativeRegistry, visiting, graphVisiting),
       optional: p.optional,
     })),
     expr.returnType
-      ? typeExprToDescriptor(expr.returnType, nativeRegistry, visiting)
+      ? typeExprToDescriptor(expr.returnType, nativeRegistry, visiting, graphVisiting)
       : primitive("void"),
     {
       typeParameters: expr.typeParameters?.map((typeParam) =>
-        nativeTypeParameterToDescriptor(typeParam, nativeRegistry, visiting),
+        nativeTypeParameterToDescriptor(typeParam, nativeRegistry, visiting, graphVisiting),
       ),
     },
   );
@@ -355,50 +419,83 @@ function nativeTypeParameterToDescriptor(
   expr: NativeTypeParameter,
   nativeRegistry?: NativeTypeRegistry,
   visiting: Set<string> = new Set(),
+  graphVisiting: Set<number> = new Set(),
 ) {
   return typeParameter(expr.name, {
     ...(expr.constraint
-      ? { constraint: typeExprToDescriptor(expr.constraint, nativeRegistry, visiting) }
+      ? {
+          constraint: typeExprToDescriptor(
+            expr.constraint,
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ),
+        }
       : {}),
     ...(expr.default
-      ? { default: typeExprToDescriptor(expr.default, nativeRegistry, visiting) }
+      ? { default: typeExprToDescriptor(expr.default, nativeRegistry, visiting, graphVisiting) }
       : {}),
   });
 }
 
-function resolveNativeIndexedAccess(
-  expr: Extract<NativeTypeExpr, { kind: "indexedAccess" }>,
+function resolveIndexedAccessDescriptor(
+  objectExpr: NativeTypeExprLike,
+  indexExpr: NativeTypeExprLike,
   nativeRegistry: NativeTypeRegistry,
   visiting: Set<string>,
-): NativeTypeExpr | undefined {
-  const objectExpr = resolveNativeRegistryExpr(expr.object, nativeRegistry, visiting);
-  const indexExpr = resolveNativeRegistryExpr(expr.index, nativeRegistry, visiting);
-  if (indexExpr.kind !== "literal" || indexExpr.literalKind !== "string") {
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  const resolvedObject = resolveRegistryExpr(objectExpr, nativeRegistry, visiting);
+  const resolvedIndex = resolveRegistryExpr(indexExpr, nativeRegistry, visiting);
+  const propertyName = resolveStringLiteralValue(resolvedIndex);
+  if (propertyName === undefined) {
     return undefined;
   }
 
-  const property = resolveNativeObjectProperty(objectExpr, indexExpr.value);
+  const property = resolveObjectProperty(resolvedObject, propertyName);
   if (!property) {
     return undefined;
   }
 
   if (!property.optional) {
-    return property.ty;
+    return typeExprToDescriptor(property.ty, nativeRegistry, visiting, graphVisiting);
   }
 
-  return {
-    kind: "union",
-    types: [property.ty, { kind: "primitive", name: "undefined" }],
-  };
+  return union([
+    typeExprToDescriptor(property.ty, nativeRegistry, visiting, graphVisiting),
+    primitive("undefined"),
+  ]);
 }
 
-function resolveNativeRegistryExpr(
-  expr: NativeTypeExpr,
+function resolveRegistryExpr(
+  expr: NativeTypeExprLike,
   nativeRegistry: NativeTypeRegistry,
   visiting: Set<string>,
-): NativeTypeExpr {
-  if (expr.kind === "parenthesized") {
-    return resolveNativeRegistryExpr(expr.inner, nativeRegistry, visiting);
+): NativeTypeExprLike {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    if (node.kind === NODE_PARENTHESIZED) {
+      return resolveRegistryExpr(
+        createGraphTypeExprRef(expr.graph, node.innerNodeId),
+        nativeRegistry,
+        visiting,
+      );
+    }
+    if (node.kind === NODE_REF && node.typeArgumentNodeIds.length === 0) {
+      const name = expr.graph.getString(node.nameId);
+      if (visiting.has(name)) {
+        return expr;
+      }
+      const resolved = nativeRegistry.get(name);
+      if (!resolved) {
+        return expr;
+      }
+      visiting.add(name);
+      const next = resolveRegistryExpr(resolved, nativeRegistry, visiting);
+      visiting.delete(name);
+      return next;
+    }
+    return expr;
   }
 
   if (expr.kind === "ref" && expr.typeArguments.length === 0) {
@@ -410,22 +507,60 @@ function resolveNativeRegistryExpr(
       return expr;
     }
     visiting.add(expr.name);
-    const next = resolveNativeRegistryExpr(resolved, nativeRegistry, visiting);
+    const next = resolveRegistryExpr(resolved, nativeRegistry, visiting);
     visiting.delete(expr.name);
     return next;
   }
 
-  if (expr.kind === "indexedAccess") {
-    return resolveNativeIndexedAccess(expr, nativeRegistry, visiting) ?? expr;
+  if (expr.kind === "parenthesized") {
+    return resolveRegistryExpr(expr.inner, nativeRegistry, visiting);
   }
 
   return expr;
 }
 
-function resolveNativeObjectProperty(
-  expr: NativeTypeExpr,
+function resolveStringLiteralValue(expr: NativeTypeExprLike): string | undefined {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    if (node.kind === NODE_LITERAL && node.literalKind === LITERAL_STRING && node.stringId) {
+      return expr.graph.getString(node.stringId);
+    }
+    return undefined;
+  }
+
+  if (expr.kind === "literal" && expr.literalKind === "string") {
+    return expr.value;
+  }
+
+  return undefined;
+}
+
+function resolveObjectProperty(
+  expr: NativeTypeExprLike,
   propertyName: string,
-): { ty: NativeTypeExpr; optional: boolean } | undefined {
+): { ty: NativeTypeExprLike; optional: boolean } | undefined {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    if (node.kind !== NODE_OBJECT) {
+      return undefined;
+    }
+
+    const member = node.members.find(
+      (candidate) =>
+        candidate.kind === MEMBER_PROPERTY &&
+        candidate.nameId !== 0 &&
+        expr.graph.getString(candidate.nameId) === propertyName,
+    );
+    if (!member) {
+      return undefined;
+    }
+
+    return {
+      ty: createGraphTypeExprRef(expr.graph, member.typeNodeId),
+      optional: member.optional,
+    };
+  }
+
   if (expr.kind !== "object") {
     return undefined;
   }
@@ -441,6 +576,354 @@ function resolveNativeObjectProperty(
     ty: member.ty,
     optional: member.optional ?? false,
   };
+}
+
+function graphTypeExprToDescriptor(
+  expr: GraphTypeExprRef,
+  nativeRegistry?: NativeTypeRegistry,
+  visiting: Set<string> = new Set(),
+  graphVisiting: Set<number> = new Set(),
+): TypeDescriptor {
+  const memo = getGraphDescriptorMemo(expr.graph, nativeRegistry);
+  const cached = memo.get(expr.nodeId);
+  if (cached) {
+    return cached;
+  }
+  if (graphVisiting.has(expr.nodeId)) {
+    return unknown(graphTypeExprToString(expr));
+  }
+
+  graphVisiting.add(expr.nodeId);
+  try {
+    const descriptor = graphNodeToDescriptor(
+      expr.graph.getNode(expr.nodeId),
+      expr,
+      nativeRegistry,
+      visiting,
+      graphVisiting,
+    );
+    memo.set(expr.nodeId, descriptor);
+    return descriptor;
+  } finally {
+    graphVisiting.delete(expr.nodeId);
+  }
+}
+
+function getGraphDescriptorMemo(
+  graph: DecodedTypeGraph,
+  nativeRegistry?: NativeTypeRegistry,
+): Map<number, TypeDescriptor> {
+  if (!nativeRegistry) {
+    return graph.descriptorMemo;
+  }
+
+  let memo = graph.descriptorMemoByContext.get(nativeRegistry);
+  if (!memo) {
+    memo = new Map<number, TypeDescriptor>();
+    graph.descriptorMemoByContext.set(nativeRegistry, memo);
+  }
+  return memo;
+}
+
+function graphNodeToDescriptor(
+  node: GraphNodeRecord,
+  expr: GraphTypeExprRef,
+  nativeRegistry?: NativeTypeRegistry,
+  visiting: Set<string> = new Set(),
+  graphVisiting: Set<number> = new Set(),
+): TypeDescriptor {
+  switch (node.kind) {
+    case NODE_PRIMITIVE:
+      return primitive(graphPrimitiveName(node.primitive));
+    case NODE_LITERAL:
+      switch (node.literalKind) {
+        case LITERAL_STRING:
+          return literal(expr.graph.getString(node.stringId!));
+        case LITERAL_NUMBER:
+          return literal(node.numberValue!);
+        case LITERAL_BOOLEAN:
+          return literal(Boolean(node.booleanValue));
+        case LITERAL_BIG_INT:
+          return literal(expr.graph.getString(node.stringId!));
+        default:
+          throw new Error(
+            `component-meta graph payload has unknown literal kind ${node.literalKind}`,
+          );
+      }
+    case NODE_UNION:
+      return union(
+        node.typeNodeIds.map((id) =>
+          typeExprToDescriptor(
+            createGraphTypeExprRef(expr.graph, id),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ),
+        ),
+      );
+    case NODE_INTERSECTION:
+      return intersection(
+        node.typeNodeIds.map((id) =>
+          typeExprToDescriptor(
+            createGraphTypeExprRef(expr.graph, id),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ),
+        ),
+      );
+    case NODE_ARRAY:
+      return array(
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, node.elementNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      );
+    case NODE_TUPLE:
+      return tuple(
+        node.elements.map((element) =>
+          typeExprToDescriptor(
+            createGraphTypeExprRef(expr.graph, element.typeNodeId),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ),
+        ),
+      );
+    case NODE_OBJECT: {
+      const props = node.members
+        .filter((member) => member.kind === MEMBER_PROPERTY || member.kind === MEMBER_METHOD)
+        .map((member) => ({
+          name: member.nameId ? expr.graph.getString(member.nameId) : "",
+          type:
+            member.kind === MEMBER_METHOD && member.functionNodeId
+              ? typeExprToDescriptor(
+                  createGraphTypeExprRef(expr.graph, member.functionNodeId),
+                  nativeRegistry,
+                  visiting,
+                  graphVisiting,
+                )
+              : member.typeNodeId
+                ? typeExprToDescriptor(
+                    createGraphTypeExprRef(expr.graph, member.typeNodeId),
+                    nativeRegistry,
+                    visiting,
+                    graphVisiting,
+                  )
+                : primitive("any"),
+          optional: member.optional,
+        }));
+      const indexSignatures = node.members
+        .filter((member) => member.kind === MEMBER_INDEX_SIGNATURE)
+        .map((member) => ({
+          keyName: member.keyNameId ? expr.graph.getString(member.keyNameId) : "key",
+          keyType: member.keyTypeNodeId
+            ? typeExprToDescriptor(
+                createGraphTypeExprRef(expr.graph, member.keyTypeNodeId),
+                nativeRegistry,
+                visiting,
+                graphVisiting,
+              )
+            : primitive("string"),
+          valueType: member.valueTypeNodeId
+            ? typeExprToDescriptor(
+                createGraphTypeExprRef(expr.graph, member.valueTypeNodeId),
+                nativeRegistry,
+                visiting,
+                graphVisiting,
+              )
+            : primitive("any"),
+          ...(member.readonly ? { readonly: true } : {}),
+        }));
+      const callSignatures = node.members
+        .filter((member) => member.kind === MEMBER_CALL_SIGNATURE && member.functionNodeId)
+        .map(
+          (member) =>
+            typeExprToDescriptor(
+              createGraphTypeExprRef(expr.graph, member.functionNodeId),
+              nativeRegistry,
+              visiting,
+              graphVisiting,
+            ) as Extract<TypeDescriptor, { kind: "function" }>,
+        );
+      const constructSignatures = node.members
+        .filter((member) => member.kind === MEMBER_CONSTRUCT_SIGNATURE && member.functionNodeId)
+        .map(
+          (member) =>
+            typeExprToDescriptor(
+              createGraphTypeExprRef(expr.graph, member.functionNodeId),
+              nativeRegistry,
+              visiting,
+              graphVisiting,
+            ) as Extract<TypeDescriptor, { kind: "function" }>,
+        );
+      return object(props, {
+        ...(indexSignatures.length > 0 ? { indexSignatures } : {}),
+        ...(callSignatures.length > 0 ? { callSignatures } : {}),
+        ...(constructSignatures.length > 0 ? { constructSignatures } : {}),
+      });
+    }
+    case NODE_FUNCTION: {
+      const parameters = node.parameters.map((parameter) => ({
+        name: parameter.nameId ? expr.graph.getString(parameter.nameId) : "",
+        type: typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, parameter.typeNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+        optional: parameter.optional,
+      }));
+      const returnType = node.returnTypeNodeId
+        ? typeExprToDescriptor(
+            createGraphTypeExprRef(expr.graph, node.returnTypeNodeId),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          )
+        : primitive("void");
+      const typeParameters = node.typeParameterNodeIds.map(
+        (id) =>
+          typeExprToDescriptor(
+            createGraphTypeExprRef(expr.graph, id),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ) as Extract<TypeDescriptor, { kind: "typeParameter" }>,
+      );
+      return func(parameters, returnType, {
+        ...(typeParameters.length > 0 ? { typeParameters } : {}),
+      });
+    }
+    case NODE_REF: {
+      const name = expr.graph.getString(node.nameId);
+      const typeArguments = node.typeArgumentNodeIds.map((id) =>
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, id),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      );
+      return typeArguments.length > 0 ? typeRef(name, typeArguments) : typeRef(name);
+    }
+    case NODE_TYPE_PARAMETER:
+      return typeParameter(expr.graph.getString(node.nameId), {
+        ...(node.constraintNodeId
+          ? {
+              constraint: typeExprToDescriptor(
+                createGraphTypeExprRef(expr.graph, node.constraintNodeId),
+                nativeRegistry,
+                visiting,
+                graphVisiting,
+              ),
+            }
+          : {}),
+        ...(node.defaultNodeId
+          ? {
+              default: typeExprToDescriptor(
+                createGraphTypeExprRef(expr.graph, node.defaultNodeId),
+                nativeRegistry,
+                visiting,
+                graphVisiting,
+              ),
+            }
+          : {}),
+      });
+    case NODE_KEY_OF:
+    case NODE_TYPE_OF:
+    case NODE_CONDITIONAL:
+    case NODE_MAPPED:
+    case NODE_TEMPLATE_LITERAL:
+    case NODE_INFER:
+    case NODE_REST:
+      return unknown(graphTypeExprToString(expr));
+    case NODE_INDEXED_ACCESS: {
+      const resolved = nativeRegistry
+        ? resolveIndexedAccessDescriptor(
+            createGraphTypeExprRef(expr.graph, node.objectNodeId),
+            createGraphTypeExprRef(expr.graph, node.indexNodeId),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          )
+        : undefined;
+      return resolved ?? unknown(graphTypeExprToString(expr));
+    }
+    case NODE_PARENTHESIZED:
+      return typeExprToDescriptor(
+        createGraphTypeExprRef(expr.graph, node.innerNodeId),
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    case NODE_UNKNOWN:
+      return unknown(expr.graph.getString(node.rawId));
+    default:
+      return unknown("unrecognized");
+  }
+}
+
+function graphPrimitiveName(tag: number): Parameters<typeof primitive>[0] {
+  switch (tag) {
+    case 1:
+      return "string";
+    case 2:
+      return "number";
+    case 3:
+      return "boolean";
+    case 4:
+      return "symbol";
+    case 5:
+      return "bigint";
+    case 6:
+      return "any";
+    case 7:
+      return "unknown";
+    case 8:
+      return "void";
+    case 9:
+      return "never";
+    case 10:
+      return "null";
+    case 11:
+      return "undefined";
+    case 12:
+      return "object";
+    default:
+      throw new Error(`component-meta graph payload has unknown primitive tag ${tag}`);
+  }
+}
+
+function graphTypeExprToString(expr: GraphTypeExprRef): string {
+  const node = expr.graph.getNode(expr.nodeId);
+  switch (node.kind) {
+    case NODE_PRIMITIVE:
+      return graphPrimitiveName(node.primitive);
+    case NODE_LITERAL:
+      if (node.literalKind === LITERAL_STRING || node.literalKind === LITERAL_BIG_INT) {
+        return expr.graph.getString(node.stringId!);
+      }
+      if (node.literalKind === LITERAL_NUMBER) {
+        return String(node.numberValue);
+      }
+      if (node.literalKind === LITERAL_BOOLEAN) {
+        return String(node.booleanValue);
+      }
+      return "literal";
+    case NODE_REF:
+      return expr.graph.getString(node.nameId);
+    case NODE_KEY_OF:
+      return `keyof ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.operandNodeId))}`;
+    case NODE_TYPE_OF:
+      return `typeof ${node.pathIds.map((id) => expr.graph.getString(id)).join(".")}`;
+    case NODE_UNKNOWN:
+      return expr.graph.getString(node.rawId);
+    default:
+      return `graphNode(${node.kind})`;
+  }
 }
 
 /**

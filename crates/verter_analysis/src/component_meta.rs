@@ -139,6 +139,7 @@ pub struct SlotAnalysis {
     pub is_scoped: bool,
     pub bindings: Vec<SlotBindingAnalysis>,
     pub is_required: bool,
+    pub return_type: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<JsdocTag>,
 }
@@ -1878,6 +1879,7 @@ fn extract_slots_from_macro(
                 is_scoped: !slot.bindings.is_empty(),
                 bindings: slot.bindings,
                 is_required: slot.is_required,
+                return_type: field.return_type.clone(),
                 description: field.description.clone(),
                 tags: field.tags.clone(),
             });
@@ -1890,6 +1892,7 @@ fn extract_slots_from_macro(
                 is_scoped: !slot.bindings.is_empty(),
                 bindings: slot.bindings,
                 is_required: slot.is_required,
+                return_type: source_field.and_then(|field| field.return_type.clone()),
                 description: source_field.and_then(|field| field.description.clone()),
                 tags: source_field
                     .map(|field| field.tags.clone())
@@ -1957,6 +1960,7 @@ fn extract_slots_from_macro(
             is_scoped: !field.bindings.is_empty(),
             bindings,
             is_required: field.is_required,
+            return_type: field.return_type.clone(),
             description: field.description.clone(),
             tags: field.tags.clone(),
         });
@@ -2310,6 +2314,7 @@ fn merge_template_slots(
                 is_scoped: tslot.has_bindings,
                 bindings: Vec::new(),
                 is_required: false,
+                return_type: None,
                 description: None,
                 tags: Vec::new(),
             });

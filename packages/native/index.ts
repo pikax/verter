@@ -479,8 +479,11 @@ export declare class ComponentMetaSession {
   /** Tombstone a file in this session (mark as deleted). */
   delete(canonicalId: string): void;
 
-  /** Single native component-meta query. Returns null if the file is missing. */
-  getComponentMeta(canonicalOrAlias: string): string | null;
+  /** Single native component-meta query. Returns a protobuf payload or null. */
+  getComponentMeta(canonicalOrAlias: string): Buffer | null;
+
+  /** Declared-surface native component-meta query. Returns a protobuf payload or null. */
+  getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
 
   /**
    * Get effective source for a file (overlay → base).

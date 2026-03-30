@@ -73,7 +73,9 @@
     "test": "vitest --run"
   },
   "dependencies": {
-    "@verter/native": "workspace:*"
+    "@bufbuild/protobuf": "2.11.0",
+    "@verter/native": "workspace:*",
+    "@verter/proto": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

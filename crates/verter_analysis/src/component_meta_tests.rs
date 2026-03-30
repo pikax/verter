@@ -1823,6 +1823,11 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
         Some("resolved default slot"),
         "resolved descriptions should fill missing local docs"
     );
+    assert_eq!(
+        default_slot.return_type.as_deref(),
+        Some("VNode[]"),
+        "resolved return types should survive slot merging"
+    );
     let binding_names: Vec<&str> = default_slot
         .bindings
         .iter()
@@ -1832,6 +1837,16 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
         binding_names,
         vec!["item", "row"],
         "resolved bindings should merge without dropping local bindings"
+    );
+    let header_slot = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "header")
+        .expect("header slot should exist");
+    assert_eq!(
+        header_slot.return_type.as_deref(),
+        Some("any"),
+        "resolved-only slots should preserve return types"
     );
 }
 

@@ -265,7 +265,8 @@ function compatDescriptorLooksLossy(descriptorText: string): boolean {
   return (
     compatRawTypeLooksLossy(normalized) ||
     splitTopLevelTypeUnion(normalized).some((part) => part.trim() === "any") ||
-    /^(indexedAccess|unknown|object|function|intersection|union|conditional)$/.test(normalized)
+    /^(indexedAccess|unknown|object|function|intersection|union|conditional)$/.test(normalized) ||
+    /^graphNode\(\d+\)$/.test(normalized)
   );
 }
 

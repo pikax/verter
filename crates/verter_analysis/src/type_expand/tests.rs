@@ -1,8 +1,10 @@
 use super::*;
-use crate::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+use crate::type_eval::{EvalEnv, EvalLookup, TypeDeclInfo, TypeDeclKind};
 use crate::type_expr::{
-    MappedModifier, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, TypeParam,
+    FunctionExpr, FunctionParam, MappedModifier, ObjectExpr, ObjectMember, ObjectProperty,
+    PrimitiveName, TypeExpr, TypeParam,
 };
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 /// Helper to build an EvalEnv with the given type declarations.
@@ -16,6 +18,92 @@ fn env_with_types(types: Vec<TypeDeclInfo>) -> EvalEnv {
 
 fn default_budget() -> ExpansionBudget {
     ExpansionBudget::default()
+}
+
+#[derive(Default)]
+struct SlotReturnLookup {
+    decls: FxHashMap<String, TypeDeclInfo>,
+    root_identities: FxHashMap<String, (String, String)>,
+}
+
+impl EvalLookup for SlotReturnLookup {
+    fn resolve_type_decl(&mut self, name: &str) -> Option<TypeDeclInfo> {
+        self.decls.get(name).cloned()
+    }
+
+    fn resolve_type_root_identity(&mut self, name: &str) -> Option<(String, String)> {
+        self.root_identities.get(name).cloned()
+    }
+}
+
+fn object_decl(name: &str, members: Vec<ObjectMember>) -> TypeDeclInfo {
+    TypeDeclInfo {
+        name: name.to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: members,
+        })),
+    }
+}
+
+fn function_slot_decl(name: &str, return_type: TypeExpr) -> TypeDeclInfo {
+    object_decl(
+        name,
+        vec![ObjectMember::Property(ObjectProperty {
+            name: "default".to_string(),
+            ty: TypeExpr::Function(Arc::new(FunctionExpr {
+                parameters: vec![FunctionParam {
+                    name: Some("props".to_string()),
+                    ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: "label".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        })],
+                    })),
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: Some(Arc::new(return_type)),
+                type_parameters: vec![],
+            })),
+            optional: false,
+            readonly: false,
+        })],
+    )
+}
+
+fn vnode_like_decl(name: &str) -> TypeDeclInfo {
+    object_decl(
+        name,
+        vec![ObjectMember::Property(ObjectProperty {
+            name: "children".to_string(),
+            ty: TypeExpr::Array {
+                element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                readonly: false,
+            },
+            optional: true,
+            readonly: false,
+        })],
+    )
+}
+
+fn slot_return_type(result: &ExpansionResult<ExpandedObjectShape>) -> &TypeExpr {
+    let default_slot = result
+        .value
+        .properties
+        .iter()
+        .find(|prop| prop.name == "default")
+        .expect("default slot should exist");
+    let TypeExpr::Function(func) = &default_slot.ty else {
+        panic!("default slot should be a function: {:?}", default_slot.ty);
+    };
+    func.return_type
+        .as_deref()
+        .expect("slot return type should exist")
 }
 
 #[test]
@@ -253,6 +341,201 @@ fn expand_object_shape_normalizes_nested_script_generic_bindings() {
             "expected infer conditional to collapse to the bound type parameter, got {other:?}"
         ),
     }
+}
+
+#[test]
+fn expand_object_shape_preserves_canonical_vue_vnode_slot_return_type_symbolically() {
+    let slots = function_slot_decl(
+        "Slots",
+        TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VNode")),
+            readonly: false,
+        },
+    );
+    let vnode = vnode_like_decl("VNode");
+    let mut env = env_with_types(vec![slots, vnode]);
+    env.preserve_canonical_vue_vnode_slot_returns = true;
+    let mut lookup = SlotReturnLookup {
+        root_identities: FxHashMap::from_iter([(
+            "VNode".to_string(),
+            (
+                "/node_modules/vue/index.d.ts".to_string(),
+                "VNode".to_string(),
+            ),
+        )]),
+        ..SlotReturnLookup::default()
+    };
+
+    let result = expand_object_shape_with_lookup(
+        &TypeExpr::named("Slots"),
+        &mut env,
+        &default_budget(),
+        &mut lookup,
+    );
+
+    assert!(
+        result.is_exact(),
+        "symbolic vue slot return types should remain exact"
+    );
+    assert_eq!(
+        slot_return_type(&result),
+        &TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VNode")),
+            readonly: false,
+        },
+        "canonical vue VNode should stay symbolic in slot return types"
+    );
+    assert_ne!(
+        slot_return_type(&result),
+        &TypeExpr::Array {
+            element: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "children".to_string(),
+                    ty: TypeExpr::Array {
+                        element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                        readonly: false,
+                    },
+                    optional: true,
+                    readonly: false,
+                })],
+            }))),
+            readonly: false,
+        },
+        "canonical vue VNode slot returns must not expand into the full object body"
+    );
+}
+
+#[test]
+fn expand_object_shape_preserves_alias_imported_vue_vnode_slot_return_type_symbolically() {
+    let slots = function_slot_decl(
+        "Slots",
+        TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VueVNode")),
+            readonly: false,
+        },
+    );
+    let vnode = vnode_like_decl("VueVNode");
+    let mut env = env_with_types(vec![slots, vnode]);
+    env.preserve_canonical_vue_vnode_slot_returns = true;
+    let mut lookup = SlotReturnLookup {
+        root_identities: FxHashMap::from_iter([(
+            "VueVNode".to_string(),
+            (
+                "/node_modules/vue/index.d.ts".to_string(),
+                "VNode".to_string(),
+            ),
+        )]),
+        ..SlotReturnLookup::default()
+    };
+
+    let result = expand_object_shape_with_lookup(
+        &TypeExpr::named("Slots"),
+        &mut env,
+        &default_budget(),
+        &mut lookup,
+    );
+
+    assert_eq!(
+        slot_return_type(&result),
+        &TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VueVNode")),
+            readonly: false,
+        },
+        "aliased vue VNode should stay symbolic in slot return types"
+    );
+    assert!(
+        !matches!(slot_return_type(&result), TypeExpr::Object(_)),
+        "aliased vue VNode slot return should not flatten to an object"
+    );
+}
+
+#[test]
+fn expand_object_shape_preserves_barrel_resolved_vue_vnode_slot_return_type_symbolically() {
+    let slots = function_slot_decl(
+        "Slots",
+        TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("BarrelVNode")),
+            readonly: false,
+        },
+    );
+    let barrel = TypeDeclInfo {
+        name: "BarrelVNode".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![],
+        body: TypeExpr::named("VueVNode"),
+    };
+    let vue_vnode = vnode_like_decl("VueVNode");
+    let mut env = env_with_types(vec![slots, barrel, vue_vnode]);
+    env.preserve_canonical_vue_vnode_slot_returns = true;
+    let mut lookup = SlotReturnLookup {
+        root_identities: FxHashMap::from_iter([(
+            "VueVNode".to_string(),
+            (
+                "/node_modules/vue/index.d.ts".to_string(),
+                "VNode".to_string(),
+            ),
+        )]),
+        ..SlotReturnLookup::default()
+    };
+
+    let result = expand_object_shape_with_lookup(
+        &TypeExpr::named("Slots"),
+        &mut env,
+        &default_budget(),
+        &mut lookup,
+    );
+
+    assert_eq!(
+        slot_return_type(&result),
+        &TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("BarrelVNode")),
+            readonly: false,
+        },
+        "barrel-resolved vue VNode should stay symbolic in slot return types"
+    );
+    assert!(
+        !matches!(slot_return_type(&result), TypeExpr::Array { element, .. } if matches!(element.as_ref(), TypeExpr::Object(_))),
+        "barrel-resolved vue VNode slot return should not expand the underlying object"
+    );
+}
+
+#[test]
+fn expand_object_shape_keeps_same_name_local_vnode_slot_return_type_expandable() {
+    let slots = function_slot_decl(
+        "Slots",
+        TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VNode")),
+            readonly: false,
+        },
+    );
+    let vnode = vnode_like_decl("VNode");
+    let mut env = env_with_types(vec![slots, vnode]);
+    env.preserve_canonical_vue_vnode_slot_returns = true;
+    let mut lookup = SlotReturnLookup::default();
+
+    let result = expand_object_shape_with_lookup(
+        &TypeExpr::named("Slots"),
+        &mut env,
+        &default_budget(),
+        &mut lookup,
+    );
+
+    assert!(
+        matches!(
+            slot_return_type(&result),
+            TypeExpr::Array { element, .. } if matches!(element.as_ref(), TypeExpr::Object(_))
+        ),
+        "same-name local VNode should still expand in slot return types"
+    );
+    assert_ne!(
+        slot_return_type(&result),
+        &TypeExpr::Array {
+            element: Arc::new(TypeExpr::named("VNode")),
+            readonly: false,
+        },
+        "same-name local VNode must not be short-circuited"
+    );
 }
 
 #[test]

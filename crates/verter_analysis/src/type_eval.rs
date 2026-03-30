@@ -112,6 +112,9 @@ pub struct EvalEnv {
     interner: TypeArgInterner,
     /// Monotonic declaration ordinal used to assign stable ids.
     next_declaration_id: DeclarationId,
+    /// Preserve canonical vue `VNode` slot return types symbolically while
+    /// still normalizing other slot return types during defineSlots expansion.
+    pub preserve_canonical_vue_vnode_slot_returns: bool,
 }
 
 /// Configurable limits for the evaluator.
@@ -159,6 +162,7 @@ impl EvalEnv {
             ref_depth: 0,
             interner: TypeArgInterner::default(),
             next_declaration_id: 0,
+            preserve_canonical_vue_vnode_slot_returns: false,
         }
     }
 
@@ -429,6 +433,10 @@ pub enum BuiltinUtilitySource {
 
 pub trait EvalLookup {
     fn resolve_type_decl(&mut self, _name: &str) -> Option<TypeDeclInfo> {
+        None
+    }
+
+    fn resolve_type_root_identity(&mut self, _name: &str) -> Option<(String, String)> {
         None
     }
 

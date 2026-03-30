@@ -1165,8 +1165,12 @@ pub fn expand_macro_types_with_lookup(
                     if m.slot_fields.is_empty() {
                         let item_started = Instant::now();
                         let item_start_steps = env.steps();
+                        let previous_slot_return_mode =
+                            env.preserve_canonical_vue_vnode_slot_returns;
+                        env.preserve_canonical_vue_vnode_slot_returns = true;
                         let shape_result =
                             expand_object_shape_with_lookup(lowered, env, budget, lookup);
+                        env.preserve_canonical_vue_vnode_slot_returns = previous_slot_return_mode;
                         log_expand_stage(
                             ExpandStageLog {
                                 macro_index,

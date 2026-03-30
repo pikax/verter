@@ -48,7 +48,13 @@ pub fn expand_object_shape_with_lookup(
 
     // Scan property types for unexpanded forms (Mapped, Conditional, unresolved Ref, etc.)
     for prop in &shape.properties {
-        record_partial_markers(&prop.ty, &mut diagnostics, Some(prop.name.as_str()));
+        record_object_shape_partial_markers(
+            &prop.ty,
+            &mut diagnostics,
+            Some(prop.name.as_str()),
+            env,
+            lookup,
+        );
     }
 
     let completeness = if diagnostics.is_empty() {
@@ -443,7 +449,7 @@ fn normalize_member_type(
     normalize_members: bool,
     lookup: &mut dyn EvalLookup,
 ) -> TypeExpr {
-    if normalize_members || should_normalize_member_type(expr, env) {
+    if normalize_members || should_normalize_member_type(expr, env, lookup) {
         super::normalized::normalize_expr_with_diagnostics_with_lookup(
             expr,
             env,
@@ -455,18 +461,22 @@ fn normalize_member_type(
     }
 }
 
-fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
+fn should_normalize_member_type(
+    expr: &TypeExpr,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> bool {
     match expr {
-        TypeExpr::Parenthesized(inner) => should_normalize_member_type(inner, env),
+        TypeExpr::Parenthesized(inner) => should_normalize_member_type(inner, env, lookup),
         TypeExpr::Array { element, .. } | TypeExpr::Rest(element) | TypeExpr::KeyOf(element) => {
-            should_normalize_member_type(element, env)
+            should_normalize_member_type(element, env, lookup)
         }
         TypeExpr::Tuple { elements, .. } => elements
             .iter()
-            .any(|element| should_normalize_member_type(&element.ty, env)),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            types.iter().any(|ty| should_normalize_member_type(ty, env))
-        }
+            .any(|element| should_normalize_member_type(&element.ty, env, lookup)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .any(|ty| should_normalize_member_type(ty, env, lookup)),
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -480,23 +490,25 @@ fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
                 || is_builtin_member_utility(name)
                 || type_arguments
                     .iter()
-                    .any(|arg| should_normalize_member_type(arg, env))
+                    .any(|arg| should_normalize_member_type(arg, env, lookup))
         }
         TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
-            ObjectMember::Property(prop) => should_normalize_member_type(&prop.ty, env),
+            ObjectMember::Property(prop) => should_normalize_member_type(&prop.ty, env, lookup),
             ObjectMember::IndexSignature(sig) => {
-                should_normalize_member_type(&sig.key_type, env)
-                    || should_normalize_member_type(&sig.value_type, env)
+                should_normalize_member_type(&sig.key_type, env, lookup)
+                    || should_normalize_member_type(&sig.value_type, env, lookup)
             }
             ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                should_normalize_function_member(func, env)
+                should_normalize_function_member(func, env, lookup)
             }
-            ObjectMember::Method(method) => should_normalize_function_member(&method.function, env),
+            ObjectMember::Method(method) => {
+                should_normalize_function_member(&method.function, env, lookup)
+            }
         }),
-        TypeExpr::Function(func) => should_normalize_function_member(func, env),
+        TypeExpr::Function(func) => should_normalize_function_member(func, env, lookup),
         TypeExpr::IndexedAccess { object, index } => {
-            should_normalize_member_type(object, env)
-                || should_normalize_member_type(index, env)
+            should_normalize_member_type(object, env, lookup)
+                || should_normalize_member_type(index, env, lookup)
                 || should_normalize_indexed_access_member(object, index, env)
         }
         TypeExpr::Conditional {
@@ -505,10 +517,10 @@ fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
             true_type,
             false_type,
         } => {
-            should_normalize_member_type(check, env)
-                || should_normalize_member_type(extends, env)
-                || should_normalize_member_type(true_type, env)
-                || should_normalize_member_type(false_type, env)
+            should_normalize_member_type(check, env, lookup)
+                || should_normalize_member_type(extends, env, lookup)
+                || should_normalize_member_type(true_type, env, lookup)
+                || should_normalize_member_type(false_type, env, lookup)
                 || matches!(extends.as_ref(), TypeExpr::Infer { .. })
         }
         TypeExpr::Mapped {
@@ -517,20 +529,21 @@ fn should_normalize_member_type(expr: &TypeExpr, env: &EvalEnv) -> bool {
             name_type,
             ..
         } => {
-            should_normalize_member_type(source, env)
-                || should_normalize_member_type(value, env)
+            should_normalize_member_type(source, env, lookup)
+                || should_normalize_member_type(value, env, lookup)
                 || name_type
                     .as_deref()
-                    .is_some_and(|ty| should_normalize_member_type(ty, env))
+                    .is_some_and(|ty| should_normalize_member_type(ty, env, lookup))
         }
         TypeExpr::TemplateLiteral { expressions, .. } => expressions
             .iter()
-            .any(|expr| should_normalize_member_type(expr, env)),
+            .any(|expr| should_normalize_member_type(expr, env, lookup)),
         _ => false,
     }
 }
 
 const MEMBER_REF_NORMALIZATION_ALIAS_DEPTH: usize = 4;
+const SLOT_RETURN_VNODE_ALIAS_DEPTH: usize = 8;
 
 fn should_normalize_direct_ref_body(expr: &TypeExpr, env: &EvalEnv) -> bool {
     should_normalize_direct_ref_body_with_depth(expr, env, MEMBER_REF_NORMALIZATION_ALIAS_DEPTH)
@@ -616,24 +629,237 @@ fn has_direct_structural_index_target_with_depth(
     }
 }
 
-fn should_normalize_function_member(func: &crate::type_expr::FunctionExpr, env: &EvalEnv) -> bool {
+fn should_normalize_function_member(
+    func: &crate::type_expr::FunctionExpr,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> bool {
     func.parameters
         .iter()
-        .any(|param| should_normalize_member_type(&param.ty, env))
-        || func
-            .return_type
-            .as_deref()
-            .is_some_and(|ty| should_normalize_member_type(ty, env))
+        .any(|param| should_normalize_member_type(&param.ty, env, lookup))
+        || func.return_type.as_deref().is_some_and(|ty| {
+            if env.preserve_canonical_vue_vnode_slot_returns {
+                should_normalize_slot_return_type(ty, env, lookup)
+            } else {
+                should_normalize_member_type(ty, env, lookup)
+            }
+        })
         || func.type_parameters.iter().any(|param| {
             param
                 .constraint
                 .as_deref()
-                .is_some_and(|ty| should_normalize_member_type(ty, env))
+                .is_some_and(|ty| should_normalize_member_type(ty, env, lookup))
                 || param
                     .default
                     .as_deref()
-                    .is_some_and(|ty| should_normalize_member_type(ty, env))
+                    .is_some_and(|ty| should_normalize_member_type(ty, env, lookup))
         })
+}
+
+fn should_normalize_slot_return_type(
+    expr: &TypeExpr,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) -> bool {
+    !resolves_to_canonical_vue_vnode(expr, env, lookup, SLOT_RETURN_VNODE_ALIAS_DEPTH)
+        && (slot_return_contains_resolvable_ref(expr, env, lookup, SLOT_RETURN_VNODE_ALIAS_DEPTH)
+            || should_normalize_member_type(expr, env, lookup))
+}
+
+fn slot_return_contains_resolvable_ref(
+    expr: &TypeExpr,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+    remaining_depth: usize,
+) -> bool {
+    match expr {
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::Rest(inner) => {
+            slot_return_contains_resolvable_ref(inner, env, lookup, remaining_depth)
+        }
+        TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+            slot_return_contains_resolvable_ref(&element.ty, env, lookup, remaining_depth)
+        }),
+        TypeExpr::Union(types)
+        | TypeExpr::Intersection(types)
+        | TypeExpr::TemplateLiteral {
+            expressions: types, ..
+        } => types
+            .iter()
+            .any(|ty| slot_return_contains_resolvable_ref(ty, env, lookup, remaining_depth)),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            if env.type_bindings.contains_key(name.as_ref())
+                || env.type_symbols.contains_key(name.as_ref())
+                || lookup.resolve_type_decl(name).is_some()
+            {
+                return true;
+            }
+
+            remaining_depth > 0
+                && lookup
+                    .resolve_type_root_identity(name)
+                    .is_some_and(|_| true)
+        }
+        TypeExpr::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(|arg| slot_return_contains_resolvable_ref(arg, env, lookup, remaining_depth)),
+        _ => false,
+    }
+}
+
+fn resolves_to_canonical_vue_vnode(
+    expr: &TypeExpr,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+    remaining_depth: usize,
+) -> bool {
+    match expr {
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::Rest(inner) => {
+            resolves_to_canonical_vue_vnode(inner, env, lookup, remaining_depth)
+        }
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            if lookup
+                .resolve_type_root_identity(name)
+                .is_some_and(|(source, exported)| {
+                    exported == "VNode" && is_canonical_vue_source(source.as_str())
+                })
+            {
+                return true;
+            }
+
+            if remaining_depth == 0 {
+                return false;
+            }
+
+            if let Some(bound) = env.type_bindings.get(name.as_ref()) {
+                return resolves_to_canonical_vue_vnode(
+                    bound.as_ref(),
+                    env,
+                    lookup,
+                    remaining_depth - 1,
+                );
+            }
+
+            if let Some(decl) = env.type_symbols.get(name.as_ref()) {
+                return resolves_to_canonical_vue_vnode(
+                    &decl.body,
+                    env,
+                    lookup,
+                    remaining_depth - 1,
+                );
+            }
+
+            false
+        }
+        _ => false,
+    }
+}
+
+fn is_canonical_vue_source(source: &str) -> bool {
+    if source == "vue" {
+        return true;
+    }
+
+    let normalized = source.replace('\\', "/");
+    normalized.contains("/node_modules/vue/")
+        || normalized.ends_with("/vue/index.d.ts")
+        || normalized.ends_with("/vue/dist/vue.d.ts")
+}
+
+fn record_object_shape_partial_markers(
+    expr: &TypeExpr,
+    diagnostics: &mut Vec<ExpansionDiagnostic>,
+    property_name: Option<&str>,
+    env: &EvalEnv,
+    lookup: &mut dyn EvalLookup,
+) {
+    if env.preserve_canonical_vue_vnode_slot_returns
+        && resolves_to_canonical_vue_vnode(expr, env, lookup, SLOT_RETURN_VNODE_ALIAS_DEPTH)
+    {
+        return;
+    }
+
+    match expr {
+        TypeExpr::Function(func) if env.preserve_canonical_vue_vnode_slot_returns => {
+            for param in &func.parameters {
+                record_object_shape_partial_markers(
+                    &param.ty,
+                    diagnostics,
+                    property_name,
+                    env,
+                    lookup,
+                );
+            }
+            if let Some(return_type) = func.return_type.as_deref() {
+                record_object_shape_partial_markers(
+                    return_type,
+                    diagnostics,
+                    property_name,
+                    env,
+                    lookup,
+                );
+            }
+            for param in &func.type_parameters {
+                if let Some(constraint) = param.constraint.as_deref() {
+                    record_object_shape_partial_markers(
+                        constraint,
+                        diagnostics,
+                        property_name,
+                        env,
+                        lookup,
+                    );
+                }
+                if let Some(default) = param.default.as_deref() {
+                    record_object_shape_partial_markers(
+                        default,
+                        diagnostics,
+                        property_name,
+                        env,
+                        lookup,
+                    );
+                }
+            }
+        }
+        TypeExpr::Object(obj) if env.preserve_canonical_vue_vnode_slot_returns => {
+            for member in &obj.properties {
+                match member {
+                    ObjectMember::Property(prop) => {
+                        record_object_shape_partial_markers(
+                            &prop.ty,
+                            diagnostics,
+                            property_name,
+                            env,
+                            lookup,
+                        );
+                    }
+                    ObjectMember::Method(method) => record_object_shape_partial_markers(
+                        &TypeExpr::Function(std::sync::Arc::new(method.function.clone())),
+                        diagnostics,
+                        property_name,
+                        env,
+                        lookup,
+                    ),
+                    _ => record_partial_markers(
+                        &TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                            properties: vec![member.clone()],
+                        })),
+                        diagnostics,
+                        property_name,
+                    ),
+                }
+            }
+        }
+        _ => record_partial_markers(expr, diagnostics, property_name),
+    }
 }
 
 fn is_builtin_member_utility(name: &str) -> bool {
@@ -663,7 +889,7 @@ fn function_expr_to_type(
     normalize_members: bool,
     lookup: &mut dyn EvalLookup,
 ) -> crate::type_expr::FunctionExpr {
-    if normalize_members {
+    if normalize_members || should_normalize_function_member(func, env, lookup) {
         normalize_function_expr(func, env, diagnostics, lookup)
     } else {
         func.clone()
@@ -838,14 +1064,20 @@ fn normalize_function_expr(
             })
             .collect(),
         return_type: sig.return_type.as_ref().map(|ret| {
-            std::sync::Arc::new(
-                super::normalized::normalize_expr_with_diagnostics_with_lookup(
-                    ret,
-                    env,
-                    diagnostics,
-                    lookup,
-                ),
-            )
+            if env.preserve_canonical_vue_vnode_slot_returns
+                && resolves_to_canonical_vue_vnode(ret, env, lookup, SLOT_RETURN_VNODE_ALIAS_DEPTH)
+            {
+                std::sync::Arc::new((**ret).clone())
+            } else {
+                std::sync::Arc::new(
+                    super::normalized::normalize_expr_with_diagnostics_with_lookup(
+                        ret,
+                        env,
+                        diagnostics,
+                        lookup,
+                    ),
+                )
+            }
         }),
         type_parameters: sig.type_parameters.clone(),
     }

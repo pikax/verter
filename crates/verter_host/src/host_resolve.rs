@@ -1974,6 +1974,43 @@ impl VerterHost {
     /// registry from `HostAnalysisData.export_signatures` (no OXC parsing).
     /// For files only on disk, reads the file and extracts export signatures
     /// (one parse, cached for all future lookups).
+    #[cfg(not(feature = "scheduler"))]
+    fn ensure_export_registry(&self, canonical: &str) -> Option<crate::types::FileExportRegistry> {
+        if let Some(registry) = read_lock(&self.files).get(canonical).and_then(|entry| {
+            entry
+                .export_registry
+                .as_ref()
+                .filter(|registry| registry.source_hash == entry.whole_hash)
+                .cloned()
+        }) {
+            return Some(registry);
+        }
+
+        let registry = {
+            let entry = self.ensure_shallow_imported_dependency_state_in_view(canonical, None)?;
+            let export_sigs = entry
+                .export_signatures
+                .as_ref()
+                .map(|export_signatures| export_signatures.as_ref().clone())
+                .unwrap_or_default();
+            Some(Self::build_export_registry(&export_sigs, entry.whole_hash))
+        };
+
+        if let Some(ref reg) = registry {
+            if let Some(file) = write_lock(&self.files).get_mut(canonical) {
+                file.export_registry = Some(reg.clone());
+            }
+        }
+
+        registry
+    }
+
+    /// Ensure the export registry is populated for a file.
+    ///
+    /// For files in compile_cache with scheduler analysis data, builds the
+    /// registry from `HostAnalysisData.export_signatures` (no OXC parsing).
+    /// For files only on disk, reads the file and extracts export signatures
+    /// (one parse, cached for all future lookups).
     #[cfg(feature = "scheduler")]
     fn ensure_export_registry(&self, canonical: &str) -> Option<crate::types::FileExportRegistry> {
         // Check if already populated
@@ -2453,6 +2490,7 @@ impl VerterHost {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         for blocker_id in blocker_ids {
             let _ = self.ensure_loaded(&blocker_id);
         }

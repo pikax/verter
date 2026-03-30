@@ -12,7 +12,7 @@ import type {
   TypeExpansionMeta,
 } from "./types.js";
 import type { TypeDescriptor } from "./type-ir.js";
-import type { NativeTypeExpr } from "./type-expr-bridge.js";
+import type { NativeTypeExprLike } from "./type-expr-bridge.js";
 
 export interface NativeJsdocTag {
   name: string;
@@ -37,7 +37,7 @@ export interface NativeExpansionMetadata extends TypeExpansionMeta {
 
 export interface NativePropMeta {
   name: string;
-  type: NativeTypeExpr;
+  type: NativeTypeExprLike;
   typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
   required: boolean;
@@ -49,7 +49,7 @@ export interface NativePropMeta {
 
 export interface NativeEventMeta {
   name: string;
-  payload: NativeTypeExpr;
+  payload: NativeTypeExprLike;
   payloadExpansion?: NativeExpansionMetadata;
   rawSignature?: string;
   description?: string;
@@ -58,7 +58,7 @@ export interface NativeEventMeta {
 
 export interface NativeSlotBindingMeta {
   name: string;
-  type: NativeTypeExpr;
+  type: NativeTypeExprLike;
   typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
 }
@@ -68,18 +68,19 @@ export interface NativeSlotMeta {
   isScoped: boolean;
   bindings: NativeSlotBindingMeta[];
   isRequired: boolean;
+  returnType?: string;
   description?: string;
   tags?: NativeJsdocTag[];
 }
 
 export interface NativeModelMeta {
   name: string;
-  type: NativeTypeExpr;
+  type: NativeTypeExprLike;
 }
 
 export interface NativeExposedMeta {
   name: string;
-  type: NativeTypeExpr;
+  type: NativeTypeExprLike;
   typeExpansion?: NativeExpansionMetadata;
   description?: string;
 }
@@ -90,7 +91,7 @@ export interface NativeResolvedTypeMeta {
    * Expanded lightweight native type.
    * This is what compat/public mapping consumes.
    */
-  type: NativeTypeExpr;
+  type: NativeTypeExprLike;
   typeExpansion?: NativeExpansionMetadata;
   /**
    * Pre-expansion source form retained for native callers that need to inspect
@@ -151,7 +152,7 @@ export interface NativeResolvedSlotField {
 export interface NativeResolvedJsdocTag extends NativeJsdocTag {
   rawType?: string;
   subjectName?: string;
-  resolvedType?: NativeTypeExpr;
+  resolvedType?: NativeTypeExprLike;
 }
 
 export interface NativeResolvedJsdocBlock {
@@ -260,7 +261,7 @@ export interface NativeComponentFlags {
 
 export interface NativeAcceptedPropMeta {
   name: string;
-  type: NativeTypeExpr;
+  type: NativeTypeExprLike;
   rawType?: string;
   required: boolean;
   provenance: NativeMemberProvenance;
@@ -270,7 +271,7 @@ export interface NativeAcceptedPropMeta {
 
 export interface NativeAcceptedEventMeta {
   name: string;
-  payload: NativeTypeExpr;
+  payload: NativeTypeExprLike;
   rawSignature?: string;
   provenance: NativeMemberProvenance;
   availability: NativeMemberAvailability;
@@ -372,14 +373,14 @@ export type NativeUnresolvedBranchReason =
 
 export interface NativeFallthroughPropEntry {
   name: string;
-  type: NativeTypeExpr;
+  type: NativeTypeExprLike;
   rawType?: string;
   sources: NativeInheritedSource[];
 }
 
 export interface NativeFallthroughEventEntry {
   name: string;
-  payload: NativeTypeExpr;
+  payload: NativeTypeExprLike;
   rawSignature?: string;
   sources: NativeInheritedSource[];
 }
@@ -470,6 +471,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
         ...(binding.rawType !== undefined ? { rawType: binding.rawType } : {}),
       })),
       isRequired: slot.isRequired,
+      ...(slot.returnType !== undefined ? { returnType: slot.returnType } : {}),
       ...(slot.description !== undefined ? { description: slot.description } : {}),
       ...(slot.tags?.length ? { tags: slot.tags } : {}),
     })),
@@ -549,7 +551,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
 
 function mapNativeAcceptedProps(
   props: NativeAcceptedPropMeta[],
-  nativeRegistry?: Map<string, NativeTypeExpr>,
+  nativeRegistry?: Map<string, NativeTypeExprLike>,
 ): AcceptedPropMeta[] {
   return props.map((p) => ({
     name: p.name,
@@ -564,7 +566,7 @@ function mapNativeAcceptedProps(
 
 function mapNativeAcceptedEvents(
   events: NativeAcceptedEventMeta[],
-  nativeRegistry?: Map<string, NativeTypeExpr>,
+  nativeRegistry?: Map<string, NativeTypeExprLike>,
 ): AcceptedEventMeta[] {
   return events.map((e) => ({
     name: e.name,
@@ -578,7 +580,7 @@ function mapNativeAcceptedEvents(
 
 function mapNativeFallthroughSurface(
   surface: NativeFallthroughSurface,
-  nativeRegistry?: Map<string, NativeTypeExpr>,
+  nativeRegistry?: Map<string, NativeTypeExprLike>,
 ): FallthroughSurface {
   if (surface.kind === "none") {
     return surface;
@@ -591,7 +593,7 @@ function mapNativeFallthroughSurface(
 
 function mapNativeFallthroughBranch(
   branch: NativeFallthroughBranch,
-  nativeRegistry?: Map<string, NativeTypeExpr>,
+  nativeRegistry?: Map<string, NativeTypeExprLike>,
 ): FallthroughBranch {
   return {
     branchKey: branch.branchKey,
@@ -629,12 +631,12 @@ export function nativeTypeRegistryToMap(
 
 function buildNativeTypeRegistry(
   meta: NativeComponentMetaResult,
-): Map<string, NativeTypeExpr> | undefined {
+): Map<string, NativeTypeExprLike> | undefined {
   if (!meta.typeRegistry?.length) {
     return undefined;
   }
 
-  const registry = new Map<string, NativeTypeExpr>();
+  const registry = new Map<string, NativeTypeExprLike>();
   for (const entry of meta.typeRegistry) {
     registry.set(entry.name, entry.type);
   }

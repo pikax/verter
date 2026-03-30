@@ -42,10 +42,10 @@ export interface NativeMetaSession {
   close(): void;
   readonly isClosed: boolean;
   readonly overlayGeneration: number;
-  /** Single native component-meta query. Returns JSON with complete metadata. */
-  getComponentMeta(canonicalOrAlias: string): string | null;
-  /** Declared-surface native query for Volar-compatible callers. Returns JSON. */
-  getDeclaredComponentMeta(canonicalOrAlias: string): string | null;
+  /** Single native component-meta query. Returns a protobuf payload. */
+  getComponentMeta(canonicalOrAlias: string): Buffer | null;
+  /** Declared-surface native query for Volar-compatible callers. Returns a protobuf payload. */
+  getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Provenance counters for observability. Returns JSON. */
   getProvenance(): string;
 }

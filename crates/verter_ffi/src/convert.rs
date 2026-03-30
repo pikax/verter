@@ -70,6 +70,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                     })
                     .collect(),
                 is_required: s.is_required,
+                return_type: s.return_type,
                 description: s.description,
                 tags: s.tags.into_iter().map(jsdoc_to_ffi).collect(),
             })

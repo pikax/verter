@@ -1533,7 +1533,7 @@ impl NapiMetaSession {
     }
 
     #[napi(js_name = "getComponentMeta")]
-    pub fn get_component_meta(&self, canonical_or_alias: String) -> Result<Option<String>> {
+    pub fn get_component_meta(&self, canonical_or_alias: String) -> Result<Option<Buffer>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let result = session
@@ -1542,13 +1542,8 @@ impl NapiMetaSession {
             match result {
                 Some(analysis) => {
                     let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
-                    let json = serde_json::to_string(&ffi).map_err(|e| {
-                        Error::new(
-                            Status::GenericFailure,
-                            format!("component-meta serialization error: {e}"),
-                        )
-                    })?;
-                    Ok(Some(json))
+                    let payload = verter_proto::component_meta::encode_component_meta_payload(&ffi);
+                    Ok(Some(Buffer::from(payload)))
                 }
                 None => Ok(None),
             }
@@ -1559,7 +1554,7 @@ impl NapiMetaSession {
     pub fn get_declared_component_meta(
         &self,
         canonical_or_alias: String,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<Buffer>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let result = session
@@ -1568,13 +1563,8 @@ impl NapiMetaSession {
             match result {
                 Some(analysis) => {
                     let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
-                    let json = serde_json::to_string(&ffi).map_err(|e| {
-                        Error::new(
-                            Status::GenericFailure,
-                            format!("component-meta serialization error: {e}"),
-                        )
-                    })?;
-                    Ok(Some(json))
+                    let payload = verter_proto::component_meta::encode_component_meta_payload(&ffi);
+                    Ok(Some(Buffer::from(payload)))
                 }
                 None => Ok(None),
             }

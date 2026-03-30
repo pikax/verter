@@ -515,6 +515,54 @@ describe("nativeComponentMetaToComponentMeta", () => {
     });
   });
 
+  it("surfaces slot returnType from the native payload", () => {
+    const meta = nativeComponentMetaToComponentMeta({
+      filePath: "/project/src/App.vue",
+      optionsApi: false,
+      props: [],
+      events: [],
+      slots: [
+        {
+          name: "default",
+          isScoped: true,
+          bindings: [],
+          isRequired: false,
+          returnType: "VNode[]",
+        },
+      ],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      ...defaultFallthroughFields,
+    } as any);
+
+    expect(meta.slots).toEqual([
+      {
+        name: "default",
+        isScoped: true,
+        bindings: [],
+        isRequired: false,
+        returnType: "VNode[]",
+      },
+    ]);
+  });
+
   it("resolves indexed-access prop descriptors through the native type registry", () => {
     const native = {
       filePath: "/project/src/Link.vue",

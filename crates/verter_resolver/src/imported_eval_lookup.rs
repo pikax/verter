@@ -267,6 +267,20 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
         resolved
     }
 
+    fn resolve_type_root_identity(&mut self, name: &str) -> Option<(String, String)> {
+        let target = self.resolve_type_lookup_target(name)?;
+        let (source_canonical_id, exported_name) = self
+            .resolver
+            .resolve_imported_type_root(&target.dep_canonical_id, &target.imported_name);
+
+        self.discovered_dependencies
+            .insert(target.dep_canonical_id.clone());
+        self.discovered_dependencies
+            .insert(source_canonical_id.clone());
+
+        Some((source_canonical_id, exported_name))
+    }
+
     fn resolve_value_decl(&mut self, path: &[String]) -> Option<ValueDeclInfo> {
         if let Some(cached) = self.value_decl_cache.get(path) {
             return cached.clone();
