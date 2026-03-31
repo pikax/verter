@@ -1082,6 +1082,8 @@ impl VerterHost {
         self.eval_env_cache.lock().clear();
         self.imported_dependency_cache.lock().clear();
         self.provenance.reset();
+        // Clear all semantic caches
+        *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
         self.bump_store_view_epoch();
     }
 
@@ -1279,6 +1281,7 @@ impl VerterHost {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn evict(&self, canonical_id: &str) {
         self.ws().notify_close(canonical_id);
+        self.semantic_db.lock().invalidate(canonical_id);
 
         #[cfg(not(feature = "scheduler"))]
         write_lock(&self.files).remove(canonical_id);

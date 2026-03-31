@@ -45,6 +45,11 @@ impl VerterHost {
     /// back the result and populates the compile cache. The `files` map is also
     /// populated for backward compatibility during the migration.
     pub fn upsert(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
+        // Invalidate semantic cache for this file before re-parsing.
+        if let Some(ref id) = req.canonical_id {
+            self.semantic_db.lock().invalidate(id);
+        }
+
         #[cfg(feature = "scheduler")]
         {
             self.upsert_via_scheduler(req)
