@@ -106,4 +106,36 @@ mod tests {
         assert_eq!(report.status, RouteReachabilityStatus::Reachable);
         assert!(report.reason.contains("imported by"));
     }
+
+    #[test]
+    fn report_carries_file_id() {
+        let graph = FileImportGraph::default();
+        let report = analyze_route_reachability("/src/Foo.vue", &graph, &[]);
+        assert_eq!(report.file_id, "/src/Foo.vue");
+    }
+
+    #[test]
+    fn imported_by_non_route_is_unknown() {
+        let graph = FileImportGraph {
+            imports: vec![],
+            import_sources: vec!["/src/Layout.vue".to_string()],
+        };
+        let routes = vec!["/src/Home.vue".to_string()];
+        let report = analyze_route_reachability("/src/Widget.vue", &graph, &routes);
+
+        // Negative: Layout.vue is not a route component
+        assert_eq!(report.status, RouteReachabilityStatus::Unknown);
+    }
+
+    #[test]
+    fn multiple_route_configs_checked() {
+        let graph = FileImportGraph::default();
+        let routes = vec![
+            "/src/Home.vue".to_string(),
+            "/src/About.vue".to_string(),
+            "/src/Contact.vue".to_string(),
+        ];
+        let report = analyze_route_reachability("/src/Contact.vue", &graph, &routes);
+        assert_eq!(report.status, RouteReachabilityStatus::Reachable);
+    }
 }

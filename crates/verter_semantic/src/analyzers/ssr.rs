@@ -161,4 +161,54 @@ mod tests {
 
         assert_eq!(report.status, SsrReadinessStatus::Compatible);
     }
+
+    #[test]
+    fn empty_file_is_compatible() {
+        let report = analyze_ssr_readiness(&[], &FileImportGraph::default());
+        assert_eq!(report.status, SsrReadinessStatus::Compatible);
+        assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn multiple_browser_globals_all_reported() {
+        let bindings = vec![
+            make_binding("window"),
+            make_binding("document"),
+            make_binding("localStorage"),
+        ];
+        let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
+
+        assert_eq!(report.status, SsrReadinessStatus::Incompatible);
+        assert_eq!(report.issues.len(), 3);
+        let names: Vec<_> = report
+            .issues
+            .iter()
+            .map(|i| i.binding_name.as_str())
+            .collect();
+        assert!(names.contains(&"window"));
+        assert!(names.contains(&"document"));
+        assert!(names.contains(&"localStorage"));
+    }
+
+    #[test]
+    fn navigator_and_history_detected() {
+        let bindings = vec![make_binding("navigator"), make_binding("history")];
+        let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
+        assert_eq!(report.status, SsrReadinessStatus::Incompatible);
+        assert_eq!(report.issues.len(), 2);
+    }
+
+    #[test]
+    fn request_animation_frame_detected() {
+        let bindings = vec![make_binding("requestAnimationFrame")];
+        let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
+        assert_eq!(report.status, SsrReadinessStatus::Incompatible);
+    }
+
+    #[test]
+    fn intersection_observer_detected() {
+        let bindings = vec![make_binding("IntersectionObserver")];
+        let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
+        assert_eq!(report.status, SsrReadinessStatus::Incompatible);
+    }
 }

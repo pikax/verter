@@ -249,4 +249,82 @@ mod tests {
         // Negative: non-reactive with no loss trace → intentional, no issue
         assert!(issues.is_empty());
     }
+
+    #[test]
+    fn empty_bindings_no_issues() {
+        let issues = analyze_reactive_flow(&[]);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn multiple_issues_across_bindings() {
+        let unused_reactive = (
+            make_decl("unused", vec![]),
+            ReactivityFact {
+                status: ReactivityStatus::Reactive,
+                source: Some(ReactivitySource::Ref),
+                trace: vec![],
+            },
+        );
+        let loss = (
+            make_decl("broken", vec![template_usage()]),
+            ReactivityFact {
+                status: ReactivityStatus::NonReactive,
+                source: Some(ReactivitySource::Props),
+                trace: vec![ProvenanceStep {
+                    kind: ProvenanceStepKind::Loss,
+                    span: Span::new(20, 30),
+                    description: "destructured".into(),
+                }],
+            },
+        );
+        let clean = (
+            make_decl("ok", vec![template_usage()]),
+            ReactivityFact {
+                status: ReactivityStatus::Reactive,
+                source: Some(ReactivitySource::Ref),
+                trace: vec![],
+            },
+        );
+
+        let issues = analyze_reactive_flow(&[unused_reactive, loss, clean]);
+
+        // Positive: 2 issues (unused + loss)
+        assert_eq!(issues.len(), 2);
+        let kinds: Vec<_> = issues.iter().map(|i| i.kind).collect();
+        assert!(kinds.contains(&ReactiveFlowIssueKind::UnusedReactive));
+        assert!(kinds.contains(&ReactiveFlowIssueKind::ReactivityLoss));
+
+        // Negative: the clean binding has no issues
+        assert!(!issues.iter().any(|i| i.binding_name == "ok"));
+    }
+
+    #[test]
+    fn unknown_reactivity_used_in_template_no_issue() {
+        let decl = make_decl("data", vec![template_usage()]);
+        let fact = ReactivityFact::unknown();
+        let issues = analyze_reactive_flow(&[(decl, fact)]);
+
+        // Negative: Unknown is not PossiblyNonReactive
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn reactive_used_in_style_not_unused() {
+        let style_usage = BindingUsage {
+            kind: UsageKind::StyleVBind,
+            span: Span::new(200, 210),
+            block: UsageBlock::Style,
+        };
+        let decl = make_decl("theme", vec![style_usage]);
+        let fact = ReactivityFact {
+            status: ReactivityStatus::Reactive,
+            source: Some(ReactivitySource::Ref),
+            trace: vec![],
+        };
+        let issues = analyze_reactive_flow(&[(decl, fact)]);
+
+        // Negative: used in style v-bind → not unused
+        assert!(issues.is_empty());
+    }
 }

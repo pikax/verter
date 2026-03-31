@@ -129,4 +129,33 @@ mod tests {
         // Negative: can't determine target
         assert!(report.facts.is_empty());
     }
+
+    #[test]
+    fn empty_edge_no_flow() {
+        let edge = ComponentInstanceEdge {
+            parent_file_id: "/src/App.vue".into(),
+            child_file_id: Some("/src/Child.vue".into()),
+            tag_name: "Child".into(),
+            usage_span: Span::new(0, 50),
+            passed_props: vec![],
+            passed_events: vec![],
+            passed_slots: vec![],
+            has_spread: false,
+            has_event_spread: false,
+        };
+        let surface = ComponentSurface::default();
+        let report = analyze_class_flow(&edge, &surface);
+        assert!(report.facts.is_empty());
+    }
+
+    #[test]
+    fn class_flow_fact_carries_source_and_target() {
+        let edge = make_edge_with_class(Some("/src/Button.vue"));
+        let surface = ComponentSurface::default();
+        let report = analyze_class_flow(&edge, &surface);
+
+        assert_eq!(report.facts.len(), 1);
+        assert_eq!(report.facts[0].source_file_id, "/src/App.vue");
+        assert_eq!(report.facts[0].target_file_id, "/src/Button.vue");
+    }
 }

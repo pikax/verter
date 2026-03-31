@@ -309,4 +309,77 @@ mod tests {
         assert_eq!(missing.len(), 1);
         assert_eq!(unknown_events.len(), 1);
     }
+
+    #[test]
+    fn empty_edge_against_empty_surface_no_issues() {
+        let edge = make_edge("Empty", vec![], vec![]);
+        let surface = ComponentSurface::default();
+        let issues = analyze_boundary(&edge, &surface);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn ref_attr_always_forwarded() {
+        let edge = make_edge("Input", vec!["ref", "is", "slot", "slot-scope"], vec![]);
+        let surface = make_surface(vec![], vec![]);
+        let issues = analyze_boundary(&edge, &surface);
+        assert!(
+            issues.is_empty(),
+            "forwarded attrs should not be unknown: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn event_spread_suppresses_unknown_events() {
+        let mut edge = make_edge("Button", vec![], vec!["unknown-event"]);
+        edge.has_event_spread = true;
+        let surface = make_surface(vec![], vec![]);
+        let issues = analyze_boundary(&edge, &surface);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn multiple_required_props_all_reported() {
+        let edge = make_edge("Card", vec![], vec![]);
+        let surface = make_surface(
+            vec![("title", false), ("subtitle", false), ("footer", false)],
+            vec![],
+        );
+        let issues = analyze_boundary(&edge, &surface);
+
+        assert_eq!(issues.len(), 3);
+        let names: Vec<_> = issues.iter().map(|i| i.member_name.as_str()).collect();
+        assert!(names.contains(&"title"));
+        assert!(names.contains(&"subtitle"));
+        assert!(names.contains(&"footer"));
+
+        // Negative: no UnknownProp issues
+        assert!(issues
+            .iter()
+            .all(|i| i.kind == BoundaryIssueKind::MissingRequiredProp));
+    }
+
+    #[test]
+    fn v_model_custom_name_event_matches() {
+        let edge = make_edge("Toggle", vec![], vec!["update:checked"]);
+        let mut surface = make_surface(vec![], vec![]);
+        surface.declared.models.push(ModelFact {
+            name: "checked".into(),
+            type_text: None,
+            span: Span::new(0, 10),
+        });
+        let issues = analyze_boundary(&edge, &surface);
+        assert!(
+            issues.is_empty(),
+            "update:checked should match model 'checked'"
+        );
+    }
+
+    #[test]
+    fn declared_event_not_flagged_as_unknown() {
+        let edge = make_edge("Button", vec![], vec!["click", "focus", "blur"]);
+        let surface = make_surface(vec![], vec!["click", "focus", "blur"]);
+        let issues = analyze_boundary(&edge, &surface);
+        assert!(issues.is_empty());
+    }
 }

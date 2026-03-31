@@ -107,4 +107,23 @@ mod tests {
         let report = analyze_co_renderability("a.vue", "b.vue", true, true, false);
         assert_eq!(report.status, CoRenderabilityStatus::MutuallyExclusive);
     }
+
+    #[test]
+    fn disjoint_routes_takes_priority_over_shared_parent() {
+        let report = analyze_co_renderability("a.vue", "b.vue", true, false, true);
+        assert_eq!(report.status, CoRenderabilityStatus::MutuallyExclusive);
+    }
+
+    #[test]
+    fn report_carries_file_ids() {
+        let report = analyze_co_renderability("/src/A.vue", "/src/B.vue", false, false, false);
+        assert_eq!(report.file_a, "/src/A.vue");
+        assert_eq!(report.file_b, "/src/B.vue");
+    }
+
+    #[test]
+    fn reason_not_empty() {
+        let report = analyze_co_renderability("a.vue", "b.vue", false, false, false);
+        assert!(!report.reason.is_empty());
+    }
 }

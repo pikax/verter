@@ -173,4 +173,76 @@ mod tests {
         let report = classify_bleed_issues(&issues, true);
         assert_eq!(report.issues[0].severity, BleedSeverity::TraceOnly);
     }
+
+    #[test]
+    fn module_style_no_bleed() {
+        let issues = detect_bleed_from_scope(
+            "app.vue",
+            StyleScopeKind::Module,
+            &[(".header", Span::new(10, 20))],
+        );
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn multiple_selectors_all_reported() {
+        let issues = detect_bleed_from_scope(
+            "app.vue",
+            StyleScopeKind::Global,
+            &[
+                (".a", Span::new(10, 12)),
+                (".b", Span::new(20, 22)),
+                ("#c", Span::new(30, 32)),
+            ],
+        );
+        assert_eq!(issues.len(), 3);
+        assert!(issues
+            .iter()
+            .all(|i| i.likelihood == CssBleedLikelihood::Definite));
+    }
+
+    #[test]
+    fn empty_selectors_no_issues() {
+        let issues = detect_bleed_from_scope("app.vue", StyleScopeKind::Global, &[]);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn definite_without_co_render_is_hint() {
+        let issues = vec![CssBleedIssue {
+            selector: ".x".into(),
+            source_file_id: "a.vue".into(),
+            likelihood: CssBleedLikelihood::Definite,
+            scope_kind: StyleScopeKind::Global,
+            span: Span::new(0, 5),
+        }];
+        let report = classify_bleed_issues(&issues, false);
+        assert_eq!(report.issues[0].severity, BleedSeverity::Hint);
+    }
+
+    #[test]
+    fn likely_with_co_render_is_hint() {
+        let issues = vec![CssBleedIssue {
+            selector: ".y".into(),
+            source_file_id: "a.vue".into(),
+            likelihood: CssBleedLikelihood::Likely,
+            scope_kind: StyleScopeKind::GlobalEscape,
+            span: Span::new(0, 5),
+        }];
+        let report = classify_bleed_issues(&issues, true);
+        assert_eq!(report.issues[0].severity, BleedSeverity::Hint);
+    }
+
+    #[test]
+    fn unknown_likelihood_always_trace() {
+        let issues = vec![CssBleedIssue {
+            selector: ".z".into(),
+            source_file_id: "a.vue".into(),
+            likelihood: CssBleedLikelihood::Unknown,
+            scope_kind: StyleScopeKind::Global,
+            span: Span::new(0, 5),
+        }];
+        let report = classify_bleed_issues(&issues, true);
+        assert_eq!(report.issues[0].severity, BleedSeverity::TraceOnly);
+    }
 }
