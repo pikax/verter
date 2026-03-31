@@ -7,6 +7,7 @@ use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind, ReactivityKind};
 use verter_analysis::ScriptAnalysisSnapshot;
 
 use crate::facts::binding::{BindingDeclaration, BindingKind, BindingUsage, UsageBlock, UsageKind};
+use crate::facts::boundary::ComponentInstanceEdge;
 use crate::facts::component::{
     ComponentSurface, DeclaredSurface, EventFact, ExposeFact, ModelFact, PropFact, SlotBindingFact,
     SlotFact,
@@ -326,6 +327,53 @@ pub fn extract_import_graph(analysis: &ScriptAnalysisSnapshot) -> FileImportGrap
         imports,
         import_sources: source_set.into_iter().collect(),
     }
+}
+
+// ── Boundary fact extraction ───────────────────────────────────────────────
+
+/// Extract component-instance edges from a template analysis snapshot.
+///
+/// Each `TemplateComponentUsage` in the template becomes a
+/// `ComponentInstanceEdge` fact, linking the parent file to the child
+/// component with the passed props/events/slots.
+pub fn extract_boundary_edges(
+    parent_file_id: &str,
+    template: &TemplateAnalysisSnapshot,
+    import_graph: &FileImportGraph,
+) -> Vec<ComponentInstanceEdge> {
+    template
+        .components
+        .iter()
+        .map(|usage| {
+            // Resolve child file ID from import graph
+            let child_file_id = import_graph
+                .find_by_local_name(&usage.name)
+                .and_then(|sym| sym.resolved_file_id.clone());
+
+            let passed_props: Vec<String> = usage.props.iter().map(|p| p.name.clone()).collect();
+
+            let passed_slots: Vec<String> = usage.slots_used.clone();
+
+            // Events come from template event handlers, not directly from component usage.
+            // For now, extract from v-model bindings as update:xxx events.
+            let mut passed_events: Vec<String> = Vec::new();
+            for model in &usage.v_models {
+                passed_events.push(format!("update:{}", model.binding_name));
+            }
+
+            ComponentInstanceEdge {
+                parent_file_id: parent_file_id.to_string(),
+                child_file_id,
+                tag_name: usage.name.clone(),
+                usage_span: usage.span,
+                passed_props,
+                passed_events,
+                passed_slots,
+                has_spread: usage.has_spread,
+                has_event_spread: false,
+            }
+        })
+        .collect()
 }
 
 // ── Prop constness extraction ──────────────────────────────────────────────
@@ -991,5 +1039,88 @@ mod tests {
 
         // Negative: Input's dynamic usage doesn't affect Button
         assert_eq!(facts[0].call_site_count, 1);
+    }
+
+    // ── Boundary extraction tests ──────────────────────────────────────────
+
+    #[test]
+    fn extract_boundary_edges_empty_template() {
+        let template = TemplateAnalysisSnapshot::default();
+        let graph = FileImportGraph::default();
+        let edges = extract_boundary_edges("/src/App.vue", &template, &graph);
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn extract_boundary_edges_resolves_child_from_imports() {
+        use crate::facts::symbol::{ImportKind, ImportedSymbol};
+
+        let template = make_template_with_component_usage(vec![make_component_usage(
+            "Button",
+            vec![
+                make_prop_usage("color", PropValueConstness::Const),
+                make_prop_usage("size", PropValueConstness::Dynamic),
+            ],
+        )]);
+
+        let graph = FileImportGraph {
+            imports: vec![ImportedSymbol {
+                local_name: "Button".into(),
+                source_specifier: "./Button.vue".into(),
+                resolved_file_id: Some("/src/Button.vue".into()),
+                exported_name: "default".into(),
+                kind: ImportKind::Default,
+                is_type_only: false,
+                span: Span::new(7, 13),
+            }],
+            import_sources: vec!["/src/Button.vue".into()],
+        };
+
+        let edges = extract_boundary_edges("/src/App.vue", &template, &graph);
+
+        // Positive: one edge extracted
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].tag_name, "Button");
+        assert_eq!(edges[0].parent_file_id, "/src/App.vue");
+        assert_eq!(edges[0].child_file_id.as_deref(), Some("/src/Button.vue"));
+        assert_eq!(edges[0].passed_props, vec!["color", "size"]);
+
+        // Negative: no spread
+        assert!(!edges[0].has_spread);
+    }
+
+    #[test]
+    fn extract_boundary_edges_unresolved_component() {
+        let template =
+            make_template_with_component_usage(vec![make_component_usage("External", vec![])]);
+        let graph = FileImportGraph::default(); // no imports
+
+        let edges = extract_boundary_edges("/src/App.vue", &template, &graph);
+
+        // Positive: edge created
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].tag_name, "External");
+
+        // Positive: child is None (unresolved)
+        assert!(edges[0].child_file_id.is_none());
+    }
+
+    #[test]
+    fn extract_boundary_edges_v_model_creates_update_event() {
+        use verter_analysis::template::TemplateComponentVModel;
+
+        let mut usage = make_component_usage("Input", vec![]);
+        usage.v_models = vec![TemplateComponentVModel {
+            binding_name: "modelValue".into(),
+            span: Span::new(20, 40),
+        }];
+
+        let template = make_template_with_component_usage(vec![usage]);
+        let graph = FileImportGraph::default();
+
+        let edges = extract_boundary_edges("/src/Form.vue", &template, &graph);
+
+        // Positive: v-model generates update event
+        assert_eq!(edges[0].passed_events, vec!["update:modelValue"]);
     }
 }
