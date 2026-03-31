@@ -94,6 +94,29 @@ pub struct ComponentSurface {
     pub inherit_attrs_disabled: bool,
 }
 
+/// Cross-file prop constness classification.
+///
+/// Indicates whether a prop is always passed as a compile-time constant
+/// across all call sites of a component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PropConstness {
+    /// All call sites pass a constant value for this prop.
+    AlwaysConst,
+    /// At least one call site passes a dynamic/reactive value.
+    SometimesDynamic,
+    /// Not enough data to determine (no call sites found or unanalyzed).
+    Unknown,
+}
+
+/// Per-prop constness fact for a component.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropConstnessFact {
+    pub prop_name: String,
+    pub constness: PropConstness,
+    /// Number of call sites analyzed.
+    pub call_site_count: usize,
+}
+
 /// Structural classification of the template root for fallthrough analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RootReachability {

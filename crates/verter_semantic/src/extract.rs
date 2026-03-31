@@ -328,6 +328,83 @@ pub fn extract_import_graph(analysis: &ScriptAnalysisSnapshot) -> FileImportGrap
     }
 }
 
+// ── Prop constness extraction ──────────────────────────────────────────────
+
+use crate::facts::component::{PropConstness, PropConstnessFact};
+use verter_analysis::template::{PropValueConstness, TemplateAnalysisSnapshot};
+
+/// Compute per-prop constness for a child component across all call sites
+/// in a single parent template.
+///
+/// Given a child component name and the parent's template analysis, examines
+/// all usage sites of that component and classifies each prop as
+/// `AlwaysConst`, `SometimesDynamic`, or `Unknown`.
+pub fn compute_prop_constness_for_child(
+    child_component_name: &str,
+    parent_template: &TemplateAnalysisSnapshot,
+) -> Vec<PropConstnessFact> {
+    let usages: Vec<_> = parent_template
+        .components
+        .iter()
+        .filter(|c| c.name == child_component_name)
+        .collect();
+
+    if usages.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect all prop names across all usages
+    let mut prop_names: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+    for usage in &usages {
+        for prop in &usage.props {
+            prop_names.insert(prop.name.clone());
+        }
+    }
+
+    // For each prop name, determine constness across all call sites
+    prop_names
+        .into_iter()
+        .map(|name| {
+            let mut all_const = true;
+            let mut any_dynamic = false;
+            let mut call_site_count = 0;
+
+            for usage in &usages {
+                if let Some(prop) = usage.props.iter().find(|p| p.name == name) {
+                    call_site_count += 1;
+                    match prop.constness {
+                        PropValueConstness::Const => {}
+                        PropValueConstness::Dynamic => {
+                            all_const = false;
+                            any_dynamic = true;
+                        }
+                        PropValueConstness::Unknown => {
+                            all_const = false;
+                        }
+                    }
+                }
+                // If a usage doesn't pass this prop at all, it's not counted
+            }
+
+            let constness = if call_site_count == 0 {
+                PropConstness::Unknown
+            } else if all_const {
+                PropConstness::AlwaysConst
+            } else if any_dynamic {
+                PropConstness::SometimesDynamic
+            } else {
+                PropConstness::Unknown
+            };
+
+            PropConstnessFact {
+                prop_name: name,
+                constness,
+                call_site_count,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,5 +881,115 @@ mod tests {
 
         // Negative: no sources in set since none resolved
         assert!(graph.import_sources.is_empty());
+    }
+
+    // ── Prop constness tests ───────────────────────────────────────────────
+
+    fn make_template_with_component_usage(
+        usages: Vec<verter_analysis::TemplateComponentUsage>,
+    ) -> TemplateAnalysisSnapshot {
+        let mut template = TemplateAnalysisSnapshot::default();
+        template.components = usages;
+        template
+    }
+
+    fn make_component_usage(
+        name: &str,
+        props: Vec<verter_analysis::TemplatePropUsage>,
+    ) -> verter_analysis::TemplateComponentUsage {
+        verter_analysis::TemplateComponentUsage {
+            name: name.to_string(),
+            import_source: None,
+            is_dynamic: false,
+            props,
+            has_spread: false,
+            slots_used: Vec::new(),
+            static_classes: Vec::new(),
+            has_dynamic_class: false,
+            dynamic_classes: Vec::new(),
+            v_models: Vec::new(),
+            span: Span::new(0, 50),
+        }
+    }
+
+    fn make_prop_usage(
+        name: &str,
+        constness: PropValueConstness,
+    ) -> verter_analysis::TemplatePropUsage {
+        verter_analysis::TemplatePropUsage {
+            name: name.to_string(),
+            is_bound: constness != PropValueConstness::Const,
+            expression: None,
+            constness,
+            referenced_bindings: Vec::new(),
+            from_spread: false,
+            span: Span::new(10, 20),
+            name_span: Span::new(10, 15),
+            is_shorthand: false,
+        }
+    }
+
+    #[test]
+    fn prop_constness_empty_template() {
+        let template = TemplateAnalysisSnapshot::default();
+        let facts = compute_prop_constness_for_child("Button", &template);
+        assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn prop_constness_single_const_usage() {
+        let template = make_template_with_component_usage(vec![make_component_usage(
+            "Button",
+            vec![make_prop_usage("color", PropValueConstness::Const)],
+        )]);
+
+        let facts = compute_prop_constness_for_child("Button", &template);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].prop_name, "color");
+        assert_eq!(facts[0].constness, PropConstness::AlwaysConst);
+        assert_eq!(facts[0].call_site_count, 1);
+    }
+
+    #[test]
+    fn prop_constness_mixed_across_sites() {
+        let template = make_template_with_component_usage(vec![
+            make_component_usage(
+                "Button",
+                vec![make_prop_usage("color", PropValueConstness::Const)],
+            ),
+            make_component_usage(
+                "Button",
+                vec![make_prop_usage("color", PropValueConstness::Dynamic)],
+            ),
+        ]);
+
+        let facts = compute_prop_constness_for_child("Button", &template);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].prop_name, "color");
+        // Positive: mixed → SometimesDynamic
+        assert_eq!(facts[0].constness, PropConstness::SometimesDynamic);
+        assert_eq!(facts[0].call_site_count, 2);
+    }
+
+    #[test]
+    fn prop_constness_different_component_not_counted() {
+        let template = make_template_with_component_usage(vec![
+            make_component_usage(
+                "Button",
+                vec![make_prop_usage("color", PropValueConstness::Const)],
+            ),
+            make_component_usage(
+                "Input",
+                vec![make_prop_usage("color", PropValueConstness::Dynamic)],
+            ),
+        ]);
+
+        let facts = compute_prop_constness_for_child("Button", &template);
+        assert_eq!(facts.len(), 1);
+        // Positive: only Button usage counted, which is const
+        assert_eq!(facts[0].constness, PropConstness::AlwaysConst);
+
+        // Negative: Input's dynamic usage doesn't affect Button
+        assert_eq!(facts[0].call_site_count, 1);
     }
 }
