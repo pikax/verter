@@ -6,7 +6,7 @@ Verter is pre-release software. APIs may change between releases — see the [AP
 
 Verter includes a built-in diagnostic engine (`verter_diagnostics`) that provides **~164 lint rules** across **11 categories**. These rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling. They analyze static analysis data from the compiler and do not require the full TypeScript type checker, so diagnostics are fast and available immediately as you type.
 
-The diagnostic engine is separate from the template compiler. It depends on `verter_analysis` for import/export/binding data and template element information, but does not depend on `verter_core` or any codegen modules.
+The diagnostic engine is separate from the template compiler. It depends on `verter_analysis` for import/export/binding data and template element information, but does not depend on `verter_compiler` or any codegen modules.
 
 ## Configuration
 

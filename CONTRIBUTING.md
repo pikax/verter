@@ -84,7 +84,7 @@ src/
 ```
 crates/
 ├── verter_lsp/            # Rust LSP server binary (stdio)
-├── verter_core/           # Core template compiler (Rust)
+├── verter_compiler/           # Core template compiler (Rust)
 └── ...
 
 packages/

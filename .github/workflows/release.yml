@@ -75,7 +75,7 @@ jobs:
             echo "::error::cargo publish dry-run failed for verter_span"
             exit 1
           }
-          # Note: verter_core dry-run is skipped here because verter_span may not
+          # Note: verter_compiler dry-run is skipped here because verter_span may not
           # yet exist on crates.io. The publish-crates job handles sequencing.
           echo "All pre-publish checks passed"
 
@@ -315,7 +315,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: crates-io
-      url: https://crates.io/crates/verter_core
+      url: https://crates.io/crates/verter_compiler
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -337,16 +337,16 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Publish verter_core
+      - name: Publish verter_compiler
         run: |
           LOCAL=$(grep -oP 'version = "\K[^"]+' Cargo.toml | head -1)
-          echo "Publishing verter_core $LOCAL..."
-          OUTPUT=$(cargo publish -p verter_core --allow-dirty 2>&1) && RC=0 || RC=$?
+          echo "Publishing verter_compiler $LOCAL..."
+          OUTPUT=$(cargo publish -p verter_compiler --allow-dirty 2>&1) && RC=0 || RC=$?
           echo "$OUTPUT"
           if [ $RC -eq 0 ]; then
-            echo "verter_core published successfully"
+            echo "verter_compiler published successfully"
           elif echo "$OUTPUT" | grep -q "already exists"; then
-            echo "verter_core $LOCAL already on crates.io, skipping"
+            echo "verter_compiler $LOCAL already on crates.io, skipping"
           else
             exit 1
           fi

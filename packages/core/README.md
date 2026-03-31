@@ -9,7 +9,7 @@ The SFC-to-TSX transformation engine for the [Verter](https://github.com/nickmes
 
 Unlike Volar, which generates virtual files, Verter produces actual valid TSX code from `.vue` files. This enables standard TypeScript tooling to provide completions, diagnostics, hover information, and go-to-definition support for Vue components.
 
-`@verter/core` handles the TypeScript side of the Verter compiler pipeline. Template compilation to optimized render functions is handled by the Rust crate `verter_core` (exposed via NAPI-RS and wasm-bindgen). Long-term, Rust will take over more of the responsibilities currently handled by this package.
+`@verter/core` handles the TypeScript side of the Verter compiler pipeline. Template compilation to optimized render functions is handled by the Rust crate `verter_compiler` (exposed via NAPI-RS and wasm-bindgen). Long-term, Rust will take over more of the responsibilities currently handled by this package.
 
 ### Key Capabilities
 

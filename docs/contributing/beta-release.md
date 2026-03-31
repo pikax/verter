@@ -97,7 +97,7 @@ npm view @verter/native version
 # Check https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
 
 # Verify crates.io
-cargo search verter_core
+cargo search verter_compiler
 
 # Smoke test
 npm create vite@latest test-app -- --template vue-ts

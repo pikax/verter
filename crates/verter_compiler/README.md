@@ -1,11 +1,11 @@
-# verter_core
+# verter_compiler
 
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
 Core Rust library crate that compiles Vue Single File Component (SFC) templates into optimized JavaScript render functions. This is the future heart of the Verter project -- it currently handles template compilation and will progressively take over more responsibilities from the TypeScript packages.
 
-`verter_core` is a **pure Rust library** with no FFI dependencies. It is consumed by [`verter_napi`](../verter_napi/) (Node.js native bindings) and [`verter_wasm`](../verter_wasm/) (browser WASM bindings).
+`verter_compiler` is a **pure Rust library** with no FFI dependencies. It is consumed by [`verter_napi`](../verter_napi/) (Node.js native bindings) and [`verter_wasm`](../verter_wasm/) (browser WASM bindings).
 
 ## Architecture
 
@@ -102,7 +102,7 @@ Main compilation entry point. Compiles a Vue SFC string into JavaScript with sou
 
 ```rust
 use oxc_allocator::Allocator;
-use verter_core::builder::codegen::{generate, CodegenOptions, CodegenResult};
+use verter_compiler::builder::codegen::{generate, CodegenOptions, CodegenResult};
 
 let allocator = Allocator::new();
 let options = CodegenOptions {
@@ -125,7 +125,7 @@ let result: CodegenResult = generate(input, &options, &allocator);
 Vite-optimized compilation that returns split blocks for virtual module serving.
 
 ```rust
-use verter_core::builder::codegen::{generate_for_vite, ViteCodegenOptions, ViteCodegenResult};
+use verter_compiler::builder::codegen::{generate_for_vite, ViteCodegenOptions, ViteCodegenResult};
 
 let result: ViteCodegenResult = generate_for_vite(input, &options, &allocator);
 // result.script    -- Option<BlockOutput> (component definition)
@@ -160,30 +160,30 @@ let result: ViteCodegenResult = generate_for_vite(input, &options, &allocator);
 ### Build
 
 ```bash
-cargo build --package verter_core
-cargo build --package verter_core --release
+cargo build --package verter_compiler
+cargo build --package verter_compiler --release
 ```
 
 ### Examples
 
 ```bash
-cargo run --package verter_core --example codegen
-cargo run --package verter_core --example ast
-cargo run --package verter_core --example check
-cargo run --package verter_core --example expression_validator
+cargo run --package verter_compiler --example codegen
+cargo run --package verter_compiler --example ast
+cargo run --package verter_compiler --example check
+cargo run --package verter_compiler --example expression_validator
 ```
 
 ## Testing
 
 ```bash
 # Run all tests
-cargo test --package verter_core --verbose
+cargo test --package verter_compiler --verbose
 
 # Run a specific test
-cargo test --package verter_core test_name
+cargo test --package verter_compiler test_name
 
 # Run with truncated output (useful for large test suites)
-cargo test --package verter_core 2>&1 | tail -60
+cargo test --package verter_compiler 2>&1 | tail -60
 ```
 
 ### Test Patterns
@@ -203,8 +203,8 @@ cargo test --package verter_core 2>&1 | tail -60
 | `vslot_bench`    | `v-slot` directive compilation |
 
 ```bash
-cargo bench --package verter_core
-cargo bench --package verter_core --bench bindings_bench
+cargo bench --package verter_compiler
+cargo bench --package verter_compiler --bench bindings_bench
 ```
 
 ## Dependencies

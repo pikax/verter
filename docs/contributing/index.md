@@ -42,7 +42,7 @@ pnpm vitest --run path/to/test.ts      # Specific file
 
 # Rust
 cargo test --workspace --verbose       # All Rust tests
-cargo test --package verter_core test  # Specific Rust test
+cargo test --package verter_compiler test  # Specific Rust test
 ```
 
 See the [Testing Guide](./testing.md) for detailed testing patterns and requirements.
@@ -83,7 +83,7 @@ This project uses **conventional commits** for automatic changelog generation vi
 
 | Scope      | Area                             |
 | ---------- | -------------------------------- |
-| `core`     | `verter_core` Rust crate         |
+| `core`     | `verter_compiler` Rust crate         |
 | `napi`     | `verter_napi` / `@verter/native` |
 | `wasm`     | `verter_wasm` / `@verter/wasm`   |
 | `play`     | Playground                       |

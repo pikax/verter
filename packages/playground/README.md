@@ -25,7 +25,7 @@ graph TD
     end
 
     subgraph WASM
-        C --- J[verter_core<br/>Rust compiler]
+        C --- J[verter_compiler<br/>Rust compiler]
     end
 ```
 

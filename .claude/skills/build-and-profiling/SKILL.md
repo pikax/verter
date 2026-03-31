@@ -10,7 +10,7 @@ description: "Build dependency chains, rebuild sequences, profiling with MCP, an
 When changing Rust code, you must rebuild downstream artifacts in order:
 
 ```
-verter_core + verter_analysis + verter_host + verter_ffi (Rust crates)
+verter_compiler + verter_analysis + verter_session + verter_ffi (Rust crates)
     ↓ cargo build
 verter_napi (NAPI-RS cdylib)    verter_lsp (LSP binary)    verter_wasm (wasm-bindgen cdylib)
     ↓ pnpm run build:native         ↓ pnpm run build:lsp       ↓ pnpm run build:wasm
@@ -27,7 +27,7 @@ playground E2E tests
 
 | What changed                          | Rebuild commands (in order)                                                                            |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Rust crate (`verter_core`)            | `pnpm run build:native` → rebuild any downstream consumer                                              |
+| Rust crate (`verter_compiler`)            | `pnpm run build:native` → rebuild any downstream consumer                                              |
 | Rust LSP (`verter_lsp`)               | `pnpm run build:lsp` (or `build:lsp:release` for optimized) → restart VS Code extension host           |
 | Unplugin (`packages/unplugin`)        | `pnpm run build:ts` (or just rebuild unplugin)                                                         |
 | Playground after Rust/unplugin change | `pnpm run build:native` → `cd packages/playground && rm -rf dist node_modules/.vite && npx vite build` |
@@ -55,11 +55,11 @@ The `hotpath` feature flag enables `#[hotpath::measure]` annotations on key func
 
 ```
 verter_bench --features hotpath
-  ├── verter_core/hotpath         (compile_inner, generate_ide_script, generate_ide_template)
-  ├── verter_host/hotpath         (upsert_via_scheduler, ensure_compiled, compile_entry, execute_source)
+  ├── verter_compiler/hotpath         (compile_inner, generate_ide_script, generate_ide_template)
+  ├── verter_session/hotpath         (upsert_via_scheduler, ensure_compiled, compile_entry, execute_source)
   │   ├── verter_analysis/hotpath (build_script_analysis_with_scope)
   │   ├── verter_scheduler/hotpath (execute_source_stage)
-  │   └── verter_vfs/hotpath      (read_file, resolve_import)
+  │   └── verter_workspace/hotpath      (read_file, resolve_import)
   └── verter_diagnostics/hotpath  (lint_inner)
 ```
 

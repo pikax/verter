@@ -167,8 +167,8 @@ graph TB
     subgraph "Rust Core"
         LSP["verter_lsp<br/>(LSP Server)"]
         MCP["verter_mcp<br/>(MCP Server)"]
-        Host["verter_host<br/>(File Host + Caching)"]
-        Compiler["verter_core<br/>(Template Compiler)"]
+        Host["verter_session<br/>(File Host + Caching)"]
+        Compiler["verter_compiler<br/>(Template Compiler)"]
         Analysis["verter_analysis<br/>(Static Analysis)"]
         Diagnostics["verter_diagnostics<br/>(~169 Lint Rules)"]
         Actions["verter_actions<br/>(Quick Fixes)"]
@@ -206,7 +206,7 @@ graph TB
 
 ```mermaid
 flowchart LR
-    SFC[".vue file"] --> Compiler["verter_core<br/>(Rust)"]
+    SFC[".vue file"] --> Compiler["verter_compiler<br/>(Rust)"]
     Compiler --> IDE["Typed TSX<br/>(IDE analysis)"]
     Compiler --> Runtime["Render Functions<br/>(VDOM / Vapor)"]
     IDE --> LSP["verter_lsp<br/>+ Type Provider"]
@@ -218,9 +218,9 @@ flowchart LR
 ```
 verter/
 ├── crates/                        # Rust crates (core of the project)
-│   ├── verter_core/               # Template compiler: parser, VDOM/Vapor codegen, IDE TSX codegen
+│   ├── verter_compiler/               # Template compiler: parser, VDOM/Vapor codegen, IDE TSX codegen
 │   ├── verter_analysis/           # Static analysis: imports, exports, bindings, type resolution
-│   ├── verter_host/               # In-memory file host: caching, dependency tracking
+│   ├── verter_session/               # In-memory file host: caching, dependency tracking
 │   ├── verter_diagnostics/        # Diagnostic engine: ~169 lint rules, visitor, DiagnosticSet
 │   ├── verter_actions/            # Code actions: quick fixes, refactoring
 │   ├── verter_lsp/                # LSP server binary (stdio)
@@ -251,7 +251,7 @@ verter/
 ```
 verter-vscode (VS Code extension)
 ├── verter_lsp (Rust LSP binary, stdio)
-│   ├── verter_host (file host + compilation)
+│   ├── verter_session (file host + compilation)
 │   ├── verter_diagnostics (lint rules + DiagnosticSet)
 │   ├── verter_actions (quick fixes + refactoring)
 │   └── TypeProvider (optional: TSGO or tsserver)
@@ -259,7 +259,7 @@ verter-vscode (VS Code extension)
 └── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
 
 verter_mcp (MCP server binary, stdio + HTTP)
-├── verter_host (file host + compilation)
+├── verter_session (file host + compilation)
 ├── verter_analysis (static analysis snapshots)
 ├── verter_diagnostics (lint rules + DiagnosticSet)
 └── verter_actions (quick fixes + refactoring)
@@ -346,7 +346,7 @@ pnpm clean
 cargo test --workspace --verbose
 
 # Run specific crate tests
-cargo test --package verter_core
+cargo test --package verter_compiler
 
 # Format and lint
 cargo fmt --all
@@ -365,7 +365,7 @@ pnpm vitest --run path/to/test.spec.ts     # Specific file
 
 # Rust tests
 cargo test --workspace --verbose
-cargo test --package verter_core test_name  # Specific test
+cargo test --package verter_compiler test_name  # Specific test
 ```
 
 Test files are co-located with source files as `*.spec.ts`.
@@ -453,9 +453,9 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 
 | Crate                | Description                                       |
 | -------------------- | ------------------------------------------------- |
-| `verter_core`        | Core template compiler                            |
+| `verter_compiler`        | Core template compiler                            |
 | `verter_analysis`    | Static analysis: imports, exports, bindings       |
-| `verter_host`        | In-memory file host: caching, dependency tracking |
+| `verter_session`        | In-memory file host: caching, dependency tracking |
 | `verter_diagnostics` | Diagnostic engine: ~169 lint rules                |
 | `verter_actions`     | Code actions: quick fixes, refactoring            |
 | `verter_lsp`         | Rust LSP server binary (stdio)                    |

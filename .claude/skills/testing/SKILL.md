@@ -108,7 +108,7 @@ The extracted file contains the module contents directly — `use super::*;`, he
 1. Write failing tests first
 2. Implement the minimum code to pass
 3. Run `cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings && cargo fmt --all`
-4. Run `cargo test --package verter_core --lib`
+4. Run `cargo test --package verter_compiler --lib`
 
 ### Arena-Based Template AST
 

@@ -10,8 +10,8 @@ description: "Verter codebase architecture: Rust compiler modules, TypeScript pa
 Verter is designed as one shared optimized codebase. Consumers should reuse the same lower-level crates instead of growing separate semantic pipelines.
 
 - Put reusable parsing, analysis, type-resolution, caching, and import-following behavior in the shared owner crate.
-- `verter_host` is the shared host/session/cache boundary for host-backed consumers.
-- `verter_analysis` and `verter_core` own reusable semantics.
+- `verter_session` is the shared host/session/cache boundary for host-backed consumers.
+- `verter_analysis` and `verter_compiler` own reusable semantics.
 - `verter_ffi` owns boundary DTOs shared by NAPI and WASM.
 - Consumer packages and apps should stay adapter-oriented: thin wrappers, public API shaping, transport glue, and UX-specific behavior.
 
@@ -260,7 +260,7 @@ template.rs           # Template element analysis, dynamic class extraction, :st
 
 **Position encoding for CSS spans**: `CssAnalysis` spans (classes, IDs, selectors) are **SFC-absolute byte offsets**. The CSS scanner produces content-relative offsets internally, then `CssAnalysis::make_spans_absolute(content_offset)` is called at the host level (after optional SCSS remap) to convert all spans to SFC-absolute. Consumers use spans directly without adding any offset. `StyleBlockAnalysis.content_offset` is retained for documentation and slice operations.
 
-## Rust Compiler Architecture (`crates/verter_core/src/`)
+## Rust Compiler Architecture (`crates/verter_compiler/src/`)
 
 The Rust compiler uses an AST-based pipeline. The `compile()` orchestrator drives a linear 5-phase pipeline:
 
@@ -432,7 +432,7 @@ The Rust compiler never does file I/O — all external resolution is the host's 
 
 **Caching rule:** when parsing a `.ts` / `.js` / declaration file for type resolution, cache discovered symbol name → canonical location mappings. Cache direct re-exports, barrelled exports, and any discovered `export *` hops as well, because repeated wildcard-barrel scanning is expensive.
 
-**Component-meta cache rule:** when changing `verter_host`, `verter_resolver`, `verter_analysis`, or `packages/component-meta` type paths, use cached lookup/eval state as the only source of truth after the cache-owning pass. Do not rewalk AST/source as a fallback to recover or expand types.
+**Component-meta cache rule:** when changing `verter_session`, `verter_resolver`, `verter_analysis`, or `packages/component-meta` type paths, use cached lookup/eval state as the only source of truth after the cache-owning pass. Do not rewalk AST/source as a fallback to recover or expand types.
 
 **Component-meta publication rule:** keep registry publication shallow and demand-driven. Publish and expand only the symbols required by the active metadata query; do not eagerly materialize unrelated owner-local or package-local helpers.
 
@@ -448,7 +448,7 @@ The Rust compiler never does file I/O — all external resolution is the host's 
 
 ## CompileTarget (Selective Pipeline)
 
-`CompileTarget` (bitflags in `verter_core::compile::types`) controls which compilation steps run:
+`CompileTarget` (bitflags in `verter_compiler::compile::types`) controls which compilation steps run:
 
 | Flag            | Controls                                             | Used By           |
 | --------------- | ---------------------------------------------------- | ----------------- |
@@ -483,7 +483,7 @@ The `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation
 
 ## verter_analysis — Static Analysis Types
 
-`verter_analysis` is independent from `verter_core`. The compilation crate produces `RawTemplateData` during compilation, which `verter_host` converts into `verter_analysis` types.
+`verter_analysis` is independent from `verter_compiler`. The compilation crate produces `RawTemplateData` during compilation, which `verter_session` converts into `verter_analysis` types.
 
 ### AnalysisScope
 
@@ -557,7 +557,7 @@ Primary output of `build_script_analysis()`. Produced by a single OXC parse + AS
 
 ### TemplateAnalysisSnapshot
 
-Populated after compilation by converting `RawTemplateData` from `verter_core`.
+Populated after compilation by converting `RawTemplateData` from `verter_compiler`.
 
 | Field                 | Type                             | Description                                       |
 | --------------------- | -------------------------------- | ------------------------------------------------- |
@@ -590,13 +590,13 @@ Aggregates file-level usage into project-wide indexes:
 Vue SFC Source
     |
     v
-verter_core::compile()
+verter_compiler::compile()
     |-- ScriptAnalysisSnapshot (from OXC parse during compilation)
     |-- RawTemplateData (spans, binding refs, component tags)
     |-- CssParsed* (v-bind spans, pseudo spans)
     |
     v
-verter_host (conversion layer)
+verter_session (conversion layer)
     |-- RawTemplateData --> TemplateAnalysisSnapshot
     |-- CssParsed*      --> StyleBlockAnalysis
     |-- Resolves import paths, populates resolved_canonical_id
@@ -620,24 +620,24 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_mcp/src/server.rs`                                                           | MCP tool router: 33 tools for analysis, diagnostics, scoring           |
 | `crates/verter_mcp/src/tools/scoring.rs`                                                    | Quality/a11y scoring engine (0-100 composite scores)                   |
 | `packages/types/src/helpers/helpers.ts`                                                     | Core type utilities                                                    |
-| `crates/verter_core/src/compile.rs`                                                         | Pipeline orchestrator (tokenize → parse → style → script → template)   |
-| `crates/verter_core/src/parser/mod.rs`                                                      | SFC parser: tokenizer events → root nodes + template AST               |
-| `crates/verter_core/src/ast/types.rs`                                                       | AstNode, ElementNode, NodeId, PropFlags                                |
-| `crates/verter_core/src/script/macros.rs`                                                   | defineProps/Emits/Model/Slots/Expose/Options                           |
-| `crates/verter_core/src/script/process.rs`                                                  | Script setup processing, companion script merging                      |
-| `crates/verter_core/src/template/code_gen/mod.rs`                                           | Template codegen entry point                                           |
-| `crates/verter_core/src/template/code_gen/walker.rs`                                        | DFS tree walker (shared by VDOM/Vapor backends)                        |
-| `crates/verter_core/src/template/code_gen/binding.rs`                                       | BindingResolver (\_ctx./$setup. prefix resolution)                     |
-| `crates/verter_core/src/template/code_gen/vdom/`                                            | VDOM render function codegen                                           |
-| `crates/verter_core/src/template/code_gen/vapor/`                                           | Vapor mode codegen                                                     |
-| `crates/verter_core/src/ide/mod.rs`                                                         | IDE codegen entry: TSX (TS SFCs) or JSX+JSDoc (JS SFCs)                |
-| `crates/verter_core/src/ide/script.rs`                                                      | IDE script codegen: TS annotations or JSDoc equivalents                |
-| `crates/verter_core/src/ide/template/mod.rs`                                                | IDE template codegen: Vue → JSX (used by LSP/TSGO)                     |
-| `crates/verter_core/src/ide/template/directives.rs`                                         | IDE: v-if → ternary, v-for → .map(), v-show → style                    |
-| `crates/verter_core/src/ide/template/props.rs`                                              | IDE: :prop → prop={}, @event → onEvent={}                              |
-| `crates/verter_core/src/ide/template/mod.rs` (`StrictSlotEntry`, `emit_strict_slot_checks`) | IDE: strict slot children type checking (`strictRenderSlot` calls)     |
-| `crates/verter_core/src/css/`                                                               | CSS preprocessing and style transformation                             |
-| `crates/verter_core/src/code_transform/code_transform.rs`                                   | Chunk-based deferred mutation engine                                   |
+| `crates/verter_compiler/src/compile.rs`                                                         | Pipeline orchestrator (tokenize → parse → style → script → template)   |
+| `crates/verter_compiler/src/parser/mod.rs`                                                      | SFC parser: tokenizer events → root nodes + template AST               |
+| `crates/verter_compiler/src/ast/types.rs`                                                       | AstNode, ElementNode, NodeId, PropFlags                                |
+| `crates/verter_compiler/src/script/macros.rs`                                                   | defineProps/Emits/Model/Slots/Expose/Options                           |
+| `crates/verter_compiler/src/script/process.rs`                                                  | Script setup processing, companion script merging                      |
+| `crates/verter_compiler/src/template/code_gen/mod.rs`                                           | Template codegen entry point                                           |
+| `crates/verter_compiler/src/template/code_gen/walker.rs`                                        | DFS tree walker (shared by VDOM/Vapor backends)                        |
+| `crates/verter_compiler/src/template/code_gen/binding.rs`                                       | BindingResolver (\_ctx./$setup. prefix resolution)                     |
+| `crates/verter_compiler/src/template/code_gen/vdom/`                                            | VDOM render function codegen                                           |
+| `crates/verter_compiler/src/template/code_gen/vapor/`                                           | Vapor mode codegen                                                     |
+| `crates/verter_compiler/src/ide/mod.rs`                                                         | IDE codegen entry: TSX (TS SFCs) or JSX+JSDoc (JS SFCs)                |
+| `crates/verter_compiler/src/ide/script.rs`                                                      | IDE script codegen: TS annotations or JSDoc equivalents                |
+| `crates/verter_compiler/src/ide/template/mod.rs`                                                | IDE template codegen: Vue → JSX (used by LSP/TSGO)                     |
+| `crates/verter_compiler/src/ide/template/directives.rs`                                         | IDE: v-if → ternary, v-for → .map(), v-show → style                    |
+| `crates/verter_compiler/src/ide/template/props.rs`                                              | IDE: :prop → prop={}, @event → onEvent={}                              |
+| `crates/verter_compiler/src/ide/template/mod.rs` (`StrictSlotEntry`, `emit_strict_slot_checks`) | IDE: strict slot children type checking (`strictRenderSlot` calls)     |
+| `crates/verter_compiler/src/css/`                                                               | CSS preprocessing and style transformation                             |
+| `crates/verter_compiler/src/code_transform/code_transform.rs`                                   | Chunk-based deferred mutation engine                                   |
 | `crates/verter_analysis/src/lib.rs`                                                         | Static analysis entry: imports, exports, bindings                      |
 | `crates/verter_analysis/src/style.rs`                                                       | CSS scanner, selector parser, specificity computation                  |
 | `crates/verter_analysis/src/selector_match.rs`                                              | Three-valued CSS selector matching against template elements           |
@@ -647,9 +647,9 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_scheduler/src/executor.rs`                                                   | StageExecutor trait: host plugs in parse/analysis/compile              |
 | `crates/verter_scheduler/src/edges.rs`                                                      | EdgeManager: ReverseIndex + BlockerRegistry (DashMap-sharded)          |
 | `crates/verter_scheduler/src/queue.rs`                                                      | JobIndex: priority queue with aging, dedup, cancel                     |
-| `crates/verter_host/src/lib.rs`                                                             | Host entry: compile, cache, upsert, dependency tracking                |
-| `crates/verter_host/src/host_executor.rs`                                                   | HostStageExecutor: real parse pipeline for scheduler                   |
-| `crates/verter_host/src/scheduler_shim.rs`                                                  | SchedulerBackedWorkspace: migration shim                               |
+| `crates/verter_session/src/lib.rs`                                                             | Host entry: compile, cache, upsert, dependency tracking                |
+| `crates/verter_session/src/host_executor.rs`                                                   | HostStageExecutor: real parse pipeline for scheduler                   |
+| `crates/verter_session/src/scheduler_shim.rs`                                                  | SchedulerBackedWorkspace: migration shim                               |
 | `crates/verter_ffi/src/lib.rs`                                                              | FFI types shared between NAPI and WASM                                 |
 | `packages/unplugin/src/index.ts`                                                            | Unplugin factory: `buildStart` (preCompile), `transform`, `load` hooks |
 | `packages/unplugin/src/core/types.ts`                                                       | `VerterPluginOptions`, `HmrStrategy`                                   |

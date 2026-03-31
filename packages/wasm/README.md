@@ -3,7 +3,7 @@
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
-WASM bindings for the Verter Vue template compiler. This package exposes the Rust `verter_core` compiler to browser environments via [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/), enabling client-side Vue SFC compilation in tools like the Verter playground.
+WASM bindings for the Verter Vue template compiler. This package exposes the Rust `verter_compiler` compiler to browser environments via [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/), enabling client-side Vue SFC compilation in tools like the Verter playground.
 
 ## Overview
 
@@ -15,7 +15,7 @@ The WASM binary is size-optimized with `opt-level = "s"` and LTO enabled in the 
 
 ```mermaid
 graph LR
-    A["verter_core<br/><i>Rust crate</i>"] --> B["verter_wasm<br/><i>wasm-bindgen cdylib</i>"]
+    A["verter_compiler<br/><i>Rust crate</i>"] --> B["verter_wasm<br/><i>wasm-bindgen cdylib</i>"]
     B --> C["wasm-pack build"]
     C --> D[".wasm binary +<br/>JS glue code"]
     D --> E["@verter/wasm<br/><i>TS wrapper (src/index.ts)</i>"]
@@ -231,7 +231,7 @@ pnpm test    # runs: vitest run
 
 | Dependency                            | Purpose                                           |
 | ------------------------------------- | ------------------------------------------------- |
-| `verter_core` (Rust)                  | Core Vue template compiler                        |
+| `verter_compiler` (Rust)                  | Core Vue template compiler                        |
 | `wasm-bindgen` (Rust)                 | Rust/WASM interop layer                           |
 | `serde` / `serde-wasm-bindgen` (Rust) | Serialization between Rust structs and JS objects |
 | `console_error_panic_hook` (Rust)     | Better panic messages in browser console          |

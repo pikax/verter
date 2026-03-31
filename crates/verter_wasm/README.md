@@ -3,7 +3,7 @@
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
-wasm-bindgen binding crate that exposes [`verter_core`](../verter_core/) for browser and WASM environments. This is a thin FFI layer that compiles to a WebAssembly module, consumed by the [`@verter/wasm`](../../packages/wasm/) npm package and used in the [Verter Playground](../../packages/playground/).
+wasm-bindgen binding crate that exposes [`verter_compiler`](../verter_compiler/) for browser and WASM environments. This is a thin FFI layer that compiles to a WebAssembly module, consumed by the [`@verter/wasm`](../../packages/wasm/) npm package and used in the [Verter Playground](../../packages/playground/).
 
 ## Architecture
 
@@ -16,7 +16,7 @@ graph LR
 
     subgraph "WASM Boundary"
         C -->|"#[wasm_bindgen]"| D["verter_wasm<br/>(this crate)"]
-        D -->|delegates to| E["verter_core<br/>(Rust compiler)"]
+        D -->|delegates to| E["verter_compiler<br/>(Rust compiler)"]
     end
 ```
 
@@ -26,7 +26,7 @@ graph LR
 sequenceDiagram
     participant JS as Browser (JavaScript)
     participant WASM as verter_wasm (WASM)
-    participant Core as verter_core (Rust)
+    participant Core as verter_compiler (Rust)
 
     Note over JS, WASM: Module initialization
     JS->>WASM: init() via #[wasm_bindgen(start)]
@@ -151,7 +151,7 @@ wasm-pack test --headless --chrome --firefox
 
 | Crate                      | Purpose                                                           |
 | -------------------------- | ----------------------------------------------------------------- |
-| `verter_core`              | Core Rust template compiler                                       |
+| `verter_compiler`              | Core Rust template compiler                                       |
 | `oxc_allocator`            | Memory allocator for OXC AST (created per-call)                   |
 | `wasm-bindgen`             | Rust/WASM interop bindings                                        |
 | `serde`                    | Serialization framework                                           |

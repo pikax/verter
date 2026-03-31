@@ -124,7 +124,7 @@ All file paths are stored internally in **canonical ID** format. Normalization h
 | Source                     | Function                         | Location                                 |
 | -------------------------- | -------------------------------- | ---------------------------------------- |
 | LSP client URI             | `uri_to_canonical_id_from_str()` | `verter_lsp/src/documents/mod.rs`        |
-| File system / bundler path | `canonicalize_id()`              | `verter_host/src/id.rs`                  |
+| File system / bundler path | `canonicalize_id()`              | `verter_session/src/id.rs`                  |
 | Bundler plugin             | `generateComponentId()`          | `packages/unplugin/src/core/compiler.ts` |
 | CLI args                   | `path_to_file_uri()`             | `verter_lsp/src/main.rs`                 |
 

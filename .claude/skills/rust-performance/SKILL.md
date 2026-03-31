@@ -1,11 +1,11 @@
 ---
 name: rust-performance
-description: "Rust performance optimization patterns: batch operations, allocation hierarchy, object pooling, CodeTransform API for verter_core"
+description: "Rust performance optimization patterns: batch operations, allocation hierarchy, object pooling, CodeTransform API for verter_compiler"
 ---
 
 # Rust Performance Guide
 
-Principles for writing performant Rust in `verter_core`, grounded in the crate's APIs and patterns.
+Principles for writing performant Rust in `verter_compiler`, grounded in the crate's APIs and patterns.
 
 ## 1. Batch Over Incremental
 

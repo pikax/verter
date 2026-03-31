@@ -17,8 +17,8 @@ graph TB
         LSP["verter-lsp<br/>(Rust LSP binary, stdio)"]
         Native["@verter/native<br/>(NAPI-RS Bindings)"]
         WASM["@verter/wasm<br/>(WASM Bindings)"]
-        VFS["verter_vfs<br/>(Virtual Filesystem)"]
-        RustCore["verter_core<br/>(Rust Template Compiler)"]
+        VFS["verter_workspace<br/>(Virtual Filesystem)"]
+        RustCore["verter_compiler<br/>(Rust Template Compiler)"]
     end
     subgraph "Language Services"
         TSPlugin["@verter/typescript-plugin<br/>(TS Plugin)"]
@@ -59,7 +59,7 @@ Verter has two distinct compilation paths, each optimized for its purpose:
 ```mermaid
 flowchart LR
     SFC[".vue file"] --> TSCore["@verter/core<br/>(TypeScript)"]
-    SFC --> RustCompiler["verter_core<br/>(Rust)"]
+    SFC --> RustCompiler["verter_compiler<br/>(Rust)"]
     TSCore --> TSX["Typed TSX<br/>(for IDE analysis)"]
     RustCompiler --> Render["Render Functions<br/>(for runtime)"]
     TSX --> LSP["verter-lsp<br/>+ IDE Features"]
@@ -68,7 +68,7 @@ flowchart LR
 
 **TypeScript pipeline** (`@verter/core`) -- Transforms `.vue` files into valid TSX using MagicString for sourcemap preservation. This output is consumed by the LSP server and TypeScript plugin to provide IDE features like hover types, completions, go-to-definition, and diagnostics.
 
-**Rust pipeline** (`verter_core`) -- Compiles Vue templates into optimized render functions (VDOM or Vapor mode) for production builds. This runs through `@verter/unplugin` during your Vite/webpack/Rollup build, and also powers the LSP's template analysis.
+**Rust pipeline** (`verter_compiler`) -- Compiles Vue templates into optimized render functions (VDOM or Vapor mode) for production builds. This runs through `@verter/unplugin` during your Vite/webpack/Rollup build, and also powers the LSP's template analysis.
 
 Both pipelines share the same Vue SFC input and produce consistent results -- the TypeScript path prioritizes type accuracy while the Rust path prioritizes runtime performance.
 
@@ -76,10 +76,10 @@ Both pipelines share the same Vue SFC input and produce consistent results -- th
 
 | Directory                    | Purpose                                                                  |
 | ---------------------------- | ------------------------------------------------------------------------ |
-| `crates/verter_core/`        | Rust template compiler                                                   |
-| `crates/verter_vfs/`         | Virtual filesystem: sole authority for file access and import resolution |
+| `crates/verter_compiler/`        | Rust template compiler                                                   |
+| `crates/verter_workspace/`         | Virtual filesystem: sole authority for file access and import resolution |
 | `crates/verter_analysis/`    | Static analysis: imports, exports, bindings, types                       |
-| `crates/verter_host/`        | In-memory file host: caching, dependencies, multi-file compilation       |
+| `crates/verter_session/`        | In-memory file host: caching, dependencies, multi-file compilation       |
 | `crates/verter_diagnostics/` | Diagnostic engine: 22+ lint rules, visitor, DiagnosticSet                |
 | `crates/verter_actions/`     | Code actions engine: quick fixes, refactoring                            |
 | `crates/verter_lsp/`         | Rust LSP server binary (stdio)                                           |
@@ -109,7 +109,7 @@ The scheduler is integrated into `VerterHost` via the `scheduler` feature flag. 
 
 ## Rust Compilation Pipeline
 
-The Rust compiler uses an AST-based pipeline with five phases. The `compile()` function in `verter_core` orchestrates the entire flow:
+The Rust compiler uses an AST-based pipeline with five phases. The `compile()` function in `verter_compiler` orchestrates the entire flow:
 
 ```mermaid
 flowchart TD
@@ -167,7 +167,7 @@ The pipeline produces a `CodeTransform` -- a chunk-based deferred mutation engin
 
 ## TSX Codegen Path
 
-In addition to the VDOM/Vapor render function backends, the Rust compiler has a separate TSX codegen path (`crates/verter_core/src/tsx/`). This path converts Vue templates into valid JSX that TypeScript can type-check:
+In addition to the VDOM/Vapor render function backends, the Rust compiler has a separate TSX codegen path (`crates/verter_compiler/src/tsx/`). This path converts Vue templates into valid JSX that TypeScript can type-check:
 
 - `v-if`/`v-else-if`/`v-else` become ternary expressions
 - `v-for` becomes `.map()` calls
@@ -179,18 +179,18 @@ The LSP server uses this TSX output for type-checking via TSGO (TypeScript's Go-
 
 ## Virtual Filesystem (VFS)
 
-All workspace file access and import resolution flows through `verter_vfs`. This crate is the **single authority** — no code outside `NativeFs` touches `std::fs`, and the host never does its own heuristic resolution.
+All workspace file access and import resolution flows through `verter_workspace`. This crate is the **single authority** — no code outside `NativeFs` touches `std::fs`, and the host never does its own heuristic resolution.
 
 ```mermaid
 graph TB
     subgraph "Consumers"
-        Host["verter_host<br/>(Compilation Host)"]
+        Host["verter_session<br/>(Compilation Host)"]
         LSP["verter_lsp<br/>(Language Server)"]
         Unplugin["@verter/unplugin<br/>(Bundler Plugin)"]
         Meta["@verter/component-meta<br/>(Metadata Extraction)"]
     end
 
-    subgraph "verter_vfs"
+    subgraph "verter_workspace"
         WS["WorkspaceAccess Trait"]
         Engine["Engine<br/>(overlay → snapshot → resolver)"]
         Resolver["ProjectResolver<br/>(tsconfig, aliases, node_modules)"]

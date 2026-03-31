@@ -14,7 +14,7 @@ Runs on push to `main` and on pull requests. Uses [dorny/paths-filter](https://g
 
 - **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-test`
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`
-- **WASM changes** (`crates/verter_core/**`, `crates/verter_wasm/**`) -- `wasm-build`
+- **WASM changes** (`crates/verter_compiler/**`, `crates/verter_wasm/**`) -- `wasm-build`
 
 All jobs run independently -- one failing does not block others.
 
@@ -80,7 +80,7 @@ validate
 
 **Publishing process:**
 
-1. **Rust crates** -- only `verter_core` is published to crates.io (binding crates are consumed via npm)
+1. **Rust crates** -- only `verter_compiler` is published to crates.io (binding crates are consumed via npm)
 2. **npm platform packages** -- published first (e.g., `@verter/native-darwin-arm64`)
 3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`
 4. **GitHub Release** -- created with changelog (via git-cliff) and all binary assets
@@ -142,7 +142,7 @@ native -> lsp -> wasm -> ts packages
 
 | What changed                   | Rebuild commands                                          |
 | ------------------------------ | --------------------------------------------------------- |
-| Rust crate (`verter_core`)     | `pnpm run build:native` then rebuild downstream consumers |
+| Rust crate (`verter_compiler`)     | `pnpm run build:native` then rebuild downstream consumers |
 | Rust LSP (`verter_lsp`)        | `pnpm run build:lsp` then restart VS Code extension host  |
 | Unplugin (`packages/unplugin`) | `pnpm run build:ts`                                       |
 | WASM (for playground)          | `pnpm run build:wasm`                                     |

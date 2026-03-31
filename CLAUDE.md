@@ -11,8 +11,8 @@ The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template 
 Verter is one shared optimized codebase, not separate semantic implementations per consumer.
 
 - Improvements should land in the lowest reusable owner crate that can correctly serve all consumers.
-- `verter_host` and shared workspace/VFS integration are the authority for host-backed loading, invalidation, dependency tracking, and cache reuse.
-- `verter_analysis` and `verter_core` own reusable semantics and type-resolution logic.
+- `verter_session` and shared workspace/VFS integration are the authority for host-backed loading, invalidation, dependency tracking, and cache reuse.
+- `verter_analysis` and `verter_compiler` own reusable semantics and type-resolution logic.
 - `verter_ffi` owns shared boundary DTOs between native bindings and WASM bindings.
 - Consumer packages such as `@verter/component-meta`, the LSP, MCP, unplugin, and playground should consume the shared substrate rather than carrying their own semantic forks.
 
@@ -65,7 +65,7 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 ```
 verter-vscode (VS Code extension)
 ├── verter-lsp (Rust LSP binary, stdio)
-│   ├── verter_host (file host + compilation)
+│   ├── verter_session (file host + compilation)
 │   │   └── verter_scheduler (async per-file staging, feature-gated)
 │   ├── verter_scheduler (priority queue, completion handles)
 │   ├── verter_diagnostics (lint rules + DiagnosticSet)
@@ -77,7 +77,7 @@ verter-vscode (VS Code extension)
     └── @verter/native
 
 verter-mcp (MCP server binary, stdio + HTTP)
-├── verter_host (file host + compilation)
+├── verter_session (file host + compilation)
 ├── verter_analysis (static analysis snapshots)
 ├── verter_diagnostics (lint rules + DiagnosticSet)
 └── verter_actions (quick fixes + refactoring)
@@ -94,9 +94,9 @@ verter-mcp (MCP server binary, stdio + HTTP)
 
 ```
 crates/
-  verter_core/       # Core template compiler (Rust)
+  verter_compiler/       # Core template compiler (Rust)
   verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
-  verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
+  verter_session/       # In-memory file host: caching, dependency tracking, multi-file compilation
   verter_scheduler/  # Async per-file scheduler: Source→Analysis→Artifact stages, priority queue, blocker registry
   verter_diagnostics/ # Vue SFC diagnostic engine: ~186 lint rules, rule trait, visitor, DiagnosticSet (depends only on verter_analysis)
   verter_actions/    # Code actions engine: quick fixes, refactoring (depends on verter_diagnostics + verter_analysis)
@@ -174,7 +174,7 @@ ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Com
 
 ### Fallthrough / Root Inheritance (CRITICAL)
 
-The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_analysis` extracts root reachability facts only. `verter_host` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
+The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
 
 **Public contract** (on `ComponentMetaAnalysis` / `FfiComponentMeta` / `ComponentMeta`):
 
@@ -202,7 +202,7 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 
 **Compat**: mapping-only. Flat Volar `props/events` stay on declared surfaces. Branch-structured inherited data is on `_verter`.
 
-**Key files**: `verter_analysis/src/component_meta.rs` (types + root extraction), `verter_analysis/src/html_intrinsics.rs` (native intrinsic catalog), `verter_host/src/host_manage.rs` (resolver + cache), `verter_ffi/src/types.rs` + `convert.rs` (FFI), `packages/component-meta/src/types.ts` (TS types).
+**Key files**: `verter_analysis/src/component_meta.rs` (types + root extraction), `verter_analysis/src/html_intrinsics.rs` (native intrinsic catalog), `verter_session/src/host_manage.rs` (resolver + cache), `verter_ffi/src/types.rs` + `convert.rs` (FFI), `packages/component-meta/src/types.ts` (TS types).
 
 ### Component-Meta Native Vs Compat (CRITICAL)
 
@@ -213,7 +213,7 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Indexed-access members may be resolved/expanded when that improves real type fidelity. Targeted compat expansion such as `Alert['variants']['color']` → the concrete color union is acceptable; blanket ref flattening is not.
 - Compat `exposed` parity should be derived from a shared cached public-instance surface (for example a `ComponentPublicInstance` extraction owned by the host/public-instance path). Do not redefine native `exposed` to mean public-instance unless the public API is deliberately expanded.
 - Native-only extensions such as `models`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface` are part of Verter's official API. Benchmark them separately from Volar-surface parity instead of treating them as regressions.
-- Component-meta type recovery must stay cache-owned. When changing `verter_host`, `verter_resolver`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
+- Component-meta type recovery must stay cache-owned. When changing `verter_session`, `verter_resolver`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
 - Component-meta registry publication must stay shallow. Publish only the symbols demanded by the current query path, and do not eagerly materialize unrelated owner/package helpers just to populate the registry.
 - Component-meta companion/file-target selection must stay shallow too. Choosing between runtime and declaration companions may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to decide the target file.
 - Imported component-meta hydration must stay cache-owned too. Once shallow imported dependency state exists, later alias/registry/fallthrough resolver stages must read only from that cache-owned state and must not jump back to raw snapshot/source builders for imported files.
@@ -322,7 +322,7 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 - `sync_imported_vue_api_lightweight()`: Same rule — provisional sync only during bootstrap.
 - `SyncCoordinator::sync_file()`: Always queues files with no owner for retry. Uses `ownership_ready` for log level (warn vs info).
 
-**Key files**: `crates/verter_vfs/src/published_state.rs` (`PublishedRoot`, `ownership_ready`), `crates/verter_lsp/src/provider_sync.rs` (`ProviderOwnerBinding`, `ProviderSyncState`), `crates/verter_lsp/src/server.rs` (`PublishedResolverSnapshot`, `ensure_current_file_synced`).
+**Key files**: `crates/verter_workspace/src/published_state.rs` (`PublishedRoot`, `ownership_ready`), `crates/verter_lsp/src/provider_sync.rs` (`ProviderOwnerBinding`, `ProviderSyncState`), `crates/verter_lsp/src/server.rs` (`PublishedResolverSnapshot`, `ensure_current_file_synced`).
 
 ### Multi-Root Workspace & Per-Project Configuration
 
@@ -336,7 +336,7 @@ In monorepo / multi-root VS Code workspaces, different packages have different `
 
 **Import resolution** (single VFS authority): All LSP import resolution goes through `WorkspaceAccess::resolve_import()` via the VFS `FilesystemWorkspace`. The workspace is created in `initialize()` with an empty project graph (enabling relative/node_modules resolution immediately), then `background_init` populates the full project graph via `set_project_graph()` for alias resolution. The host's internal `project_resolver` (set via `set_internal_resolver()`) is used only for compilation — never for LSP resolution. `preferred_specifier()` provides reverse-alias lookup for auto-imports.
 
-**Tsconfig/vite config discovery** delegates to `verter_vfs::config` — all tsconfig parsing, membership, references, and `raw_paths_json` live in VFS. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
+**Tsconfig/vite config discovery** delegates to `verter_workspace::config` — all tsconfig parsing, membership, references, and `raw_paths_json` live in VFS. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
 
 1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
 2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
@@ -364,7 +364,7 @@ Style preprocessing goes through `preprocessBlock()` → `preprocessStyle()` whi
 
 **Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`. This is stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
 
-**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update, non-Vite only), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
+**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_session/src/host_upsert.rs` (`apply_style_overrides` — lang update, non-Vite only), `crates/verter_session/src/id.rs` (`render_ids` — URL generation).
 
 ### Cached Directive Fields on ElementNode
 
@@ -442,8 +442,8 @@ pnpm vitest --run path/to/test.spec.ts       # Specific file
 
 # Rust
 cargo test --workspace --verbose             # All Rust tests
-cargo test --package verter_core test_name   # Specific Rust test
-cargo test --package verter_core 2>&1 | tail -60  # Full suite with truncated output
+cargo test --package verter_compiler test_name   # Specific Rust test
+cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
 
 ### End-of-change Checks
@@ -616,7 +616,7 @@ Types:
   release  - Version bump and release
 
 Scopes:
-  core     - verter_core Rust crate
+  core     - verter_compiler Rust crate
   napi     - verter_napi / @verter/native
   wasm     - verter_wasm / @verter/wasm
   play     - playground

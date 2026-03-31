@@ -47,7 +47,7 @@ graph TB
         LSP["verter-lsp<br/>(Rust LSP binary, stdio)"]
         Native["@verter/native<br/>(NAPI-RS Bindings)"]
         WASM["@verter/wasm<br/>(WASM Bindings)"]
-        RustCore["verter_core<br/>(Rust Template Compiler)"]
+        RustCore["verter_compiler<br/>(Rust Template Compiler)"]
     end
     subgraph "Language Services"
         TSPlugin["@verter/typescript-plugin<br/>(TS Plugin)"]
@@ -82,7 +82,7 @@ Verter has two distinct compilation paths, each optimized for its purpose:
 ```mermaid
 flowchart LR
     SFC[".vue file"] --> TSCore["@verter/core<br/>(TypeScript)"]
-    SFC --> RustCompiler["verter_core<br/>(Rust)"]
+    SFC --> RustCompiler["verter_compiler<br/>(Rust)"]
     TSCore --> TSX["Typed TSX<br/>(for IDE analysis)"]
     RustCompiler --> Render["Render Functions<br/>(for runtime)"]
     TSX --> LSP["verter-lsp<br/>+ IDE Features"]
@@ -91,7 +91,7 @@ flowchart LR
 
 **TypeScript pipeline** (`@verter/core`) -- Transforms `.vue` files into valid TSX using MagicString for sourcemap preservation. This output is consumed by the LSP server and TypeScript plugin to provide IDE features like hover types, completions, go-to-definition, and diagnostics.
 
-**Rust pipeline** (`verter_core`) -- Compiles Vue templates into optimized render functions (VDOM or Vapor mode) for production builds. This runs through `@verter/unplugin` during your Vite/webpack/Rollup build, and also powers the LSP's template analysis.
+**Rust pipeline** (`verter_compiler`) -- Compiles Vue templates into optimized render functions (VDOM or Vapor mode) for production builds. This runs through `@verter/unplugin` during your Vite/webpack/Rollup build, and also powers the LSP's template analysis.
 
 Both pipelines share the same Vue SFC input and produce consistent results -- the TypeScript path prioritizes type accuracy while the Rust path prioritizes runtime performance.
 

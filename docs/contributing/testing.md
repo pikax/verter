@@ -47,9 +47,9 @@ const map = s.generateMap({ source: "test.vue" });
 
 ```bash
 cargo test --workspace --verbose                # All Rust tests
-cargo test --package verter_core test_name      # Specific test by name
-cargo test --package verter_core -- --nocapture # With stdout output
-cargo test --package verter_core 2>&1 | tail -60  # Truncated output
+cargo test --package verter_compiler test_name      # Specific test by name
+cargo test --package verter_compiler -- --nocapture # With stdout output
+cargo test --package verter_compiler 2>&1 | tail -60  # Truncated output
 ```
 
 ### Test File Organization
