@@ -519,6 +519,89 @@ impl VerterHost {
         QueryResult::complete(bindings, revision)
     }
 
+    /// Get an aggregated semantic snapshot for a file.
+    ///
+    /// Combines component surface, bindings, reactivity, and import graph
+    /// into a single [`FileSemanticSnapshot`]. Populates any missing caches.
+    pub fn semantic_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> verter_semantic::query::QueryResult<verter_semantic::snapshot::FileSemanticSnapshot> {
+        use verter_semantic::query::QueryResult;
+        use verter_semantic::snapshot::FileSemanticSnapshot;
+
+        let revision = self.semantic_revision();
+
+        // Get or compute each piece
+        let surface_result = self.semantic_component_surface(canonical_id);
+        let bindings_result = self.semantic_bindings(canonical_id);
+
+        // Import graph
+        let import_graph = {
+            let file_ref = verter_semantic::refs::FileRef::new(canonical_id);
+            let cached = self.semantic_db.lock().import_graph(&file_ref, revision);
+            if cached.is_complete() {
+                cached.value.unwrap_or_default()
+            } else {
+                // Extract from analysis
+                #[cfg(feature = "scheduler")]
+                let analysis = self.scheduler_script_analysis(canonical_id);
+                #[cfg(not(feature = "scheduler"))]
+                let analysis: Option<verter_analysis::ScriptAnalysisSnapshot> = {
+                    let files = self.files.read();
+                    files
+                        .get(canonical_id)
+                        .and_then(|f| f.script_analysis.as_ref())
+                        .map(|a| a.as_ref().clone())
+                };
+                let graph = analysis
+                    .map(|a| verter_semantic::extract::extract_import_graph(&a))
+                    .unwrap_or_default();
+                self.semantic_db.lock().set_import_graph(
+                    canonical_id.to_string(),
+                    revision,
+                    graph.clone(),
+                );
+                graph
+            }
+        };
+
+        let snapshot = FileSemanticSnapshot {
+            file_id: canonical_id.to_string(),
+            revision,
+            component_surface: surface_result.value,
+            bindings: bindings_result.value.unwrap_or_default(),
+            import_graph,
+        };
+
+        QueryResult::complete(snapshot, revision)
+    }
+
+    /// Find a binding's reactivity fact by name within a file.
+    ///
+    /// Uses stable binding name lookup through the semantic snapshot.
+    pub fn binding_reactivity(
+        &self,
+        canonical_id: &str,
+        binding_name: &str,
+    ) -> verter_semantic::query::QueryResult<
+        Option<verter_semantic::facts::reactivity::ReactivityFact>,
+    > {
+        use verter_semantic::query::QueryResult;
+
+        let revision = self.semantic_revision();
+        let bindings_result = self.semantic_bindings(canonical_id);
+
+        let fact = bindings_result.value.and_then(|bindings| {
+            bindings
+                .into_iter()
+                .find(|(decl, _)| decl.name == binding_name)
+                .map(|(_, fact)| fact)
+        });
+
+        QueryResult::complete(fact, revision)
+    }
+
     /// Access the unified resolver runtime for counter reads and diagnostics.
     pub fn resolver_runtime(
         &self,

@@ -23,3 +23,4 @@ pub mod facts;
 pub mod query;
 pub mod refs;
 pub mod revision;
+pub mod snapshot;
