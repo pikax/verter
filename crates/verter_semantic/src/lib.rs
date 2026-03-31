@@ -18,6 +18,7 @@
 //! - `verter_session` orchestrates materialization and scheduling
 
 pub mod db;
+pub mod extract;
 pub mod facts;
 pub mod query;
 pub mod refs;
