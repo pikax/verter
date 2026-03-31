@@ -1,7 +1,7 @@
 //! Host/source-loading boundary for type expansion.
 //!
 //! [`TypeExpansionHost`] is a synchronous trait implemented by the source-of-truth
-//! owner (likely `verter_host`). It provides coherent snapshots of SFC state.
+//! owner (likely `verter_session`). It provides coherent snapshots of SFC state.
 //!
 //! The host trait is sync on purpose:
 //! - it reads already-materialized host state
@@ -19,9 +19,9 @@ use crate::type_expansion::TypeExpansionError;
 
 /// Provides coherent SFC snapshots for artifact construction.
 ///
-/// Implemented by the source-of-truth owner (e.g., `verter_host::VerterHost`).
+/// Implemented by the source-of-truth owner (e.g., `verter_session::VerterHost`).
 /// Defined in `verter_resolver` so the resolver can consume it without
-/// depending on `verter_host`.
+/// depending on `verter_session`.
 pub trait TypeExpansionHost: Send + Sync {
     /// Obtain a coherent snapshot of the SFC at the given canonical ID.
     ///

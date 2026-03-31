@@ -12,7 +12,7 @@ description = "Benchmarks and examples for verter_core"
 [features]
 hotpath = [
   "verter_core/hotpath",
-  "verter_host/hotpath",
+  "verter_session/hotpath",
   "verter_diagnostics/hotpath",
   "dep:hotpath",
   "hotpath/hotpath",
@@ -21,8 +21,8 @@ hotpath-alloc = ["verter_core/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"
 
 [dependencies]
 verter_core = { path = "../verter_core", features = ["bench"] }
-verter_host = { path = "../verter_host" }
-verter_vfs = { path = "../verter_vfs" }
+verter_session = { path = "../verter_session" }
+verter_workspace = { path = "../verter_workspace" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_analysis = { path = "../verter_analysis" }
 verter_span = { path = "../verter_span" }

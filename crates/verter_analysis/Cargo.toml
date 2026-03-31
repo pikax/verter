@@ -15,7 +15,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 [dependencies]
 verter_span = { path = "../verter_span" }
 hotpath = { version = "0.13", optional = true }
-verter_vfs = { path = "../verter_vfs" }
+verter_workspace = { path = "../verter_workspace" }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }

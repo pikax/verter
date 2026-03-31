@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
 use verter_diagnostics::{Linter, Severity};
-use verter_host::VerterHost;
+use verter_session::VerterHost;
 
 use crate::config::McpServerConfig;
 use crate::helpers::{
@@ -206,7 +206,7 @@ pub struct VerterMcpServer {
 // ── Helper: build ScriptAnalysisSnapshot from host FileAnalysisSnapshot ──
 
 fn build_script_snapshot(
-    analysis: &verter_host::FileAnalysisSnapshot,
+    analysis: &verter_session::FileAnalysisSnapshot,
 ) -> verter_analysis::types::ScriptAnalysisSnapshot {
     verter_analysis::types::ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
@@ -331,13 +331,13 @@ impl VerterMcpServer {
                 .map_err(|e| mcp_err(format!("Cannot read {}: {}", canonical, e)))?,
         };
         let file_kind = if canonical.ends_with(".vue") {
-            verter_host::FileKind::VueSfc
+            verter_session::FileKind::VueSfc
         } else {
-            verter_host::FileKind::NonSfc
+            verter_session::FileKind::NonSfc
         };
         let result = self
             .host
-            .upsert(verter_host::UpsertRequest {
+            .upsert(verter_session::UpsertRequest {
                 canonical_id: Some(canonical.clone()),
                 input_id: canonical.clone(),
                 source: Arc::from(source.as_str()),
@@ -592,7 +592,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -779,7 +779,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -835,7 +835,7 @@ impl VerterMcpServer {
         }
 
         let response = serde_json::json!({
-            "files_checked": files.iter().filter(|(_, k)| *k == verter_host::FileKind::VueSfc).count(),
+            "files_checked": files.iter().filter(|(_, k)| *k == verter_session::FileKind::VueSfc).count(),
             "summary": {
                 "errors": total_errors,
                 "warnings": total_warnings,
@@ -922,7 +922,7 @@ impl VerterMcpServer {
         let canonical = self.resolve(&params.path);
         ensure_loaded(&self.host, &canonical)?;
 
-        let profile = verter_host::CompileProfile {
+        let profile = verter_session::CompileProfile {
             is_production: params.production.unwrap_or(false),
             source_map: params.source_map.unwrap_or(false),
             force_vapor: params.vapor.unwrap_or(false),
@@ -931,11 +931,11 @@ impl VerterMcpServer {
 
         let mut outputs = serde_json::Map::new();
         for node_kind in [
-            verter_host::VirtualNodeKind::Main,
-            verter_host::VirtualNodeKind::Script,
-            verter_host::VirtualNodeKind::Template,
+            verter_session::VirtualNodeKind::Main,
+            verter_session::VirtualNodeKind::Script,
+            verter_session::VirtualNodeKind::Template,
         ] {
-            if let Ok(resp) = self.host.get_virtual_file(verter_host::VirtualQuery {
+            if let Ok(resp) = self.host.get_virtual_file(verter_session::VirtualQuery {
                 raw_id: None,
                 canonical_id: Some(canonical.clone()),
                 node_kind: Some(node_kind.clone()),
@@ -953,8 +953,8 @@ impl VerterMcpServer {
         }
 
         for i in 0..4 {
-            let node_kind = verter_host::VirtualNodeKind::Style { index: i };
-            if let Ok(resp) = self.host.get_virtual_file(verter_host::VirtualQuery {
+            let node_kind = verter_session::VirtualNodeKind::Style { index: i };
+            if let Ok(resp) = self.host.get_virtual_file(verter_session::VirtualQuery {
                 raw_id: None,
                 canonical_id: Some(canonical.clone()),
                 node_kind: Some(node_kind),
@@ -989,8 +989,8 @@ impl VerterMcpServer {
 
         let strict_slots = params.strict_slots.unwrap_or(self.config.strict_slots);
 
-        let profile = verter_host::CompileProfile {
-            target: verter_host::CompileTarget::IDE,
+        let profile = verter_session::CompileProfile {
+            target: verter_session::CompileTarget::IDE,
             strict_slots,
             ..Default::default()
         };
@@ -1025,7 +1025,7 @@ impl VerterMcpServer {
         let root_resolved = params.root.as_ref().map(|r| self.resolve(r));
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .filter(|(id, _)| {
                 root_resolved
                     .as_ref()
@@ -1070,7 +1070,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_files: HashSet<String> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -1135,7 +1135,7 @@ impl VerterMcpServer {
         let mut injects: HashMap<String, Vec<String>> = HashMap::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if *kind != verter_session::FileKind::VueSfc {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -1206,7 +1206,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -1251,7 +1251,7 @@ impl VerterMcpServer {
 
         // Check prop usage against definitions
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if *kind != verter_session::FileKind::VueSfc {
                 continue;
             }
             if let Some(path) = &params.path {
@@ -1497,7 +1497,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_files: Vec<_> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .collect();
 
         let mut quality_scores: Vec<(String, u32)> = Vec::new();
@@ -1583,7 +1583,7 @@ impl VerterMcpServer {
             "overview": {
                 "total_files": files.len(),
                 "vue_files": vue_files.len(),
-                "script_deps": files.iter().filter(|(_, k)| *k == verter_host::FileKind::NonSfc).count(),
+                "script_deps": files.iter().filter(|(_, k)| *k == verter_session::FileKind::NonSfc).count(),
             },
             "component_stats": {
                 "avg_quality_score": avg_score,
@@ -1937,7 +1937,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2013,7 +2013,7 @@ impl VerterMcpServer {
         let mut targets: Vec<serde_json::Value> = Vec::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if *kind != verter_session::FileKind::VueSfc {
                 continue;
             }
             if let Some(path) = &params.path {
@@ -2349,7 +2349,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2416,7 +2416,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2468,7 +2468,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2717,7 +2717,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
 
@@ -2750,7 +2750,7 @@ impl VerterMcpServer {
         let filter_id = params.path.as_ref().map(|p| self.resolve(p));
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if *kind != verter_session::FileKind::VueSfc {
                 continue;
             }
             if let Some(ref filter) = filter_id {
@@ -2819,7 +2819,7 @@ impl VerterMcpServer {
         let mut used_callees: HashSet<String> = HashSet::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if *kind != verter_session::FileKind::VueSfc {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -2885,7 +2885,7 @@ impl VerterMcpServer {
         let mut consumer_files: Vec<serde_json::Value> = Vec::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if *kind != verter_session::FileKind::VueSfc {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -2998,7 +2998,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .map(|(id, _)| id.as_str())
             .collect();
 
@@ -3084,7 +3084,7 @@ const CLIENT_ONLY_HOOKS: &[VueApiClassification] = &[
 ];
 
 /// Compute SSR readiness score (0-100) for a component.
-fn compute_ssr_readiness(analysis: &verter_host::FileAnalysisSnapshot) -> serde_json::Value {
+fn compute_ssr_readiness(analysis: &verter_session::FileAnalysisSnapshot) -> serde_json::Value {
     let mut score: i32 = 100;
     let mut issues = Vec::new();
 
@@ -3170,7 +3170,7 @@ fn compute_ssr_readiness(analysis: &verter_host::FileAnalysisSnapshot) -> serde_
 }
 
 /// Build an ordered migration plan for SSR safety.
-fn build_ssr_migration_plan(analysis: &verter_host::FileAnalysisSnapshot) -> serde_json::Value {
+fn build_ssr_migration_plan(analysis: &verter_session::FileAnalysisSnapshot) -> serde_json::Value {
     let mut steps = Vec::new();
     let mut priority = 1u32;
 
@@ -3337,15 +3337,15 @@ impl ServerHandler for VerterMcpServer {
 mod tests {
     use super::*;
     use verter_analysis::types::TypeResolutionSource;
-    use verter_host::{HostConfig, UpsertRequest};
+    use verter_session::{HostConfig, UpsertRequest};
 
     fn make_host() -> Arc<VerterHost> {
         Arc::new(VerterHost::new_standalone(HostConfig::default()))
     }
 
     fn make_host_with_workspace(roots: Vec<String>) -> Arc<VerterHost> {
-        let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-            verter_vfs::FilesystemOptions {
+        let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions {
                 roots,
                 eager_preload: false,
             },
@@ -3358,15 +3358,15 @@ mod tests {
             canonical_id: Some(id.to_string()),
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: verter_host::FileKind::VueSfc,
+            file_kind: verter_session::FileKind::VueSfc,
             aliases: vec![],
         });
     }
 
     fn compile_analysis(host: &VerterHost, id: &str) {
-        let profile = verter_host::CompileProfile {
-            target: verter_host::CompileTarget::ANALYSIS,
-            ..verter_host::CompileProfile::default()
+        let profile = verter_session::CompileProfile {
+            target: verter_session::CompileTarget::ANALYSIS,
+            ..verter_session::CompileProfile::default()
         };
         let _ = host.ensure_compiled(id, &profile);
     }

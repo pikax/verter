@@ -50,32 +50,32 @@ pub(super) struct BackgroundInitArgs {
     pub(super) mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
     /// VFS workspace handle — populated during background_init with a FilesystemWorkspace.
     pub(super) vfs_workspace:
-        Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
+        Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
 }
 
 struct PublishedWorkspaceBuild {
-    root: verter_vfs::PublishedRoot,
+    root: verter_workspace::PublishedRoot,
     trust_required: Vec<crate::vite_config::ViteConfigTrustInfo>,
     configured_projects: Vec<(String, String)>,
 }
 
 fn build_published_workspace(
-    ws: &verter_vfs::FilesystemWorkspace,
+    ws: &verter_workspace::FilesystemWorkspace,
     canonical_roots: &[String],
     vite_opts: &crate::vite_config::ViteConfigOptions,
     generation: u64,
     init_lint_opts: Option<serde_json::Value>,
     conditional_root_narrowing: bool,
 ) -> PublishedWorkspaceBuild {
-    let vfs_vite_opts = verter_vfs::ViteConfigOptions {
+    let vfs_vite_opts = verter_workspace::ViteConfigOptions {
         enabled: vite_opts.enabled,
         trusted_files: vite_opts.trusted_files.clone(),
         node_path: vite_opts.node_path.clone(),
     };
-    let build = verter_vfs::build_workspace_snapshot(
+    let build = verter_workspace::build_workspace_snapshot(
         ws,
         canonical_roots,
-        verter_vfs::workspace_snapshot::SnapshotGeneration(generation),
+        verter_workspace::workspace_snapshot::SnapshotGeneration(generation),
         &vfs_vite_opts,
     );
     let trust_required: Vec<crate::vite_config::ViteConfigTrustInfo> = build
@@ -101,18 +101,19 @@ fn build_published_workspace(
         .projects
         .iter()
         .filter_map(|project| match &project.payload {
-            verter_vfs::workspace_snapshot::ProjectPayload::Configured {
-                tsconfig_path, ..
+            verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                tsconfig_path,
+                ..
             } => Some((
                 project.root.as_str().to_string(),
                 tsconfig_path.as_str().to_string(),
             )),
-            verter_vfs::workspace_snapshot::ProjectPayload::Fallback { .. } => None,
+            verter_workspace::workspace_snapshot::ProjectPayload::Fallback { .. } => None,
         })
         .collect();
 
     PublishedWorkspaceBuild {
-        root: verter_vfs::PublishedRoot::with_ext(snapshot, Box::new(views)),
+        root: verter_workspace::PublishedRoot::with_ext(snapshot, Box::new(views)),
         trust_required,
         configured_projects,
     }
@@ -167,14 +168,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         match existing {
             Some(ws) => ws,
             None => {
-                let new_ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
-                    verter_vfs::FilesystemOptions {
+                let new_ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+                    verter_workspace::FilesystemOptions {
                         roots: canonical_roots.clone(),
                         eager_preload: false,
                     },
                 ));
-                new_ws.set_project_graph(verter_vfs::ProjectGraph::new());
-                let ws_dyn: Arc<dyn verter_vfs::WorkspaceAccess> = new_ws.clone();
+                new_ws.set_project_graph(verter_workspace::ProjectGraph::new());
+                let ws_dyn: Arc<dyn verter_workspace::WorkspaceAccess> = new_ws.clone();
                 host.set_workspace(ws_dyn);
                 *vfs_workspace.write() = Some(Arc::clone(&new_ws));
                 tracing::info!(
@@ -242,7 +243,8 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let _ = tp.update_workspace_folders(added, vec![]).await;
 
         for (project_root, tsconfig_path) in &configured_projects {
-            if let Some((base_url, paths)) = verter_vfs::config::raw_paths_json(&*ws, tsconfig_path)
+            if let Some((base_url, paths)) =
+                verter_workspace::config::raw_paths_json(&*ws, tsconfig_path)
             {
                 tracing::info!(
                     "configuring tsserver paths for {} via {} (baseUrl: {})",
@@ -571,7 +573,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 pub(super) async fn drain_pending_snapshot_provider_sync(
     project_sync: Option<&ProjectSync>,
     documents: &DocumentRegistry,
-    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     pending_snapshot_provider_sync: &DashSet<String>,
     is_tsgo: bool,
@@ -650,7 +652,7 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
 pub(super) async fn resync_aliased_imports_for_open_files(
     documents: &DocumentRegistry,
     project_sync: Option<&ProjectSync>,
-    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     is_tsgo: bool,
 ) -> bool {
@@ -995,8 +997,9 @@ pub(super) fn owner_path_config_for_source(
 ) -> Option<(String, serde_json::Value)> {
     let owner = snapshot.resolver.owner_for_file(canonical_id)?;
     let tsconfig_path = owner.tsconfig_path.as_deref()?;
-    let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
-    verter_vfs::config::raw_paths_json(&ws, tsconfig_path)
+    let ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    verter_workspace::config::raw_paths_json(&ws, tsconfig_path)
 }
 
 pub(crate) async fn configure_provider_paths_for_source(
@@ -1181,11 +1184,11 @@ pub(super) async fn sync_pending_non_vue_provider_file(
     let module_references = block_in_place_if_available(|| {
         documents
             .host
-            .upsert(verter_host::UpsertRequest {
+            .upsert(verter_session::UpsertRequest {
                 canonical_id: Some(canonical_id.to_string()),
                 input_id: canonical_id.to_string(),
                 source: source.clone(),
-                file_kind: verter_host::FileKind::NonSfc,
+                file_kind: verter_session::FileKind::NonSfc,
                 aliases: Vec::new(),
             })
             .map(|result| result.module_references)
@@ -1226,7 +1229,7 @@ pub(super) async fn sync_pending_non_vue_provider_file(
                 prepared
                     .resolved_dependencies
                     .iter()
-                    .map(|entry| verter_host::DependencyResolution {
+                    .map(|entry| verter_session::DependencyResolution {
                         specifier: entry.provider_specifier.clone(),
                         resolved_canonical_id: Some(entry.source_id.clone()),
                         possible_canonical_ids: Vec::new(),
@@ -1339,7 +1342,7 @@ pub(super) fn materialize_verter_types(roots: &[String]) -> MaterializeVerterTyp
         if !pkg_path.exists() || is_generated_verter_types_stub(&types_dir) {
             match std::fs::create_dir_all(&types_dir) {
                 Ok(()) => {
-                    let dts = verter_host::VERTER_TYPES_STANDALONE_DTS;
+                    let dts = verter_session::VERTER_TYPES_STANDALONE_DTS;
                     let pkg = r#"{"name":"@verter/types","types":"index.d.ts"}"#;
                     let dts_written = match write_if_changed(&types_dir.join("index.d.ts"), dts) {
                         Ok(w) => w,
@@ -1401,7 +1404,9 @@ mod tests {
         )
         .expect("source file should be written");
 
-        let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+        let ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
         let build = build_published_workspace(
             &ws,
             std::slice::from_ref(&root),
@@ -1429,7 +1434,7 @@ mod tests {
                     .root
                     .snapshot
                     .configured_owner_resolution_for_file(&app_path),
-                verter_vfs::ConfiguredOwnerResolution::Unique(_)
+                verter_workspace::ConfiguredOwnerResolution::Unique(_)
             ),
             "exact snapshot builder should materialize include-owned files before publish"
         );

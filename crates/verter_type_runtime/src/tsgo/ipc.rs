@@ -3467,27 +3467,29 @@ const count: number = 42;
   <div>{{ msg }} {{ count }}</div>
 </template>"#;
 
-        // Generate TSX using verter_host — upsert then trigger compilation via get_virtual_file
-        let host = verter_host::VerterHost::new_standalone(verter_host::HostConfig::default());
-        let _ = host.upsert(verter_host::UpsertRequest {
+        // Generate TSX using verter_session — upsert then trigger compilation via get_virtual_file
+        let host =
+            verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
+        let _ = host.upsert(verter_session::UpsertRequest {
             canonical_id: Some("App.vue".to_string()),
             input_id: "App.vue".to_string(),
             source: std::sync::Arc::from(vue_source),
-            file_kind: verter_host::FileKind::VueSfc,
+            file_kind: verter_session::FileKind::VueSfc,
             aliases: vec![],
         });
 
         // Trigger compilation (upsert only parses; get_virtual_file compiles lazily)
-        let profile = verter_host::CompileProfile {
+        let profile = verter_session::CompileProfile {
             source_map: true,
-            target: verter_host::CompileTarget::IDE | verter_host::CompileTarget::TEMPLATE_DATA,
+            target: verter_session::CompileTarget::IDE
+                | verter_session::CompileTarget::TEMPLATE_DATA,
             ..Default::default()
         };
         let _compiled = host
-            .get_virtual_file(verter_host::VirtualQuery {
+            .get_virtual_file(verter_session::VirtualQuery {
                 raw_id: None,
                 canonical_id: Some("App.vue".to_string()),
-                node_kind: Some(verter_host::VirtualNodeKind::Main),
+                node_kind: Some(verter_session::VirtualNodeKind::Main),
                 compile_profile: profile.clone(),
             })
             .expect("compilation should succeed");
@@ -3764,26 +3766,28 @@ const count: number = 42;
             return None;
         }
 
-        let host = verter_host::VerterHost::new_standalone(verter_host::HostConfig::default());
+        let host =
+            verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
         let file_id = format!("{}.vue", file_stem);
-        let _ = host.upsert(verter_host::UpsertRequest {
+        let _ = host.upsert(verter_session::UpsertRequest {
             canonical_id: Some(file_id.clone()),
             input_id: file_id.clone(),
             source: std::sync::Arc::from(vue_source),
-            file_kind: verter_host::FileKind::VueSfc,
+            file_kind: verter_session::FileKind::VueSfc,
             aliases: vec![],
         });
-        let profile = verter_host::CompileProfile {
+        let profile = verter_session::CompileProfile {
             source_map: false,
-            target: verter_host::CompileTarget::IDE | verter_host::CompileTarget::TEMPLATE_DATA,
+            target: verter_session::CompileTarget::IDE
+                | verter_session::CompileTarget::TEMPLATE_DATA,
             embed_ambient_types: false,
             ..Default::default()
         };
         let _ = host
-            .get_virtual_file(verter_host::VirtualQuery {
+            .get_virtual_file(verter_session::VirtualQuery {
                 raw_id: None,
                 canonical_id: Some(file_id.clone()),
-                node_kind: Some(verter_host::VirtualNodeKind::Main),
+                node_kind: Some(verter_session::VirtualNodeKind::Main),
                 compile_profile: profile.clone(),
             })
             .expect("compilation should succeed");
@@ -3828,26 +3832,28 @@ const count: number = 42;
 
     /// Helper: compile Vue SFC to TSX, return (code, source_map_json).
     fn compile_vue_to_tsx_with_map(vue_source: &str, file_stem: &str) -> (String, Option<String>) {
-        let host = verter_host::VerterHost::new_standalone(verter_host::HostConfig::default());
+        let host =
+            verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
         let file_id = format!("{}.vue", file_stem);
-        let _ = host.upsert(verter_host::UpsertRequest {
+        let _ = host.upsert(verter_session::UpsertRequest {
             canonical_id: Some(file_id.clone()),
             input_id: file_id.clone(),
             source: std::sync::Arc::from(vue_source),
-            file_kind: verter_host::FileKind::VueSfc,
+            file_kind: verter_session::FileKind::VueSfc,
             aliases: vec![],
         });
-        let profile = verter_host::CompileProfile {
+        let profile = verter_session::CompileProfile {
             source_map: true,
-            target: verter_host::CompileTarget::IDE | verter_host::CompileTarget::TEMPLATE_DATA,
+            target: verter_session::CompileTarget::IDE
+                | verter_session::CompileTarget::TEMPLATE_DATA,
             embed_ambient_types: false,
             ..Default::default()
         };
         let _ = host
-            .get_virtual_file(verter_host::VirtualQuery {
+            .get_virtual_file(verter_session::VirtualQuery {
                 raw_id: None,
                 canonical_id: Some(file_id.clone()),
-                node_kind: Some(verter_host::VirtualNodeKind::Main),
+                node_kind: Some(verter_session::VirtualNodeKind::Main),
                 compile_profile: profile.clone(),
             })
             .expect("compilation should succeed");
@@ -3997,7 +4003,7 @@ const props = withDefaults(defineProps({ bar: String }), {})
     /// Get the standalone @verter/types d.ts content from the compiled constant.
     /// This is the same content the LSP writes to node_modules.
     fn verter_types_standalone_dts() -> &'static str {
-        verter_host::VERTER_TYPES_STANDALONE_DTS
+        verter_session::VERTER_TYPES_STANDALONE_DTS
     }
 
     /// Create a test project with Vue types but WITHOUT @verter/types on disk.
@@ -4881,7 +4887,7 @@ const y: boolean = 42;
     /// @ai-generated — E2E: TSGO returns type diagnostics for Verter-generated TSX from a Vue SFC.
     ///
     /// Compiles a Vue SFC with a clear type error (assigning `{}` to a `const boolean`)
-    /// through verter_host to produce TSX, then feeds it to TSGO and verifies that
+    /// through verter_session to produce TSX, then feeds it to TSGO and verifies that
     /// pull diagnostics return the expected type error.
     ///
     /// This tests the full pipeline: Vue SFC → Verter TSX codegen → TSGO type check.

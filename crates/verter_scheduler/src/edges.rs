@@ -38,14 +38,14 @@ pub struct ExactResValue {
     pub possible_canonical_ids: Vec<String>,
 }
 
-/// Resolution phase discriminant (mirrors `verter_vfs::types::ResolvePhase`).
+/// Resolution phase discriminant (mirrors `verter_workspace::types::ResolvePhase`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolvePhase {
     CodegenBlocker,
     ProviderGraph,
 }
 
-/// Request kind discriminant (mirrors `verter_vfs::types::ResolveRequestKind`).
+/// Request kind discriminant (mirrors `verter_workspace::types::ResolveRequestKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolveRequestKind {
     EsmImport,

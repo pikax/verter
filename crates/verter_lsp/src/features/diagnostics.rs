@@ -1,12 +1,12 @@
-// Phase 2: Diagnostics — parse errors, macro validation from verter_host.
+// Phase 2: Diagnostics — parse errors, macro validation from verter_session.
 // Phase 3: Enhanced with type errors, unused variables, strict null checks from TypeProvider.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::{DiagnosticsSnapshot, HostDiagnostic, HostSeverity};
+use verter_session::{DiagnosticsSnapshot, HostDiagnostic, HostSeverity};
 
 use crate::documents::line_index::LineIndex;
 
-/// Convert a `DiagnosticsSnapshot` from verter_host into LSP `Diagnostic` items.
+/// Convert a `DiagnosticsSnapshot` from verter_session into LSP `Diagnostic` items.
 pub fn map_diagnostics(snapshot: &DiagnosticsSnapshot, line_index: &LineIndex) -> Vec<Diagnostic> {
     snapshot
         .diagnostics

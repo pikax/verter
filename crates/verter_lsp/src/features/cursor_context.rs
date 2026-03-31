@@ -1,5 +1,5 @@
 use oxc_span::GetSpan;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::sfc_scanner::{classify_cursor, SfcBlock, SfcCursorContext};
 

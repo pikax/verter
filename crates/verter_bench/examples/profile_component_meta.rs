@@ -29,8 +29,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use verter_analysis::AnalyzedMacroKind;
-use verter_host::{FileAnalysisSnapshot, HostConfig, VerterHost};
-use verter_vfs::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
+use verter_session::{FileAnalysisSnapshot, HostConfig, VerterHost};
+use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BootstrapMode {
@@ -421,7 +421,7 @@ fn make_host(project_root: &Path) -> io::Result<VerterHost> {
     ws.set_project_graph(graph_result.graph);
     let host = VerterHost::new(
         HostConfig {
-            analysis_level: verter_host::AnalysisLevel::Full,
+            analysis_level: verter_session::AnalysisLevel::Full,
             ..HostConfig::default()
         },
         Arc::new(ws),
@@ -522,7 +522,8 @@ fn run_component_meta_request(
 
     let (resolve_imported_elapsed, resolved_imported_types) = if include_resolve_imported {
         let resolve_started = Instant::now();
-        let resolved = host.resolve_component_meta(target_id, verter_host::ResolverMode::Expanded);
+        let resolved =
+            host.resolve_component_meta(target_id, verter_session::ResolverMode::Expanded);
         let resolved_count = resolved
             .map(|state| state.resolved_macros.len())
             .unwrap_or(0);

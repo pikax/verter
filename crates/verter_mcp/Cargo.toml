@@ -18,8 +18,8 @@ name = "verter-mcp"
 path = "src/main.rs"
 
 [dependencies]
-verter_host = { path = "../verter_host" }
-verter_vfs = { path = "../verter_vfs" }
+verter_session = { path = "../verter_session" }
+verter_workspace = { path = "../verter_workspace" }
 verter_analysis = { path = "../verter_analysis" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }

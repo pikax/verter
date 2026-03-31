@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
-use verter_host::{CompileProfile, FileKind, UpsertRequest, VerterHost};
+use verter_session::{CompileProfile, FileKind, UpsertRequest, VerterHost};
 
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
@@ -67,20 +67,20 @@ pub struct WorkspaceScannerConfig {
     /// Optional project sync for sending files to the type provider.
     pub project_sync: Option<ProjectSync>,
     /// VFS workspace for published resolver snapshot.
-    pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
+    pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
     /// Tracks provider materialization per source file (shared with server).
     pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// Whether the type provider is TSGO (affects sync strategy).
     pub is_tsgo: bool,
     /// Compile profile for IDE output.
     pub tsx_profile: CompileProfile,
-    /// Coverage patterns from `verter_vfs::config::discover_tsconfigs()` (e.g., `"C:/project/src/**"`).
+    /// Coverage patterns from `verter_workspace::config::discover_tsconfigs()` (e.g., `"C:/project/src/**"`).
     /// Legacy — used when `workspace_snapshot` is `None`.
     pub tsconfig_patterns: Vec<String>,
     /// Published workspace snapshot for ownership-based tier classification.
     /// When `Some`, `classify_from_snapshot()` is used instead of
     /// `classify_tiers()`. Generation-pinned at spawn time.
-    pub workspace_snapshot: Option<std::sync::Arc<verter_vfs::WorkspaceSnapshot>>,
+    pub workspace_snapshot: Option<std::sync::Arc<verter_workspace::WorkspaceSnapshot>>,
     /// Optional oneshot channel fired after the full scanner loop completes
     /// (both Phase 1 `.vue` files and Phase 2 non-Vue source files).
     /// Used by the server to send `$/verter/typeProviderSyncComplete`.
@@ -203,13 +203,13 @@ pub fn classify_tiers(paths: &[String], tsconfig_patterns: &[String]) -> Vec<(St
 /// `classify_tiers()` with exact ownership semantics.
 pub fn classify_from_snapshot(
     paths: &[String],
-    snapshot: &verter_vfs::WorkspaceSnapshot,
+    snapshot: &verter_workspace::WorkspaceSnapshot,
 ) -> Vec<(String, Tier)> {
     paths
         .iter()
         .map(|path| {
             let tier = match snapshot.configured_owner_resolution_for_file(path) {
-                verter_vfs::ConfiguredOwnerResolution::None => Tier::Other,
+                verter_workspace::ConfiguredOwnerResolution::None => Tier::Other,
                 _ => Tier::ProjectSource, // Unique or Ambiguous → both are configured
             };
             (path.clone(), tier)
@@ -509,7 +509,7 @@ pub(crate) async fn resync_non_vue_file(
     canonical_id: &str,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
-    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) {
@@ -541,7 +541,7 @@ async fn sync_non_vue_file_to_provider(
     canonical_id: &str,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
-    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) -> Vec<crate::project_resolver::ResolveResult> {
@@ -652,7 +652,7 @@ async fn sync_non_vue_file_to_provider(
             prepared
                 .resolved_dependencies
                 .iter()
-                .map(|entry| verter_host::DependencyResolution {
+                .map(|entry| verter_session::DependencyResolution {
                     specifier: entry.provider_specifier.clone(),
                     resolved_canonical_id: Some(entry.source_id.clone()),
                     possible_canonical_ids: Vec::new(),
@@ -673,7 +673,7 @@ async fn follow_node_modules_deps(
     initial_deps: Vec<crate::project_resolver::ResolveResult>,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
-    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
     node_modules_synced: &mut HashSet<String>,
@@ -731,7 +731,7 @@ async fn sync_file_to_provider(
     host: &VerterHost,
     profile: &CompileProfile,
     sync: &ProjectSync,
-    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>,
+    vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) {
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[tokio::test]
     async fn scanner_assigns_each_vue_to_exactly_one_owner_project() {
-        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
         let canonical_id = "/workspace/pkg-a/src/App.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1119,7 +1119,7 @@ mod tests {
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
-            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
             ..CompileProfile::default()
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
@@ -1178,7 +1178,7 @@ mod tests {
 
     #[tokio::test]
     async fn scanner_routes_unmatched_files_to_workspace_project_only() {
-        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
         let canonical_id = "/workspace/scripts/Tool.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1188,7 +1188,7 @@ mod tests {
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
-            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
             ..CompileProfile::default()
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[tokio::test]
     async fn scanner_syncs_vue_ide_artifact_for_tsgo() {
-        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
         let canonical_id = "/workspace/src/App.vue";
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
@@ -1276,7 +1276,7 @@ defineProps<{ msg: string }>()
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
-            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
             ..CompileProfile::default()
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
@@ -1347,7 +1347,7 @@ defineProps<{ msg: string }>()
 
         let canonical_id = root.join("src").join("App.vue");
         let canonical_id = canonical_id.to_string_lossy().replace('\\', "/");
-        let host = VerterHost::new_standalone(verter_host::HostConfig::default());
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
@@ -1361,7 +1361,7 @@ import Child from '@/Child.vue'
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
-            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
             ..CompileProfile::default()
         };
         assert!(host.ensure_compiled(&canonical_id, &profile).is_ok());
@@ -1400,10 +1400,14 @@ import Child from '@/Child.vue'
                 .is_some(),
             "resolver should match the Vue file to the temp tsconfig owner"
         );
-        let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
-        let (expected_base_url, expected_paths) =
-            verter_vfs::config::raw_paths_json(&ws, &root.join("tsconfig.json").to_string_lossy())
-                .expect("raw_paths_json should read the temp tsconfig");
+        let ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
+        let (expected_base_url, expected_paths) = verter_workspace::config::raw_paths_json(
+            &ws,
+            &root.join("tsconfig.json").to_string_lossy(),
+        )
+        .expect("raw_paths_json should read the temp tsconfig");
 
         sync_file_to_provider(
             &canonical_id,
@@ -1622,8 +1626,8 @@ import Child from '@/Child.vue'
 
     #[test]
     fn classify_from_snapshot_configured_is_project_source() {
-        use verter_vfs::workspace_snapshot::*;
-        use verter_vfs::{
+        use verter_workspace::workspace_snapshot::*;
+        use verter_workspace::{
             CanonicalPath, ConfiguredMembership, FallbackMembership, NormalizedGlob,
             ProjectResolver, StaticMembershipSpec,
         };
@@ -1679,8 +1683,8 @@ import Child from '@/Child.vue'
 
     #[test]
     fn classify_from_snapshot_outside_all_projects_is_other() {
-        use verter_vfs::workspace_snapshot::*;
-        use verter_vfs::ProjectResolver;
+        use verter_workspace::workspace_snapshot::*;
+        use verter_workspace::ProjectResolver;
 
         let snap = WorkspaceSnapshot {
             projects: vec![],
@@ -1695,8 +1699,8 @@ import Child from '@/Child.vue'
 
     #[test]
     fn classify_from_snapshot_node_modules_is_other() {
-        use verter_vfs::workspace_snapshot::*;
-        use verter_vfs::{
+        use verter_workspace::workspace_snapshot::*;
+        use verter_workspace::{
             CanonicalPath, ConfiguredMembership, ProjectResolver, StaticMembershipSpec,
         };
 

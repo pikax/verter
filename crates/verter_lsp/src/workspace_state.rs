@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use verter_diagnostics::{Linter, ResolvedLintConfig};
-use verter_vfs::workspace_snapshot::ProjectId;
+use verter_workspace::workspace_snapshot::ProjectId;
 
 use crate::vite_config::ViteConfigTrustInfo;
 
@@ -86,7 +86,7 @@ impl LspViews {
     /// ambiguously owned.
     pub fn linter_view_for_file(
         &self,
-        snapshot: &verter_vfs::WorkspaceSnapshot,
+        snapshot: &verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> Option<&LspProjectView> {
         snapshot
@@ -100,7 +100,7 @@ impl LspViews {
     /// is unowned or ambiguously owned.
     pub fn find_project_root<'a>(
         &self,
-        snapshot: &'a verter_vfs::WorkspaceSnapshot,
+        snapshot: &'a verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> Option<&'a str> {
         snapshot
@@ -115,7 +115,7 @@ impl LspViews {
     /// Tier 3: Inherit from project `ssr_enabled`
     pub fn is_ssr_context(
         &self,
-        snapshot: &verter_vfs::WorkspaceSnapshot,
+        snapshot: &verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> bool {
         // Tier 1/2: filename suffix override
@@ -139,7 +139,7 @@ impl LspViews {
 /// For each `OwnershipProject`, discovers lint config from the project root
 /// and detects SSR projects.
 pub fn build_lsp_views(
-    snapshot: &verter_vfs::WorkspaceSnapshot,
+    snapshot: &verter_workspace::WorkspaceSnapshot,
     trust_required: Vec<ViteConfigTrustInfo>,
 ) -> LspViews {
     let mut project_views = Vec::with_capacity(snapshot.projects.len());
@@ -226,10 +226,10 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 mod tests {
     use super::*;
     use crate::vite_config::ViteConfigTrustInfo;
-    use verter_vfs::workspace_snapshot::{
+    use verter_workspace::workspace_snapshot::{
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
-    use verter_vfs::{CanonicalPath, FallbackMembership, NormalizedGlob, ProjectResolver};
+    use verter_workspace::{CanonicalPath, FallbackMembership, NormalizedGlob, ProjectResolver};
 
     fn fallback_project(id: u32, root: &str) -> OwnershipProject {
         let root_cp = CanonicalPath::new(root);
@@ -262,8 +262,8 @@ mod tests {
             workspace_root: root_cp.clone(),
             payload: ProjectPayload::Configured {
                 tsconfig_path: CanonicalPath::new(tsconfig),
-                membership: verter_vfs::ConfiguredMembership {
-                    spec: verter_vfs::StaticMembershipSpec {
+                membership: verter_workspace::ConfiguredMembership {
+                    spec: verter_workspace::StaticMembershipSpec {
                         files: files.iter().map(|f| CanonicalPath::new(f)).collect(),
                         include: Vec::new(),
                         exclude: Vec::new(),

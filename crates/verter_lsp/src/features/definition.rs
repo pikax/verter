@@ -1,4 +1,4 @@
-// Go-to-definition: span-based navigation from verter_host analysis.
+// Go-to-definition: span-based navigation from verter_session analysis.
 //
 // Supports navigation from:
 // - Template bindings → script declarations
@@ -11,7 +11,7 @@
 use tower_lsp_server::ls_types::*;
 use verter_analysis::types::{DomQueryCallSite, DomQueryKind};
 use verter_analysis::{match_selector, MatchResult};
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
@@ -741,7 +741,7 @@ fn dom_query_definition(
     let template = analysis.template.as_deref()?;
     let elements = &template.elements;
 
-    // DomQueryCallSite spans are SFC-absolute (adjusted by verter_host during analysis)
+    // DomQueryCallSite spans are SFC-absolute (adjusted by verter_session during analysis)
     let call = analysis
         .dom_query_calls
         .iter()

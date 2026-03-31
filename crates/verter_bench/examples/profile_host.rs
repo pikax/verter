@@ -20,10 +20,10 @@ use std::sync::Arc;
 
 use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
 use verter_diagnostics::{LintConfig, Linter};
-use verter_host::{
+use verter_session::{
     CompileProfile, CompileTarget, FileAnalysisSnapshot, HostConfig, UpsertRequest, VerterHost,
 };
-use verter_vfs::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
+use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 struct VueFile {
     canonical_id: String,
@@ -235,7 +235,7 @@ fn main() {
                 canonical_id: Some(file.canonical_id.clone()),
                 input_id: file.canonical_id.clone(),
                 source: Arc::from(file.content.as_str()),
-                file_kind: verter_host::FileKind::VueSfc,
+                file_kind: verter_session::FileKind::VueSfc,
                 aliases: Vec::new(),
             };
             if host.upsert(req).is_ok() {

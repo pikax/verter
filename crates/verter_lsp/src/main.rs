@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
-use verter_host::{HostConfig, VerterHost};
 use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
@@ -11,6 +10,7 @@ use verter_lsp::tsgo::traits::TypeProvider;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
 use verter_lsp::tsserver::resilient as tsserver_resilient;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
+use verter_session::{HostConfig, VerterHost};
 
 #[tokio::main]
 async fn main() {
@@ -42,7 +42,7 @@ async fn main() {
     let stdout = tokio::io::stdout();
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        analysis_level: verter_host::AnalysisLevel::Full,
+        analysis_level: verter_session::AnalysisLevel::Full,
         ..HostConfig::default()
     }));
 

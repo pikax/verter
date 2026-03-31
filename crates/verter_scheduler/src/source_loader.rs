@@ -6,7 +6,7 @@
 //! - [`MemorySourceLoader`] — in-memory map (tests, WASM, playground)
 //! - [`DiskSourceLoader`] — overlay + disk via NativeFs (native builds)
 //!
-//! **Note**: This trait mirrors [`verter_vfs::SourceLoader`] but is defined
+//! **Note**: This trait mirrors [`verter_workspace::SourceLoader`] but is defined
 //! separately to keep `verter_scheduler` free of VFS dependencies. The VFS
 //! trait is the canonical definition; this is a scheduler-local copy.
 

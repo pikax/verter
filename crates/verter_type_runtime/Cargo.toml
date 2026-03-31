@@ -19,6 +19,6 @@ verter_span = { path = "../verter_span" }
 
 [features]
 default = []
-# Enables LSP-integration tests that depend on verter_host and LSP internals.
+# Enables LSP-integration tests that depend on verter_session and LSP internals.
 # Not enabled by default — only used when running tests from verter_lsp context.
 __lsp_tests = []

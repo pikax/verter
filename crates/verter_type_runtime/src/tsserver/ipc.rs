@@ -2174,14 +2174,14 @@ pub fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
     }
 }
 
-// Integration tests that depend on verter_host stay in verter_lsp.
+// Integration tests that depend on verter_session stay in verter_lsp.
 #[cfg(all(test, feature = "__lsp_tests"))]
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use verter_host::{
+    use verter_session::{
         CompileProfile, CompileTarget, FileKind, HostConfig, UpsertRequest, VerterHost,
         VirtualNodeKind, VirtualQuery,
     };
@@ -2345,7 +2345,7 @@ mod tests {
         }
 
         std::fs::create_dir_all(&types_dir)?;
-        std::fs::write(&index_path, verter_host::VERTER_TYPES_STANDALONE_DTS)?;
+        std::fs::write(&index_path, verter_session::VERTER_TYPES_STANDALONE_DTS)?;
         std::fs::write(
             &pkg_path,
             r#"{"name":"@verter/types","types":"index.d.ts"}"#,

@@ -1449,7 +1449,7 @@ fn test_dom_query_selector_no_match() {
 
     let parsed = parse_selector(".missing").unwrap();
 
-    // Use SFC-absolute offsets (spans are adjusted by verter_host during analysis)
+    // Use SFC-absolute offsets (spans are adjusted by verter_session during analysis)
     let qs_str_start = source.find("'.missing'").unwrap();
     let arg_start = qs_str_start + 1;
     let arg_end = arg_start + ".missing".len();
@@ -1534,7 +1534,7 @@ fn test_dom_query_selector_falls_back_to_css() {
 
     let parsed = parse_selector(".btn").unwrap();
 
-    // Use SFC-absolute offsets (spans are adjusted by verter_host during analysis)
+    // Use SFC-absolute offsets (spans are adjusted by verter_session during analysis)
     let qs_str_start = source.find("'.btn'").unwrap();
     let arg_start = qs_str_start + 1;
     let arg_end = arg_start + ".btn".len();

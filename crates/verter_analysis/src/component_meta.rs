@@ -1,7 +1,7 @@
 //! Component metadata extraction from analysis snapshots.
 //!
 //! Pure analysis-domain types and extraction logic for component-meta.
-//! This module does NOT depend on `verter_host` — all resolved data
+//! This module does NOT depend on `verter_session` — all resolved data
 //! is pre-supplied via [`ComponentMetaInput`].
 //!
 //! # Ownership boundary

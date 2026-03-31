@@ -1,7 +1,7 @@
 // Workspace symbols: aggregate symbols across all indexed Vue files.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::VerterHost;
+use verter_session::VerterHost;
 
 /// Search for workspace symbols matching a query string.
 ///
@@ -16,7 +16,7 @@ pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformatio
     let mut symbols = Vec::new();
 
     for (canonical_id, file_kind) in &file_list {
-        if *file_kind != verter_host::FileKind::VueSfc {
+        if *file_kind != verter_session::FileKind::VueSfc {
             continue;
         }
 

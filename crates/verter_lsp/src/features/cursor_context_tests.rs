@@ -1,7 +1,7 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_analysis::template::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 use verter_span::Span;
 
 // =============================================================================

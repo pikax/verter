@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 ///
 /// Delegates to VFS config.
 pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
-    let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
-    verter_vfs::config::has_solution_style_tsconfig(&ws, &workspace_root.to_string_lossy())
+    let ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    verter_workspace::config::has_solution_style_tsconfig(&ws, &workspace_root.to_string_lossy())
 }
 
 pub use verter_diagnostics::{
@@ -379,22 +380,26 @@ impl ProjectRegistry {
         let mut trust_required = Vec::new();
 
         for root_uri in roots {
-            let canonical = verter_vfs::resolver::normalize_canonical_id(
+            let canonical = verter_workspace::resolver::normalize_canonical_id(
                 &crate::documents::uri_to_canonical_id_from_str(root_uri),
             );
             let root_path = PathBuf::from(&canonical);
 
             // Discover tsconfigs under this root (VFS config)
-            let discovered = verter_vfs::config::discover_tsconfigs(&root_path);
+            let discovered = verter_workspace::config::discover_tsconfigs(&root_path);
 
             for entry in &discovered {
                 let project_root = entry.root.clone();
                 let project_root_path = PathBuf::from(&project_root);
-                let ws =
-                    verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
-                let membership = verter_vfs::config::load_project_membership(&ws, &entry.path);
-                let compiler_options = verter_vfs::config::load_compiler_options(&ws, &entry.path);
-                let references = verter_vfs::config::load_project_references(&ws, &entry.path);
+                let ws = verter_workspace::FilesystemWorkspace::new(
+                    verter_workspace::FilesystemOptions::default(),
+                );
+                let membership =
+                    verter_workspace::config::load_project_membership(&ws, &entry.path);
+                let compiler_options =
+                    verter_workspace::config::load_compiler_options(&ws, &entry.path);
+                let references =
+                    verter_workspace::config::load_project_references(&ws, &entry.path);
                 // Tsconfig-backed projects use tsconfig paths as the sole alias source.
                 // Vite aliases are only applied to fallback (no-tsconfig) projects.
                 let workspace_aliases = Vec::new();
@@ -557,19 +562,23 @@ impl ProjectRegistry {
         let mut projects = Vec::new();
 
         for &root in roots {
-            let root = verter_vfs::resolver::normalize_canonical_id(root);
+            let root = verter_workspace::resolver::normalize_canonical_id(root);
             let root_path = PathBuf::from(&root);
 
-            let discovered = verter_vfs::config::discover_tsconfigs(&root_path);
+            let discovered = verter_workspace::config::discover_tsconfigs(&root_path);
 
             for entry in &discovered {
                 let project_root = entry.root.clone();
                 let project_root_path = PathBuf::from(&project_root);
-                let ws =
-                    verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
-                let membership = verter_vfs::config::load_project_membership(&ws, &entry.path);
-                let compiler_options = verter_vfs::config::load_compiler_options(&ws, &entry.path);
-                let references = verter_vfs::config::load_project_references(&ws, &entry.path);
+                let ws = verter_workspace::FilesystemWorkspace::new(
+                    verter_workspace::FilesystemOptions::default(),
+                );
+                let membership =
+                    verter_workspace::config::load_project_membership(&ws, &entry.path);
+                let compiler_options =
+                    verter_workspace::config::load_compiler_options(&ws, &entry.path);
+                let references =
+                    verter_workspace::config::load_project_references(&ws, &entry.path);
                 let lint = discover_lint_config(&project_root_path);
                 let ssr_enabled = detect_ssr_project(&project_root_path, &lint);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
@@ -619,7 +628,7 @@ impl ProjectRegistry {
     ///
     /// Falls back to `None` if no project root is a prefix of the file path.
     pub fn find_project(&self, file_path: &str) -> Option<&ProjectConfig> {
-        let normalized = verter_vfs::resolver::normalize_canonical_id(file_path);
+        let normalized = verter_workspace::resolver::normalize_canonical_id(file_path);
         self.projects
             .iter()
             .find(|project| project_matches_file(project, &normalized))
@@ -699,7 +708,7 @@ impl ProjectRegistry {
         for root_uri in roots {
             let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
             let root_path = PathBuf::from(&canonical);
-            for entry in verter_vfs::config::discover_tsconfigs(&root_path) {
+            for entry in verter_workspace::config::discover_tsconfigs(&root_path) {
                 patterns.push(format!("{}/**", entry.root));
             }
         }
@@ -1484,8 +1493,9 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root =
-            verter_vfs::resolver::normalize_canonical_id(&tmp.to_string_lossy().replace('\\', "/"));
+        let root = verter_workspace::resolver::normalize_canonical_id(
+            &tmp.to_string_lossy().replace('\\', "/"),
+        );
         let registry = ProjectRegistry::from_canonical_roots(&[&root]);
         let source_file = format!("{root}/src/App.vue");
         let expected_app = format!("{root}/tsconfig.app.json");
@@ -1524,8 +1534,9 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root =
-            verter_vfs::resolver::normalize_canonical_id(&tmp.to_string_lossy().replace('\\', "/"));
+        let root = verter_workspace::resolver::normalize_canonical_id(
+            &tmp.to_string_lossy().replace('\\', "/"),
+        );
         let registry = ProjectRegistry::from_canonical_roots(&[&root]);
         let unmatched = format!("{root}/scripts/tool.ts");
 
@@ -1572,8 +1583,9 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root =
-            verter_vfs::resolver::normalize_canonical_id(&tmp.to_string_lossy().replace('\\', "/"));
+        let root = verter_workspace::resolver::normalize_canonical_id(
+            &tmp.to_string_lossy().replace('\\', "/"),
+        );
         let registry = ProjectRegistry::from_canonical_roots(&[&root]);
         let app_file = format!("{root}/src/App.ts");
         let project = registry

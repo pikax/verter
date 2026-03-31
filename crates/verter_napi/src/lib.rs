@@ -3,7 +3,7 @@
 
 //! # verter_napi — Node.js bindings for Verter
 //!
-//! NAPI-RS binding layer that exposes [`verter_host::VerterHost`] and
+//! NAPI-RS binding layer that exposes [`verter_session::VerterHost`] and
 //! `processStyle` to Node.js.
 //!
 //! ## API parity
@@ -31,7 +31,7 @@ use napi::{Error, Status};
 use napi_derive::napi;
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
-use verter_host as host;
+use verter_session as host;
 
 mod meta;
 
@@ -681,7 +681,7 @@ pub struct NapiLintDiagnostic {
 
 /// Point-in-time snapshot of host performance metrics.
 ///
-/// Only populated when built with the `host_metrics` feature.
+/// Only populated when built with the `session_metrics` feature.
 /// Obtain via [`NapiVerterHost::getMetrics`].
 #[napi(object)]
 pub struct NapiHostMetrics {
@@ -1064,13 +1064,13 @@ pub struct NapiDirEntry {
 /// Construct first, then pass to `VerterHost.withWorkspace()`.
 #[napi(js_name = "Workspace")]
 pub struct NapiWorkspace {
-    inner: std::sync::Arc<verter_vfs::FilesystemWorkspace>,
+    inner: std::sync::Arc<verter_workspace::FilesystemWorkspace>,
 }
 
 impl NapiWorkspace {
     /// Get the underlying workspace as a trait object.
-    pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_vfs::WorkspaceAccess> {
-        std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_vfs::WorkspaceAccess>
+    pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_workspace::WorkspaceAccess> {
+        std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_workspace::WorkspaceAccess>
     }
 
     /// Get the filesystem workspace roots for runtime-backed integrations.
@@ -1087,7 +1087,7 @@ impl NapiWorkspace {
     /// and populates the resolver.
     #[napi(constructor)]
     pub fn new(roots: Vec<String>) -> Self {
-        let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions {
+        let ws = verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
             roots,
             eager_preload: false,
         });
@@ -1104,28 +1104,28 @@ impl NapiWorkspace {
     /// Read a file from the workspace (overlay → snapshot → disk).
     #[napi(js_name = "readFile")]
     pub async fn read_file(&self, path: String) -> Result<Option<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         Ok(self.inner.read_file(&path).map(|s| s.to_string()))
     }
 
     /// Check if a file exists in the workspace.
     #[napi(js_name = "fileExists")]
     pub async fn file_exists(&self, path: String) -> Result<bool> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         Ok(self.inner.file_exists(&path))
     }
 
     /// Check if a path is a directory.
     #[napi(js_name = "isDir")]
     pub async fn is_dir(&self, path: String) -> Result<bool> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         Ok(self.inner.is_dir(&path))
     }
 
     /// Write file content. Creates parent directories as needed.
     #[napi(js_name = "writeFile")]
     pub async fn write_file(&self, path: String, content: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .write_file(&path, &content)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1134,7 +1134,7 @@ impl NapiWorkspace {
     /// Read directory entries. Returns array of { path, isDir }.
     #[napi(js_name = "readDir")]
     pub async fn read_dir(&self, dir: String) -> Result<Vec<NapiDirEntry>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .read_dir(&dir)
             .map(|entries| {
@@ -1157,7 +1157,7 @@ impl NapiWorkspace {
         exclude_dirs: Vec<String>,
         extensions: Option<Vec<String>>,
     ) -> Result<Vec<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         let exts = extensions;
         self.inner
             .walk(
@@ -1177,7 +1177,7 @@ impl NapiWorkspace {
     /// Delete a file.
     #[napi(js_name = "deleteFile")]
     pub async fn delete_file(&self, path: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .delete_file(&path)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1186,7 +1186,7 @@ impl NapiWorkspace {
     /// Create a directory and all parent directories.
     #[napi(js_name = "createDirAll")]
     pub async fn create_dir_all(&self, path: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .create_dir_all(&path)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1195,7 +1195,7 @@ impl NapiWorkspace {
     /// Delete a directory and all its contents.
     #[napi(js_name = "deleteDirAll")]
     pub async fn delete_dir_all(&self, path: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .delete_dir_all(&path)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1204,7 +1204,7 @@ impl NapiWorkspace {
     /// Copy a file from src to dst.
     #[napi(js_name = "copyFile")]
     pub async fn copy_file(&self, src: String, dst: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .copy_file(&src, &dst)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1213,7 +1213,7 @@ impl NapiWorkspace {
     /// Resolve symlinks to real path. Returns null if not found.
     #[napi(js_name = "realpath")]
     pub async fn realpath(&self, path: String) -> Result<Option<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         Ok(self.inner.realpath(&path))
     }
 
@@ -1226,18 +1226,18 @@ impl NapiWorkspace {
         phase: Option<String>,
         kind: Option<String>,
     ) -> Result<Option<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         let phase = match phase.as_deref() {
-            Some("provider") => verter_vfs::ResolvePhase::ProviderGraph,
-            _ => verter_vfs::ResolvePhase::CodegenBlocker,
+            Some("provider") => verter_workspace::ResolvePhase::ProviderGraph,
+            _ => verter_workspace::ResolvePhase::CodegenBlocker,
         };
         let kind = match kind.as_deref() {
-            Some("type") => verter_vfs::ResolveRequestKind::TypeImport,
-            Some("require") => verter_vfs::ResolveRequestKind::RequireCall,
-            Some("src") => verter_vfs::ResolveRequestKind::SfcSrcAttr,
-            _ => verter_vfs::ResolveRequestKind::EsmImport,
+            Some("type") => verter_workspace::ResolveRequestKind::TypeImport,
+            Some("require") => verter_workspace::ResolveRequestKind::RequireCall,
+            Some("src") => verter_workspace::ResolveRequestKind::SfcSrcAttr,
+            _ => verter_workspace::ResolveRequestKind::EsmImport,
         };
-        let ctx = verter_vfs::ResolutionContext { phase, kind };
+        let ctx = verter_workspace::ResolutionContext { phase, kind };
         Ok(self
             .inner
             .resolve_import(&importer, &specifier, ctx)
@@ -1253,7 +1253,7 @@ impl NapiWorkspace {
                 .into_iter()
                 .map(napi_project_config_to_ide)
                 .collect();
-            use verter_vfs::WorkspaceAccess;
+            use verter_workspace::WorkspaceAccess;
             self.inner.configure_resolver(configs);
         }))
     }
@@ -1261,7 +1261,7 @@ impl NapiWorkspace {
     /// Notify workspace that an editor buffer is open/changed.
     #[napi(js_name = "notifyUpsert")]
     pub fn notify_upsert(&self, canonical_id: String, source: Buffer) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         let source_str = std::str::from_utf8(&source)
             .map_err(|e| Error::new(Status::InvalidArg, format!("invalid UTF-8: {e}")))?;
         self.inner
@@ -1272,14 +1272,14 @@ impl NapiWorkspace {
     /// Notify workspace that an editor buffer was closed.
     #[napi(js_name = "notifyClose")]
     pub fn notify_close(&self, canonical_id: String) {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner.notify_close(&canonical_id);
     }
 
     /// Notify workspace that a file was deleted.
     #[napi(js_name = "notifyDelete")]
     pub fn notify_delete(&self, canonical_id: String) {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner.notify_delete(&canonical_id);
     }
 }
@@ -1800,11 +1800,11 @@ impl NapiVerterHost {
 
     /// Returns a snapshot of host performance metrics.
     ///
-    /// Only available when built with the `host_metrics` feature.
+    /// Only available when built with the `session_metrics` feature.
     /// Returns `null` when the feature is disabled.
     #[napi(js_name = "getMetrics")]
     pub fn get_metrics(&self) -> Option<NapiHostMetrics> {
-        #[cfg(feature = "host_metrics")]
+        #[cfg(feature = "session_metrics")]
         {
             let m = self.inner.metrics_snapshot();
             Some(NapiHostMetrics {
@@ -1820,7 +1820,7 @@ impl NapiVerterHost {
                 compileTimeUsTotal: m.compile_time_us_total as f64,
             })
         }
-        #[cfg(not(feature = "host_metrics"))]
+        #[cfg(not(feature = "session_metrics"))]
         {
             None
         }

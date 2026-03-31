@@ -24,9 +24,9 @@ use crate::ResolvedMacroMeta;
 
 /// Trait for hosts that can provide component-meta results.
 ///
-/// Implemented by `ComponentMetaHost` in `verter_host`. This allows
+/// Implemented by `ComponentMetaHost` in `verter_session`. This allows
 /// `VerterTypeExpander` to call into the existing resolution pipeline
-/// without depending on `verter_host` directly.
+/// without depending on `verter_session` directly.
 pub trait VerterComponentMetaProvider: Send + Sync {
     /// Get full component metadata for a file (uses Verter's native resolver).
     fn get_component_meta(

@@ -28,7 +28,7 @@ use oxc_allocator::Allocator;
 use rayon::prelude::*;
 use tempfile::TempDir;
 use verter_core::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
-use verter_host::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 use crate::error_map::map_tsc_position;
 use crate::reporter::{self, Diagnostic, TscDiagnostic};

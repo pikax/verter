@@ -20,7 +20,7 @@ verter_analysis = { path = "../verter_analysis" }
 verter_core = { path = "../verter_core" }
 verter_span = { path = "../verter_span" }
 verter_type_runtime = { path = "../verter_type_runtime", optional = true }
-verter_vfs = { path = "../verter_vfs" }
+verter_workspace = { path = "../verter_workspace" }
 
 [features]
 default = []

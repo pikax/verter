@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::*;
-use verter_host::{
+use verter_session::{
     CompileProfile, FileKind, HostUpdateResult, IdeResponse, StyleOverrideEntry,
     StyleOverrideRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
@@ -19,7 +19,7 @@ use crate::uri::{file_uri_to_path, percent_decode};
 use line_index::LineIndex;
 use position_map::PositionMapper;
 
-/// Manages open documents and their relationship to verter_host.
+/// Manages open documents and their relationship to verter_session.
 pub struct DocumentRegistry {
     pub(crate) host: Arc<VerterHost>,
     /// Map from document URI to document state.
@@ -37,7 +37,7 @@ pub struct DocumentRegistry {
 
 /// Tracked state for an open document.
 pub struct DocumentState {
-    /// The canonical ID used with verter_host.
+    /// The canonical ID used with verter_session.
     pub canonical_id: String,
     /// Current document version (from LSP client).
     pub version: i32,
@@ -62,7 +62,8 @@ impl DocumentRegistry {
             documents: DashMap::new(),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,
-                target: verter_host::CompileTarget::IDE | verter_host::CompileTarget::TEMPLATE_DATA,
+                target: verter_session::CompileTarget::IDE
+                    | verter_session::CompileTarget::TEMPLATE_DATA,
                 ..CompileProfile::default()
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
@@ -450,13 +451,13 @@ impl DocumentRegistry {
     }
 
     /// Get the analysis snapshot for a document.
-    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_host::FileAnalysisSnapshot> {
+    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_session::FileAnalysisSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
         self.host.get_analysis(&canonical_id)
     }
 
     /// Get the diagnostics for a document.
-    pub fn get_diagnostics(&self, uri: &Uri) -> Option<verter_host::DiagnosticsSnapshot> {
+    pub fn get_diagnostics(&self, uri: &Uri) -> Option<verter_session::DiagnosticsSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
         self.host
             .get_diagnostics(&canonical_id, &self.tsx_profile.read())
@@ -585,7 +586,7 @@ impl DocumentRegistry {
         self.documents.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Get the underlying verter_host reference.
+    /// Get the underlying verter_session reference.
     pub fn host(&self) -> &VerterHost {
         &self.host
     }
@@ -763,8 +764,8 @@ mod tests {
 
     #[test]
     fn open_uris_returns_open_documents() {
-        let host = Arc::new(verter_host::VerterHost::new_standalone(
-            verter_host::HostConfig::default(),
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
 
@@ -819,8 +820,8 @@ mod tests {
     /// position mapper when the host already has cached TSX output.
     #[test]
     fn position_mapper_lazily_rebuilt_on_fast_path() {
-        let host = Arc::new(verter_host::VerterHost::new_standalone(
-            verter_host::HostConfig::default(),
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
         let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
@@ -862,8 +863,8 @@ mod tests {
     /// get_ide() fast path should not overwrite an existing position mapper.
     #[test]
     fn position_mapper_not_overwritten_when_present() {
-        let host = Arc::new(verter_host::VerterHost::new_standalone(
-            verter_host::HostConfig::default(),
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
         let uri: Uri = "file:///home/user/App.vue".parse().unwrap();

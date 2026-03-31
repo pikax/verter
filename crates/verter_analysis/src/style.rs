@@ -9,11 +9,11 @@
 use verter_span::Span;
 
 // =============================================================================
-// Vue Feature Input Types (constructed by verter_host from verter_core output)
+// Vue Feature Input Types (constructed by verter_session from verter_core output)
 // =============================================================================
 
 /// Pre-extracted Vue-specific CSS features from verter_core.
-/// `verter_host` converts `CssParsed*` types into these.
+/// `verter_session` converts `CssParsed*` types into these.
 #[derive(Debug, Clone, Default)]
 pub struct VueStyleInput {
     pub v_binds: Vec<VBindInput>,
@@ -23,7 +23,7 @@ pub struct VueStyleInput {
 /// A `v-bind()` expression found in CSS.
 #[derive(Debug, Clone)]
 pub struct VBindInput {
-    /// The expression text (resolved from span by verter_host).
+    /// The expression text (resolved from span by verter_session).
     pub expression: String,
     pub quoted: bool,
     pub start: u32,
@@ -38,7 +38,7 @@ pub struct SpecialPseudoInput {
     pub kind: SpecialPseudoKind,
     pub start: u32,
     pub end: u32,
-    /// Inner selector text (resolved from span by verter_host).
+    /// Inner selector text (resolved from span by verter_session).
     pub inner: Option<String>,
 }
 

@@ -1,7 +1,7 @@
 //! Static analysis utilities for Vue Single File Components.
 //!
 //! Provides import/export extraction, Vue API classification, script and style
-//! analysis, and a project-wide component graph. Used by `verter_host` for
+//! analysis, and a project-wide component graph. Used by `verter_session` for
 //! smart invalidation and LSP features.
 //!
 //! Depends on `verter_core` (indirectly via OXC) for AST parsing.

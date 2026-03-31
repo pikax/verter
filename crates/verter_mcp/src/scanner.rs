@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use verter_host::{FileKind, UpsertRequest, VerterHost};
+use verter_session::{FileKind, UpsertRequest, VerterHost};
 use walkdir::WalkDir;
 
 /// Result of scanning a project directory.

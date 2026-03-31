@@ -31,7 +31,7 @@ mod test_harness;
 mod test_utils;
 
 use std::sync::Arc;
-use verter_host::VerterHost;
+use verter_session::VerterHost;
 
 use tsgo::traits::TypeProvider;
 

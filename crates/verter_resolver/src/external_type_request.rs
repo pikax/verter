@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
 use verter_core::utils::oxc::vue::resolve_type::ResolvedElements;
-use verter_vfs::ResolveRequestKind;
+use verter_workspace::ResolveRequestKind;
 
 use crate::{
     resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
@@ -422,7 +422,7 @@ mod tests {
     use verter_core::utils::oxc::vue::resolve_type::{
         AnalyzedExternalTypeSource, ResolvedElements, RuntimeType,
     };
-    use verter_vfs::ResolveRequestKind;
+    use verter_workspace::ResolveRequestKind;
 
     #[derive(Default)]
     struct TestResolver {

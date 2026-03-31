@@ -1,7 +1,7 @@
 //! Raw template data extracted during compilation.
 //!
 //! These are core-native types with no dependency on `verter_analysis`.
-//! `verter_host` converts them into `verter_analysis::TemplateAnalysisSnapshot`.
+//! `verter_session` converts them into `verter_analysis::TemplateAnalysisSnapshot`.
 
 use crate::ast::types::{AstNodeKind, ElementNode, TemplateAst};
 use crate::common::Span;
@@ -11,7 +11,7 @@ use crate::types::NodeId;
 use rustc_hash::FxHashMap;
 
 /// Raw template data extracted during compilation.
-/// `verter_host` converts this to `verter_analysis::TemplateAnalysisSnapshot`.
+/// `verter_session` converts this to `verter_analysis::TemplateAnalysisSnapshot`.
 #[derive(Debug, Default)]
 pub struct RawTemplateData {
     pub components: Vec<RawComponentUsage>,
@@ -39,7 +39,7 @@ pub struct RawComponentUsage {
     pub static_classes: Vec<String>,
     /// Whether `:class="..."` is present.
     pub has_dynamic_class: bool,
-    /// Raw `:class` expression text (for dynamic class name extraction by verter_host).
+    /// Raw `:class` expression text (for dynamic class name extraction by verter_session).
     pub dynamic_class_expr: Option<String>,
     pub span: Span,
 }

@@ -1,5 +1,5 @@
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_vfs::ResolveRequestKind;
+use verter_workspace::ResolveRequestKind;
 
 use crate::ResolverHash16;
 
@@ -199,7 +199,7 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use verter_vfs::ResolveRequestKind;
+    use verter_workspace::ResolveRequestKind;
 
     #[derive(Default)]
     struct TestResolver {

@@ -308,7 +308,7 @@ pub struct AnalyzedImport {
     /// SFC-absolute byte span of the import declaration.
     pub span: Span,
     /// Canonical file ID resolved by the host (None during standalone analysis).
-    /// Populated by verter_host after path resolution for cross-file go-to-definition.
+    /// Populated by verter_session after path resolution for cross-file go-to-definition.
     pub resolved_canonical_id: Option<String>,
 }
 

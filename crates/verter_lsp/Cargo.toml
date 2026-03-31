@@ -10,13 +10,13 @@ description = "Rust LSP server for Verter — Language Server Protocol implement
 publish = false
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_host/hotpath", "verter_diagnostics/hotpath"]
+hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_diagnostics/hotpath"]
 
 [dependencies]
-verter_host = { path = "../verter_host", features = ["host_metrics", "scheduler"] }
+verter_session = { path = "../verter_session", features = ["session_metrics", "scheduler"] }
 hotpath = { version = "0.13", optional = true }
 verter_scheduler = { path = "../verter_scheduler" }
-verter_vfs = { path = "../verter_vfs" }
+verter_workspace = { path = "../verter_workspace" }
 verter_analysis = { path = "../verter_analysis" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }

@@ -14,7 +14,7 @@ use verter_analysis::types::{
     DomQueryCallSite, DomQueryKind, VueApiCallSite, VueApiClassification,
 };
 use verter_analysis::{match_selector, MatchResult};
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 /// Generate Verter-specific inlay hints for a Vue SFC.
 ///

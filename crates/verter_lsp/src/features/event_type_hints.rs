@@ -6,7 +6,7 @@
 
 use tower_lsp_server::ls_types::*;
 use verter_analysis::template::TemplateEventHandler;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::features::action_utils;

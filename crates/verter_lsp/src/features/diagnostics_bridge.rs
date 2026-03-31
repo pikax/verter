@@ -5,7 +5,7 @@ use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
 use verter_diagnostics::{
     DiagnosticSet, DiagnosticTag as LintDiagnosticTag, LintDiagnostic, Severity,
 };
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 

@@ -11,10 +11,6 @@ use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
 use verter_analysis::type_expr::{ObjectMember, TypeExpr};
-use verter_host::component_meta_host::{
-    ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
-    ComponentMetaTraceCursor, ComponentMetaTypeExpander,
-};
 use verter_resolver::query_artifact::{
     ArtifactId, ArtifactProfile as ResolverArtifactProfile, GeneratedQueryArtifact,
     QuerySpanMapping,
@@ -25,6 +21,10 @@ use verter_resolver::type_expansion::{
 };
 use verter_resolver::type_expansion_host::TypeExpansionSnapshot;
 use verter_resolver::type_text_parser;
+use verter_session::component_meta_host::{
+    ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
+    ComponentMetaTraceCursor, ComponentMetaTypeExpander,
+};
 use verter_type_runtime::tsgo::{find_tsgo_binary, TsgoTypeProvider};
 use verter_type_runtime::tsserver::TsserverTypeProvider;
 use verter_type_runtime::{
@@ -655,8 +655,8 @@ fn merge_component_meta_backend_data(
 }
 
 fn create_component_meta_host(
-    host_config: verter_host::HostConfig,
-    workspace: Option<Arc<dyn verter_vfs::WorkspaceAccess>>,
+    host_config: verter_session::HostConfig,
+    workspace: Option<Arc<dyn verter_workspace::WorkspaceAccess>>,
     workspace_roots: &[String],
 ) -> Result<Arc<ComponentMetaHost>> {
     create_component_meta_host_with_factory(
@@ -668,8 +668,8 @@ fn create_component_meta_host(
 }
 
 fn create_component_meta_host_with_factory<F>(
-    host_config: verter_host::HostConfig,
-    workspace: Option<Arc<dyn verter_vfs::WorkspaceAccess>>,
+    host_config: verter_session::HostConfig,
+    workspace: Option<Arc<dyn verter_workspace::WorkspaceAccess>>,
     workspace_roots: &[String],
     build_expander: F,
 ) -> Result<Arc<ComponentMetaHost>>
@@ -1384,7 +1384,7 @@ impl NapiMetaProject {
             let host_config =
                 verter_ffi::convert::ffi_config_to_host(ffi_config).map_err(crate::ffi_err)?;
             let roots = workspace.roots();
-            let ws: Arc<dyn verter_vfs::WorkspaceAccess> = workspace.workspace();
+            let ws: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.workspace();
             Ok(NapiMetaProject {
                 inner: create_component_meta_host(host_config, Some(ws), &roots)?,
             })
@@ -1542,7 +1542,8 @@ impl NapiMetaSession {
             match result {
                 Some(analysis) => {
                     let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
-                    let payload = verter_proto::component_meta::encode_component_meta_payload(&ffi);
+                    let payload =
+                        verter_protocol::component_meta::encode_component_meta_payload(&ffi);
                     Ok(Some(Buffer::from(payload)))
                 }
                 None => Ok(None),
@@ -1566,7 +1567,8 @@ impl NapiMetaSession {
                         analysis,
                         Some(&resolved),
                     );
-                    let payload = verter_proto::component_meta::encode_component_meta_payload(&ffi);
+                    let payload =
+                        verter_protocol::component_meta::encode_component_meta_payload(&ffi);
                     Ok(Some(Buffer::from(payload)))
                 }
                 None => Ok(None),
@@ -1587,7 +1589,8 @@ impl NapiMetaSession {
             match result {
                 Some(analysis) => {
                     let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
-                    let payload = verter_proto::component_meta::encode_component_meta_payload(&ffi);
+                    let payload =
+                        verter_protocol::component_meta::encode_component_meta_payload(&ffi);
                     Ok(Some(Buffer::from(payload)))
                 }
                 None => Ok(None),
@@ -1735,7 +1738,7 @@ mod tests {
 
     #[test]
     fn create_component_meta_host_installs_expander_for_non_verter_backend() {
-        let mut host_config = verter_host::HostConfig::default();
+        let mut host_config = verter_session::HostConfig::default();
         host_config.type_expansion_backend = TypeExpansionBackend::Tsgo;
         let roots = vec!["/workspace".to_string()];
         let invoked = AtomicBool::new(false);
@@ -1761,7 +1764,7 @@ mod tests {
 
     #[test]
     fn create_component_meta_host_skips_expander_factory_for_verter_backend() {
-        let host_config = verter_host::HostConfig::default();
+        let host_config = verter_session::HostConfig::default();
         let invoked = AtomicBool::new(false);
 
         let host = create_component_meta_host_with_factory(host_config, None, &[], |_, _| {
@@ -1922,7 +1925,7 @@ defineProps<Props>()
         let app_id = app_path.to_string_lossy().into_owned();
         let types_id = types_path.to_string_lossy().into_owned();
 
-        let mut host_config = verter_host::HostConfig::default();
+        let mut host_config = verter_session::HostConfig::default();
         host_config.type_expansion_backend = TypeExpansionBackend::Tsgo;
         let workspace_roots = vec![test_root.to_string_lossy().into_owned()];
         let host = create_component_meta_host(host_config, None, &workspace_roots).unwrap();
@@ -1931,7 +1934,7 @@ defineProps<Props>()
         host.upsert_base(&app_id, app_source).unwrap();
         host.host().set_import_dependencies(
             &app_id,
-            vec![verter_host::DependencyResolution {
+            vec![verter_session::DependencyResolution {
                 specifier: "./types".to_string(),
                 resolved_canonical_id: Some(types_id.clone()),
                 possible_canonical_ids: Vec::new(),

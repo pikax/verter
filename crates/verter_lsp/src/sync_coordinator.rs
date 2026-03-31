@@ -75,7 +75,7 @@ pub struct SyncCoordinatorDeps {
     /// Source-keyed provider materialization state shared with the server.
     pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// VFS workspace for published LspViews and resolver snapshot.
-    pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
+    pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
@@ -368,7 +368,7 @@ mod tests {
     use crate::tsgo::mock::{MockCall, MockTypeProvider};
     use crate::ProjectSyncMode;
     use tower_lsp_server::{LspService, Server};
-    use verter_host::{HostConfig, VerterHost};
+    use verter_session::{HostConfig, VerterHost};
 
     #[derive(Default)]
     struct NoopLanguageServer;

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::LanguageServer;
-use verter_host::{HostConfig, VerterHost};
+use verter_session::{HostConfig, VerterHost};
 
 use crate::server::VerterLanguageServer;
 use crate::tsgo::traits::TypeProvider;
@@ -143,9 +143,10 @@ impl TestSessionBuilder {
             TestProviderKind::Tsgo => crate::TypeProviderKind::Tsgo,
         };
 
-        let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
-            verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
-        );
+        let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> =
+            Arc::new(verter_workspace::FilesystemWorkspace::new(
+                verter_workspace::FilesystemOptions::default(),
+            ));
         let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&provider);
@@ -192,15 +193,15 @@ impl TestSessionBuilder {
 
         // Build and install VFS workspace with published snapshot (replaces old resolver_snapshot + project_registry)
         {
-            let vfs_ws = Arc::new(verter_vfs::FilesystemWorkspace::new(
-                verter_vfs::FilesystemOptions::default(),
+            let vfs_ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+                verter_workspace::FilesystemOptions::default(),
             ));
-            let vfs_vite_opts = verter_vfs::ViteConfigOptions {
+            let vfs_vite_opts = verter_workspace::ViteConfigOptions {
                 enabled: false,
                 trusted_files: Vec::new(),
                 node_path: None,
             };
-            let vfs_build = verter_vfs::ProjectGraph::from_workspace_roots(
+            let vfs_build = verter_workspace::ProjectGraph::from_workspace_roots(
                 &*vfs_ws,
                 &[workspace_id.clone()],
                 &vfs_vite_opts,
@@ -209,7 +210,7 @@ impl TestSessionBuilder {
             if let Some(published) = vfs_ws.load_published() {
                 let snapshot_arc = Arc::clone(&published.snapshot);
                 let views = crate::workspace_state::build_lsp_views(&snapshot_arc, vec![]);
-                vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+                vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
                     snapshot_arc,
                     Box::new(views),
                 ));
@@ -229,9 +230,11 @@ impl TestSessionBuilder {
         //    can resolve path aliases in go-to-definition and completions.
         let tsconfig_path = std::path::PathBuf::from(&tsconfig_path_str);
         if tsconfig_path.exists() {
-            let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default());
+            let ws = verter_workspace::FilesystemWorkspace::new(
+                verter_workspace::FilesystemOptions::default(),
+            );
             if let Some((base_url, paths)) =
-                verter_vfs::config::raw_paths_json(&ws, &tsconfig_path_str)
+                verter_workspace::config::raw_paths_json(&ws, &tsconfig_path_str)
             {
                 let _ = provider.configure_paths(&base_url, paths).await;
             }

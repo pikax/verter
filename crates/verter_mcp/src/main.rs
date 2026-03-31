@@ -16,12 +16,12 @@ use clap::Parser;
 use rmcp::ServiceExt;
 
 use verter_diagnostics::Linter;
-use verter_host::{HostConfig, VerterHost};
 use verter_mcp::config::{Cli, McpServerConfig, Transport};
 use verter_mcp::scanner;
 use verter_mcp::tools;
 use verter_mcp::VerterMcpServer;
-use verter_vfs::{FilesystemOptions, FilesystemWorkspace};
+use verter_session::{HostConfig, VerterHost};
+use verter_workspace::{FilesystemOptions, FilesystemWorkspace};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

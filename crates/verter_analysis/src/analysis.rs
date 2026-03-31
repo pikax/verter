@@ -105,7 +105,7 @@ impl ImportBindingMap {
 /// reusable by `verter_core`, linters, and other tools.
 ///
 /// Note: Import path resolution (relative → absolute) happens in the caller
-/// (e.g., `verter_host`), not here. This function is path-resolution-agnostic.
+/// (e.g., `verter_session`), not here. This function is path-resolution-agnostic.
 pub fn build_script_analysis(
     content: &str,
     source_type: SourceType,

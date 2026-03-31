@@ -11,10 +11,10 @@ publish = false
 
 [features]
 default = []
-scheduler = ["verter_host/scheduler"]
+scheduler = ["verter_session/scheduler"]
 
 [dependencies]
-verter_host = { path = "../verter_host", version = "0.0.1-beta.1", default-features = false }
+verter_session = { path = "../verter_session", version = "0.0.1-beta.1", default-features = false }
 verter_analysis = { path = "../verter_analysis" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }

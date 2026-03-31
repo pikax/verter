@@ -1,6 +1,6 @@
 //! # verter_wasm — WebAssembly bindings for Verter
 //!
-//! `wasm-bindgen` binding layer that exposes [`verter_host::VerterHost`] to
+//! `wasm-bindgen` binding layer that exposes [`verter_session::VerterHost`] to
 //! the browser. Used by the Verter playground.
 //!
 //! ## API parity
@@ -22,7 +22,7 @@ use std::panic::AssertUnwindSafe;
 use serde::Serialize;
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
-use verter_host as host;
+use verter_session as host;
 use wasm_bindgen::prelude::*;
 
 // Re-imports for code actions and diagnostics

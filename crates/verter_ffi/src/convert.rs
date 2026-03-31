@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use verter_host as host;
+use verter_session as host;
 
 use crate::types::*;
 
@@ -1684,7 +1684,7 @@ pub fn host_error_to_string(err: &host::HostError) -> String {
                 .join("; ");
             format!("HostError::CompileError: {}", summary)
         }
-        // Catch-all for scheduler-related errors (feature-gated in verter_host).
+        // Catch-all for scheduler-related errors (feature-gated in verter_session).
         #[allow(unreachable_patterns)]
         other => format!("HostError: {}", other),
     }

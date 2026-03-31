@@ -5,7 +5,7 @@ use verter_core::utils::oxc::vue::resolve_type::{
     analyze_external_type_source, imported_member_name_for_required_alias,
     required_import_alias_names_for_binding, AnalyzedExternalTypeSource, ResolvedElements,
 };
-use verter_vfs::ResolveRequestKind;
+use verter_workspace::ResolveRequestKind;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExternalTypeBodyCache {
@@ -401,7 +401,7 @@ mod tests {
     use verter_core::utils::oxc::vue::resolve_type::{
         AnalyzedExternalTypeSource, ResolvedElements, RuntimeType,
     };
-    use verter_vfs::ResolveRequestKind;
+    use verter_workspace::ResolveRequestKind;
 
     #[derive(Default)]
     struct TestResolver {

@@ -1,7 +1,7 @@
 //! Template analysis types for Vue SFC templates.
 //!
 //! These types are populated by `verter_core` during compilation (as raw data),
-//! then converted by `verter_host` into these analysis types. They enable:
+//! then converted by `verter_session` into these analysis types. They enable:
 //! - Cross-file render tree construction
 //! - Prop constness optimization
 //! - LSP features (references, rename, document highlights)

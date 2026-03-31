@@ -7,11 +7,11 @@
 //! - **Tier 2**: Export-level hashing → invalidate only if macro-consumed exports changed
 //! - **Tier 3**: Cross-file type resolution → invalidate only if resolved type shape changed
 //!
-//! Ported from `verter_host::deps`.
+//! Ported from `verter_session::deps`.
 
 use std::collections::BTreeSet;
 
-/// 128-bit hash, same as `verter_host::types::Hash16`.
+/// 128-bit hash, same as `verter_session::types::Hash16`.
 pub type Hash16 = [u8; 16];
 
 /// Result of invalidation check for a single dependent.

@@ -1,0 +1,60 @@
+[package]
+name = "verter_session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Top-level session API for Verter — compilation, caching, dependency tracking, multi-file orchestration"
+publish = false
+
+[features]
+default = ["scheduler"]
+session_metrics = []
+scheduler = ["verter_scheduler", "dashmap"]
+hotpath = [
+  "dep:hotpath",
+  "hotpath/hotpath",
+  "verter_core/hotpath",
+  "verter_analysis/hotpath",
+  "verter_resolver/hotpath",
+  "verter_scheduler?/hotpath",
+  "verter_workspace/hotpath",
+]
+
+[dependencies]
+verter_core = { path = "../verter_core" }
+verter_analysis = { path = "../verter_analysis" }
+verter_resolver = { path = "../verter_resolver" }
+verter_span = { path = "../verter_span" }
+verter_workspace = { path = "../verter_workspace" }
+hotpath = { version = "0.13", optional = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+rustc-hash = { workspace = true }
+self_cell = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde = { workspace = true }
+tracing = "0.1"
+serde_json = { workspace = true }
+sourcemap = "9"
+thiserror = "2"
+parking_lot = "0.12"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dashmap = { version = "6", optional = true }
+verter_scheduler = { path = "../verter_scheduler", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
+[dev-dependencies]
+smallvec = "1.13"
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "host_bench"
+harness = false

@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use verter_host::{FileKind as HostFileKind, VerterHost};
 use verter_scheduler::node::SourceSnapshot;
 use verter_scheduler::scheduler::Request;
 use verter_scheduler::source_loader::FileKind as SchedulerFileKind;
 use verter_scheduler::stage::{Priority, TargetStage};
+use verter_session::{FileKind as HostFileKind, VerterHost};
 
 /// Priority mapping for LSP operations.
 ///

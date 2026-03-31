@@ -14,8 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 verter_core = { path = "../verter_core" }
-verter_host = { path = "../verter_host" }
-verter_vfs = { path = "../verter_vfs" }
+verter_session = { path = "../verter_session" }
+verter_workspace = { path = "../verter_workspace" }
 clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

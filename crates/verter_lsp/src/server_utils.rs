@@ -55,7 +55,7 @@ pub(super) fn wants_code_action_kind(only: Option<&[CodeActionKind]>, kind: &str
 /// Scans all known .vue files in the host, derives PascalCase names from filenames,
 /// and computes relative import paths from the current file.
 pub(super) fn build_workspace_components(
-    host: &verter_host::VerterHost,
+    host: &verter_session::VerterHost,
     current_file_id: &str,
 ) -> Vec<crate::features::completion::WorkspaceComponent> {
     let files = host.list_files();
@@ -68,7 +68,7 @@ pub(super) fn build_workspace_components(
 
     for (file_id, kind) in &files {
         // Only .vue files
-        if *kind != verter_host::FileKind::VueSfc {
+        if *kind != verter_session::FileKind::VueSfc {
             continue;
         }
         // Skip the current file
@@ -172,7 +172,7 @@ pub(super) fn provider_api_path_for_source(
 
 pub(super) fn source_id_from_provider_vue_path(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    host: &verter_host::VerterHost,
+    host: &verter_session::VerterHost,
     provider_path: &str,
 ) -> Option<String> {
     let candidate = resolver.source_id_from_provider_id(provider_path)?;
@@ -234,7 +234,7 @@ impl<'a> LspProjectResolverReader<'a> {
     }
 }
 
-impl verter_vfs::WorkspaceAccess for LspProjectResolverReader<'_> {
+impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // Try host cache first (already-upserted files), then workspace (disk).
         self.documents
@@ -258,10 +258,10 @@ impl verter_vfs::WorkspaceAccess for LspProjectResolverReader<'_> {
 
 pub(crate) fn rewrite_non_vue_source_with_resolver(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn verter_vfs::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceAccess,
     importer_id: &str,
     source: &str,
-    module_references: &[verter_host::ScriptModuleReference],
+    module_references: &[verter_session::ScriptModuleReference],
 ) -> String {
     let mut rewritten = source.to_string();
     let mut replacements: Vec<(usize, usize, String)> = module_references
@@ -304,10 +304,10 @@ pub(crate) fn rewrite_non_vue_source_with_resolver(
 
 pub(crate) fn prepare_non_vue_provider_sync(
     snapshot: Option<&super::PublishedResolverSnapshot>,
-    reader: &dyn verter_vfs::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceAccess,
     importer_id: &str,
     source: &str,
-    module_references: &[verter_host::ScriptModuleReference],
+    module_references: &[verter_session::ScriptModuleReference],
 ) -> Option<PreparedNonVueProviderSync> {
     let snapshot = snapshot?;
     let provider_path = snapshot.resolver.provider_id_for_source(importer_id)?;
@@ -334,9 +334,9 @@ pub(crate) fn prepare_non_vue_provider_sync(
 
 pub(crate) fn collect_resolved_provider_dependencies(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn verter_vfs::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceAccess,
     importer_id: &str,
-    module_references: &[verter_host::ScriptModuleReference],
+    module_references: &[verter_session::ScriptModuleReference],
 ) -> Vec<crate::project_resolver::ResolveResult> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::new();
@@ -389,7 +389,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
 
 pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn verter_vfs::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceAccess,
     importer_id: &str,
     module_references: &[verter_analysis::AnalyzedModuleReference],
 ) -> Vec<crate::project_resolver::ResolveResult> {
@@ -430,7 +430,7 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
 }
 
 pub(crate) fn module_reference_request_kind(
-    reference: &verter_host::ScriptModuleReference,
+    reference: &verter_session::ScriptModuleReference,
 ) -> crate::project_resolver::ResolveRequestKind {
     if reference.is_type_only {
         crate::project_resolver::ResolveRequestKind::TypeImport
@@ -488,10 +488,10 @@ pub(super) fn import_resolved_matches_target(resolved: &str, target: &str) -> bo
 /// Extracted as a free function so both `VerterLanguageServer` and `SyncCoordinator`
 /// can resolve component types for diagnostic computation.
 pub(crate) fn resolve_component_for(
-    host: &verter_host::VerterHost,
+    host: &verter_session::VerterHost,
     parent_canonical_id: &str,
     import_source: &str,
-) -> Option<verter_host::FileAnalysisSnapshot> {
+) -> Option<verter_session::FileAnalysisSnapshot> {
     let read_component_analysis = |canonical_id: &str| {
         let mut analysis = host.get_analysis(canonical_id);
 
@@ -504,8 +504,8 @@ pub(crate) fn resolve_component_for(
                 .as_ref()
                 .is_some_and(|analysis| analysis.template.is_none())
         {
-            let profile = verter_host::CompileProfile {
-                target: verter_host::CompileTarget::ANALYSIS,
+            let profile = verter_session::CompileProfile {
+                target: verter_session::CompileTarget::ANALYSIS,
                 ..Default::default()
             };
             let _ = host.ensure_compiled(canonical_id, &profile);
@@ -727,7 +727,7 @@ pub(super) fn did_open_provider_sync_policy(
 /// explicitly instead of `&self`. Used by `resync_aliased_imports_for_open_files`
 /// in `background_init` after the project registry becomes available.
 pub(super) fn resolve_import_specifier_standalone(
-    host: &verter_host::VerterHost,
+    host: &verter_session::VerterHost,
     parent_canonical_id: &str,
     specifier: &str,
 ) -> Option<String> {
@@ -782,7 +782,7 @@ where
 
 pub(super) fn collect_priority_vue_targets_from_module_references(
     snapshot: Option<&super::PublishedResolverSnapshot>,
-    reader: &dyn verter_vfs::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceAccess,
     importer_id: &str,
     module_references: &[verter_analysis::AnalyzedModuleReference],
 ) -> Vec<String> {
@@ -837,7 +837,7 @@ pub(crate) fn compute_verter_diagnostics_for_with_views(
     documents: &DocumentRegistry,
     uri: &Uri,
     cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
-    vfs_workspace: Option<&verter_vfs::FilesystemWorkspace>,
+    vfs_workspace: Option<&verter_workspace::FilesystemWorkspace>,
 ) -> Vec<Diagnostic> {
     // Check cache: if version AND diagnostics generation both match, return cached.
     let uri_str = uri.as_str();

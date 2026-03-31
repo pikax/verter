@@ -42,7 +42,7 @@ use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
 use crate::tsgo::traits::TypeProvider;
 use crate::LspConfig;
-use verter_vfs::WorkspaceAccess;
+use verter_workspace::WorkspaceAccess;
 
 // ── Handler tracking for freeze diagnosis ──────────────────────────────
 
@@ -144,13 +144,13 @@ pub(crate) struct PreparedNonVueProviderSync {
 
 struct ResolvedComponentDocument {
     uri: Uri,
-    analysis: verter_host::FileAnalysisSnapshot,
+    analysis: verter_session::FileAnalysisSnapshot,
     line_index: LineIndex,
 }
 
 /// The Verter language server implementation.
 ///
-/// Wraps `verter_host` for SFC analysis and optionally a `TypeProvider`
+/// Wraps `verter_session` for SFC analysis and optionally a `TypeProvider`
 /// (e.g., TSGO) for richer type information.
 ///
 pub struct VerterLanguageServer {
@@ -242,7 +242,7 @@ pub struct VerterLanguageServer {
     /// roots and project configuration are known. `None` until initialization
     /// completes. Provides disk-backed file reads, project ownership, and import
     /// resolution through the [`WorkspaceAccess`] trait.
-    vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>>,
+    vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
 }
 
 impl VerterLanguageServer {
@@ -259,8 +259,9 @@ impl VerterLanguageServer {
         let cached_verter_diags = Arc::new(DashMap::new());
         let provider_sync_states = Arc::new(DashMap::new());
         let pending_snapshot_provider_sync = Arc::new(DashSet::new());
-        let vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
-            Arc::new(parking_lot::RwLock::new(None));
+        let vfs_workspace: Arc<
+            parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
+        > = Arc::new(parking_lot::RwLock::new(None));
 
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
@@ -569,7 +570,7 @@ impl VerterLanguageServer {
             canonical_id,
             resolved_dependencies
                 .iter()
-                .map(|entry| verter_host::DependencyResolution {
+                .map(|entry| verter_session::DependencyResolution {
                     specifier: entry.provider_specifier.clone(),
                     resolved_canonical_id: Some(entry.source_id.clone()),
                     possible_canonical_ids: Vec::new(),
@@ -583,7 +584,7 @@ impl VerterLanguageServer {
         snapshot: &PublishedResolverSnapshot,
         canonical_id: &str,
         source: Arc<str>,
-        module_references: &[verter_host::ScriptModuleReference],
+        module_references: &[verter_session::ScriptModuleReference],
     ) {
         let reader = LspProjectResolverReader::new(&self.documents);
         let Some(prepared) = prepare_non_vue_provider_sync(
@@ -630,7 +631,7 @@ impl VerterLanguageServer {
                 prepared
                     .resolved_dependencies
                     .iter()
-                    .map(|entry| verter_host::DependencyResolution {
+                    .map(|entry| verter_session::DependencyResolution {
                         specifier: entry.provider_specifier.clone(),
                         resolved_canonical_id: Some(entry.source_id.clone()),
                         possible_canonical_ids: Vec::new(),
@@ -692,11 +693,11 @@ impl VerterLanguageServer {
             let module_references = self
                 .documents
                 .host
-                .upsert(verter_host::UpsertRequest {
+                .upsert(verter_session::UpsertRequest {
                     canonical_id: Some(canonical_id.clone()),
                     input_id: canonical_id.clone(),
                     source: Arc::clone(&source),
-                    file_kind: verter_host::FileKind::NonSfc,
+                    file_kind: verter_session::FileKind::NonSfc,
                     aliases: Vec::new(),
                 })
                 .map(|result| result.module_references)
@@ -751,7 +752,7 @@ impl VerterLanguageServer {
                     &canonical_id,
                     resolved_dependencies
                         .iter()
-                        .map(|entry| verter_host::DependencyResolution {
+                        .map(|entry| verter_session::DependencyResolution {
                             specifier: entry.provider_specifier.clone(),
                             resolved_canonical_id: Some(entry.source_id.clone()),
                             possible_canonical_ids: Vec::new(),
@@ -1225,11 +1226,11 @@ impl VerterLanguageServer {
                 continue;
             };
             let module_references = block_in_place_if_available(|| {
-                host.upsert(verter_host::UpsertRequest {
+                host.upsert(verter_session::UpsertRequest {
                     canonical_id: Some(barrel_id.clone()),
                     input_id: barrel_id.clone(),
                     source: source.clone(),
-                    file_kind: verter_host::FileKind::NonSfc,
+                    file_kind: verter_session::FileKind::NonSfc,
                     aliases: Vec::new(),
                 })
                 .map(|result| result.module_references)
@@ -1577,7 +1578,7 @@ impl VerterLanguageServer {
 
     fn component_import_binding_name(
         &self,
-        analysis: &verter_host::FileAnalysisSnapshot,
+        analysis: &verter_session::FileAnalysisSnapshot,
         component: &verter_analysis::template::TemplateComponentUsage,
     ) -> Option<String> {
         let import_source = component.import_source.as_ref()?;
@@ -1600,7 +1601,7 @@ impl VerterLanguageServer {
     fn resolve_component_document_for_usage(
         &self,
         parent_uri: &Uri,
-        parent_analysis: &verter_host::FileAnalysisSnapshot,
+        parent_analysis: &verter_session::FileAnalysisSnapshot,
         component: &verter_analysis::template::TemplateComponentUsage,
     ) -> Option<ResolvedComponentDocument> {
         let import_source = component.import_source.as_ref()?;
@@ -1652,7 +1653,7 @@ impl VerterLanguageServer {
     fn resolve_component_document_for_import_binding(
         &self,
         parent_uri: &Uri,
-        parent_analysis: &verter_host::FileAnalysisSnapshot,
+        parent_analysis: &verter_session::FileAnalysisSnapshot,
         import_source: &str,
         binding_name: &str,
     ) -> Option<ResolvedComponentDocument> {
@@ -1826,7 +1827,7 @@ impl VerterLanguageServer {
     fn resolve_template_identifier(
         &self,
         uri: &Uri,
-        analysis: &verter_host::FileAnalysisSnapshot,
+        analysis: &verter_session::FileAnalysisSnapshot,
         line_index: &LineIndex,
         word: &str,
     ) -> Option<GotoDefinitionResponse> {
@@ -2588,7 +2589,7 @@ impl VerterLanguageServer {
         &self,
         parent_uri: &Uri,
         import_source: &str,
-    ) -> Option<verter_host::FileAnalysisSnapshot> {
+    ) -> Option<verter_session::FileAnalysisSnapshot> {
         let canonical_id = uri_to_canonical_id(parent_uri);
         resolve_component_for(self.documents.host(), &canonical_id, import_source)
     }
@@ -2815,11 +2816,11 @@ impl VerterLanguageServer {
             let module_references = self
                 .documents
                 .host
-                .upsert(verter_host::UpsertRequest {
+                .upsert(verter_session::UpsertRequest {
                     canonical_id: Some(path.clone()),
                     input_id: path.clone(),
                     source: Arc::from(last.text.as_str()),
-                    file_kind: verter_host::FileKind::NonSfc,
+                    file_kind: verter_session::FileKind::NonSfc,
                     aliases: Vec::new(),
                 })
                 .map(|result| result.module_references)
@@ -2859,11 +2860,11 @@ impl VerterLanguageServer {
 
         if let Some(ws) = self.vfs_workspace.read().as_ref() {
             let change = match params.change_type.as_str() {
-                "create" | "update" => verter_vfs::WorkspaceChange::FileChanged {
+                "create" | "update" => verter_workspace::WorkspaceChange::FileChanged {
                     canonical_id: canonical_id.clone(),
                     source: None,
                 },
-                "delete" => verter_vfs::WorkspaceChange::FileDeleted {
+                "delete" => verter_workspace::WorkspaceChange::FileDeleted {
                     canonical_id: canonical_id.clone(),
                 },
                 other => {
@@ -2948,9 +2949,11 @@ impl VerterLanguageServer {
         };
 
         if let Some(ws) = self.vfs_workspace.read().as_ref() {
-            ws.apply_changes(vec![verter_vfs::WorkspaceChange::DirectoryTreeDirty {
-                prefix: workspace_root,
-            }]);
+            ws.apply_changes(vec![
+                verter_workspace::WorkspaceChange::DirectoryTreeDirty {
+                    prefix: workspace_root,
+                },
+            ]);
         }
     }
 
@@ -3375,7 +3378,7 @@ impl VerterLanguageServer {
         let overrides = params
             .overrides
             .into_iter()
-            .map(|o| verter_host::StyleOverrideEntry {
+            .map(|o| verter_session::StyleOverrideEntry {
                 index: o.index as usize,
                 code: Arc::from(o.code),
                 source_map: o.source_map.map(Arc::from),
@@ -3513,8 +3516,8 @@ impl VerterLanguageServer {
 
         for (canonical_id, file_kind) in &file_list {
             let kind = match file_kind {
-                verter_host::FileKind::VueSfc => "vue",
-                verter_host::FileKind::NonSfc => {
+                verter_session::FileKind::VueSfc => "vue",
+                verter_session::FileKind::NonSfc => {
                     if canonical_id.ends_with(".ts") || canonical_id.ends_with(".tsx") {
                         "ts"
                     } else {
@@ -3528,7 +3531,7 @@ impl VerterLanguageServer {
                 kind,
             });
 
-            if *file_kind == verter_host::FileKind::VueSfc {
+            if *file_kind == verter_session::FileKind::VueSfc {
                 total_vue_files += 1;
 
                 // Get analysis for component graph
@@ -3585,7 +3588,7 @@ impl VerterLanguageServer {
         let file_list = self.documents.host.list_files();
         let mut template_components = Vec::new();
         for (canonical_id, file_kind) in &file_list {
-            if *file_kind == verter_host::FileKind::VueSfc {
+            if *file_kind == verter_session::FileKind::VueSfc {
                 if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
                     if let Some(template) = &analysis.template {
                         template_components
@@ -3703,7 +3706,7 @@ impl VerterLanguageServer {
         let mut parents = Vec::new();
         let vue_count = file_list
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
             .count();
         tracing::info!(
             "getComponentParents: target='{}' scanning {} vue files",
@@ -3712,7 +3715,7 @@ impl VerterLanguageServer {
         );
 
         for (canonical_id, file_kind) in &file_list {
-            if *file_kind != verter_host::FileKind::VueSfc {
+            if *file_kind != verter_session::FileKind::VueSfc {
                 continue;
             }
             // Skip the target file itself
@@ -3798,7 +3801,10 @@ impl VerterLanguageServer {
     }
 
     /// Install a VFS workspace (test harness access).
-    pub(crate) fn install_vfs_workspace(&self, workspace: Arc<verter_vfs::FilesystemWorkspace>) {
+    pub(crate) fn install_vfs_workspace(
+        &self,
+        workspace: Arc<verter_workspace::FilesystemWorkspace>,
+    ) {
         *self.vfs_workspace.write() = Some(workspace);
     }
 }
@@ -3858,14 +3864,14 @@ impl LanguageServer for VerterLanguageServer {
                 .iter()
                 .map(|r| crate::documents::uri_to_canonical_id_from_str(r))
                 .collect();
-            let ws = std::sync::Arc::new(verter_vfs::FilesystemWorkspace::new(
-                verter_vfs::FilesystemOptions {
+            let ws = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
+                verter_workspace::FilesystemOptions {
                     roots: canonical_roots,
                     eager_preload: false,
                 },
             ));
-            ws.set_project_graph(verter_vfs::ProjectGraph::new());
-            let ws_dyn: std::sync::Arc<dyn verter_vfs::WorkspaceAccess> = ws.clone();
+            ws.set_project_graph(verter_workspace::ProjectGraph::new());
+            let ws_dyn: std::sync::Arc<dyn verter_workspace::WorkspaceAccess> = ws.clone();
             self.documents.host().set_workspace(ws_dyn);
             *self.vfs_workspace.write() = Some(ws);
             tracing::info!(
@@ -4995,11 +5001,11 @@ impl LanguageServer for VerterLanguageServer {
             let canonical_id = crate::documents::uri_to_canonical_id(uri);
             let resolve_component = |import_source: &str,
                                      component_name: Option<&str>|
-             -> Option<verter_host::FileAnalysisSnapshot> {
+             -> Option<verter_session::FileAnalysisSnapshot> {
                 let try_follow_reexport =
                     |resolved: &str,
                      comp_name: Option<&str>|
-                     -> Option<verter_host::FileAnalysisSnapshot> {
+                     -> Option<verter_session::FileAnalysisSnapshot> {
                         if resolved.ends_with(".vue") {
                             return self.documents.host().get_analysis(resolved);
                         }

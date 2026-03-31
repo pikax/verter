@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rmcp::model::ErrorData as McpError;
-use verter_host::{CompileProfile, FileKind, UpsertRequest, VerterHost};
+use verter_session::{CompileProfile, FileKind, UpsertRequest, VerterHost};
 
 /// Normalize a path: resolve relative to project root, forward-slash normalize.
 pub fn resolve_path(path: &str, project_root: Option<&Path>) -> String {
@@ -54,7 +54,7 @@ pub fn ensure_template_analysis(host: &VerterHost, canonical_id: &str) -> Result
     // Trigger compilation to populate template analysis.
     // Use ANALYSIS target (script + template data) — skips style and VDOM codegen.
     let profile = CompileProfile {
-        target: verter_host::CompileTarget::ANALYSIS,
+        target: verter_session::CompileTarget::ANALYSIS,
         ..CompileProfile::default()
     };
     let _ = host.ensure_compiled(canonical_id, &profile);
@@ -67,7 +67,7 @@ pub fn ensure_template_analysis(host: &VerterHost, canonical_id: &str) -> Result
 pub fn batch_analysis_with_template(
     host: &VerterHost,
     canonical_ids: &[&str],
-) -> Vec<(String, verter_host::FileAnalysisSnapshot)> {
+) -> Vec<(String, verter_session::FileAnalysisSnapshot)> {
     for id in canonical_ids {
         let _ = ensure_template_analysis(host, id);
     }

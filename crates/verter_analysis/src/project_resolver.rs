@@ -1,27 +1,27 @@
-//! Project resolver — re-exported from `verter_vfs::resolver`.
+//! Project resolver — re-exported from `verter_workspace::resolver`.
 //!
 //! All resolver types and the
 //! `ProjectResolver` (aliased as `NativeProjectResolver`) now live in
-//! `verter_vfs`. This module re-exports them for backward compatibility
+//! `verter_workspace`. This module re-exports them for backward compatibility
 //! and adds analysis-dependent utility functions that reference
 //! `crate::AnalyzedModuleReference`.
 
 use std::collections::HashSet;
 
-// ── Re-exports from verter_vfs ──
+// ── Re-exports from verter_workspace ──
 //
-// Everything that was originally defined here is now in verter_vfs::resolver
-// and verter_vfs::types.  Downstream code (`verter_host`, `verter_lsp`,
+// Everything that was originally defined here is now in verter_workspace::resolver
+// and verter_workspace::types.  Downstream code (`verter_session`, `verter_lsp`,
 // `verter_napi`, `verter_wasm`) can keep importing via
 // `verter_analysis::project_resolver::*` unchanged.
 
-pub use verter_vfs::resolver::{
+pub use verter_workspace::resolver::{
     build_known_file_index, collapse_path, is_absolute_specifier, is_relative_specifier,
     join_paths, normalize_canonical_id, normalize_known_file_id, parent_dir,
     resolve_known_dependency_base, resolve_known_dependency_id, IdeProjectCompilerOptions,
     IdeProjectConfig, NativeProjectResolver, ProjectMembership, ProjectResolver, WorkspaceAlias,
 };
-pub use verter_vfs::types::{
+pub use verter_workspace::types::{
     ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
     ResolveRequestKind, ResolveResult,
 };
@@ -29,7 +29,7 @@ pub use verter_vfs::types::{
 // ── Analysis-dependent functions ──
 //
 // These functions reference `crate::AnalyzedModuleReference` and so must
-// stay in `verter_analysis`.  They delegate to the verter_vfs path helpers.
+// stay in `verter_analysis`.  They delegate to the verter_workspace path helpers.
 
 pub fn collect_resolvable_module_reference_specifiers(
     module_references: &[crate::AnalyzedModuleReference],

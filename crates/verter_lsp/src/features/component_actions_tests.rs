@@ -7,7 +7,7 @@ use verter_analysis::template::{
 };
 use verter_analysis::types::AnalyzedMacro;
 use verter_analysis::types::ImportBindingKind;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {

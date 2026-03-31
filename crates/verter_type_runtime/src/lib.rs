@@ -23,7 +23,7 @@
 //! verter_lsp ────────→ verter_type_runtime (for sessions + orchestration)
 //! ```
 //!
-//! `verter_type_runtime` does NOT depend on `verter_resolver` or `verter_host`.
+//! `verter_type_runtime` does NOT depend on `verter_resolver` or `verter_session`.
 
 pub mod backend;
 pub mod codec;

@@ -1,10 +1,10 @@
 /// @ai-generated — Phase 4 integration tests for verter_lsp.
 ///
-/// These tests use the full pipeline: DocumentRegistry (backed by verter_host) →
+/// These tests use the full pipeline: DocumentRegistry (backed by verter_session) →
 /// LSP feature functions → verify results. They test real Vue SFC content end-to-end.
 use std::sync::Arc;
 use tower_lsp_server::ls_types::*;
-use verter_host::{HostConfig, VerterHost};
+use verter_session::{HostConfig, VerterHost};
 
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::DocumentRegistry;

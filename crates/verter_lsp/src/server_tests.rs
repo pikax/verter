@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use verter_host::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 use crate::server::PublishedResolverSnapshot;
 use crate::test_utils::make_test_vfs_workspace_from_registry;
@@ -645,19 +645,19 @@ fn install_test_resolver_for_root(
     root: &str,
     tsconfig: Option<&str>,
 ) {
-    let vfs_ws = std::sync::Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions::default(),
+    let vfs_ws = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
     ));
 
     // Build a minimal project graph with a single project.
-    let projects = vec![verter_vfs::workspace_snapshot::OwnershipProject {
-        id: verter_vfs::workspace_snapshot::ProjectId(0),
-        root: verter_vfs::CanonicalPath::new(root),
-        workspace_root: verter_vfs::CanonicalPath::new(root),
-        payload: verter_vfs::workspace_snapshot::ProjectPayload::Fallback {
-            membership: verter_vfs::FallbackMembership {
-                root: verter_vfs::CanonicalPath::new(root),
-                exclude: vec![verter_vfs::NormalizedGlob::new(&format!(
+    let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
+        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        root: verter_workspace::CanonicalPath::new(root),
+        workspace_root: verter_workspace::CanonicalPath::new(root),
+        payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
+            membership: verter_workspace::FallbackMembership {
+                root: verter_workspace::CanonicalPath::new(root),
+                exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
                     "{}/node_modules/**",
                     root
                 ))],
@@ -665,21 +665,22 @@ fn install_test_resolver_for_root(
         },
     }];
 
-    let resolver =
-        verter_vfs::ProjectResolver::new(vec![crate::project_resolver::IdeProjectConfig::new(
+    let resolver = verter_workspace::ProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
             root.to_string(),
             root.to_string(),
             tsconfig.map(|s| s.to_string()),
-        )]);
+        ),
+    ]);
 
-    let snapshot = std::sync::Arc::new(verter_vfs::WorkspaceSnapshot {
+    let snapshot = std::sync::Arc::new(verter_workspace::WorkspaceSnapshot {
         projects,
         resolver,
-        generation: verter_vfs::workspace_snapshot::SnapshotGeneration(1),
+        generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
     });
 
     let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
-    vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+    vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),
     ));
@@ -938,8 +939,8 @@ fn test_module_reference(
     analyzability: verter_analysis::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-) -> verter_host::ScriptModuleReference {
-    verter_host::ScriptModuleReference {
+) -> verter_session::ScriptModuleReference {
+    verter_session::ScriptModuleReference {
         syntax: verter_analysis::ModuleReferenceSyntax::StaticImport,
         semantics: verter_analysis::ModuleReferenceSemantics::Import,
         is_type_only: false,
@@ -965,8 +966,8 @@ fn test_module_reference_with_semantics(
     expr_end: usize,
     semantics: verter_analysis::ModuleReferenceSemantics,
     is_type_only: bool,
-) -> verter_host::ScriptModuleReference {
-    verter_host::ScriptModuleReference {
+) -> verter_session::ScriptModuleReference {
+    verter_session::ScriptModuleReference {
         semantics,
         is_type_only,
         ..test_module_reference(
@@ -1025,7 +1026,7 @@ impl TestResolverReader {
     }
 }
 
-impl verter_vfs::WorkspaceAccess for TestResolverReader {
+impl verter_workspace::WorkspaceAccess for TestResolverReader {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.texts.get(&canonical_id.replace('\\', "/")).cloned()
     }
@@ -1066,8 +1067,8 @@ async fn make_definition_test_server(
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
-        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let host_for_server = Arc::clone(&host);
@@ -1469,11 +1470,11 @@ fn provider_path_helpers_round_trip_through_resolver() {
     ]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
-    host.upsert(verter_host::UpsertRequest {
+    host.upsert(verter_session::UpsertRequest {
         canonical_id: Some("/workspace/src/App.vue".to_string()),
         input_id: "/workspace/src/App.vue".to_string(),
         source: "<template><div/></template>".into(),
-        file_kind: verter_host::FileKind::VueSfc,
+        file_kind: verter_session::FileKind::VueSfc,
         aliases: Vec::new(),
     })
     .unwrap();
@@ -1525,11 +1526,11 @@ fn vue_tsx_virtual_file_resolves() {
     ]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
-    host.upsert(verter_host::UpsertRequest {
+    host.upsert(verter_session::UpsertRequest {
         canonical_id: Some("/workspace/src/App.vue".to_string()),
         input_id: "/workspace/src/App.vue".to_string(),
         source: "<template><div/></template>".into(),
-        file_kind: verter_host::FileKind::VueSfc,
+        file_kind: verter_session::FileKind::VueSfc,
         aliases: Vec::new(),
     })
     .unwrap();
@@ -6874,7 +6875,7 @@ fn test_is_vue_file() {
 #[test]
 fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     let host = Arc::new(VerterHost::new_standalone(
-        verter_host::HostConfig::default(),
+        verter_session::HostConfig::default(),
     ));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
@@ -6921,12 +6922,12 @@ fn compute_verter_diagnostics_ignores_plain_typescript_files() {
 /// host's `diagnostics_generation` changes (even if the document version hasn't).
 #[test]
 fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
-    use verter_host::{CompileErrorPolicy, FileKind, UpsertRequest};
+    use verter_session::{CompileErrorPolicy, FileKind, UpsertRequest};
 
-    let host = Arc::new(VerterHost::new_standalone(verter_host::HostConfig {
+    let host = Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
         dev_mode: false,
         compile_error_policy: CompileErrorPolicy::StrictError,
-        ..verter_host::HostConfig::default()
+        ..verter_session::HostConfig::default()
     }));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
@@ -7030,8 +7031,8 @@ import Child from '@/components/Child.vue'
 <template><Child msg="hello" /></template>"#
     );
 
-    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
-        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let documents = DocumentRegistry::new(Arc::clone(&host));
@@ -7267,8 +7268,8 @@ defineProps<{ show: boolean }>()
         .to_string();
     let app_id = format!("{workspace_id}/src/App.vue");
 
-    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
-        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let documents = DocumentRegistry::new(Arc::clone(&host));
@@ -7355,7 +7356,7 @@ import { Overlay } from './components'
 
 #[test]
 fn vfs_workspace_rwlock_initially_none() {
-    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
+    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>> =
         Arc::new(parking_lot::RwLock::new(None));
 
     // Before background_init, the workspace is None
@@ -7367,12 +7368,12 @@ fn vfs_workspace_rwlock_initially_none() {
 
 #[test]
 fn vfs_workspace_rwlock_install_and_access() {
-    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
+    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>> =
         Arc::new(parking_lot::RwLock::new(None));
 
     // Simulate what background_init does: build workspace and store it
-    let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec!["/test-project".to_string()],
             eager_preload: false,
         },
@@ -7393,15 +7394,15 @@ fn vfs_workspace_rwlock_install_and_access() {
 
 #[test]
 fn vfs_workspace_with_project_graph() {
-    let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec!["/my-project".to_string()],
             eager_preload: false,
         },
     ));
 
     // Before setting a project graph, owner_for_file returns None
-    use verter_vfs::WorkspaceAccess;
+    use verter_workspace::WorkspaceAccess;
     assert!(
         workspace
             .owner_for_file("/my-project/src/App.vue")
@@ -7410,18 +7411,19 @@ fn vfs_workspace_with_project_graph() {
     );
 
     // Set a simple project graph
-    let graph = verter_vfs::ProjectGraph::from_configs(vec![verter_vfs::VfsProjectConfig {
-        root: "/my-project".to_string(),
-        rank: verter_vfs::ProjectRank::Inferred,
-        tsconfig_path: None,
-        root_files: vec![],
-        extensions: vec![".vue".to_string()],
-        workspace_root: "/my-project".to_string(),
-        workspace_aliases: vec![],
-        compiler_options: Default::default(),
-        references: vec![],
-        membership: verter_vfs::ProjectMembership::MatchAll,
-    }]);
+    let graph =
+        verter_workspace::ProjectGraph::from_configs(vec![verter_workspace::VfsProjectConfig {
+            root: "/my-project".to_string(),
+            rank: verter_workspace::ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![".vue".to_string()],
+            workspace_root: "/my-project".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: Default::default(),
+            references: vec![],
+            membership: verter_workspace::ProjectMembership::MatchAll,
+        }]);
     workspace.set_project_graph(graph);
 
     // Now owner_for_file should return the project
@@ -7447,7 +7449,7 @@ fn vfs_workspace_with_project_graph() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
-    use verter_vfs::WorkspaceAccess;
+    use verter_workspace::WorkspaceAccess;
 
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
@@ -7461,8 +7463,8 @@ async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
     let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
     let service = make_hover_test_service(provider);
     let server = service.inner();
-    let vfs_workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let vfs_workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec![root_id.clone()],
             eager_preload: false,
         },
@@ -7495,7 +7497,7 @@ async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_watcher_state_changed_invalidates_vfs_negative_cache_under_workspace_root() {
-    use verter_vfs::WorkspaceAccess;
+    use verter_workspace::WorkspaceAccess;
 
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
@@ -7509,8 +7511,8 @@ async fn on_watcher_state_changed_invalidates_vfs_negative_cache_under_workspace
     let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
     let service = make_hover_test_service(provider);
     let server = service.inner();
-    let vfs_workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let vfs_workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec![root_id.clone()],
             eager_preload: false,
         },
@@ -7549,7 +7551,7 @@ fn standalone_host_cannot_resolve_disk_files() {
     std::fs::write(ws.join("App.vue"), "<template><div/></template>").unwrap();
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let file_id = verter_vfs::resolver::normalize_canonical_id(
+    let file_id = verter_workspace::resolver::normalize_canonical_id(
         &ws.join("App.vue").to_string_lossy().replace('\\', "/"),
     );
     // Positive: standalone host cannot load disk files (documents the limitation)

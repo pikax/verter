@@ -3577,7 +3577,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "verter_span",
- "verter_vfs",
+ "verter_workspace",
 ]
 
 [[package]]
@@ -3598,9 +3598,9 @@ dependencies = [
  "verter_analysis",
  "verter_core",
  "verter_diagnostics",
- "verter_host",
+ "verter_session",
  "verter_span",
- "verter_vfs",
+ "verter_workspace",
  "walkdir",
 ]
 
@@ -3645,7 +3645,7 @@ dependencies = [
  "serde_json",
  "verter_analysis",
  "verter_span",
- "verter_vfs",
+ "verter_workspace",
 ]
 
 [[package]]
@@ -3656,39 +3656,9 @@ dependencies = [
  "verter_actions",
  "verter_analysis",
  "verter_diagnostics",
- "verter_host",
  "verter_resolver",
+ "verter_session",
  "verter_span",
-]
-
-[[package]]
-name = "verter_host"
-version = "0.0.1-beta.1"
-dependencies = [
- "criterion",
- "dashmap 6.1.0",
- "hotpath",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_span",
- "parking_lot",
- "rustc-hash 2.1.1",
- "self_cell",
- "serde",
- "serde_json",
- "smallvec",
- "sourcemap",
- "thiserror 2.0.18",
- "tracing",
- "verter_analysis",
- "verter_core",
- "verter_resolver",
- "verter_scheduler",
- "verter_span",
- "verter_vfs",
- "web-time",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -3719,12 +3689,12 @@ dependencies = [
  "verter_actions",
  "verter_analysis",
  "verter_diagnostics",
- "verter_host",
  "verter_mcp",
  "verter_scheduler",
+ "verter_session",
  "verter_span",
  "verter_type_runtime",
- "verter_vfs",
+ "verter_workspace",
 ]
 
 [[package]]
@@ -3743,9 +3713,9 @@ dependencies = [
  "verter_actions",
  "verter_analysis",
  "verter_diagnostics",
- "verter_host",
+ "verter_session",
  "verter_span",
- "verter_vfs",
+ "verter_workspace",
  "walkdir",
 ]
 
@@ -3765,17 +3735,17 @@ dependencies = [
  "verter_core",
  "verter_diagnostics",
  "verter_ffi",
- "verter_host",
- "verter_proto",
+ "verter_protocol",
  "verter_resolver",
  "verter_scheduler",
+ "verter_session",
  "verter_span",
  "verter_type_runtime",
- "verter_vfs",
+ "verter_workspace",
 ]
 
 [[package]]
-name = "verter_proto"
+name = "verter_protocol"
 version = "0.0.1-beta.1"
 dependencies = [
  "prost",
@@ -3799,7 +3769,7 @@ dependencies = [
  "verter_core",
  "verter_span",
  "verter_type_runtime",
- "verter_vfs",
+ "verter_workspace",
 ]
 
 [[package]]
@@ -3814,6 +3784,36 @@ dependencies = [
  "rayon",
  "rustc-hash 2.1.1",
  "verter_span",
+]
+
+[[package]]
+name = "verter_session"
+version = "0.0.1-beta.1"
+dependencies = [
+ "criterion",
+ "dashmap 6.1.0",
+ "hotpath",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
+ "parking_lot",
+ "rustc-hash 2.1.1",
+ "self_cell",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "sourcemap",
+ "thiserror 2.0.18",
+ "tracing",
+ "verter_analysis",
+ "verter_core",
+ "verter_resolver",
+ "verter_scheduler",
+ "verter_span",
+ "verter_workspace",
+ "web-time",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -3838,8 +3838,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "verter_core",
- "verter_host",
- "verter_vfs",
+ "verter_session",
+ "verter_workspace",
  "walkdir",
 ]
 
@@ -3856,7 +3856,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "verter_vfs"
+name = "verter_wasm"
+version = "0.0.1-beta.1"
+dependencies = [
+ "console_error_panic_hook",
+ "getrandom 0.3.4",
+ "serde",
+ "serde-wasm-bindgen",
+ "verter_actions",
+ "verter_analysis",
+ "verter_diagnostics",
+ "verter_ffi",
+ "verter_session",
+ "verter_span",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "verter_workspace"
 version = "0.0.1-beta.1"
 dependencies = [
  "arc-swap",
@@ -3874,24 +3892,6 @@ dependencies = [
  "tempfile",
  "tracing",
  "walkdir",
-]
-
-[[package]]
-name = "verter_wasm"
-version = "0.0.1-beta.1"
-dependencies = [
- "console_error_panic_hook",
- "getrandom 0.3.4",
- "serde",
- "serde-wasm-bindgen",
- "verter_actions",
- "verter_analysis",
- "verter_diagnostics",
- "verter_ffi",
- "verter_host",
- "verter_span",
- "wasm-bindgen",
- "wasm-bindgen-test",
 ]
 
 [[package]]
