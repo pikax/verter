@@ -648,6 +648,42 @@ impl VerterHost {
         QueryResult::complete(fact, revision)
     }
 
+    /// Get boundary analysis reports for a component via stable ref.
+    ///
+    /// Uses the semantic DB to resolve the component's surface and analyze
+    /// all usages of it across the workspace. Returns boundary issues
+    /// (unknown props, missing required, unknown events).
+    pub fn boundary_reports(
+        &self,
+        component_ref: &verter_semantic::refs::ComponentRef,
+    ) -> verter_semantic::query::QueryResult<Vec<verter_semantic::analyzers::boundary::BoundaryIssue>>
+    {
+        use verter_semantic::analyzers::boundary::analyze_boundary;
+        use verter_semantic::query::QueryResult;
+
+        let revision = self.semantic_revision();
+
+        // Get the component's declared surface
+        let surface_result = self.semantic_component_surface(&component_ref.file_id);
+        let surface = match surface_result.value {
+            Some(s) => s,
+            None => return QueryResult::complete(vec![], revision),
+        };
+
+        // Get the semantic snapshot to access boundary edges
+        let snapshot = self.semantic_snapshot(&component_ref.file_id);
+
+        // Analyze each boundary edge targeting this component
+        let mut all_issues = Vec::new();
+        for edge in &snapshot.value.boundary_edges {
+            if edge.child_file_id.as_deref() == Some(component_ref.file_id.as_str()) {
+                all_issues.extend(analyze_boundary(edge, &surface));
+            }
+        }
+
+        QueryResult::complete(all_issues, revision)
+    }
+
     /// Access the unified resolver runtime for counter reads and diagnostics.
     pub fn resolver_runtime(
         &self,
