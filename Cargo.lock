@@ -3814,6 +3814,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_semantic"
+version = "0.0.1-beta.1"
+dependencies = [
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "verter_analysis",
+ "verter_parser",
+ "verter_span",
+]
+
+[[package]]
 name = "verter_session"
 version = "0.0.1-beta.1"
 dependencies = [

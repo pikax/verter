@@ -1,0 +1,19 @@
+[package]
+name = "verter_semantic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Semantic authority for Verter — revision-tracked query engine, component surface, binding analysis, reactivity provenance"
+publish = false
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+verter_parser = { path = "../verter_parser" }
+verter_analysis = { path = "../verter_analysis" }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+smallvec = "1.13"
+serde_json = { workspace = true }
