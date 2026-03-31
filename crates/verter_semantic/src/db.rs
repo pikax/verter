@@ -816,4 +816,146 @@ mod tests {
         let surface = result.value.unwrap();
         assert_eq!(surface.declared.props[0].name, "deep");
     }
+
+    // ── Cache invariant tests (plan-required) ──────────────────────────────
+
+    #[test]
+    fn same_revision_query_returns_cached_not_recomputed() {
+        // Plan: "proving file reads/parses happen at most once per canonical ID per relevant revision"
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        let mut surface = ComponentSurface::default();
+        surface.declared.props.push(PropFact {
+            name: "cached".into(),
+            is_optional: false,
+            type_text: None,
+            default_value: None,
+            description: None,
+            span: Span::new(0, 6),
+        });
+        db.set_component_surface("a.vue".into(), rev, surface);
+
+        // Query twice at same revision — both should return the same cached data
+        let r1 = db.component_surface(&FileRef::new("a.vue"), rev);
+        let r2 = db.component_surface(&FileRef::new("a.vue"), rev);
+
+        assert!(r1.is_complete());
+        assert!(r2.is_complete());
+        assert_eq!(
+            r1.value.as_ref().unwrap().declared.props[0].name,
+            r2.value.as_ref().unwrap().declared.props[0].name
+        );
+    }
+
+    #[test]
+    fn import_graph_cached_and_reused_across_queries() {
+        // Plan: "proving shallow symbol/export/import state is stored once and reused"
+        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        let graph = FileImportGraph {
+            imports: vec![ImportedSymbol {
+                local_name: "Foo".into(),
+                source_specifier: "./foo".into(),
+                resolved_file_id: Some("/foo.ts".into()),
+                exported_name: "Foo".into(),
+                kind: ImportKind::Named,
+                is_type_only: false,
+                span: Span::new(10, 13),
+            }],
+            import_sources: vec!["/foo.ts".into()],
+        };
+
+        db.set_import_graph("parent.vue".into(), rev, graph);
+
+        // Multiple queries at same revision all return cached data
+        for _ in 0..5 {
+            let result = db.import_graph(&FileRef::new("parent.vue"), rev);
+            assert!(result.is_complete());
+            let g = result.value.unwrap();
+            assert_eq!(g.imports[0].local_name, "Foo");
+        }
+    }
+
+    #[test]
+    fn new_revision_invalidates_stale_cache() {
+        // Plan: "VFS is the authority for file-change invalidation"
+        let mut db = SemanticDb::new();
+        let rev1 = make_revision(1);
+        let rev2 = make_revision(2);
+
+        let mut surface = ComponentSurface::default();
+        surface.declared.props.push(PropFact {
+            name: "old_prop".into(),
+            is_optional: false,
+            type_text: None,
+            default_value: None,
+            description: None,
+            span: Span::new(0, 8),
+        });
+        db.set_component_surface("a.vue".into(), rev1, surface);
+
+        // At rev2, cache is stale → partial
+        let result = db.component_surface(&FileRef::new("a.vue"), rev2);
+        assert_eq!(result.completeness, Completeness::Partial);
+
+        // After explicit invalidation + re-set at rev2
+        db.invalidate("a.vue");
+        let mut new_surface = ComponentSurface::default();
+        new_surface.declared.props.push(PropFact {
+            name: "new_prop".into(),
+            is_optional: true,
+            type_text: None,
+            default_value: None,
+            description: None,
+            span: Span::new(0, 8),
+        });
+        db.set_component_surface("a.vue".into(), rev2, new_surface);
+
+        let result = db.component_surface(&FileRef::new("a.vue"), rev2);
+        assert!(result.is_complete());
+        assert_eq!(result.value.unwrap().declared.props[0].name, "new_prop");
+    }
+
+    #[test]
+    fn set_multiple_facts_for_same_file_all_cached() {
+        // Plan: "cache named declarations from that parsed file by name"
+        use crate::facts::binding::{BindingDeclaration, BindingKind};
+        use crate::facts::reactivity::ReactivityFact;
+        use crate::facts::symbol::FileImportGraph;
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        db.set_component_surface("a.vue".into(), rev, ComponentSurface::default());
+        db.set_bindings(
+            "a.vue".into(),
+            rev,
+            vec![(
+                BindingDeclaration {
+                    name: "x".into(),
+                    kind: BindingKind::Const,
+                    span: Span::new(0, 1),
+                    usages: vec![],
+                },
+                ReactivityFact::non_reactive(),
+            )],
+        );
+        db.set_import_graph("a.vue".into(), rev, FileImportGraph::default());
+
+        // All three facts cached under the same file
+        assert_eq!(db.cached_file_count(), 1);
+
+        let file = FileRef::new("a.vue");
+        assert!(db.component_surface(&file, rev).is_complete());
+        assert!(db.bindings(&file, rev).is_complete());
+        assert!(db.import_graph(&file, rev).is_complete());
+
+        // Bindings value is populated
+        let b = db.bindings(&file, rev).value.unwrap();
+        assert_eq!(b[0].0.name, "x");
+    }
 }
