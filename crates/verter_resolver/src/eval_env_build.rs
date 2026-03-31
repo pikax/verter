@@ -62,14 +62,9 @@ pub fn build_owner_eval_env_with_inputs<A: OwnerEvalEnvAssembler>(
     let requested_binding_names = collect_requested_binding_names(macros);
 
     for dep_source in &imported_inputs.sources {
-        let dep_env = assembler
-            .base_eval_env(dep_source.canonical_id.as_str())
-            .unwrap_or_else(|| {
-                Arc::new(verter_analysis::type_eval_build::parse_and_build_env(
-                    dep_source.source.as_ref(),
-                ))
-            });
-        env.extend_missing_from_ref(dep_env.as_ref());
+        if let Some(dep_env) = assembler.base_eval_env(dep_source.canonical_id.as_str()) {
+            env.extend_missing_from_ref(dep_env.as_ref());
+        }
     }
 
     assembler.materialize_imported_type_aliases(
@@ -327,7 +322,6 @@ mod tests {
         let imported_inputs = ImportedEvalInputs {
             sources: vec![crate::ImportedEvalSource {
                 canonical_id: "/src/dep.ts".to_string(),
-                source: std::sync::Arc::<str>::from("export interface DepOnly {}"),
             }],
             type_aliases: vec![ImportedTypeAlias {
                 local_name: "Imported".to_string(),
@@ -475,5 +469,45 @@ mod tests {
 
         assert!(actual.env.value_symbols.contains_key("theme"));
         assert!(!actual.env.value_symbols.contains_key("helper"));
+    }
+
+    #[test]
+    fn build_owner_eval_env_with_inputs_skips_missing_imported_dep_envs() {
+        let mut owner_env = EvalEnv::new();
+        owner_env.add_type(TypeDeclInfo {
+            name: "Local".to_string(),
+            declaration_id: 1,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: TypeExpr::Primitive(PrimitiveName::String),
+        });
+
+        let mut assembler = TestAssembler::default();
+        assembler
+            .base_envs
+            .insert("/src/owner.ts".to_string(), Arc::new(owner_env));
+
+        let actual = build_owner_eval_env_with_inputs(
+            &assembler,
+            "/src/owner.ts",
+            &(),
+            &[],
+            &ImportedEvalInputs {
+                sources: vec![crate::ImportedEvalSource {
+                    canonical_id: "/src/missing.ts".to_string(),
+                }],
+                type_aliases: Vec::new(),
+                canonical_dependencies: BTreeSet::new(),
+                overflow: None,
+                stats: crate::ImportedEvalStats::default(),
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("owner env should build");
+
+        assert!(actual.env.type_symbols.contains_key("Local"));
+        assert!(!actual.env.type_symbols.contains_key("DepOnly"));
     }
 }

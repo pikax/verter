@@ -525,18 +525,8 @@ fn extract_variable(
     let mut object_shape = None;
 
     if let Some(ref init) = decl.init {
-        match init {
-            Expression::ArrowFunctionExpression(arrow) => {
-                function_signature = Some(extract_arrow_signature(arrow, source));
-            }
-            Expression::FunctionExpression(func) => {
-                function_signature = Some(extract_function_signature(func, source));
-            }
-            Expression::ObjectExpression(obj) => {
-                object_shape = Some(extract_object_literal(obj, source));
-            }
-            _ => {}
-        }
+        function_signature = extract_initializer_function_signature(init, source);
+        object_shape = extract_initializer_object_shape(init, source);
 
         if type_annotation.is_none() {
             let inferred = infer_expression_type(init, source);
@@ -557,15 +547,8 @@ fn extract_variable(
 }
 
 fn extract_default_expression(expr: &Expression<'_>, source: &str, env: &mut EvalEnv) {
-    let function_signature = match expr {
-        Expression::ArrowFunctionExpression(arrow) => Some(extract_arrow_signature(arrow, source)),
-        Expression::FunctionExpression(func) => Some(extract_function_signature(func, source)),
-        _ => None,
-    };
-    let object_shape = match expr {
-        Expression::ObjectExpression(obj) => Some(extract_object_literal(obj, source)),
-        _ => None,
-    };
+    let function_signature = extract_initializer_function_signature(expr, source);
+    let object_shape = extract_initializer_object_shape(expr, source);
     let type_annotation = Some(lower_value_expression(expr, source));
 
     env.add_value(ValueDeclInfo {
@@ -576,6 +559,42 @@ fn extract_default_expression(expr: &Expression<'_>, source: &str, env: &mut Eva
         function_signature,
         object_shape,
     });
+}
+
+fn extract_initializer_function_signature(
+    expr: &Expression<'_>,
+    source: &str,
+) -> Option<FunctionSignature> {
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => Some(extract_arrow_signature(arrow, source)),
+        Expression::FunctionExpression(func) => Some(extract_function_signature(func, source)),
+        Expression::TSAsExpression(ts_as) => {
+            extract_initializer_function_signature(&ts_as.expression, source)
+        }
+        Expression::TSSatisfiesExpression(sat) => {
+            extract_initializer_function_signature(&sat.expression, source)
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            extract_initializer_function_signature(&paren.expression, source)
+        }
+        _ => None,
+    }
+}
+
+fn extract_initializer_object_shape(expr: &Expression<'_>, source: &str) -> Option<ObjectExpr> {
+    match expr {
+        Expression::ObjectExpression(obj) => Some(extract_object_literal(obj, source)),
+        Expression::TSAsExpression(ts_as) => {
+            extract_initializer_object_shape(&ts_as.expression, source)
+        }
+        Expression::TSSatisfiesExpression(sat) => {
+            extract_initializer_object_shape(&sat.expression, source)
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            extract_initializer_object_shape(&paren.expression, source)
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -755,8 +774,14 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
             }))
         }
         Expression::TSAsExpression(ts_as) => {
-            // const x = value as SomeType → use the asserted type
-            lower_ts_type(&ts_as.type_annotation, source)
+            // `as const` should preserve the underlying literal/object surface
+            // instead of degrading the inferred type to an opaque `const` marker.
+            let asserted = lower_ts_type(&ts_as.type_annotation, source);
+            if is_const_assertion_type_expr(&asserted) {
+                infer_expression_type(&ts_as.expression, source)
+            } else {
+                asserted
+            }
         }
         Expression::TSSatisfiesExpression(sat) => {
             // const x = value satisfies SomeType → use the satisfies type
@@ -764,6 +789,16 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
         }
         _ => TypeExpr::Primitive(PrimitiveName::Any),
     }
+}
+
+fn is_const_assertion_type_expr(expr: &TypeExpr) -> bool {
+    matches!(
+        expr,
+        TypeExpr::Unknown { raw } if raw == "const"
+    ) || matches!(
+        expr,
+        TypeExpr::Ref { name, type_arguments } if name.as_ref() == "const" && type_arguments.is_empty()
+    )
 }
 
 fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMember> {

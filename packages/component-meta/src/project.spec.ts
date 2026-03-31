@@ -309,12 +309,14 @@ describe("ComponentMetaSession public API", () => {
     project.close();
   });
 
-  it("uses the native component-meta query instead of rebuilding from session analysis helpers", async () => {
+  it("uses the declared native component-meta query instead of rebuilding from session analysis helpers", async () => {
+    const getDeclaredComponentMeta = vi.fn((id: string) => nativeMetaPayload(id));
     const session = {
       closed: false,
       engine: { state: "active" as const, clearCaches() {} },
       upsert() {},
       delete() {},
+      getDeclaredComponentMeta,
       getComponentMeta(id: string) {
         return nativeMetaPayload(id);
       },
@@ -334,6 +336,202 @@ describe("ComponentMetaSession public API", () => {
     const meta = await project.getComponentMeta("Button.vue");
 
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("/test/Button.vue");
+  });
+
+  it("projects optional generic raw prop text through the public session API", async () => {
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      getComponentMeta(id: string) {
+        return {
+          ...nativeMetaPayload(id),
+          props: [
+            {
+              name: "searchInput",
+              type: { kind: "primitive", name: "boolean" },
+              rawType: "boolean | Omit<InputProps, 'modelValue'>",
+              required: false,
+              hasDefault: false,
+            },
+          ],
+        };
+      },
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ searchInput?: boolean | Omit<InputProps, 'modelValue'> }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new ComponentMetaSession(session as any, "/test");
+
+    const meta = await project.getComponentMeta("Button.vue");
+
+    expect(meta.props[0]?.type).toBe('boolean | Omit<InputProps, "modelValue"> | undefined');
+  });
+
+  it("projects registry-backed event, slot, and exposed schemas through the public session API", async () => {
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      getComponentMeta(id: string) {
+        return {
+          ...nativeMetaPayload(id),
+          events: [
+            {
+              name: "select",
+              payload: {
+                kind: "tuple",
+                readonly: false,
+                elements: [
+                  {
+                    ty: { kind: "ref", name: "Item", typeArguments: [] },
+                    optional: false,
+                    rest: false,
+                  },
+                ],
+              },
+              rawSignature: '(event: "select", item: Item) => void',
+            },
+          ],
+          slots: [
+            {
+              name: "default",
+              isScoped: true,
+              isRequired: true,
+              bindings: [
+                {
+                  name: "item",
+                  type: { kind: "ref", name: "Item", typeArguments: [] },
+                  rawType: "Item",
+                },
+              ],
+            },
+          ],
+          exposed: [
+            {
+              name: "focus",
+              type: { kind: "ref", name: "Handle", typeArguments: [] },
+            },
+          ],
+          typeRegistry: [
+            {
+              name: "Item",
+              type: {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "label",
+                    optional: false,
+                    ty: { kind: "primitive", name: "string" },
+                  },
+                ],
+              },
+            },
+            {
+              name: "Handle",
+              type: {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "active",
+                    optional: false,
+                    ty: { kind: "primitive", name: "boolean" },
+                  },
+                ],
+              },
+            },
+          ],
+        };
+      },
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new ComponentMetaSession(session as any, "/test");
+
+    const meta = await project.getComponentMeta("Button.vue");
+
+    expect(meta.events[0]?.type).toBe("[item: Item]");
+    expect(meta.events[0]?.schema).toEqual([
+      {
+        kind: "object",
+        type: "{ label: string }",
+        schema: {
+          label: {
+            name: "label",
+            global: false,
+            description: "",
+            tags: [],
+            required: true,
+            type: "string",
+            schema: "string",
+          },
+        },
+      },
+    ]);
+    expect(meta.slots[0]?.schema).toEqual({
+      kind: "object",
+      type: "{ item: { label: string } }",
+      schema: {
+        item: {
+          name: "item",
+          global: false,
+          description: "",
+          tags: [],
+          required: true,
+          type: "{ label: string }",
+          schema: {
+            kind: "object",
+            type: "{ label: string }",
+            schema: {
+              label: {
+                name: "label",
+                global: false,
+                description: "",
+                tags: [],
+                required: true,
+                type: "string",
+                schema: "string",
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(meta.exposed[0]?.schema).toEqual({
+      kind: "object",
+      type: "{ active: boolean }",
+      schema: {
+        active: {
+          name: "active",
+          global: false,
+          description: "",
+          tags: [],
+          required: true,
+          type: "boolean",
+          schema: "boolean",
+        },
+      },
+    });
   });
 
   it("exposes raw native component-meta with resolution provenance", async () => {
@@ -438,6 +636,111 @@ describe("ComponentMetaSession public API", () => {
     ]);
     expect(nativeMeta?.typeRegistry?.[0]?.rawType).toContain("export class Props");
     expect(nativeMeta?.typeRegistry?.[0]?.declaration?.canonicalSource).toBe("/test/types.ts");
+  });
+
+  it("routes compat and native project queries through different native session methods", async () => {
+    const getComponentMeta = vi.fn(() => nativeMetaPayload("/test/Button.vue"));
+    const getResolvedComponentMeta = vi.fn(() => ({
+      ...nativeMetaPayload("/test/Button.vue"),
+      resolution: {
+        mode: "expanded" as const,
+        macros: [],
+      },
+    }));
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      getComponentMeta,
+      getResolvedComponentMeta,
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new ComponentMetaSession(session as any, "/test");
+
+    const compatMeta = await project.getComponentMeta("Button.vue");
+    const nativeMeta = await project.getNativeComponentMeta("Button.vue");
+
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
+    expect(compatMeta.props.map((prop) => prop.name)).toEqual(["label"]);
+    expect(nativeMeta?.resolution?.mode).toBe("expanded");
+  });
+
+  it("keeps public-instance members off the public session API compat exposed surface", async () => {
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      getComponentMeta() {
+        return {
+          ...nativeMetaPayload("/test/App.vue"),
+          exposed: [
+            {
+              name: "analysisOnly",
+              type: {
+                kind: "primitive",
+                name: "number",
+              },
+            },
+          ],
+          publicInstance: {
+            completeness: "partial",
+            members: [
+              {
+                name: "$slots",
+                kind: "slotContainer",
+                type: {
+                  kind: "object",
+                  properties: [],
+                },
+              },
+              {
+                name: "label",
+                kind: "prop",
+                type: {
+                  kind: "primitive",
+                  name: "string",
+                },
+              },
+              {
+                name: "focus",
+                kind: "exposed",
+                type: {
+                  kind: "primitive",
+                  name: "number",
+                },
+              },
+            ],
+          },
+        };
+      },
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new ComponentMetaSession(session as any, "/test");
+
+    const meta = await project.getComponentMeta("App.vue");
+
+    expect(meta.exposed.map((member) => member.name)).toEqual(["analysisOnly"]);
   });
 
   it("getNativeComponentMeta returns undefined for missing files", async () => {

@@ -1662,6 +1662,118 @@ defineProps<Props>()
 }
 
 #[test]
+fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_imported_state() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/types.ts".to_string(),
+        Arc::from("export type Props = { label: string }\n"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let seeded = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed imported state");
+    let decl = seeded
+        .env
+        .as_ref()
+        .and_then(|env| env.type_symbols.get("Props"))
+        .cloned()
+        .expect("seeded dependency should expose Props");
+
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = cache
+            .get_mut("/src/types.ts")
+            .expect("types dependency should stay cached");
+        Arc::make_mut(entry).snapshot = None;
+    }
+
+    let materialized = materialize_imported_component_meta_registry_decl_body_in_view(
+        &host,
+        "/src/types.ts",
+        &decl,
+        &[],
+        None,
+    );
+
+    assert_eq!(
+        materialized, decl.body,
+        "registry decl materialization should stay shallow when the imported cache does not own a snapshot yet",
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/types.ts", None)
+            .and_then(|entry| entry.snapshot.clone())
+            .is_none(),
+        "registry decl materialization must not bounce into raw snapshot building for imported files",
+    );
+}
+
+#[test]
+fn typed_jsdoc_resolution_uses_cached_import_lookup_without_external_source_traversal() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/tag-types.ts",
+            r#"export interface DocType { id: string; active?: boolean }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+import type { DocType } from './tag-types'
+
+export interface Props { a: string }
+"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/types.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./tag-types".to_string(),
+            resolved_canonical_id: Some("/tag-types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    project.host().provenance().reset();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let store_view = project.host().resolver_store_view();
+
+    let resolved = resolve_jsdoc_tag_type(
+        project.host(),
+        "/types.ts",
+        "DocType",
+        &mut tracked_deps,
+        Some(&store_view),
+    )
+    .expect("typed JSDoc payload should resolve through cached imported lookup");
+
+    assert!(
+        matches!(resolved, verter_analysis::type_expr::TypeExpr::Object(_)),
+        "typed JSDoc should resolve the imported symbol through the cached eval env, got {resolved:?}",
+    );
+    assert!(
+        tracked_deps.contains("/tag-types.ts"),
+        "typed JSDoc resolution should still track the imported dependency"
+    );
+    let p = provenance(&project);
+    assert_eq!(
+        p.resolved_external_type_cache_misses, 0,
+        "typed JSDoc should not call resolve_external_type_from_loaded_files through the legacy source-body path"
+    );
+}
+
+#[test]
 fn imported_member_jsdoc_flows_through_shared_resolver_path() {
     let project = make_project();
     project
@@ -2022,6 +2134,81 @@ defineProps<Props>()
             && !prop_names.contains(&"target")
             && !prop_names.contains(&"active"),
         "omitted imported keys must not leak into final props: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn imported_inherited_props_reach_resolved_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export interface LinkProps {
+  as?: string
+  class?: any
+  href?: string
+  target?: string
+  active?: boolean
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'active'
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  label?: string
+  color?: string
+  variant?: string
+  ui?: object
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface Props extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: 'primary'
+  variant?: 'solid'
+  side?: 'left' | 'right'
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let evaluated = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded component meta should carry evaluated types");
+    let prop_names: std::collections::BTreeSet<_> = evaluated
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.as_str())
+        .collect();
+
+    assert!(
+        prop_names.contains("as") && prop_names.contains("class"),
+        "resolved evaluated types should retain inherited imported props before final projection: {:?}",
+        prop_names
+    );
+    assert!(
+        prop_names.contains("label")
+            && prop_names.contains("ui")
+            && prop_names.contains("color")
+            && prop_names.contains("variant")
+            && prop_names.contains("side"),
+        "resolved evaluated types should retain local props before final projection: {:?}",
         prop_names
     );
 }
@@ -2987,6 +3174,89 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 }
 
 #[test]
+fn imported_mapped_slots_reach_resolved_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export interface PricingPlan {
+  id: string
+}
+
+export interface PricingPlanSlots {
+  badge(props: { planId: string }): any
+  title(props: { planId: string }): any
+}
+
+export type ExtendSlotWithPlan<TPlan, TKey extends keyof PricingPlanSlots> =
+  PricingPlanSlots[TKey] extends (props: infer P) => any
+    ? (props: P & { plan: TPlan }) => any
+    : PricingPlanSlots[TKey]
+
+export type PricingPlansSlots<TPlan extends PricingPlan = PricingPlan> = {
+  [K in keyof PricingPlanSlots]?: ExtendSlotWithPlan<TPlan, K>
+} & {
+  default?(props?: {}): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { PricingPlansSlots } from './slots'
+
+defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let evaluated = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded component meta should carry evaluated types");
+    let slot_names: std::collections::BTreeSet<_> = evaluated
+        .define_slots
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|slot| slot.name.as_str())
+        .collect();
+    let binding_names: std::collections::BTreeSet<_> = evaluated
+        .slot_bindings
+        .iter()
+        .filter_map(|binding| {
+            binding
+                .name
+                .strip_prefix("badge.")
+                .map(|name| name.to_string())
+        })
+        .collect();
+
+    assert!(
+        slot_names.contains("badge")
+            && slot_names.contains("title")
+            && slot_names.contains("default"),
+        "resolved evaluated slot shapes should retain imported mapped slot names before final projection: {:?}",
+        slot_names
+    );
+    assert_eq!(
+        binding_names,
+        std::collections::BTreeSet::from([
+            "plan".to_string(),
+            "planId".to_string(),
+        ]),
+        "resolved evaluated slot bindings should retain mapped slot parameter expansion before final projection",
+    );
+}
+
+#[test]
 fn imported_dynamic_slot_branches_do_not_synthesize_default_in_final_component_meta() {
     let project = make_project();
     project
@@ -3597,8 +3867,8 @@ defineProps<Props>()
         .unwrap();
 
     // Query through session — should NOT reuse stale base cache
-    let session_state = session
-        .resolve_component_meta_state("/App.vue", ResolverMode::Expanded)
+    let (_analysis, session_state) = session
+        .get_component_meta_with_resolution("/App.vue")
         .unwrap()
         .expect("session resolver query should return a result");
     let overlay_props: Vec<&str> = session_state

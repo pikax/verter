@@ -13,18 +13,21 @@ use verter_ffi::types::*;
 use crate::verter::v1::{
     self as proto, type_node, AcceptedEventMeta, AcceptedPropMeta, ArrayNode, BindingMeta,
     BranchStatus, ComponentFlags, ComponentMetaBody, ComponentMetaPayload, ComponentMetaResolution,
-    ComponentPropUsage, ComponentUsage, ConditionalNode, ConsumedRootBindings, EventMeta,
-    ExpansionDiagnostic, ExpansionMetadata, ExposedMeta, FallthroughBranch, FallthroughEventEntry,
-    FallthroughPropEntry, FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta,
-    ImportMeta, IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
-    MappedNode, MemberAvailability, MemberProvenance, ModelMeta, ObjectMember as ProtoObjectMember,
-    ObjectNode, ParenthesizedNode, PartialBranchReason, PropMeta, RefNode, ResolvedEmitField,
-    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedPropField,
-    ResolvedRootStep, ResolvedSlotBinding, ResolvedSlotField, ResolvedTypeDeclaration, RestNode,
-    RootBranch, RootReachability, RootTargetRef, SelectorMeta, SlotBindingMeta, SlotMeta,
-    StyleMeta, TemplateLiteralNode, TemplateRefMeta, TupleElement, TupleNode, TypeGraph, TypeNode,
-    TypeOfNode, TypeParameterNode, TypeRegistryEntry, UnionNode, UnknownNode,
-    UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
+    ComponentPropUsage, ComponentUsage, ConditionalNode, ConsumedRootBindings,
+    CustomBlockMeta as ProtoCustomBlockMeta, EventMeta, ExpansionDiagnostic, ExpansionMetadata,
+    ExposedMeta, FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry,
+    FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta, ImportMeta,
+    IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode, MappedNode,
+    MemberAvailability, MemberProvenance, ModelMeta, ObjectMember as ProtoObjectMember, ObjectNode,
+    ParenthesizedNode, PartialBranchReason, PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta,
+    RefNode, ResolvedEmitField, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta,
+    ResolvedNativeProp, ResolvedPropField, ResolvedRootStep, ResolvedSlotBinding,
+    ResolvedSlotField, ResolvedTypeDeclaration, RestNode, RootBranch, RootInfo, RootReachability,
+    RootTargetRef, ScriptBlockMeta, SelectorMeta, SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta,
+    SlotMeta, StyleBlockMeta as ProtoStyleBlockMeta, StyleMeta, TemplateBlockMeta,
+    TemplateLiteralNode, TemplateRefMeta, TupleElement, TupleNode, TypeGraph, TypeNode, TypeOfNode,
+    TypeParameterNode, TypeRegistryEntry, UnionNode, UnknownNode, UnresolvedBranchReason,
+    UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
 pub const COMPONENT_META_SCHEMA_VERSION: u32 = 1;
@@ -174,6 +177,15 @@ fn component_meta_body_to_proto(
             builder,
             &meta.fallthrough_surface,
         )),
+        root_info: Some(root_info_to_proto(builder, &meta.root_info)),
+        public_instance: meta
+            .public_instance
+            .as_ref()
+            .map(|public_instance| public_instance_to_proto(builder, public_instance)),
+        sfc_blocks: meta
+            .sfc_blocks
+            .as_ref()
+            .map(|blocks| sfc_blocks_to_proto(builder, blocks)),
         resolution: meta
             .resolution
             .as_ref()
@@ -431,6 +443,164 @@ fn root_reachability_to_proto(
                 .map(|branch| root_branch_to_proto(builder, branch))
                 .collect(),
         },
+    }
+}
+
+fn root_info_to_proto(builder: &mut GraphBuilder, info: &FfiRootInfo) -> RootInfo {
+    RootInfo {
+        kind: match info.kind {
+            FfiRootInfoKind::None => proto::RootInfoKind::None,
+            FfiRootInfoKind::Single => proto::RootInfoKind::Single,
+            FfiRootInfoKind::Conditional => proto::RootInfoKind::Conditional,
+            FfiRootInfoKind::Multiple => proto::RootInfoKind::Multiple,
+        } as i32,
+        reason: info
+            .reason
+            .as_ref()
+            .map(no_fallthrough_reason_to_proto)
+            .unwrap_or(proto::NoFallthroughReason::Unspecified) as i32,
+        targets: info
+            .targets
+            .iter()
+            .map(|target| root_target_ref_to_proto(builder, target))
+            .collect(),
+    }
+}
+
+fn public_instance_to_proto(
+    builder: &mut GraphBuilder,
+    public_instance: &FfiPublicInstanceMeta,
+) -> PublicInstanceMeta {
+    PublicInstanceMeta {
+        completeness: match public_instance.completeness.as_str() {
+            "exact" => proto::PublicInstanceCompleteness::Exact,
+            _ => proto::PublicInstanceCompleteness::Partial,
+        } as i32,
+        members: public_instance
+            .members
+            .iter()
+            .map(|member| PublicInstanceMemberMeta {
+                name_id: builder.string_id(&member.name),
+                kind: match member.kind.as_str() {
+                    "prop" => proto::PublicInstanceMemberKind::Prop,
+                    "slotContainer" => proto::PublicInstanceMemberKind::SlotContainer,
+                    "exposed" => proto::PublicInstanceMemberKind::Exposed,
+                    _ => proto::PublicInstanceMemberKind::Unspecified,
+                } as i32,
+                type_node_id: builder.node_id(&member.r#type),
+                type_expansion: member
+                    .type_expansion
+                    .as_ref()
+                    .map(|metadata| expansion_metadata_to_proto(builder, metadata)),
+                raw_type_id: builder.string_id_opt(member.raw_type.as_deref()),
+                description_id: builder.string_id_opt(member.description.as_deref()),
+            })
+            .collect(),
+    }
+}
+
+fn sfc_blocks_to_proto(builder: &mut GraphBuilder, blocks: &FfiSfcBlocksMeta) -> SfcBlocksMeta {
+    SfcBlocksMeta {
+        template: blocks
+            .template
+            .as_ref()
+            .map(|template| template_block_to_proto(builder, template)),
+        script: blocks
+            .script
+            .as_ref()
+            .map(|script| script_block_to_proto(builder, script)),
+        script_setup: blocks
+            .script_setup
+            .as_ref()
+            .map(|script| script_block_to_proto(builder, script)),
+        styles: blocks
+            .styles
+            .iter()
+            .map(|style| style_block_to_proto(builder, style))
+            .collect(),
+        custom: blocks
+            .custom
+            .iter()
+            .map(|custom| custom_block_to_proto(builder, custom))
+            .collect(),
+    }
+}
+
+fn sfc_attribute_to_proto(
+    builder: &mut GraphBuilder,
+    attribute: &FfiSfcAttributeMeta,
+) -> SfcAttributeMeta {
+    SfcAttributeMeta {
+        name_id: builder.string_id(&attribute.name),
+        value_id: builder.string_id_opt(attribute.value.as_deref()),
+    }
+}
+
+fn template_block_to_proto(
+    builder: &mut GraphBuilder,
+    block: &FfiTemplateBlockMeta,
+) -> TemplateBlockMeta {
+    TemplateBlockMeta {
+        lang_id: builder.string_id_opt(block.lang.as_deref()),
+        src_id: builder.string_id_opt(block.src.as_deref()),
+        attributes: block
+            .attributes
+            .iter()
+            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
+            .collect(),
+    }
+}
+
+fn script_block_to_proto(
+    builder: &mut GraphBuilder,
+    block: &FfiScriptBlockMeta,
+) -> ScriptBlockMeta {
+    ScriptBlockMeta {
+        lang_id: builder.string_id_opt(block.lang.as_deref()),
+        src_id: builder.string_id_opt(block.src.as_deref()),
+        generic_id: builder.string_id_opt(block.generic.as_deref()),
+        attrs_type_id: builder.string_id_opt(block.attrs_type.as_deref()),
+        attributes: block
+            .attributes
+            .iter()
+            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
+            .collect(),
+    }
+}
+
+fn style_block_to_proto(
+    builder: &mut GraphBuilder,
+    block: &FfiStyleBlockMeta,
+) -> ProtoStyleBlockMeta {
+    ProtoStyleBlockMeta {
+        index: block.index,
+        lang_id: builder.string_id_opt(block.lang.as_deref()),
+        src_id: builder.string_id_opt(block.src.as_deref()),
+        scoped: block.scoped,
+        is_module: block.is_module,
+        module_name_id: builder.string_id_opt(block.module_name.as_deref()),
+        attributes: block
+            .attributes
+            .iter()
+            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
+            .collect(),
+    }
+}
+
+fn custom_block_to_proto(
+    builder: &mut GraphBuilder,
+    block: &FfiCustomBlockMeta,
+) -> ProtoCustomBlockMeta {
+    ProtoCustomBlockMeta {
+        index: block.index,
+        block_type_id: builder.string_id(&block.block_type),
+        lang_id: builder.string_id_opt(block.lang.as_deref()),
+        src_id: builder.string_id_opt(block.src.as_deref()),
+        attributes: block
+            .attributes
+            .iter()
+            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
+            .collect(),
     }
 }
 
@@ -1212,6 +1382,8 @@ fn build_test_meta() -> FfiComponentMeta {
         }],
         models: Vec::new(),
         exposed: Vec::new(),
+        public_instance: None,
+        sfc_blocks: None,
         type_registry: vec![FfiResolvedTypeMeta {
             name: "TreeNode".to_string(),
             r#type: tree_node,
@@ -1239,6 +1411,11 @@ fn build_test_meta() -> FfiComponentMeta {
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness: FfiAcceptedSurfaceCompleteness::Exact,
+        root_info: FfiRootInfo {
+            kind: FfiRootInfoKind::None,
+            reason: Some(FfiNoFallthroughReason::NoTemplate),
+            targets: Vec::new(),
+        },
         root_reachability: FfiRootReachability::NoFallthrough {
             reason: FfiNoFallthroughReason::NoTemplate,
         },

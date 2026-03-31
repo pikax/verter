@@ -456,6 +456,10 @@ pub struct FfiComponentMeta {
     pub slots: Vec<FfiSlotMeta>,
     pub models: Vec<FfiModelMeta>,
     pub exposed: Vec<FfiExposedMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_instance: Option<FfiPublicInstanceMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfc_blocks: Option<FfiSfcBlocksMeta>,
     pub type_registry: Vec<FfiResolvedTypeMeta>,
     pub components: Vec<FfiComponentUsage>,
     pub template_refs: Vec<FfiTemplateRefMeta>,
@@ -467,6 +471,7 @@ pub struct FfiComponentMeta {
     pub accepted_props: Vec<FfiAcceptedPropMeta>,
     pub accepted_events: Vec<FfiAcceptedEventMeta>,
     pub accepted_surface_completeness: FfiAcceptedSurfaceCompleteness,
+    pub root_info: FfiRootInfo,
     pub root_reachability: FfiRootReachability,
     pub fallthrough_surface: FfiFallthroughSurface,
     pub options_api: bool,
@@ -569,6 +574,105 @@ pub struct FfiExposedMeta {
     pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicInstanceMeta {
+    pub completeness: String,
+    pub members: Vec<FfiPublicInstanceMemberMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicInstanceMemberMeta {
+    pub name: String,
+    pub kind: String,
+    pub r#type: verter_analysis::type_expr::TypeExpr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_expansion: Option<FfiExpansionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiSfcBlocksMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<FfiTemplateBlockMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script: Option<FfiScriptBlockMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_setup: Option<FfiScriptBlockMeta>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<FfiStyleBlockMeta>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom: Vec<FfiCustomBlockMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiSfcAttributeMeta {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiTemplateBlockMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<FfiSfcAttributeMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiScriptBlockMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attrs_type: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<FfiSfcAttributeMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiStyleBlockMeta {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
+    pub scoped: bool,
+    pub is_module: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<FfiSfcAttributeMeta>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiCustomBlockMeta {
+    pub index: u32,
+    pub block_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<FfiSfcAttributeMeta>,
 }
 
 #[derive(Serialize, Clone)]
@@ -715,10 +819,14 @@ pub struct FfiComponentUsage {
     pub import_source: Option<String>,
     pub is_dynamic: bool,
     pub props: Vec<FfiComponentPropUsage>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_spread: bool,
     pub slots_used: Vec<String>,
     pub static_classes: Vec<String>,
     pub has_dynamic_class: bool,
     pub v_models: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub v_model_entries: Vec<FfiComponentVModelEntry>,
 }
 
 #[derive(Serialize, Clone)]
@@ -727,6 +835,20 @@ pub struct FfiComponentPropUsage {
     pub name: String,
     pub is_bound: bool,
     pub constness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub referenced_bindings: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_spread: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_shorthand: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentVModelEntry {
+    pub binding_name: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -823,7 +945,7 @@ pub struct FfiJsdocTag {
 // =============================================================================
 
 /// Root reachability classification for fallthrough inheritance.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FfiRootReachability {
     /// No fallthrough inheritance is possible.
@@ -835,7 +957,7 @@ pub enum FfiRootReachability {
 }
 
 /// Why a component has no fallthrough surface.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum FfiNoFallthroughReason {
     InheritAttrsFalse,
@@ -848,7 +970,7 @@ pub enum FfiNoFallthroughReason {
 }
 
 /// A single root render branch.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiRootBranch {
     pub branch_index: u16,
@@ -860,7 +982,7 @@ pub struct FfiRootBranch {
 }
 
 /// The kind of root render target.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FfiRootTargetRef {
     #[serde(rename_all = "camelCase")]
@@ -887,7 +1009,7 @@ pub enum FfiRootTargetRef {
 }
 
 /// Why a root target cannot be resolved for fallthrough inheritance.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FfiUnresolvedRootTargetReason {
     DynamicComponentIs,
@@ -902,13 +1024,34 @@ pub enum FfiUnresolvedRootTargetReason {
 }
 
 /// Attrs/listeners explicitly bound on the root element.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiConsumedRootBindings {
     pub attrs: Vec<String>,
     pub listeners: Vec<String>,
     pub has_dynamic_attr_name: bool,
     pub has_dynamic_listener_name: bool,
+}
+
+/// First-class root summary for consumers that do not want to reconstruct it
+/// from the full branch graph.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiRootInfo {
+    pub kind: FfiRootInfoKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<FfiNoFallthroughReason>,
+    pub targets: Vec<FfiRootTargetRef>,
+}
+
+/// Coarse root summary kind.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiRootInfoKind {
+    None,
+    Single,
+    Conditional,
+    Multiple,
 }
 
 /// Why generic-root specialization could not resolve a concrete instantiation.

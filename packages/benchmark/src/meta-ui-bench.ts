@@ -1,13 +1,12 @@
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   applyDefaultBenchmarkTransforms,
   compareNormalizedArtifacts,
-  normalizeForBenchmark,
   rotateComponentOrder,
   summarizeLatencySeries,
   type ArtifactComparison,
@@ -16,13 +15,13 @@ import {
   type MetaUiScenario,
   type NormalizedMetaArtifact,
 } from "./meta-ui-core.js";
-import { propsToJsonSchema, refineMetaForBenchmark } from "./meta-ui-meta.js";
 import { aggregateRunFromRepeats, type MetaUiBenchmarkRun } from "./meta-ui-report.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "../../..");
 const require = createRequire(import.meta.url);
+const tsxLoaderPath = require.resolve("tsx");
 
 const JSON_MODE = process.argv.includes("--json");
 
@@ -41,6 +40,7 @@ interface MetaUiBenchArgs {
   scenarios: MetaUiScenario[];
   repeats: number;
   warmupPasses: number;
+  queryTimeoutMs: number;
   components: string[];
   limit: number | null;
   expected: "vue-component-meta" | "none";
@@ -72,9 +72,61 @@ interface ExpectedArtifactsManifest {
 }
 
 interface BackendInstance {
-  queryRaw(component: PreparedComponentSnapshot): Promise<any>;
+  query(component: PreparedComponentSnapshot): Promise<MeasuredQueryResult>;
   dispose(): Promise<void> | void;
+  isAvailable(): boolean;
 }
+
+interface MeasuredQueryResult {
+  artifact: NormalizedMetaArtifact;
+  latencyMs: number;
+  outcome: MetaUiOutcomeBucket;
+}
+
+interface WorkerInitPayload {
+  backend: MetaUiBackend;
+  uiRoot: string;
+  checkerConfig: Record<string, unknown>;
+  components: PreparedComponentSnapshot[];
+}
+
+interface QueryWorkerOptions {
+  workerEntryPath?: string;
+  queryTimeoutMs?: number;
+  setupTimeoutMs?: number;
+}
+
+interface WorkerReadyMessage {
+  type: "ready";
+}
+
+interface WorkerResultMessage {
+  type: "result";
+  requestId: number;
+  result: MeasuredQueryResult;
+}
+
+interface WorkerErrorMessage {
+  type: "error";
+  requestId: number;
+  message: string;
+  stack?: string;
+}
+
+interface WorkerFatalMessage {
+  type: "fatal";
+  message: string;
+  stack?: string;
+}
+
+type WorkerMessage =
+  | WorkerReadyMessage
+  | WorkerResultMessage
+  | WorkerErrorMessage
+  | WorkerFatalMessage;
+
+const DEFAULT_QUERY_TIMEOUT_MS = 250;
+const DEFAULT_SETUP_TIMEOUT_MS = 30_000;
 
 type GlobalWithOptionalGc = typeof globalThis & {
   gc?: () => void;
@@ -126,6 +178,7 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     scenarios: [...SUPPORTED_SCENARIOS],
     repeats: 1,
     warmupPasses: 1,
+    queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS,
     components: [],
     limit: null,
     expected: "vue-component-meta",
@@ -159,6 +212,13 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
       args.warmupPasses = parseNonNegativeInt(
         arg.slice("--warmup-passes=".length),
         "warmup-passes",
+      );
+      continue;
+    }
+    if (arg.startsWith("--query-timeout-ms=")) {
+      args.queryTimeoutMs = parseNonNegativeInt(
+        arg.slice("--query-timeout-ms=".length),
+        "query-timeout-ms",
       );
       continue;
     }
@@ -353,53 +413,259 @@ function tryResolveTypesDeclaration(fullPath: string): string {
 
 async function createBackendInstance(
   prepared: PreparedProject,
+  args: MetaUiBenchArgs,
   backend: MetaUiBackend,
   componentPaths: PreparedComponentSnapshot[],
 ): Promise<BackendInstance> {
   const checkerConfig = buildCheckerConfig(prepared, componentPaths);
-  const checker = await createChecker(prepared, checkerConfig, backend);
-  for (const component of componentPaths) {
-    checker.updateFile(component.absolutePath, component.transformedSource);
-  }
-
-  return {
-    async queryRaw(component) {
-      return checker.getComponentMeta(component.absolutePath);
+  return createWorkerBackendInstance(
+    {
+      backend,
+      uiRoot: prepared.uiRoot,
+      checkerConfig,
+      components: componentPaths,
     },
-    dispose() {
-      checker.close?.();
-      checker.dispose?.();
+    {
+      queryTimeoutMs: args.queryTimeoutMs,
     },
-  };
+  );
 }
 
-async function createChecker(
-  prepared: PreparedProject,
-  checkerConfig: Record<string, unknown>,
-  backend: MetaUiBackend,
-): Promise<any> {
-  if (backend === "vue-component-meta") {
-    const module = require("vue-component-meta");
-    if (typeof module.createCheckerByJson === "function") {
-      return module.createCheckerByJson(prepared.uiRoot, checkerConfig, {
-        forceUseTs: true,
-        schema: true,
-      });
+export async function createWorkerBackendInstance(
+  payload: WorkerInitPayload,
+  options: QueryWorkerOptions = {},
+): Promise<BackendInstance> {
+  const workerEntryPath = options.workerEntryPath ?? resolve(__dirname, "meta-ui-query-worker.ts");
+  const queryTimeoutMs = options.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
+  const setupTimeoutMs = options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS;
+  const child = spawn(
+    process.execPath,
+    ["--expose-gc", "--import", tsxLoaderPath, workerEntryPath],
+    {
+      cwd: repoRoot,
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    },
+  );
+  const stderr: string[] = [];
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  const waitForReady = new Promise<void>((resolveReady, rejectReady) => {
+    let settled = false;
+    const readyTimer =
+      setupTimeoutMs > 0
+        ? setTimeout(() => {
+            finalizeReadyReject(
+              new Error(`meta-ui backend setup timed out after ${setupTimeoutMs}ms`),
+              true,
+            );
+          }, setupTimeoutMs)
+        : null;
+
+    const cleanup = () => {
+      if (readyTimer) {
+        clearTimeout(readyTimer);
+      }
+      child.off("message", onMessage);
+      child.off("exit", onExit);
+      child.off("error", onError);
+    };
+
+    const finalizeReadyResolve = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolveReady();
+    };
+
+    const finalizeReadyReject = (error: Error, terminate: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      if (terminate) {
+        child.kill("SIGKILL");
+      }
+      rejectReady(enrichWorkerError(error, stderr));
+    };
+
+    const onMessage = (message: WorkerMessage) => {
+      if (message?.type === "ready") {
+        finalizeReadyResolve();
+        return;
+      }
+      if (message?.type === "fatal") {
+        finalizeReadyReject(new Error(message.message), true);
+      }
+    };
+
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      finalizeReadyReject(
+        new Error(`meta-ui backend worker exited before ready (code=${code}, signal=${signal})`),
+        false,
+      );
+    };
+
+    const onError = (error: Error) => {
+      finalizeReadyReject(error, false);
+    };
+
+    child.on("message", onMessage);
+    child.on("exit", onExit);
+    child.on("error", onError);
+    child.send({ type: "init", payload });
+  });
+
+  await waitForReady;
+  return new WorkerBackendInstance(child, stderr, queryTimeoutMs);
+}
+
+class WorkerBackendInstance implements BackendInstance {
+  private readonly child: ChildProcess;
+  private readonly stderr: string[];
+  private readonly queryTimeoutMs: number;
+  private readonly pending = new Map<
+    number,
+    {
+      resolve: (value: MeasuredQueryResult) => void;
+      reject: (reason?: unknown) => void;
+      timer: NodeJS.Timeout | null;
     }
-    throw new Error("Installed vue-component-meta does not expose createCheckerByJson().");
+  >();
+  private nextRequestId = 1;
+  private unavailableError: Error | null = null;
+
+  constructor(child: ChildProcess, stderr: string[], queryTimeoutMs: number) {
+    this.child = child;
+    this.stderr = stderr;
+    this.queryTimeoutMs = queryTimeoutMs;
+    this.child.on("message", this.onMessage);
+    this.child.on("exit", this.onExit);
+    this.child.on("error", this.onError);
   }
 
-  const { createCheckerByJson } = require("@verter/component-meta/compat");
-  return createCheckerByJson(prepared.uiRoot, checkerConfig, {
-    forceUseTs: true,
-    schema: true,
-    runtimeMode: "dedicated",
-    typeExpansionBackend: backend === "verter" ? "verter" : backend,
-  });
+  isAvailable(): boolean {
+    return this.unavailableError === null;
+  }
+
+  async query(component: PreparedComponentSnapshot): Promise<MeasuredQueryResult> {
+    if (this.unavailableError) {
+      throw this.unavailableError;
+    }
+    const requestId = this.nextRequestId++;
+    return new Promise<MeasuredQueryResult>((resolveResult, rejectResult) => {
+      const timer =
+        this.queryTimeoutMs > 0
+          ? setTimeout(() => {
+              const timeoutError = new Error(
+                `meta-ui query timed out after ${this.queryTimeoutMs}ms while resolving ${component.relativePath}`,
+              );
+              this.markUnavailable(timeoutError, true);
+            }, this.queryTimeoutMs)
+          : null;
+      this.pending.set(requestId, {
+        resolve: resolveResult,
+        reject: rejectResult,
+        timer,
+      });
+      this.child.send({ type: "query", requestId, component });
+    });
+  }
+
+  async dispose(): Promise<void> {
+    this.child.off("message", this.onMessage);
+    this.child.off("exit", this.onExit);
+    this.child.off("error", this.onError);
+    this.markUnavailable(new Error("meta-ui backend worker disposed"), false);
+    if (!this.child.killed) {
+      this.child.kill("SIGKILL");
+    }
+  }
+
+  private readonly onMessage = (message: WorkerMessage) => {
+    if (message?.type === "result") {
+      const pending = this.pending.get(message.requestId);
+      if (!pending) {
+        return;
+      }
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
+      this.pending.delete(message.requestId);
+      pending.resolve(message.result);
+      return;
+    }
+
+    if (message?.type === "error") {
+      const pending = this.pending.get(message.requestId);
+      if (!pending) {
+        return;
+      }
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
+      this.pending.delete(message.requestId);
+      const error = new Error(message.message);
+      if (message.stack) {
+        error.stack = message.stack;
+      }
+      pending.reject(error);
+      return;
+    }
+
+    if (message?.type === "fatal") {
+      this.markUnavailable(new Error(message.message), true);
+    }
+  };
+
+  private readonly onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (this.unavailableError) {
+      return;
+    }
+    this.markUnavailable(
+      new Error(`meta-ui backend worker exited unexpectedly (code=${code}, signal=${signal})`),
+      false,
+    );
+  };
+
+  private readonly onError = (error: Error) => {
+    this.markUnavailable(error, false);
+  };
+
+  private markUnavailable(error: Error, terminate: boolean): void {
+    const finalError = enrichWorkerError(error, this.stderr);
+    if (!this.unavailableError) {
+      this.unavailableError = finalError;
+    }
+    for (const [requestId, pending] of this.pending) {
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
+      pending.reject(finalError);
+      this.pending.delete(requestId);
+    }
+    if (terminate && !this.child.killed) {
+      this.child.kill("SIGKILL");
+    }
+  }
+}
+
+function enrichWorkerError(error: Error, stderr: string[]): Error {
+  const stderrText = stderr.join("").trim();
+  if (stderrText.length === 0) {
+    return error;
+  }
+  return new Error(`${error.message}\n${stderrText}`);
 }
 
 async function buildExpectedArtifacts(
   prepared: PreparedProject,
+  args: MetaUiBenchArgs,
   expected: "vue-component-meta" | "none",
   expectedDir: string,
 ): Promise<Map<string, string>> {
@@ -410,14 +676,20 @@ async function buildExpectedArtifacts(
 
   const total = prepared.componentSnapshots.length;
   for (const [index, component] of prepared.componentSnapshots.entries()) {
-    const instance = await createBackendInstance(prepared, "vue-component-meta", [component]);
+    const instance = await createBackendInstance(prepared, args, "vue-component-meta", [component]);
     try {
-      const { artifact } = await executeMeasuredQuery(instance, component);
+      const { artifact, latencyMs, outcome } = await executeMeasuredQuery(instance, component);
       const filePath = resolve(expectedDir, `${component.relativePath}.json`);
       mkdirSync(dirname(filePath), { recursive: true });
       writeFileSync(filePath, JSON.stringify(artifact));
       artifacts.set(component.relativePath, filePath);
-      logProgress("[expected]", component, index + 1, total, "baseline-ready");
+      logProgress(
+        "[expected]",
+        component,
+        index + 1,
+        total,
+        `baseline-ready outcome=${outcome} latency=${latencyMs.toFixed(2)}ms`,
+      );
     } finally {
       await instance.dispose();
       maybeRunGarbageCollection();
@@ -482,47 +754,7 @@ async function executeMeasuredQuery(
   instance: BackendInstance,
   component: PreparedComponentSnapshot,
 ) {
-  const startedAt = performance.now();
-  const raw = await instance.queryRaw(component);
-  const refined = refineMetaForBenchmark(raw);
-  const propsJsonSchema = propsToJsonSchema(refined.props);
-  const diagnostics = collectDiagnostics(raw, refined);
-  const artifact = normalizeForBenchmark(
-    component.relativePath,
-    refined,
-    propsJsonSchema,
-    diagnostics,
-  );
-  const endedAt = performance.now();
-  const outcome: MetaUiOutcomeBucket = artifact.diagnostics.length > 0 ? "degraded" : "success";
-  return {
-    artifact,
-    latencyMs: endedAt - startedAt,
-    outcome,
-  };
-}
-
-function collectDiagnostics(raw: any, refined: any) {
-  const diagnostics = [];
-  if (!raw) {
-    diagnostics.push({
-      level: "error" as const,
-      code: "meta_ui_empty_meta",
-      message: "Backend returned no metadata.",
-    });
-  }
-  if (
-    !Array.isArray(refined?.props) ||
-    !Array.isArray(refined?.events) ||
-    !Array.isArray(refined?.slots)
-  ) {
-    diagnostics.push({
-      level: "warning" as const,
-      code: "meta_ui_incomplete_surface",
-      message: "Backend returned an incomplete metadata surface.",
-    });
-  }
-  return diagnostics;
+  return instance.query(component);
 }
 
 function classifyFailure(error: unknown): MetaUiOutcomeBucket {
@@ -534,6 +766,7 @@ function classifyFailure(error: unknown): MetaUiOutcomeBucket {
 
 async function runScenario(
   prepared: PreparedProject,
+  args: MetaUiBenchArgs,
   backend: MetaUiBackend,
   scenario: MetaUiScenario,
   repeats: number,
@@ -548,6 +781,7 @@ async function runScenario(
       repeatResults.push(
         await runSingleScenarioRepeat(
           prepared,
+          args,
           backend,
           scenario,
           index + 1,
@@ -560,6 +794,7 @@ async function runScenario(
       repeatResults.push(
         await runRepoScenarioRepeat(
           prepared,
+          args,
           backend,
           scenario,
           index + 1,
@@ -604,6 +839,7 @@ async function runScenario(
 
 async function runSingleScenarioRepeat(
   prepared: PreparedProject,
+  args: MetaUiBenchArgs,
   backend: MetaUiBackend,
   scenario: MetaUiScenario,
   repeatIndex: number,
@@ -626,7 +862,7 @@ async function runSingleScenarioRepeat(
 
   for (const [componentIndex, component] of components.entries()) {
     const setupStartedAt = performance.now();
-    const instance = await createBackendInstance(prepared, backend, [component]);
+    const instance = await createBackendInstance(prepared, args, backend, [component]);
     setupMs += performance.now() - setupStartedAt;
 
     try {
@@ -688,6 +924,7 @@ async function runSingleScenarioRepeat(
 
 async function runRepoScenarioRepeat(
   prepared: PreparedProject,
+  args: MetaUiBenchArgs,
   backend: MetaUiBackend,
   scenario: MetaUiScenario,
   repeatIndex: number,
@@ -695,9 +932,7 @@ async function runRepoScenarioRepeat(
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
-  const setupStartedAt = performance.now();
-  const instance = await createBackendInstance(prepared, backend, components);
-  const setupMs = performance.now() - setupStartedAt;
+  let setupMs = 0;
   let warmupMs = 0;
   const componentLatenciesMs: number[] = [];
   const outcomeCounts = { success: 0, degraded: 0, query_error: 0, crash: 0 };
@@ -708,13 +943,42 @@ async function runRepoScenarioRepeat(
     totalFieldMismatches: 0,
   };
   const total = components.length;
+  let instance: BackendInstance | null = null;
+  let recoveryMode = false;
+
+  const startInstance = async () => {
+    const setupStartedAt = performance.now();
+    instance = await createBackendInstance(prepared, args, backend, components);
+    setupMs += performance.now() - setupStartedAt;
+  };
+
+  await startInstance();
 
   try {
     if (scenario === "repo_warm_second_pass") {
       const warmupStartedAt = performance.now();
       for (let pass = 0; pass < warmupPasses; pass++) {
         for (const component of components) {
-          await executeMeasuredQuery(instance, component);
+          if (recoveryMode) {
+            break;
+          }
+          if (!instance || !instance.isAvailable()) {
+            recoveryMode = true;
+            break;
+          }
+          try {
+            await executeMeasuredQuery(instance, component);
+          } catch {
+            if (instance && !instance.isAvailable()) {
+              await instance.dispose();
+              instance = null;
+              recoveryMode = true;
+              break;
+            }
+          }
+        }
+        if (recoveryMode) {
+          break;
         }
       }
       warmupMs = performance.now() - warmupStartedAt;
@@ -722,6 +986,41 @@ async function runRepoScenarioRepeat(
 
     const steadyStartedAt = performance.now();
     for (const [componentIndex, component] of components.entries()) {
+      if (recoveryMode) {
+        const singleSetupStartedAt = performance.now();
+        const singleInstance = await createBackendInstance(prepared, args, backend, [component]);
+        setupMs += performance.now() - singleSetupStartedAt;
+        try {
+          const result = await executeMeasuredQuery(singleInstance, component);
+          componentLatenciesMs.push(result.latencyMs);
+          outcomeCounts[result.outcome]++;
+          updateDeviationTotals(
+            deviationTotals,
+            expectedArtifacts.get(component.relativePath),
+            result.artifact,
+          );
+          logProgress(
+            `[repeat ${repeatIndex}]`,
+            component,
+            componentIndex + 1,
+            total,
+            `${scenario} outcome=${result.outcome} latency=${result.latencyMs.toFixed(2)}ms`,
+          );
+        } catch (error) {
+          const outcome = classifyFailure(error);
+          outcomeCounts[outcome]++;
+          logProgress(
+            `[repeat ${repeatIndex}]`,
+            component,
+            componentIndex + 1,
+            total,
+            `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
+          );
+        } finally {
+          await singleInstance.dispose();
+        }
+        continue;
+      }
       try {
         const result = await executeMeasuredQuery(instance, component);
         componentLatenciesMs.push(result.latencyMs);
@@ -748,6 +1047,11 @@ async function runRepoScenarioRepeat(
           total,
           `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
         );
+        if (instance && !instance.isAvailable()) {
+          await instance.dispose();
+          instance = null;
+          recoveryMode = true;
+        }
       }
     }
     const steadyStateMs = performance.now() - steadyStartedAt;
@@ -767,7 +1071,7 @@ async function runRepoScenarioRepeat(
       ),
     };
   } finally {
-    await instance.dispose();
+    await instance?.dispose();
     maybeRunGarbageCollection();
   }
 }
@@ -844,7 +1148,7 @@ async function main() {
     }
     expectedArtifacts =
       tryLoadExpectedArtifacts(prepared, args.expectedDir) ??
-      (await buildExpectedArtifacts(prepared, args.expected, args.expectedDir));
+      (await buildExpectedArtifacts(prepared, args, args.expected, args.expectedDir));
     logLine(`Prepared ${expectedArtifacts.size} expected artifacts in ${args.expectedDir}.`);
     return;
   }
@@ -852,7 +1156,7 @@ async function main() {
   if (needsExpectedArtifacts) {
     expectedArtifacts =
       tryLoadExpectedArtifacts(prepared, args.expectedDir) ??
-      (await buildExpectedArtifacts(prepared, args.expected, args.expectedDir));
+      (await buildExpectedArtifacts(prepared, args, args.expected, args.expectedDir));
   }
   const runs: MetaUiBenchmarkRun[] = [];
 
@@ -861,6 +1165,7 @@ async function main() {
       logLine(`Running ${backend} / ${scenario}...`);
       const run = await runScenario(
         prepared,
+        args,
         backend,
         scenario,
         args.repeats,

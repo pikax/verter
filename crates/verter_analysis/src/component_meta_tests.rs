@@ -322,6 +322,56 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
     );
 }
 
+#[test]
+fn resolved_macro_projection_merges_duplicate_prop_metadata() {
+    let macros = vec![make_define_props(Vec::new())];
+    let mut sparse = make_prop("as", Some("ton"), true);
+    sparse.resolution_error = Some("broken expanded display".to_string());
+
+    let mut rich = make_prop("as", Some("any"), true);
+    rich.description = Some(
+        "The element or component this component should render as when not a link.".to_string(),
+    );
+    rich.tags = vec![crate::types::JsdocTag {
+        name: "defaultValue".to_string(),
+        text: Some("'button'".to_string()),
+    }];
+
+    let resolved = vec![
+        crate::component_meta::ResolvedMacroInput {
+            macro_index: 0,
+            props: vec![sparse],
+            emits: Vec::new(),
+            slots: Vec::new(),
+        },
+        crate::component_meta::ResolvedMacroInput {
+            macro_index: 0,
+            props: vec![rich],
+            emits: Vec::new(),
+            slots: Vec::new(),
+        },
+    ];
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved;
+
+    let result = extract_component_meta(input);
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "as")
+        .expect("merged prop should be present");
+
+    assert_eq!(prop.raw_type.as_deref(), Some("any"));
+    assert_eq!(
+        prop.description.as_deref(),
+        Some("The element or component this component should render as when not a link.")
+    );
+    assert_eq!(prop.tags.len(), 1);
+    assert_eq!(prop.tags[0].name, "defaultValue");
+    assert_eq!(prop.tags[0].text.as_deref(), Some("'button'"));
+}
+
 // ---------------------------------------------------------------------------
 // WithDefaults handling
 // ---------------------------------------------------------------------------
@@ -894,6 +944,84 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
 }
 
 #[test]
+fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_access() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![crate::types::AnalyzedSlotField {
+            name: "default".to_string(),
+            is_required: false,
+            span: verter_span::Span::default(),
+            bindings: vec![crate::types::AnalyzedSlotFieldBinding {
+                name: "ui".to_string(),
+                type_annotation: Some("Button['ui']".to_string()),
+                span: verter_span::Span::default(),
+            }],
+            return_type: Some("any".to_string()),
+            description: None,
+            tags: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: vec![crate::type_expand::ExpandedField {
+            name: "default.ui".to_string(),
+            r#type: TypeExpr::Ref {
+                name: Arc::from("ComponentUI"),
+                type_arguments: Arc::from(vec![TypeExpr::TypeOf(crate::type_expr::ValueRef {
+                    path: vec!["theme".to_string()],
+                })]),
+            },
+            raw_type: Some("Button['ui']".to_string()),
+            optional: false,
+            completeness: crate::type_expand::ExpansionCompleteness::Partial,
+            diagnostics: vec![
+                crate::type_expand::ExpansionDiagnostic {
+                    reason: crate::type_expand::ExpansionStopReason::UnresolvedReference,
+                    context: "unresolved type reference 'ComponentUI'".to_string(),
+                    property_name: Some("default.ui".to_string()),
+                },
+                crate::type_expand::ExpansionDiagnostic {
+                    reason: crate::type_expand::ExpansionStopReason::UnsupportedOperator,
+                    context: "typeof theme was preserved symbolically".to_string(),
+                    property_name: Some("default.ui".to_string()),
+                },
+            ],
+        }],
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let slot = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let binding = slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("ui binding should be extracted");
+
+    assert_eq!(
+        binding.type_expr,
+        TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("Button")),
+            index: Arc::new(TypeExpr::string_literal("ui")),
+        },
+        "partial helper slot bindings should keep the symbolic indexed-access source contract"
+    );
+    assert_eq!(binding.raw_type.as_deref(), Some("Button['ui']"));
+}
+
+#[test]
 fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineSlots,
@@ -1270,6 +1398,159 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
     );
     assert_eq!(to.raw_type.as_deref(), Some("RouteLocationRaw"));
     assert_eq!(href.raw_type.as_deref(), Some("NuxtLinkProps['to']"));
+}
+
+#[test]
+fn suspicious_partial_identifier_props_fall_back_to_source_any() {
+    let macros = vec![make_define_props(Vec::new())];
+    let mut imported = make_prop("as", Some("any"), true);
+    imported.description = Some(
+        "The element or component this component should render as when not a link.".to_string(),
+    );
+    imported.tags = vec![crate::types::JsdocTag {
+        name: "defaultValue".to_string(),
+        text: Some("'button'".to_string()),
+    }];
+    let resolved_macros = vec![ResolvedMacroInput {
+        macro_index: 0,
+        props: vec![imported],
+        emits: Vec::new(),
+        slots: Vec::new(),
+    }];
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: vec![crate::type_expand::ExpandedField {
+            name: "as".to_string(),
+            r#type: TypeExpr::named("ton"),
+            raw_type: Some("ton".to_string()),
+            optional: true,
+            completeness: crate::type_expand::ExpansionCompleteness::Partial,
+            diagnostics: Vec::new(),
+        }],
+        define_props: vec![crate::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: crate::type_expand::ExpansionResult::partial(
+                crate::type_expand::ExpandedObjectShape {
+                    properties: vec![crate::type_expand::ExpandedProperty {
+                        name: "as".to_string(),
+                        ty: TypeExpr::named("ton"),
+                        optional: true,
+                        readonly: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+                Vec::new(),
+            ),
+        }],
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "as")
+        .expect("as prop should be extracted");
+
+    assert_eq!(
+        prop.type_expr,
+        TypeExpr::Primitive(PrimitiveName::Any),
+        "partial suspicious identifiers should fall back to the richer source annotation",
+    );
+    assert_eq!(prop.raw_type.as_deref(), Some("any"));
+    assert_eq!(prop.tags.len(), 1);
+}
+
+#[test]
+fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
+    let macros = vec![make_define_props(vec![make_prop(
+        "ui",
+        Some("Button['slots']"),
+        true,
+    )])];
+    let degraded = TypeExpr::Object(Arc::new(crate::type_expr::ObjectExpr {
+        properties: vec![
+            crate::type_expr::ObjectMember::Property(crate::type_expr::ObjectProperty {
+                name: "base".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::Undefined),
+                optional: false,
+                readonly: false,
+            }),
+            crate::type_expr::ObjectMember::Property(crate::type_expr::ObjectProperty {
+                name: "label".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::Undefined),
+                optional: false,
+                readonly: false,
+            }),
+        ],
+    }));
+    let evaluated = crate::type_expand::ExpandedComponentTypes {
+        props: vec![crate::type_expand::ExpandedField {
+            name: "ui".to_string(),
+            r#type: degraded.clone(),
+            raw_type: Some("Button['slots']".to_string()),
+            optional: true,
+            completeness: crate::type_expand::ExpansionCompleteness::Partial,
+            diagnostics: vec![crate::type_expand::ExpansionDiagnostic {
+                reason: crate::type_expand::ExpansionStopReason::UnsupportedOperator,
+                context: "indexed access was preserved symbolically".to_string(),
+                property_name: Some("ui".to_string()),
+            }],
+        }],
+        define_props: vec![crate::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: crate::type_expand::ExpansionResult::partial(
+                crate::type_expand::ExpandedObjectShape {
+                    properties: vec![crate::type_expand::ExpandedProperty {
+                        name: "ui".to_string(),
+                        ty: degraded,
+                        optional: true,
+                        readonly: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+                vec![crate::type_expand::ExpansionDiagnostic {
+                    reason: crate::type_expand::ExpansionStopReason::UnsupportedOperator,
+                    context: "indexed access was preserved symbolically".to_string(),
+                    property_name: Some("ui".to_string()),
+                }],
+            ),
+        }],
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "ui")
+        .expect("ui prop should be extracted");
+
+    assert_eq!(
+        prop.type_expr,
+        TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("Button")),
+            index: Arc::new(TypeExpr::string_literal("slots")),
+        },
+        "partial degraded objects should keep the symbolic indexed-access contract",
+    );
+    assert_eq!(prop.raw_type.as_deref(), Some("Button['slots']"));
 }
 
 #[test]

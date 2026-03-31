@@ -9,7 +9,7 @@
  * ```
  */
 
-import { resolve, dirname } from "node:path";
+import { dirname } from "node:path";
 import { createRequire } from "node:module";
 import {
   nativeComponentMetaToComponentMeta,
@@ -17,13 +17,26 @@ import {
 } from "../native-component-meta.js";
 import type { TypeDescriptor } from "../type-ir.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
-import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
-import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
+import type {
+  ComponentMeta,
+  PropMeta,
+  EventMeta,
+  SlotMeta,
+  ExposedMeta,
+  PublicInstanceMemberMeta,
+} from "../types.js";
+import type {
+  PropertyMeta,
+  PropertyMetaSchema,
+  VolarComponentMeta,
+  MetaCheckerOptions,
+} from "./types.js";
 import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
 import {
   createMetaRuntime,
   getMetaRuntime,
   stableSelectiveConfigHash,
+  resolvePath as runtimeResolvePath,
   normalizePath as runtimeNormalizePath,
   parseTsconfig,
   extractPathAliases,
@@ -59,6 +72,7 @@ const COMPAT_BLOCKED_SLOT_NAMES = new Set([
 ]);
 
 const COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH = 512;
+const COMPAT_MAX_REGISTRY_DISPLAY_DEPTH = 1;
 
 function isCompatVisibleSlotName(name: string): boolean {
   return !COMPAT_BLOCKED_SLOT_NAMES.has(name);
@@ -115,6 +129,11 @@ export function mapPropMeta(
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
   const type = preferredCompatPropTypeText(prop, typeRegistry);
+  const schema = normalizeOptionalPropSchema(
+    typeDescriptorToSchema(prop.type, options, typeRegistry),
+    type,
+    prop.required,
+  );
   return {
     name: prop.name,
     description: prop.description ?? "",
@@ -126,7 +145,7 @@ export function mapPropMeta(
       name: t.name,
       ...(t.text != null && { text: t.text }),
     })),
-    schema: typeDescriptorToSchema(prop.type, options, typeRegistry),
+    schema,
   };
 }
 
@@ -168,16 +187,88 @@ function preferredCompatPropTypeText(
   return rawType;
 }
 
-function preferredCompatTypeText(rawType: string | undefined, descriptor: TypeDescriptor): string {
-  if (rawType && !compatRawTypeLooksLossy(rawType)) {
-    return normalizeTypeString(rawType);
+function preferredCompatTypeText(
+  rawType: string | undefined,
+  descriptor: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): string {
+  const descriptorText = normalizeTypeString(
+    typeDescriptorToCompatDisplay(descriptor, typeRegistry),
+  );
+  if (!rawType || compatRawTypeLooksLossy(rawType)) {
+    return descriptorText;
   }
-  return normalizeTypeString(typeDescriptorToCompatDisplay(descriptor));
+
+  const normalizedRawType = normalizeTypeString(rawType);
+  if (shouldPreferDescriptorForProp(normalizedRawType, descriptorText)) {
+    return descriptorText;
+  }
+
+  return normalizedRawType;
 }
 
 function compatRawTypeLooksLossy(rawType: string): boolean {
   const normalized = rawType.trim();
-  return normalized.startsWith("```") || normalized.includes("...") || normalized === "object";
+  return (
+    normalized.startsWith("```") ||
+    normalized.includes("...") ||
+    normalized.includes("/*") ||
+    normalized.includes("*/") ||
+    normalized === "object"
+  );
+}
+
+function normalizeOptionalPropSchema(
+  schema: PropertyMetaSchema,
+  type: string,
+  required: boolean,
+): PropertyMetaSchema {
+  if (required || compatSchemaIncludesTopLevelUndefined(schema)) {
+    return schema;
+  }
+
+  if (typeof schema === "string") {
+    return {
+      kind: "enum",
+      type,
+      schema: [schema, "undefined"],
+    };
+  }
+
+  if (Array.isArray(schema)) {
+    return {
+      kind: "enum",
+      type,
+      schema: [...schema, "undefined"],
+    };
+  }
+
+  if (schema.kind === "enum") {
+    return {
+      ...schema,
+      type,
+      schema: [...(schema.schema ?? []), "undefined"],
+    };
+  }
+
+  return {
+    kind: "enum",
+    type,
+    schema: [schema, "undefined"],
+  };
+}
+
+function compatSchemaIncludesTopLevelUndefined(schema: PropertyMetaSchema): boolean {
+  if (typeof schema === "string") {
+    return schema.trim() === "undefined";
+  }
+  if (Array.isArray(schema)) {
+    return schema.some((entry) => compatSchemaIncludesTopLevelUndefined(entry));
+  }
+  if (schema.kind === "enum" || schema.kind === "array" || schema.kind === "event") {
+    return (schema.schema ?? []).some((entry) => compatSchemaIncludesTopLevelUndefined(entry));
+  }
+  return false;
 }
 
 function normalizeOptionalCompatTypeText(type: string, required: boolean): string {
@@ -212,6 +303,7 @@ function splitTopLevelTypeUnion(type: string): string[] {
 
   for (let index = 0; index < type.length; index++) {
     const ch = type[index];
+    const prev = index > 0 ? type[index - 1] : "";
     switch (ch) {
       case "(":
         parenDepth++;
@@ -235,7 +327,10 @@ function splitTopLevelTypeUnion(type: string): string[] {
         angleDepth++;
         break;
       case ">":
-        angleDepth--;
+        // `=>` is an arrow function token, not a generic-depth close.
+        if (prev !== "=") {
+          angleDepth--;
+        }
         break;
       case "|":
         if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
@@ -271,7 +366,24 @@ function compatDescriptorLooksLossy(descriptorText: string): boolean {
 }
 
 function compatDescriptorLooksOverexpanded(descriptorText: string): boolean {
-  return descriptorText.length > COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH;
+  if (descriptorText.length > COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH) {
+    return true;
+  }
+
+  if (!descriptorText.includes("{")) {
+    return false;
+  }
+
+  const identifiers = descriptorText.match(/\b[A-Za-z_$][A-Za-z0-9_$]*\b/g) ?? [];
+  const counts = new Map<string, number>();
+  let maxRepeats = 0;
+  for (const identifier of identifiers) {
+    const next = (counts.get(identifier) ?? 0) + 1;
+    counts.set(identifier, next);
+    maxRepeats = Math.max(maxRepeats, next);
+  }
+
+  return maxRepeats >= 6;
 }
 
 function looksLikeBareTypeReference(type: string): boolean {
@@ -279,7 +391,7 @@ function looksLikeBareTypeReference(type: string): boolean {
 }
 
 function looksLikeIndexedAccessType(type: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$.<>, ]*\[[^\]]+\]$/.test(type.trim());
+  return /^[A-Za-z_$][A-Za-z0-9_$.<>, ]*(\[[^\]]+\])+$/.test(type.trim());
 }
 
 function normalizeDefaultForCompat(type: string, value: string | undefined): string | undefined {
@@ -319,6 +431,7 @@ function typeDescriptorToCompatDisplay(
   descriptor: TypeDescriptor,
   typeRegistry?: Map<string, TypeDescriptor>,
   visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
 ): string {
   switch (descriptor.kind) {
     case "primitive":
@@ -328,28 +441,51 @@ function typeDescriptorToCompatDisplay(
       return typeDescriptorToString(descriptor);
     case "union":
       return descriptor.types
-        .map((type) => typeDescriptorToCompatDisplay(type, typeRegistry, visited))
+        .map((type) =>
+          typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth),
+        )
         .join(" | ");
     case "intersection":
       return descriptor.types
-        .map((type) => typeDescriptorToCompatDisplay(type, typeRegistry, visited))
+        .map((type) =>
+          typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth),
+        )
         .join(" & ");
     case "array":
-      return `${typeDescriptorToCompatDisplay(descriptor.element, typeRegistry, visited)}[]`;
+      return `${typeDescriptorToCompatDisplay(
+        descriptor.element,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      )}[]`;
     case "tuple":
-      return `[${descriptor.elements.map((type) => typeDescriptorToCompatDisplay(type, typeRegistry, visited)).join(", ")}]`;
+      return `[${descriptor.elements
+        .map((type) =>
+          typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(", ")}]`;
     case "function":
-      return compatFunctionTypeToString(descriptor, typeRegistry, visited);
+      return compatFunctionTypeToString(descriptor, typeRegistry, visited, registryResolutionDepth);
     case "object":
-      return compatObjectTypeToString(descriptor, typeRegistry, visited);
+      return compatObjectTypeToString(descriptor, typeRegistry, visited, registryResolutionDepth);
     case "typeParameter":
       return descriptor.name;
     case "ref": {
-      if (typeRegistry && !descriptor.typeArguments?.length && !visited.has(descriptor.name)) {
+      if (
+        typeRegistry &&
+        registryResolutionDepth < COMPAT_MAX_REGISTRY_DISPLAY_DEPTH &&
+        !descriptor.typeArguments?.length &&
+        !visited.has(descriptor.name)
+      ) {
         const resolved = typeRegistry.get(descriptor.name);
         if (resolved) {
           visited.add(descriptor.name);
-          const rendered = typeDescriptorToCompatDisplay(resolved, typeRegistry, visited);
+          const rendered = typeDescriptorToCompatDisplay(
+            resolved,
+            typeRegistry,
+            visited,
+            registryResolutionDepth + 1,
+          );
           visited.delete(descriptor.name);
           return rendered;
         }
@@ -363,27 +499,32 @@ function compatObjectTypeToString(
   descriptor: Extract<TypeDescriptor, { kind: "object" }>,
   typeRegistry?: Map<string, TypeDescriptor>,
   visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
 ): string {
   const members: string[] = [];
 
   for (const prop of descriptor.properties) {
     members.push(
-      `${prop.name}${prop.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(prop.type, typeRegistry, visited)}`,
+      `${prop.name}${prop.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(prop.type, typeRegistry, visited, registryResolutionDepth)}`,
     );
   }
 
   for (const indexSignature of descriptor.indexSignatures ?? []) {
     members.push(
-      `${indexSignature.readonly ? "readonly " : ""}[${indexSignature.keyName}: ${typeDescriptorToCompatDisplay(indexSignature.keyType, typeRegistry, visited)}]: ${typeDescriptorToCompatDisplay(indexSignature.valueType, typeRegistry, visited)}`,
+      `${indexSignature.readonly ? "readonly " : ""}[${indexSignature.keyName}: ${typeDescriptorToCompatDisplay(indexSignature.keyType, typeRegistry, visited, registryResolutionDepth)}]: ${typeDescriptorToCompatDisplay(indexSignature.valueType, typeRegistry, visited, registryResolutionDepth)}`,
     );
   }
 
   for (const signature of descriptor.callSignatures ?? []) {
-    members.push(compatFunctionTypeToString(signature, typeRegistry, visited));
+    members.push(
+      compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth),
+    );
   }
 
   for (const signature of descriptor.constructSignatures ?? []) {
-    members.push(`new ${compatFunctionTypeToString(signature, typeRegistry, visited)}`);
+    members.push(
+      `new ${compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth)}`,
+    );
   }
 
   if (members.length === 0) {
@@ -397,30 +538,46 @@ function compatFunctionTypeToString(
   descriptor: Extract<TypeDescriptor, { kind: "function" }>,
   typeRegistry?: Map<string, TypeDescriptor>,
   visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
 ): string {
   const typeParams = descriptor.typeParameters?.length
-    ? `<${descriptor.typeParameters.map((param) => compatTypeParameterToString(param, typeRegistry, visited)).join(", ")}>`
+    ? `<${descriptor.typeParameters
+        .map((param) =>
+          compatTypeParameterToString(param, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(", ")}>`
     : "";
   const params = descriptor.parameters
     .map(
       (param) =>
-        `${param.name}${param.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(param.type, typeRegistry, visited)}`,
+        `${param.name}${param.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(param.type, typeRegistry, visited, registryResolutionDepth)}`,
     )
     .join(", ");
-  return `${typeParams}(${params}): ${typeDescriptorToCompatDisplay(descriptor.returnType, typeRegistry, visited)}`;
+  return `${typeParams}(${params}): ${typeDescriptorToCompatDisplay(descriptor.returnType, typeRegistry, visited, registryResolutionDepth)}`;
 }
 
 function compatTypeParameterToString(
   descriptor: Extract<TypeDescriptor, { kind: "typeParameter" }>,
   typeRegistry?: Map<string, TypeDescriptor>,
   visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
 ): string {
   let rendered = descriptor.name;
   if (descriptor.constraint) {
-    rendered += ` extends ${typeDescriptorToCompatDisplay(descriptor.constraint, typeRegistry, visited)}`;
+    rendered += ` extends ${typeDescriptorToCompatDisplay(
+      descriptor.constraint,
+      typeRegistry,
+      visited,
+      registryResolutionDepth,
+    )}`;
   }
   if (descriptor.default) {
-    rendered += ` = ${typeDescriptorToCompatDisplay(descriptor.default, typeRegistry, visited)}`;
+    rendered += ` = ${typeDescriptorToCompatDisplay(
+      descriptor.default,
+      typeRegistry,
+      visited,
+      registryResolutionDepth,
+    )}`;
   }
   return rendered;
 }
@@ -445,32 +602,243 @@ function evaluateDefault(val: string | undefined): string | undefined {
   return val;
 }
 
+function buildSlotBindingsType(slot: SlotMeta, typeRegistry?: Map<string, TypeDescriptor>): string {
+  if (slot.bindings.length === 0) {
+    return slot.isRequired === false ? "{} | undefined" : "{}";
+  }
+
+  return `{ ${slot.bindings
+    .map(
+      (binding) =>
+        `${binding.name}: ${preferredCompatTypeText(binding.rawType, binding.type, typeRegistry)}`,
+    )
+    .join("; ")}; }`;
+}
+
+function buildSlotBindingsDescriptor(slot: SlotMeta): TypeDescriptor {
+  return {
+    kind: "object",
+    properties: slot.bindings.map((binding) => ({
+      name: binding.name,
+      type: binding.type,
+      optional: false,
+    })),
+  };
+}
+
+function wrapOptionalEmptySlotSchema(type: string, schema: PropertyMetaSchema): PropertyMetaSchema {
+  return {
+    kind: "enum",
+    type,
+    schema: [schema, "undefined"],
+  };
+}
+
+function isVoidLikeEventPayload(payload: TypeDescriptor): boolean {
+  return (
+    payload.kind === "unknown" && /^(void|undefined|never)$/.test((payload.rawType ?? "").trim())
+  );
+}
+
+function buildEventPayloadSchema(
+  payload: TypeDescriptor,
+  options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): PropertyMetaSchema[] {
+  if (payload.kind === "tuple") {
+    return payload.elements.map((element) =>
+      typeDescriptorToSchema(element, options, typeRegistry),
+    );
+  }
+  if (isVoidLikeEventPayload(payload)) {
+    return [];
+  }
+  return [typeDescriptorToSchema(payload, options, typeRegistry)];
+}
+
+function buildEventPayloadType(
+  event: EventMeta,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): string {
+  const fromSignature = extractEventTupleType(event.rawSignature);
+  if (fromSignature) {
+    return normalizeTypeString(fromSignature);
+  }
+  if (event.payload.kind === "tuple") {
+    return normalizeTypeString(typeDescriptorToCompatDisplay(event.payload, typeRegistry));
+  }
+  if (isVoidLikeEventPayload(event.payload)) {
+    return "[]";
+  }
+  return `[${normalizeTypeString(typeDescriptorToCompatDisplay(event.payload, typeRegistry))}]`;
+}
+
+function extractEventTupleType(rawSignature: string | undefined): string | undefined {
+  if (!rawSignature) {
+    return undefined;
+  }
+  const trimmed = rawSignature.trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed;
+  }
+  const paramsSource = extractFunctionParameterSource(rawSignature);
+  if (paramsSource === undefined) {
+    return undefined;
+  }
+  const params = splitTopLevelCommaList(paramsSource);
+  if (params.length === 0) {
+    return "[]";
+  }
+  const payloadParams =
+    looksLikeEventNameParameter(params[0] ?? "") && params.length > 0 ? params.slice(1) : params;
+  return `[${payloadParams.join(", ")}]`;
+}
+
+function extractFunctionParameterSource(signature: string): string | undefined {
+  let depth = 0;
+  let start = -1;
+  let quote: "'" | '"' | "`" | null = null;
+
+  for (let index = 0; index < signature.length; index++) {
+    const ch = signature[index];
+    const prev = index > 0 ? signature[index - 1] : "";
+
+    if (quote) {
+      if (ch === quote && prev !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+
+    if (ch === "(") {
+      if (depth === 0) {
+        start = index + 1;
+      }
+      depth++;
+      continue;
+    }
+
+    if (ch === ")") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        return signature.slice(start, index).trim();
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function splitTopLevelCommaList(source: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+
+  for (let index = 0; index < source.length; index++) {
+    const ch = source[index];
+    const prev = index > 0 ? source[index - 1] : "";
+
+    if (quote) {
+      if (ch === quote && prev !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+
+    switch (ch) {
+      case "(":
+        parenDepth++;
+        break;
+      case ")":
+        parenDepth--;
+        break;
+      case "[":
+        bracketDepth++;
+        break;
+      case "]":
+        bracketDepth--;
+        break;
+      case "{":
+        braceDepth++;
+        break;
+      case "}":
+        braceDepth--;
+        break;
+      case "<":
+        angleDepth++;
+        break;
+      case ">":
+        if (prev !== "=") {
+          angleDepth--;
+        }
+        break;
+      case ",":
+        if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
+          parts.push(source.slice(start, index).trim());
+          start = index + 1;
+        }
+        break;
+    }
+  }
+
+  parts.push(source.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+function looksLikeEventNameParameter(param: string): boolean {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*\s*:\s*["'`]/.test(param.trim());
+}
+
 /**
  * Map a Verter EventMeta to Volar PropertyMeta.
  */
-export function mapEventMeta(event: EventMeta, options?: MetaCheckerOptions): PropertyMeta {
+export function mapEventMeta(
+  event: EventMeta,
+  options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): PropertyMeta {
   return {
     name: event.name,
     description: event.description ?? "",
-    type: preferredCompatTypeText(event.rawSignature, event.payload),
+    type: buildEventPayloadType(event, typeRegistry),
     required: false,
     global: false,
     tags: (event.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
     })),
-    schema: typeDescriptorToSchema(event.payload, options),
+    schema: buildEventPayloadSchema(event.payload, options, typeRegistry),
   };
 }
 
 /**
  * Map a Verter SlotMeta to Volar PropertyMeta.
  */
-export function mapSlotMeta(slot: SlotMeta, options?: MetaCheckerOptions): PropertyMeta {
-  const type =
-    slot.bindings.length > 0
-      ? `{ ${slot.bindings.map((b) => `${b.name}: ${preferredCompatTypeText(b.rawType, b.type)}`).join("; ")}; }`
-      : "{}";
+export function mapSlotMeta(
+  slot: SlotMeta,
+  options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): PropertyMeta {
+  const type = buildSlotBindingsType(slot, typeRegistry);
+  const bindingsSchema = typeDescriptorToSchema(
+    buildSlotBindingsDescriptor(slot),
+    options,
+    typeRegistry,
+  );
   return {
     name: slot.name,
     description: slot.description ?? "",
@@ -481,14 +849,21 @@ export function mapSlotMeta(slot: SlotMeta, options?: MetaCheckerOptions): Prope
       name: t.name,
       ...(t.text != null && { text: t.text }),
     })),
-    schema: type,
+    schema:
+      slot.bindings.length === 0 && slot.isRequired === false
+        ? wrapOptionalEmptySlotSchema(type, bindingsSchema)
+        : bindingsSchema,
   };
 }
 
 /**
  * Map a Verter ExposedMeta to Volar PropertyMeta.
  */
-export function mapExposedMeta(exposed: ExposedMeta, options?: MetaCheckerOptions): PropertyMeta {
+export function mapExposedMeta(
+  exposed: ExposedMeta | PublicInstanceMemberMeta,
+  options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): PropertyMeta {
   return {
     name: exposed.name,
     description: exposed.description ?? "",
@@ -496,7 +871,7 @@ export function mapExposedMeta(exposed: ExposedMeta, options?: MetaCheckerOption
     required: false,
     global: false,
     tags: [],
-    schema: typeDescriptorToSchema(exposed.type, options),
+    schema: typeDescriptorToSchema(exposed.type, options, typeRegistry),
   };
 }
 
@@ -511,11 +886,11 @@ export function mapComponentMeta(
   return {
     type: 0,
     props: meta.props.map((p) => mapPropMeta(p, options, typeRegistry)),
-    events: meta.events.map((e) => mapEventMeta(e, options)),
+    events: meta.events.map((e) => mapEventMeta(e, options, typeRegistry)),
     slots: meta.slots
       .filter((s) => isCompatVisibleSlotName(s.name))
-      .map((s) => mapSlotMeta(s, options)),
-    exposed: meta.exposed.map((e) => mapExposedMeta(e, options)),
+      .map((s) => mapSlotMeta(s, options, typeRegistry)),
+    exposed: meta.exposed.map((e) => mapExposedMeta(e, options, typeRegistry)),
     _verter: meta,
   };
 }
@@ -563,10 +938,13 @@ export class ComponentMetaChecker {
    */
   async getComponentMeta(filePath: string, _exportName?: string): Promise<VolarComponentMeta> {
     this.ensureActive();
-    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
+    const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
     if (this._session) {
-      let nativeMeta = this._session.getComponentMeta(absPath);
+      let nativeMeta =
+        typeof this._session.getDeclaredComponentMeta === "function"
+          ? this._session.getDeclaredComponentMeta(absPath)
+          : this._session.getComponentMeta(absPath);
       if (nativeMeta && this.shouldRetryFullNativeMeta()) {
         const retriedMeta = this._session.getComponentMeta(absPath);
         if (
@@ -618,7 +996,7 @@ export class ComponentMetaChecker {
    */
   updateFile(filePath: string, content: string): void {
     this.ensureActive();
-    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
+    const absPath = runtimeResolvePath(this.projectRoot, filePath);
     this.overlayFiles.add(absPath);
     this.baseFiles.delete(absPath);
     this.deletedFiles.delete(absPath);
@@ -631,7 +1009,7 @@ export class ComponentMetaChecker {
    */
   deleteFile(filePath: string): void {
     this.ensureActive();
-    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
+    const absPath = runtimeResolvePath(this.projectRoot, filePath);
     this.overlayFiles.add(absPath);
     this.baseFiles.delete(absPath);
     this.trackedFiles.delete(absPath);
@@ -656,7 +1034,7 @@ export class ComponentMetaChecker {
     if (!this._session) {
       throw new Error("restoreBaseFile requires a runtime session-backed checker.");
     }
-    const absPath = runtimeNormalizePath(resolve(this.projectRoot, filePath));
+    const absPath = runtimeResolvePath(this.projectRoot, filePath);
     this.overlayFiles.delete(absPath);
     this.deletedFiles.delete(absPath);
     this._session.restoreBaseFile(absPath);
@@ -837,17 +1215,17 @@ export async function createChecker(
   tsconfigPath: string,
   options?: MetaCheckerOptions,
 ): Promise<ComponentMetaChecker> {
-  const absPath = resolve(tsconfigPath);
-  const projectRoot = dirname(absPath);
+  const normalizedAbsPath = runtimeResolvePath(tsconfigPath);
+  const projectRoot = dirname(normalizedAbsPath);
   const workspace = createWorkspace(projectRoot);
-  const parsed = await parseTsconfig(absPath, workspace);
+  const parsed = await parseTsconfig(normalizedAbsPath, workspace);
   const input: EngineKeyInput = {
     backend: "napi",
     root: runtimeNormalizePath(projectRoot),
     configKind: "tsconfig",
-    tsconfigPath: runtimeNormalizePath(absPath),
+    tsconfigPath: runtimeNormalizePath(normalizedAbsPath),
     configHash: stableSelectiveConfigHash(
-      parsed?.config ?? { tsconfigPath: runtimeNormalizePath(absPath) },
+      parsed?.config ?? { tsconfigPath: runtimeNormalizePath(normalizedAbsPath) },
     ),
     nativeFlags: { analysisLevel: "full" },
     typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
@@ -923,7 +1301,7 @@ export async function createCheckerByJson(
   configJson: object,
   options?: MetaCheckerOptions,
 ): Promise<ComponentMetaChecker> {
-  const absRoot = resolve(projectRoot);
+  const absRoot = runtimeResolvePath(projectRoot);
   const config = configJson as Record<string, unknown>;
   const workspace = createWorkspace(absRoot);
   const input: EngineKeyInput = {

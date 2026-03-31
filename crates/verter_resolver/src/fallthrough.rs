@@ -1370,6 +1370,8 @@ mod tests {
             slots: Vec::new(),
             models: Vec::new(),
             exposed: Vec::new(),
+            public_instance: None,
+            sfc_blocks: None,
             type_registry: Vec::new(),
             components: Vec::new(),
             template_refs: Vec::new(),

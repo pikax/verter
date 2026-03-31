@@ -1,5 +1,3 @@
-import { typeDescriptorToString } from "@verter/component-meta/compat";
-
 function camelCase(input: string): string {
   return input
     .replace(/^[^a-zA-Z0-9]+/, "")
@@ -40,12 +38,47 @@ export function refineMetaForBenchmark(meta: any) {
     exposed: (meta?.exposed ?? []).map((member: any) => stripInternalSchemaNoise(member)),
     models: (sourceMeta?.models ?? []).map((model: any) => ({
       name: model.name,
-      type: typeDescriptorToString(model.type),
+      type: benchmarkTypeDescriptorToString(model.type),
       description: null,
       tags: [],
       schema: null,
     })),
   };
+}
+
+function benchmarkTypeDescriptorToString(type: any): string {
+  if (!type || typeof type !== "object") {
+    return "unknown";
+  }
+
+  switch (type.kind) {
+    case "primitive":
+      return String(type.name ?? "unknown");
+    case "literal":
+      return JSON.stringify(type.value);
+    case "ref": {
+      const args = Array.isArray(type.typeArguments)
+        ? type.typeArguments.map((entry: any) => benchmarkTypeDescriptorToString(entry))
+        : [];
+      return args.length > 0 ? `${type.name}<${args.join(", ")}>` : String(type.name ?? "unknown");
+    }
+    case "array":
+      return `${benchmarkTypeDescriptorToString(type.elementType)}[]`;
+    case "tuple":
+      return `[${(type.elements ?? [])
+        .map((entry: any) => benchmarkTypeDescriptorToString(entry))
+        .join(", ")}]`;
+    case "union":
+      return (type.types ?? [])
+        .map((entry: any) => benchmarkTypeDescriptorToString(entry))
+        .join(" | ");
+    case "intersection":
+      return (type.types ?? [])
+        .map((entry: any) => benchmarkTypeDescriptorToString(entry))
+        .join(" & ");
+    default:
+      return String(type.name ?? type.kind ?? "unknown");
+  }
 }
 
 function stripInternalSchemaNoise(value: any): any {

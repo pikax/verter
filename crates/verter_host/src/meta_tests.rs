@@ -2238,6 +2238,63 @@ defineProps<Props<T>>()
 }
 
 #[test]
+fn get_component_meta_uses_default_type_parameters_when_generic_args_are_omitted() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Generic.vue",
+            r#"<script lang="ts">
+export interface Item {
+  id: string
+}
+
+export interface Props<T = Item> {
+  items?: T[]
+}
+</script>
+
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/Generic.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+
+    let items = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "items")
+        .expect("items prop should exist");
+
+    let TypeExpr::Array { element, .. } = &items.type_expr else {
+        panic!(
+            "expected items to resolve to an array, got {:?}",
+            items.type_expr
+        );
+    };
+    let TypeExpr::Object(shape) = element.as_ref() else {
+        panic!(
+            "expected omitted generic default to instantiate to Item, got {:?}",
+            element
+        );
+    };
+    assert!(
+        shape
+            .properties
+            .iter()
+            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "id")),
+        "expected instantiated Item shape to expose id, got {:?}",
+        shape.properties
+    );
+}
+
+#[test]
 fn evaluate_types_skips_irrelevant_transitive_generic_arg_dependencies() {
     let project = make_project();
     project
@@ -2473,7 +2530,9 @@ fn get_component_meta_merges_local_eval_surface_with_imported_props() {
         .upsert_base(
             "/types.ts",
             r#"export interface ExternalProps {
+  /** Stable id description. */
   id: string
+  /** Optional label description. */
   label?: string
 }"#,
         )
@@ -2498,6 +2557,26 @@ defineProps<LocalProps>()
     let meta = get_meta(&project, "/App.vue");
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
     assert_eq!(prop_names, vec!["id", "label", "own"]);
+    let id = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "id")
+        .expect("id prop should exist");
+    let label = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "label")
+        .expect("label prop should exist");
+    assert!(id.required, "imported required prop should stay required");
+    assert!(
+        !label.required,
+        "imported optional prop should stay optional after wrapper flattening"
+    );
+    assert_eq!(id.description.as_deref(), Some("Stable id description."));
+    assert_eq!(
+        label.description.as_deref(),
+        Some("Optional label description.")
+    );
 }
 
 #[test]
@@ -3126,6 +3205,1926 @@ defineProps<ButtonProps>()
     assert!(
         !prop_names.contains(&"raw") && !prop_names.contains(&"custom"),
         "workspace-only nested imports should still respect Omit, got: {prop_names:?}"
+    );
+}
+
+// @ai-generated - Reproduces wrapper props imported from a generic interface exported by another .vue file through a barrel.
+#[test]
+fn get_component_meta_keeps_props_from_barrel_imported_generic_vue_interfaces() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/runtime/types/index.ts".to_string(),
+        Arc::from("export * from '../components/SelectMenu.vue'\nexport * from '../icons'\nexport * from './input'\n"),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/icons.ts".to_string(),
+        Arc::from(
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts".to_string(),
+        Arc::from(
+            r#"export interface ButtonHTMLAttributes {
+  name?: string
+  formaction?: string
+  formtarget?: string
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/utils.ts".to_string(),
+        Arc::from(
+            r#"export type ArrayOrNested<T> = T[]
+export type GetItemKeys<T> = string
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/input.ts".to_string(),
+        Arc::from(
+            r#"export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/SelectMenu.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { InputProps, UseComponentIconsProps } from '../types'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { ArrayOrNested, GetItemKeys } from '../types/utils'
+
+export type SelectMenuItem = {
+  label?: string
+  value?: string
+}
+
+export interface SelectMenuProps<
+  T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends UseComponentIconsProps, Omit<ButtonHTMLAttributes, 'name'> {
+  open?: boolean
+  disabled?: boolean
+  name?: string
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/ColorModeSelect.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(
+        project
+            .ensure_loaded("/workspace/src/runtime/components/ColorModeSelect.vue")
+            .unwrap(),
+        "workspace owner should load into the shared base project"
+    );
+
+    let meta = get_meta(
+        &project,
+        "/workspace/src/runtime/components/ColorModeSelect.vue",
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"loading"),
+        "barrel-imported generic vue props should keep imported interface members, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"open")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name"),
+        "barrel-imported generic vue props should keep direct generic survivors, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"formaction")
+            && prop_names.contains(&"formtarget")
+            && prop_names.contains(&"searchInput")
+            && prop_names.contains(&"valueKey"),
+        "barrel-imported generic vue props should recurse into imported utility heritage, got: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"icon")
+            && !prop_names.contains(&"items")
+            && !prop_names.contains(&"modelValue"),
+        "barrel-imported generic vue props should still respect wrapper Omit, got: {prop_names:?}"
+    );
+}
+
+// @ai-generated - Reproduces imported Pick<VueButtonHTMLAttributes, ...> heritage surviving through generic wrapper Omit chains.
+#[test]
+fn get_component_meta_keeps_imported_picked_button_form_attrs_through_generic_wrapper_omits() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/runtime/types/index.ts".to_string(),
+        Arc::from("export * from '../components/SelectMenu.vue'\nexport * from '../icons'\nexport * from './input'\n"),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/icons.ts".to_string(),
+        Arc::from(
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/vue-dom.ts".to_string(),
+        Arc::from(
+            r#"export interface VueButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts".to_string(),
+        Arc::from(
+            r#"import type { VueButtonHTMLAttributes } from '../vue-dom'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/utils.ts".to_string(),
+        Arc::from(
+            r#"export type ArrayOrNested<T> = T[]
+export type GetItemKeys<T> = string
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/input.ts".to_string(),
+        Arc::from(
+            r#"export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/SelectMenu.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { InputProps, UseComponentIconsProps } from '../types'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { ArrayOrNested, GetItemKeys } from '../types/utils'
+
+export type SelectMenuItem = {
+  label?: string
+  value?: string
+}
+
+export interface SelectMenuProps<
+  T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends UseComponentIconsProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  disabled?: boolean
+  name?: string
+  open?: boolean
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/ColorModeSelect.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let project = make_workspace_project(Arc::clone(&ws));
+    assert!(
+        project
+            .ensure_loaded("/workspace/src/runtime/components/ColorModeSelect.vue")
+            .unwrap(),
+        "workspace owner should load into the shared base project"
+    );
+
+    let meta = get_meta(
+        &project,
+        "/workspace/src/runtime/components/ColorModeSelect.vue",
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "picked button form attrs should survive generic wrapper omits, got: {prop_names:?}"
+    );
+}
+
+// @ai-generated - Reproduces Pick<VueButtonHTMLAttributes, ...> form attrs disappearing when the source alias comes from a package import.
+#[test]
+fn get_component_meta_keeps_picked_package_button_form_attrs_through_generic_wrapper_omits() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/index.ts",
+            "export * from '../components/SelectMenu.vue'\nexport * from '../icons'\nexport * from './input'\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/icons.ts",
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/input.ts",
+            r#"export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/html.ts",
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/utils.ts",
+            r#"export type ArrayOrNested<T> = T[]
+export type GetItemKeys<T> = string
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { InputProps, UseComponentIconsProps } from '../types'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { ArrayOrNested, GetItemKeys } from '../types/utils'
+
+export type SelectMenuItem = {
+  label?: string
+  value?: string
+}
+
+export interface SelectMenuProps<
+  T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends UseComponentIconsProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  disabled?: boolean
+  name?: string
+  open?: boolean
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/color-mode/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let meta = get_meta(
+        &project,
+        "/src/runtime/components/color-mode/ColorModeSelect.vue",
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "package-picked button form attrs should survive generic wrapper omits, got: {prop_names:?}"
+    );
+}
+
+// @ai-generated - Reproduces package-imported Pick<VueButtonHTMLAttributes, ...> heritage surviving through a cyclic barrel that also re-exports the wrapper component.
+#[test]
+fn get_component_meta_keeps_picked_package_button_form_attrs_through_cyclic_barrel_wrapper_omits() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/index.ts",
+            r#"export * from '../components/SelectMenu.vue'
+export * from '../components/color-mode/ColorModeSelect.vue'
+export * from '../icons'
+export * from './input'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/icons.ts",
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/input.ts",
+            r#"export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/html.ts",
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/utils.ts",
+            r#"export type ArrayOrNested<T> = T[]
+export type GetItemKeys<T> = string
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { InputProps, UseComponentIconsProps } from '../types'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { ArrayOrNested, GetItemKeys } from '../types/utils'
+
+export type SelectMenuItem = {
+  label?: string
+  value?: string
+}
+
+export interface SelectMenuProps<
+  T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends UseComponentIconsProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  disabled?: boolean
+  name?: string
+  open?: boolean
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/color-mode/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/components/color-mode/ColorModeSelect.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "../../types".to_string(),
+            resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/components/SelectMenu.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../types".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../types/html".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/html.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../types/utils".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../components/SelectMenu.vue".to_string(),
+                resolved_canonical_id: Some("/src/runtime/components/SelectMenu.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../components/color-mode/ColorModeSelect.vue".to_string(),
+                resolved_canonical_id: Some(
+                    "/src/runtime/components/color-mode/ColorModeSelect.vue".to_string(),
+                ),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../icons".to_string(),
+                resolved_canonical_id: Some("/src/runtime/icons.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./input".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/input.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let meta = get_meta(
+        &project,
+        "/src/runtime/components/color-mode/ColorModeSelect.vue",
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "package-picked button form attrs should survive cyclic barrel wrapper omits, got: {prop_names:?}"
+    );
+}
+
+// @ai-generated - Reproduces package-imported Pick<VueButtonHTMLAttributes, ...> heritage surviving through a cyclic barrel when defineProps is wrapped in withDefaults().
+#[test]
+fn get_component_meta_keeps_picked_package_button_form_attrs_through_cyclic_barrel_with_defaults() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}
+
+export declare function withDefaults<T, D>(props: T, defaults: D): T & D
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/index.ts",
+            r#"export * from '../components/SelectMenu.vue'
+export * from '../components/color-mode/ColorModeSelect.vue'
+export * from '../icons'
+export * from './input'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/icons.ts",
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/input.ts",
+            r#"export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/html.ts",
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/utils.ts",
+            r#"export type ArrayOrNested<T> = T[]
+export type GetItemKeys<T> = string
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { InputProps, UseComponentIconsProps } from '../types'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { ArrayOrNested, GetItemKeys } from '../types/utils'
+
+export type SelectMenuItem = {
+  label?: string
+  value?: string
+}
+
+export interface SelectMenuProps<
+  T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends UseComponentIconsProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  disabled?: boolean
+  name?: string
+  open?: boolean
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/color-mode/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+import { withDefaults } from 'vue'
+
+const props = withDefaults(defineProps<ColorModeSelectProps>(), {
+  searchInput: false
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/components/color-mode/ColorModeSelect.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../../types".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "vue".to_string(),
+                resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/components/SelectMenu.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../types".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../types/html".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/html.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../types/utils".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../components/SelectMenu.vue".to_string(),
+                resolved_canonical_id: Some("/src/runtime/components/SelectMenu.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../components/color-mode/ColorModeSelect.vue".to_string(),
+                resolved_canonical_id: Some(
+                    "/src/runtime/components/color-mode/ColorModeSelect.vue".to_string(),
+                ),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../icons".to_string(),
+                resolved_canonical_id: Some("/src/runtime/icons.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./input".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/input.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let meta = get_meta(
+        &project,
+        "/src/runtime/components/color-mode/ColorModeSelect.vue",
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "package-picked button form attrs should survive cyclic barrel withDefaults wrapper, got: {prop_names:?}"
+    );
+}
+
+// @ai-generated - Reproduces package-imported Pick<VueButtonHTMLAttributes, ...> heritage surviving when the imported generic interface also extends a picked external generic package interface.
+#[test]
+fn get_component_meta_keeps_picked_package_button_form_attrs_through_external_generic_pick_and_cyclic_barrel(
+) {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"export interface ComboboxRootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  name?: string
+  by?: string
+  items?: T
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/index.ts",
+            r#"export * from '../components/SelectMenu.vue'
+export * from '../components/color-mode/ColorModeSelect.vue'
+export * from '../icons'
+export * from './input'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/icons.ts",
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/input.ts",
+            r#"export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/html.ts",
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/utils.ts",
+            r#"export type ArrayOrNested<T> = T[]
+export type GetItemKeys<T> = string
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { ComboboxRootProps } from 'reka-ui'
+import type { InputProps, UseComponentIconsProps } from '../types'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { ArrayOrNested, GetItemKeys } from '../types/utils'
+
+export type SelectMenuItem = {
+  label?: string
+  value?: string
+}
+
+export interface SelectMenuProps<
+  T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled' | 'name' | 'by'>,
+    UseComponentIconsProps,
+    Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/color-mode/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+import { withDefaults } from 'vue'
+
+const props = withDefaults(defineProps<ColorModeSelectProps>(), {
+  searchInput: false
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/components/color-mode/ColorModeSelect.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../../types".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "vue".to_string(),
+                resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/components/SelectMenu.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "reka-ui".to_string(),
+                resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../types".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../types/html".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/html.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../types/utils".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/types/index.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../components/SelectMenu.vue".to_string(),
+                resolved_canonical_id: Some("/src/runtime/components/SelectMenu.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../components/color-mode/ColorModeSelect.vue".to_string(),
+                resolved_canonical_id: Some(
+                    "/src/runtime/components/color-mode/ColorModeSelect.vue".to_string(),
+                ),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "../icons".to_string(),
+                resolved_canonical_id: Some("/src/runtime/icons.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./input".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/input.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let meta = get_meta(
+        &project,
+        "/src/runtime/components/color-mode/ColorModeSelect.vue",
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "package-picked button form attrs should survive external generic pick + cyclic barrel wrapper, got: {prop_names:?}"
+    );
+}
+
+#[test]
+fn evaluate_types_keeps_reexported_vue_button_form_attrs_through_workspace_generic_wrapper() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue", "types": "./dist/vue.d.ts", "exports": { ".": { "types": "./dist/vue.d.ts", "import": "./dist/vue.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/dist/vue.d.ts".to_string(),
+        Arc::from("export * from '@vue/runtime-dom'"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/dist/vue.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-dom/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "@vue/runtime-dom", "types": "./dist/runtime-dom.d.ts", "exports": { ".": { "types": "./dist/runtime-dom.d.ts", "import": "./dist/runtime-dom.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts".to_string(),
+        Arc::from(
+            r#"export interface HTMLAttributes {
+  class?: any
+}
+
+export interface ButtonHTMLAttributes extends HTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-dom/dist/runtime-dom.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "reka-ui", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/dist/index.d.ts".to_string(),
+        Arc::from(
+            r#"export interface ComboboxRootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  name?: string
+  by?: string
+  items?: T
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/dist/index.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/index.ts".to_string(),
+        Arc::from(
+            r#"export * from '../components/SelectMenu.vue'
+export * from '../components/color-mode/ColorModeSelect.vue'
+export * from '../icons'
+export * from './input'
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/icons.ts".to_string(),
+        Arc::from(
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/input.ts".to_string(),
+        Arc::from(
+            r#"export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts".to_string(),
+        Arc::from(
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/utils.ts".to_string(),
+        Arc::from(
+            r#"export type ArrayOrNested<T> = T[]
+export type GetItemKeys<T> = string
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/SelectMenu.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { ComboboxRootProps } from 'reka-ui'
+import type { InputProps, UseComponentIconsProps } from '../types'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { ArrayOrNested, GetItemKeys } from '../types/utils'
+
+export type SelectMenuItem = {
+  label?: string
+  value?: string
+}
+
+export interface SelectMenuProps<
+  T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled' | 'name' | 'by'>,
+    UseComponentIconsProps,
+    Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/color-mode/ColorModeSelect.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+import { withDefaults } from 'vue'
+
+const props = withDefaults(defineProps<ColorModeSelectProps>(), {
+  searchInput: false
+})
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
+    assert!(
+        project
+            .ensure_loaded("/workspace/src/runtime/components/color-mode/ColorModeSelect.vue")
+            .unwrap(),
+        "workspace owner should load the wrapper component"
+    );
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/workspace/src/runtime/components/color-mode/ColorModeSelect.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+
+    let define_props = evaluated
+        .define_props
+        .first()
+        .expect("wrapper should produce a defineProps expansion");
+    let prop_names: Vec<&str> = define_props
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "workspace evaluate_types should preserve re-exported vue button form attrs, got: {prop_names:?}"
+    );
+    assert!(
+        !define_props.result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason
+                == verter_analysis::type_expand::ExpansionStopReason::UnresolvedReference
+                && diagnostic.context.contains("VueButtonHTMLAttributes")
+        }),
+        "workspace evaluate_types should not leave VueButtonHTMLAttributes unresolved, got {:?}",
+        define_props.result.diagnostics
+    );
+}
+
+#[test]
+fn evaluate_types_keeps_complex_nuxt_ui_form_attrs_through_wrapper_omits() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/tsconfig.json".to_string(),
+        Arc::from(
+            r#"{ "compilerOptions": { "module": "esnext", "moduleResolution": "bundler" } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "vue", "type": "module", "exports": { ".": { "types": "./dist/vue.d.mts", "import": "./dist/vue.runtime.mjs" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/dist/vue.d.mts".to_string(),
+        Arc::from(
+            r#"export * from '@vue/runtime-dom'
+export type VNode = any
+export declare function withDefaults<T, D>(props: T, defaults: D): T & D
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/dist/vue.runtime.mjs".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-dom/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "@vue/runtime-dom", "type": "module", "exports": { ".": { "types": "./dist/runtime-dom.d.ts", "import": "./dist/runtime-dom.mjs" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts".to_string(),
+        Arc::from(
+            r#"export interface HTMLAttributes {
+  class?: any
+}
+
+export interface ButtonHTMLAttributes extends HTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-dom/dist/runtime-dom.mjs".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "reka-ui", "type": "module", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.mjs" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/dist/index.d.ts".to_string(),
+        Arc::from(
+            r#"export interface ComboboxRootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  name?: string
+  resetSearchTermOnBlur?: boolean
+  resetSearchTermOnSelect?: boolean
+  resetModelValueOnClear?: boolean
+  highlightOnHover?: boolean
+  by?: string
+  items?: T
+}
+
+export interface ComboboxRootEmits {
+  'update:open': [value: boolean]
+}
+
+export interface ComboboxContentProps {
+  side?: 'bottom' | 'top'
+  sideOffset?: number
+  collisionPadding?: number
+  position?: 'popper' | 'item-aligned'
+  as?: string
+  asChild?: boolean
+  forceMount?: boolean
+}
+
+export interface ComboboxContentEmits {
+  escapeKeyDown?: [event: KeyboardEvent]
+}
+
+export interface ComboboxArrowProps {
+  width?: number
+  height?: number
+  as?: string
+  asChild?: boolean
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/dist/index.mjs".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/input.ts".to_string(),
+        Arc::from(
+            r#"export interface ModelModifiers {
+  trim?: boolean
+  number?: boolean
+  lazy?: boolean
+}
+
+export type ApplyModifiers<T, _Mod> = T
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/utils.ts".to_string(),
+        Arc::from(
+            r#"export type AcceptableValue = string | number
+export type ArrayOrNested<T> = T[] | T[][]
+export type GetItemKeys<T> = string
+export type GetItemValue<T, VK> = VK extends string ? string : T
+export type GetModelValue<T, VK, M, ExcludeItem> = M extends true
+  ? Array<GetItemValue<T, VK>>
+  : GetItemValue<T, VK> | ExcludeItem
+export type NestedItem<A> = A extends Array<infer U> ? U : never
+export type EmitsToProps<T> = T extends object ? { [K in keyof T as K extends string ? `on${Capitalize<K>}` : never]?: T[K] } : {}
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/tv.ts".to_string(),
+        Arc::from(
+            r#"export type ComponentConfig<_Theme, _AppConfig, _Name extends string> = {
+  variants: {
+    color: 'primary' | 'neutral'
+    variant: 'outline' | 'ghost'
+    size: 'sm' | 'md'
+  }
+  slots: Record<string, any>
+  ui: Record<string, any>
+}
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts".to_string(),
+        Arc::from(
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/types/index.ts".to_string(),
+        Arc::from(
+            r#"export interface UseComponentIconsProps {
+  icon?: string
+  loading?: boolean
+}
+
+export interface AvatarProps {
+  src?: string
+}
+
+export interface ButtonProps {
+  color?: string
+  variant?: string
+  icon?: string
+}
+
+export interface ChipProps {
+  color?: string
+}
+
+export interface IconProps {
+  name?: string
+}
+
+export interface InputProps {
+  modelValue?: string
+  defaultValue?: string
+  placeholder?: string
+  variant?: string
+}
+
+export type LinkPropsKeys = 'href' | 'to'
+
+export * from '../components/SelectMenu.vue'
+export * from '../components/color-mode/ColorModeSelect.vue'
+export * from './input'
+export * from './tv'
+export * from './utils'
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/SelectMenu.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { ComboboxRootProps, ComboboxRootEmits, ComboboxContentProps, ComboboxContentEmits, ComboboxArrowProps } from 'reka-ui'
+import type { VNode } from 'vue'
+import type { UseComponentIconsProps } from '../types'
+import type { AvatarProps, ButtonProps, ChipProps, IconProps, InputProps, LinkPropsKeys } from '../types'
+import type { ModelModifiers, ApplyModifiers } from '../types/input'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { AcceptableValue, ArrayOrNested, GetItemKeys, GetModelValue, NestedItem, EmitsToProps } from '../types/utils'
+import type { ComponentConfig } from '../types/tv'
+
+type SelectMenu = ComponentConfig<unknown, {}, 'selectMenu'>
+
+export type SelectMenuValue = AcceptableValue
+
+export type SelectMenuItem = SelectMenuValue | {
+  label?: string
+  description?: string
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+  chip?: ChipProps
+  type?: 'label' | 'separator' | 'item'
+  disabled?: boolean
+  onSelect?: (e: Event) => void
+  class?: any
+  ui?: Pick<SelectMenu['slots'], 'label' | 'separator' | 'item'>
+  [key: string]: any
+}
+
+type ExcludeItem = { type: 'label' | 'separator' }
+type IsClearUsed<M extends boolean, C extends boolean | object> = M extends false
+  ? (C extends true ? null : C extends object ? null : never)
+  : never
+
+export interface SelectMenuProps<T extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>, VK extends GetItemKeys<T> | undefined = undefined, M extends boolean = false, Mod extends Omit<ModelModifiers, 'lazy'> = Omit<ModelModifiers, 'lazy'>, C extends boolean | object = false> extends Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled' | 'name' | 'resetSearchTermOnBlur' | 'resetSearchTermOnSelect' | 'resetModelValueOnClear' | 'highlightOnHover' | 'by'>, UseComponentIconsProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  id?: string
+  placeholder?: string
+  searchInput?: boolean | Omit<InputProps, 'modelValue' | 'defaultValue'>
+  color?: SelectMenu['variants']['color']
+  variant?: SelectMenu['variants']['variant']
+  size?: SelectMenu['variants']['size']
+  required?: boolean
+  trailingIcon?: IconProps['name']
+  selectedIcon?: IconProps['name']
+  clear?: (C & boolean) | (C & Partial<Omit<ButtonProps, LinkPropsKeys>>)
+  clearIcon?: IconProps['name']
+  content?: Omit<ComboboxContentProps, 'as' | 'asChild' | 'forceMount'> & Partial<EmitsToProps<ComboboxContentEmits>>
+  arrow?: boolean | Omit<ComboboxArrowProps, 'as' | 'asChild'>
+  portal?: boolean | string | HTMLElement
+  virtualize?: boolean | {
+    overscan?: number
+    estimateSize?: number | ((index: number) => number)
+  }
+  valueKey?: VK
+  labelKey?: GetItemKeys<T>
+  descriptionKey?: GetItemKeys<T>
+  items?: T
+  defaultValue?: ApplyModifiers<GetModelValue<T, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>
+  modelValue?: ApplyModifiers<GetModelValue<T, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>
+  modelModifiers?: Mod
+  multiple?: M & boolean
+  highlight?: boolean
+  createItem?: boolean | 'always' | { position?: 'top' | 'bottom', when?: 'empty' | 'always' }
+  filterFields?: string[]
+  ignoreFilter?: boolean
+  autofocus?: boolean
+  autofocusDelay?: number
+  class?: any
+  ui?: SelectMenu['slots']
+}
+
+export interface SelectMenuEmits<
+  A extends ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<A> | undefined,
+  M extends boolean,
+  Mod extends Omit<ModelModifiers, 'lazy'> = Omit<ModelModifiers, 'lazy'>,
+  C extends boolean | object = false
+> extends Pick<ComboboxRootEmits, 'update:open'> {
+  'change': [event: Event]
+  'blur': [event: FocusEvent]
+  'focus': [event: FocusEvent]
+  'create': [item: string]
+  'clear': []
+  'highlight': [payload: {
+    ref: HTMLElement
+    value: ApplyModifiers<GetModelValue<A, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>
+  } | undefined]
+  'update:modelValue': [value: ApplyModifiers<GetModelValue<A, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>]
+}
+
+type SlotProps<T extends SelectMenuItem> = (props: { item: T, index: number, ui: SelectMenu['ui'] }) => VNode[]
+
+export interface SelectMenuSlots<
+  A extends ArrayOrNested<SelectMenuItem> = ArrayOrNested<SelectMenuItem>,
+  VK extends GetItemKeys<A> | undefined = undefined,
+  M extends boolean = false,
+  Mod extends Omit<ModelModifiers, 'lazy'> = Omit<ModelModifiers, 'lazy'>,
+  C extends boolean | object = false,
+  T extends NestedItem<A> = NestedItem<A>
+> {
+  'default'?(props: {
+    modelValue: ApplyModifiers<GetModelValue<A, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>
+    open: boolean
+    ui: SelectMenu['ui']
+  }): VNode[]
+  'item'?: SlotProps<T>
+}
+</script>
+
+<script setup lang="ts" generic="T extends ArrayOrNested<SelectMenuItem>, VK extends GetItemKeys<T> | undefined = undefined, M extends boolean = false, Mod extends Omit<ModelModifiers, 'lazy'> = Omit<ModelModifiers, 'lazy'>, C extends boolean | object = false">
+import { withDefaults } from 'vue'
+
+const props = withDefaults(defineProps<SelectMenuProps<T, VK, M, Mod, C>>(), {
+  portal: true,
+  searchInput: true,
+  labelKey: 'label',
+  descriptionKey: 'description',
+  resetSearchTermOnBlur: true,
+  resetSearchTermOnSelect: true,
+  resetModelValueOnClear: true,
+  autofocusDelay: 0,
+  virtualize: false
+})
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/runtime/components/color-mode/ColorModeSelect.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from '../../types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+import { withDefaults } from 'vue'
+
+const props = withDefaults(defineProps<ColorModeSelectProps>(), {
+  searchInput: false
+})
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
+    assert!(
+        project
+            .ensure_loaded("/workspace/src/runtime/components/color-mode/ColorModeSelect.vue")
+            .unwrap(),
+        "workspace owner should load the complex wrapper component"
+    );
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/workspace/src/runtime/components/color-mode/ColorModeSelect.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+
+    let define_props = evaluated
+        .define_props
+        .first()
+        .expect("wrapper should produce a defineProps expansion");
+    let prop_names: Vec<&str> = define_props
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "complex Nuxt UI wrapper should preserve inherited button form attrs, got: {prop_names:?}"
+    );
+}
+
+#[test]
+fn evaluate_types_hydrates_transitive_imported_pick_dependencies_for_wrapper_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/html.ts",
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types.ts",
+            r#"import type { ButtonHTMLAttributes } from './types/html'
+
+export interface Props extends Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  label?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './runtime/types'
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/types.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types/html".to_string(),
+            resolved_canonical_id: Some("/src/runtime/types/html.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./runtime/types".to_string(),
+            resolved_canonical_id: Some("/src/runtime/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+
+    let define_props = evaluated
+        .define_props
+        .first()
+        .expect("wrapper should produce a defineProps expansion");
+    let prop_names: Vec<&str> = define_props
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "transitive imported Pick dependencies should survive wrapper evaluation, got: {prop_names:?}"
+    );
+    assert!(
+        !define_props.result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason == verter_analysis::type_expand::ExpansionStopReason::UnresolvedReference
+                && diagnostic.context.contains("VueButtonHTMLAttributes")
+        }),
+        "transitive imported Pick dependencies should not leave VueButtonHTMLAttributes unresolved, got {:?}",
+        define_props.result.diagnostics
+    );
+}
+
+#[test]
+fn evaluate_types_hydrates_transitive_imported_pick_dependencies_from_dual_script_vue_deps() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}
+
+export declare function withDefaults<T, D>(props: T, defaults: D): T & D
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/html.ts",
+            r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/components/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { ButtonHTMLAttributes } from '../types/html'
+
+export type SelectMenuItem = {
+  label?: string
+}
+
+export interface SelectMenuProps<T extends SelectMenuItem[] = SelectMenuItem[]> extends Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  items?: T
+  label?: string
+}
+</script>
+
+<script setup lang="ts" generic="T extends SelectMenuItem[] = SelectMenuItem[]">
+import { withDefaults } from 'vue'
+
+const props = withDefaults(defineProps<SelectMenuProps<T>>(), {})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/types/index.ts",
+            r#"export * from '../components/SelectMenu.vue'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from './runtime/types'
+
+defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/components/SelectMenu.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "../types/html".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/html.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "vue".to_string(),
+                resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/runtime/types/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "../components/SelectMenu.vue".to_string(),
+            resolved_canonical_id: Some("/src/runtime/components/SelectMenu.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./runtime/types".to_string(),
+            resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+
+    let define_props = evaluated
+        .define_props
+        .first()
+        .expect("wrapper should produce a defineProps expansion");
+    let prop_names: Vec<&str> = define_props
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    assert!(
+        prop_names.contains(&"form")
+            && prop_names.contains(&"formaction")
+            && prop_names.contains(&"formenctype")
+            && prop_names.contains(&"formmethod")
+            && prop_names.contains(&"formnovalidate")
+            && prop_names.contains(&"formtarget"),
+        "dual-script vue wrapper evaluation should preserve transitive Pick dependencies, got: {prop_names:?}"
+    );
+    assert!(
+        !define_props.result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason == verter_analysis::type_expand::ExpansionStopReason::UnresolvedReference
+                && diagnostic.context.contains("VueButtonHTMLAttributes")
+        }),
+        "dual-script vue wrapper evaluation should not leave VueButtonHTMLAttributes unresolved, got {:?}",
+        define_props.result.diagnostics
     );
 }
 
@@ -4742,6 +6741,180 @@ defineProps<Props>()
         .find(|entry| entry.name == "RouteLocationRaw")
         .expect("RouteLocationRaw should be published in the resolved type registry");
     assert_route_union_surface(&registry_entry.type_expr);
+    eprintln!("registry={:#?}", resolved.resolved_type_registry);
+    let published_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(
+        !published_names.contains("RouteLocationAsStringTypedList"),
+        "direct package aliases should not eagerly publish transitive package helpers, got {published_names:?}"
+    );
+    assert!(
+        !published_names.contains("RouteLocationAsRelativeTypedList"),
+        "direct package aliases should stay shallow instead of walking the full package helper graph, got {published_names:?}"
+    );
+}
+
+#[test]
+fn resolve_component_meta_keeps_package_registry_helpers_shallow_for_local_slot_types() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json".to_string(),
+        Arc::from(r#"{ "name": "pkg", "types": "./dist/index.d.ts" }"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
+        Arc::from(
+            r#"
+export interface InternalNode {
+  leaf: string
+}
+
+export type PublicNode = InternalNode | {
+  next: InternalNode
+}
+"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    let project = MetaProject::new(host);
+    project
+        .upsert_base(
+            "/workspace/src/slot-types.ts",
+            r#"import type { PublicNode } from 'pkg'
+
+export interface ButtonSlots {
+  default?(): PublicNode
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonSlots } from './slot-types'
+
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./slot-types".to_string(),
+            resolved_canonical_id: Some("/workspace/src/slot-types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta(
+            "/workspace/src/App.vue",
+            crate::types::ResolverMode::Expanded,
+        )
+        .expect("resolved component meta should exist");
+
+    let published_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(
+        published_names.contains("ButtonSlots"),
+        "local slot helper should still be published, got {published_names:?}"
+    );
+    assert!(
+        published_names.contains("PublicNode"),
+        "direct package alias used by the slot contract should still be published, got {published_names:?}"
+    );
+    assert!(
+        !published_names.contains("InternalNode"),
+        "package registry publication should stay shallow instead of recursing into helper internals, got {published_names:?}"
+    );
+}
+
+#[test]
+fn resolve_component_meta_skips_unreferenced_owner_local_registry_helpers() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+type Used = {
+  label: string
+}
+
+type UnusedLeaf = {
+  deep: {
+    nested: string
+  }
+}
+
+type UnusedWrapper = {
+  payload: UnusedLeaf
+}
+
+export interface Props {
+  item?: Used
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let published_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+
+    assert!(
+        published_names.contains("Props"),
+        "the queried defineProps contract should stay published, got {published_names:?}"
+    );
+    assert!(
+        published_names.contains("Used"),
+        "owner-local helpers that are referenced by the queried surface should still publish, got {published_names:?}"
+    );
+    assert!(
+        !published_names.contains("UnusedLeaf"),
+        "resolve_component_meta should not eagerly publish unrelated owner-local helpers, got {published_names:?}"
+    );
+    assert!(
+        !published_names.contains("UnusedWrapper"),
+        "resolve_component_meta should stay demand-driven for owner-local registry helpers, got {published_names:?}"
+    );
 }
 
 #[test]
@@ -4854,6 +7027,1083 @@ defineProps<LinkProps>()
 }
 
 #[test]
+fn resolve_component_meta_evaluates_owner_local_registry_aliases_against_imported_generic_helpers()
+{
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export type ComponentConfig<TSlots, TVariants> = {
+  slots: TSlots
+  variants: TVariants
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig } from './types'
+
+type Button = ComponentConfig<
+  { root?: { base: string } },
+  { color?: 'primary' | 'neutral' }
+>
+
+export interface Props {
+  ui?: Button['slots']
+  color?: Button['variants']['color']
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("owner-local Button helper should be published in the type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "owner-local helper alias should be evaluated against imported generic helpers, got {:?}",
+            button_entry.type_expr
+        );
+    };
+    let button_member_names: Vec<&str> = button_shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        button_member_names.contains(&"slots") && button_member_names.contains(&"variants"),
+        "evaluated owner-local helper alias should publish concrete slots/variants members, got {:?}",
+        button_member_names
+    );
+}
+
+#[test]
+fn resolve_component_meta_materializes_transitive_generic_registry_helpers_for_indexed_access() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export type ComponentVariants<TTheme> = {
+  color: 'primary' | 'secondary'
+  size: 'sm' | 'md'
+}
+
+export type ComponentSlots<TTheme> = {
+  root?: {
+    base: string
+  }
+}
+
+export type ComponentConfig<TTheme> = {
+  variants: ComponentVariants<TTheme>
+  slots: ComponentSlots<TTheme>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ComponentConfig } from './types'
+import theme from '#build/ui/button'
+
+type Button = ComponentConfig<typeof theme>
+
+defineProps<{
+  activeColor?: Button['variants']['color']
+  ui?: Button['slots']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "Button helper should materialize as an object for indexed-access recovery, got {:?}",
+            button_entry.type_expr
+        );
+    };
+    let variants_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a variants member");
+    let TypeExpr::Object(variants_shape) = variants_member else {
+        panic!(
+            "Button.variants should materialize as an object for chained indexed access, got {:?}",
+            variants_member
+        );
+    };
+    assert!(
+        variants_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
+        ),
+        "Button.variants should keep its color member, got {:?}",
+        variants_member
+    );
+
+    let slots_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ComponentSlots")
+        .expect("transitive ComponentSlots helper should be published in the type registry");
+    let TypeExpr::Object(slots_shape) = &slots_entry.type_expr else {
+        panic!(
+            "ComponentSlots helper should materialize as an object, got {:?}",
+            slots_entry.type_expr
+        );
+    };
+    assert!(
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
+        ),
+        "ComponentSlots should keep its root member, got {:?}",
+        slots_entry.type_expr
+    );
+}
+
+#[test]
+fn resolve_component_meta_materializes_owner_local_mapped_generic_helpers() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: string
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}
+
+const theme = {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { solid: '', soft: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+
+type Button = ComponentConfig<typeof theme>
+
+defineProps<{
+  activeColor?: Button['variants']['color']
+  ui?: Button['slots']
+  slotUi?: Button['ui']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "owner-local Button helper should materialize as an object, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    let variants_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a variants member");
+    let TypeExpr::Object(variants_shape) = variants_member else {
+        panic!(
+            "Button.variants should materialize as an object, got {:?}",
+            variants_member
+        );
+    };
+    assert!(
+        variants_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
+        ),
+        "Button.variants should expose color, got {:?}",
+        variants_member
+    );
+
+    let slots_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a slots member");
+    let TypeExpr::Object(slots_shape) = slots_member else {
+        panic!(
+            "Button.slots should materialize as an object, got {:?}",
+            slots_member
+        );
+    };
+    assert!(
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "Button.slots should expose base, got {:?}",
+        slots_member
+    );
+
+    let ui_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_member else {
+        panic!(
+            "Button.ui should materialize as an object, got {:?}",
+            ui_member
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "Button.ui should expose base, got {:?}",
+        ui_member
+    );
+}
+
+#[test]
+fn resolve_component_meta_materializes_imported_component_config_registry_helpers() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/tailwind-variants.d.ts",
+            r#"export type ClassValue = string | { [key: string]: boolean }
+export type TVVariants<S, C, V> = { [K in keyof V]: keyof V[K] }
+export type TVCompoundVariants<V, S, C, O, U> = never
+export type TVDefaultVariants<V, S, O, U> = never
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"import type { ClassValue, TVVariants, TVCompoundVariants, TVDefaultVariants } from './tailwind-variants'
+
+export type TVConfig<T extends Record<string, any>> = {
+  [P in keyof T]?: {
+    [K in keyof T[P] as K extends 'base' | 'slots' | 'variants' | 'defaultVariants' ? K : never]?: K extends 'base' ? ClassValue
+      : K extends 'slots' ? {
+        [S in keyof T[P]['slots']]?: ClassValue
+      }
+        : K extends 'variants' ? TVVariants<T[P]['slots'], ClassValue, WidenVariantsValues<T[P]['variants']>>
+          : K extends 'defaultVariants' ? TVDefaultVariants<WidenVariantsValues<T[P]['variants']>, T[P]['slots'], object, undefined>
+            : never
+  }
+} & {
+  [P in keyof T]?: {
+    compoundVariants?: TVCompoundVariants<WidenVariantsValues<T[P]['variants']>, T[P]['slots'], ClassValue, object, undefined>
+  }
+}
+
+type WidenVariantsValues<V extends Record<string, any> | undefined>
+  = V extends Record<string, any> ? V & {
+    [K in keyof V]: V[K] extends Record<string, any>
+      ? V[K] & Record<string & {}, any>
+      : V[K]
+  } : V
+
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: ClassValue
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+type GetComponentAppConfig<A, U extends string, K extends string>
+  = A extends Record<U, Record<K, any>> ? A[U][K] : {}
+
+type ComponentAppConfig<
+  T,
+  A extends Record<string, any>,
+  K extends string,
+  U extends string = 'ui' | 'ui.prose'
+> = A & (
+  U extends 'ui.prose'
+    ? { ui?: { prose?: { [k in K]?: Partial<T> } } }
+    : { [key in Exclude<U, 'ui.prose'>]?: { [k in K]?: Partial<T> } }
+)
+
+export type ComponentConfig<
+  T extends Record<string, any>,
+  A extends Record<string, any>,
+  K extends string,
+  U extends 'ui' | 'ui.prose' = 'ui'
+> = {
+  AppConfig: ComponentAppConfig<T, A, K, U>
+  variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/schema.ts",
+            r#"export interface AppConfig {
+  ui: {
+    button: {
+      variants: {
+        color: {
+          neutral: string
+        }
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { solid: '', soft: '' },
+    size: { sm: '', md: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from './schema'
+import theme from './theme'
+import type { ComponentConfig } from './tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  ui?: Button['slots']
+}
+
+export interface ButtonSlots {
+  default?(props: { ui: Button['ui'] }): any
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "imported ComponentConfig alias should materialize as an object, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    let variants_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a variants member");
+    let TypeExpr::Object(variants_shape) = variants_member else {
+        panic!(
+            "Button.variants should materialize as an object, got {:?}",
+            variants_member
+        );
+    };
+    let color_member = variants_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button.variants should keep a color member");
+    assert_union_string_literals(color_member, &["neutral", "primary", "secondary"]);
+
+    let slots_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a slots member");
+    let TypeExpr::Object(slots_shape) = slots_member else {
+        panic!(
+            "Button.slots should materialize as an object, got {:?}",
+            slots_member
+        );
+    };
+    assert!(
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "Button.slots should expose base, got {:?}",
+        slots_member
+    );
+    assert!(
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "Button.slots should expose label, got {:?}",
+        slots_member
+    );
+}
+
+#[test]
+fn resolve_component_meta_materializes_bound_registry_members_despite_opaque_sibling_args() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: string
+}
+
+export type ComponentConfig<T extends Record<string, any>, A> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  appConfig?: A
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig } from './types'
+import theme from './theme'
+
+type Button = ComponentConfig<typeof theme, MissingAppConfig>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  ui?: Button['slots']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "Button helper should materialize as an object despite the opaque sibling arg, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    let variants_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a variants member");
+    let TypeExpr::Object(variants_shape) = variants_member else {
+        panic!(
+            "Button.variants should materialize as an object, got {:?}",
+            variants_member
+        );
+    };
+    let color_member = variants_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button.variants should keep a color member");
+    assert_union_string_literals(color_member, &["primary", "secondary"]);
+
+    let slots_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a slots member");
+    let TypeExpr::Object(slots_shape) = slots_member else {
+        panic!(
+            "Button.slots should materialize as an object, got {:?}",
+            slots_member
+        );
+    };
+    assert!(
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "Button.slots should expose base, got {:?}",
+        slots_member
+    );
+    assert!(
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "Button.slots should expose label, got {:?}",
+        slots_member
+    );
+}
+
+#[test]
+fn resolve_component_meta_publishes_transitive_registry_aliases_for_nested_indexed_access_refs() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: string
+}
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/avatar-theme.ts",
+            r#"export default {
+  variants: {
+    size: { sm: '', md: '' }
+  },
+  slots: {
+    base: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/avatar-types.ts",
+            r#"import type { ComponentConfig } from './types'
+import avatarTheme from './avatar-theme'
+
+export type Avatar = ComponentConfig<typeof avatarTheme>
+
+export interface AvatarProps {
+  size?: Avatar['variants']['size']
+  ui?: Avatar['slots']
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { AvatarProps } from './avatar-types'
+
+export interface ButtonProps {
+  avatar?: AvatarProps
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./avatar-types".to_string(),
+            resolved_canonical_id: Some("/src/avatar-types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/avatar-types.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./avatar-theme".to_string(),
+                resolved_canonical_id: Some("/src/avatar-theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let avatar_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Avatar")
+        .expect("transitive Avatar alias should be published in the resolved type registry");
+    let TypeExpr::Object(avatar_shape) = &avatar_entry.type_expr else {
+        panic!(
+            "Avatar helper should materialize as an object, got {:?}",
+            avatar_entry.type_expr
+        );
+    };
+
+    let variants_member = avatar_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Avatar helper should keep a variants member");
+    let TypeExpr::Object(variants_shape) = variants_member else {
+        panic!(
+            "Avatar.variants should materialize as an object, got {:?}",
+            variants_member
+        );
+    };
+    let size_member = variants_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "size" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Avatar.variants should keep a size member");
+    assert_union_string_literals(size_member, &["md", "sm"]);
+}
+
+#[test]
+fn resolve_component_meta_handles_renamed_import_cycles_in_shallow_alias_hydration() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/helpers.ts",
+            r#"type Id<T> = T
+
+type SlotInfo<T> = Id<{
+  value: T
+}>
+
+type WithChildren<T> = {
+  slot: SlotInfo<ComponentConfig<T>>
+}
+
+export type ComponentConfig<T> = WithChildren<T>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig as LocalConfig } from './helpers'
+
+export interface ButtonProps {
+  slot?: LocalConfig<string>['slot']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let local_config = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "LocalConfig")
+        .expect("renamed imported alias should be published in the resolved type registry");
+    let TypeExpr::Object(local_config_shape) = &local_config.type_expr else {
+        panic!(
+            "LocalConfig should materialize as an object, got {:?}",
+            local_config.type_expr
+        );
+    };
+    assert!(
+        local_config_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "slot")
+        ),
+        "LocalConfig should keep its slot member, got {:?}",
+        local_config.type_expr
+    );
+}
+
+#[test]
+fn resolve_component_meta_publishes_transitive_renamed_imported_registry_aliases() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export type Inner = {
+  nested: {
+    leaf: string
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/helpers.ts",
+            r#"import type { Inner as LocalInner } from './base'
+
+export type ComponentConfig = {
+  ui: LocalInner
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig } from './helpers'
+
+export interface ButtonProps {
+  ui?: ComponentConfig['ui']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./helpers".to_string(),
+            resolved_canonical_id: Some("/src/helpers.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/helpers.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./base".to_string(),
+            resolved_canonical_id: Some("/src/base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let local_inner = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "LocalInner")
+        .expect(
+            "transitive renamed imported alias should be published in the resolved type registry",
+        );
+    let TypeExpr::Object(local_inner_shape) = &local_inner.type_expr else {
+        panic!(
+            "LocalInner should materialize as an object, got {:?}",
+            local_inner.type_expr
+        );
+    };
+
+    let nested_member = local_inner_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "nested" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("LocalInner should keep a nested member");
+    let TypeExpr::Object(nested_shape) = nested_member else {
+        panic!(
+            "LocalInner.nested should materialize as an object, got {:?}",
+            nested_member
+        );
+    };
+    assert!(
+        nested_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "leaf")
+        ),
+        "LocalInner.nested should expose leaf, got {:?}",
+        nested_member
+    );
+}
+
+#[test]
+fn resolve_component_meta_keeps_deep_imported_registry_branches_shallow() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export type Level3 = {
+  leaf: string
+}
+
+export type Level2 = {
+  node: Level3
+}
+
+export type Level1 = {
+  node: Level2
+}
+
+export type ComponentConfig = {
+  ui: Level1
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig } from './types'
+
+export interface ButtonProps {
+  ui?: ComponentConfig['ui']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let config_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ComponentConfig")
+        .expect("ComponentConfig should be published in the resolved type registry");
+    let TypeExpr::Object(config_shape) = &config_entry.type_expr else {
+        panic!(
+            "ComponentConfig should materialize as an object, got {:?}",
+            config_entry.type_expr
+        );
+    };
+
+    let ui_member = config_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("ComponentConfig should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_member else {
+        panic!(
+            "ComponentConfig.ui should materialize as an object, got {:?}",
+            ui_member
+        );
+    };
+
+    let node_member = ui_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "node" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("ComponentConfig.ui should keep a node member");
+    assert!(
+        matches!(
+            node_member,
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "Level2" && type_arguments.is_empty()
+        ),
+        "deep imported registry branches should stay shallow once the structural depth cap is hit, got {:?}",
+        node_member
+    );
+}
+
+#[test]
 fn get_component_meta_returns_full_native_metadata_contract() {
     let project = make_project();
     project
@@ -4917,8 +8167,26 @@ onMounted(() => {
         meta.components[0].import_source.as_deref(),
         Some("./FancyButton.vue")
     );
+    assert!(!meta.components[0].has_spread);
     assert!(meta.components[0].has_dynamic_class);
     assert_eq!(meta.components[0].v_models, vec!["modelValue".to_string()]);
+    assert_eq!(
+        meta.components[0]
+            .v_model_entries
+            .iter()
+            .map(|entry| entry.binding_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["modelValue"]
+    );
+    let label_prop = meta.components[0]
+        .props
+        .iter()
+        .find(|prop| prop.name == "label")
+        .expect("label prop usage should be present");
+    assert_eq!(label_prop.expression.as_deref(), Some("`${doubled}`"));
+    assert_eq!(label_prop.referenced_bindings, vec!["doubled".to_string()]);
+    assert!(!label_prop.from_spread);
+    assert!(!label_prop.is_shorthand);
 
     assert_eq!(
         meta.template_refs.len(),
@@ -4927,6 +8195,45 @@ onMounted(() => {
     );
     assert_eq!(meta.template_refs[0].name, "button");
     assert_eq!(meta.template_refs[0].target_tag, "FancyButton");
+
+    let child_meta = session
+        .get_component_meta("/FancyButton.vue")
+        .unwrap()
+        .expect("child component meta should be available");
+    let public_instance = child_meta
+        .public_instance
+        .as_ref()
+        .expect("host should provide a public-instance sidecar");
+    let public_member_names: Vec<_> = public_instance
+        .members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect();
+    assert!(
+        public_member_names.contains(&"label"),
+        "public instance should expose declared props, got {:?}",
+        public_member_names
+    );
+    assert!(
+        public_member_names.contains(&"modelValue"),
+        "public instance should expose model props, got {:?}",
+        public_member_names
+    );
+    assert!(
+        public_member_names.contains(&"$slots"),
+        "public instance should expose $slots, got {:?}",
+        public_member_names
+    );
+    assert!(
+        public_instance.members.iter().any(|member| {
+            member.name == "$slots"
+                && matches!(
+                    member.kind,
+                    verter_analysis::component_meta::PublicInstanceMemberKind::SlotContainer
+                )
+        }),
+        "$slots should be tagged as a public-instance slot container"
+    );
 
     assert!(
         meta.imports.iter().any(|import| import.source == "vue"),
@@ -4959,6 +8266,134 @@ onMounted(() => {
             .iter()
             .any(|selector| selector.text == "#wrapper .primary"),
         "style selectors should be preserved"
+    );
+}
+
+#[test]
+fn get_component_meta_surfaces_sfc_block_metadata() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Button.vue",
+            r#"<script lang="ts">
+export const legacy = true
+</script>
+<script setup lang="ts" generic="T extends string = string" attrs="ButtonAttrs">
+defineProps<{ label: string }>()
+defineSlots<{
+  default(props: { item: number }): any
+}>()
+defineExpose({
+  focus() {}
+})
+</script>
+<template lang="html" data-layout="stack">
+  <button>{{ label }}</button>
+  <slot :item="1" />
+</template>
+<style scoped module="theme" lang="scss">
+.primary { color: red; }
+</style>
+<i18n lang="json">
+{ "label": "Button" }
+</i18n>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/Button.vue")
+        .unwrap()
+        .expect("component meta should be available");
+
+    let blocks = meta
+        .sfc_blocks
+        .as_ref()
+        .expect("host should surface SFC block metadata");
+    assert_eq!(
+        blocks
+            .script
+            .as_ref()
+            .and_then(|block| block.lang.as_deref()),
+        Some("ts")
+    );
+    assert_eq!(
+        blocks
+            .script_setup
+            .as_ref()
+            .and_then(|block| block.generic.as_deref()),
+        Some("T extends string = string")
+    );
+    assert_eq!(
+        blocks
+            .script_setup
+            .as_ref()
+            .and_then(|block| block.attrs_type.as_deref()),
+        Some("ButtonAttrs")
+    );
+    assert_eq!(
+        blocks
+            .template
+            .as_ref()
+            .and_then(|block| block.lang.as_deref()),
+        Some("html")
+    );
+    assert!(
+        blocks.template.as_ref().is_some_and(|block| block
+            .attributes
+            .iter()
+            .any(|attribute| attribute.name == "data-layout"
+                && attribute.value.as_deref() == Some("stack"))),
+        "template block should preserve arbitrary root attributes"
+    );
+    assert_eq!(blocks.styles.len(), 1);
+    assert_eq!(blocks.styles[0].index, 0);
+    assert_eq!(blocks.styles[0].lang.as_deref(), Some("scss"));
+    assert!(blocks.styles[0].scoped);
+    assert!(blocks.styles[0].is_module);
+    assert_eq!(blocks.styles[0].module_name.as_deref(), Some("theme"));
+    assert_eq!(blocks.custom.len(), 1);
+    assert_eq!(blocks.custom[0].index, 0);
+    assert_eq!(blocks.custom[0].block_type, "i18n");
+    assert_eq!(blocks.custom[0].lang.as_deref(), Some("json"));
+}
+
+#[test]
+fn get_component_meta_preserves_component_spread_usage() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/FancyButton.vue",
+            r#"<script setup lang="ts">
+defineProps<{ label?: string }>()
+</script>
+<template><button><slot /></button></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import FancyButton from './FancyButton.vue'
+
+const attrs = { label: 'Hello' }
+</script>
+<template>
+  <FancyButton v-bind="attrs" />
+</template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let meta = session
+        .get_component_meta("/App.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+
+    assert_eq!(meta.components.len(), 1);
+    assert!(
+        meta.components[0].has_spread,
+        "component usage should preserve v-bind spread markers"
     );
 }
 
@@ -5872,6 +9307,167 @@ defineSlots<CalendarSlots>()
 }
 
 #[test]
+fn imported_slot_binding_indexed_access_helpers_resolve_to_concrete_members() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+export type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"
+export const theme = {
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/button-types.ts",
+            r#"
+import type { ComponentConfig } from './types'
+import { theme } from './theme'
+
+export type Button = ComponentConfig<typeof theme>
+
+export interface ButtonSlots {
+  default?(props: {
+    ui: Button['ui']
+  }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonSlots } from './button-types'
+
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("should resolve component meta state");
+
+    let button_slots = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ButtonSlots")
+        .expect("ButtonSlots should be published in the resolved type registry");
+    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
+        panic!(
+            "ButtonSlots should materialize as an object, got {:?}",
+            button_slots.type_expr
+        );
+    };
+    let default_slot = button_slots_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "default" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("ButtonSlots should keep the default slot signature");
+    let TypeExpr::Function(default_slot_fn) = default_slot else {
+        panic!(
+            "default slot should materialize as a function, got {:?}",
+            default_slot
+        );
+    };
+    let Some(props_param) = default_slot_fn.parameters.first() else {
+        panic!("default slot should keep its props parameter");
+    };
+    let TypeExpr::Object(props_shape) = &props_param.ty else {
+        panic!(
+            "slot props should materialize as an object, got {:?}",
+            props_param.ty
+        );
+    };
+    assert!(
+        props_shape.properties.iter().any(
+            |member| matches!(
+                member,
+                ObjectMember::Property(property)
+                    if property.name == "ui"
+                        && matches!(
+                            &property.ty,
+                            TypeExpr::IndexedAccess {
+                                object,
+                                index
+                            } if matches!(object.as_ref(), TypeExpr::Ref { name, .. } if name.as_ref() == "Button")
+                                && matches!(index.as_ref(), TypeExpr::Literal(LiteralValue::String(value)) if value == "ui")
+                        )
+            )
+        ),
+        "default slot props should keep the ui indexed-access contract, got {:?}",
+        default_slot
+    );
+
+    let button = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button should be published transitively for imported slot bindings");
+    let TypeExpr::Object(button_shape) = &button.type_expr else {
+        panic!(
+            "Button should materialize as an object, got {:?}",
+            button.type_expr
+        );
+    };
+    let ui_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("resolved Button helper should expose a ui member");
+    let TypeExpr::Object(ui_shape) = ui_member else {
+        panic!(
+            "Button.ui should materialize as an object, got {:?}",
+            ui_member
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "resolved Button.ui should expose base, got {:?}",
+        ui_member
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "resolved Button.ui should expose label, got {:?}",
+        ui_member
+    );
+}
+
+#[test]
 fn local_pick_slot_bindings_keep_symbolic_raw_type() {
     let project = make_project();
     project
@@ -6496,6 +10092,84 @@ defineProps<LinkProps>()
             && prop_names.contains(&"ariaCurrentValue"),
         "LinkProps should keep router members across package re-exported Omit heritage: {:?}",
         prop_names
+    );
+}
+
+#[test]
+fn imported_omit_props_preserve_jsdoc_and_raw_type_text() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface UseComponentIconsProps {
+  icon?: string
+}
+
+interface NuxtLinkProps {
+  to?: string
+}
+
+interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+}
+
+interface AnchorHTMLAttributes {
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps, /** @vue-ignore */ Omit<ButtonHTMLAttributes, 'type'>, /** @vue-ignore */ Omit<AnchorHTMLAttributes, 'href'> {
+  /** Force the link to be active independent of the current route. */
+  active?: boolean
+  /** Class to apply when the link is active */
+  activeClass?: string
+  raw?: boolean
+  custom?: boolean
+}
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+
+defineProps<ButtonProps>()
+</script>
+<template><button /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Button.vue")
+        .expect("should return component meta");
+
+    let active = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "active")
+        .expect("active prop should be preserved through imported Omit");
+    assert_eq!(active.raw_type.as_deref(), Some("boolean"));
+    assert_eq!(
+        active.description.as_deref(),
+        Some("Force the link to be active independent of the current route.")
+    );
+
+    let active_class = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "activeClass")
+        .expect("activeClass prop should be preserved through imported Omit");
+    assert_eq!(active_class.raw_type.as_deref(), Some("string"));
+    assert_eq!(
+        active_class.description.as_deref(),
+        Some("Class to apply when the link is active")
     );
 }
 
@@ -8339,12 +12013,13 @@ fn cached_eval_inputs_track_macro_and_runtime_dependencies() {
     // - an imported value (rootAttrs from ./utils.ts) used in v-bind spread
     // - additional non-type imports (./helpers.ts)
     //
-    // Phase 2 no longer requires value-only imports to be merged into
-    // `cached_eval_inputs.sources`. Runtime values are materialized from the
-    // owner snapshot's resolved imports when the owner eval env is built.
+    // Cached eval inputs now track invalidation dependencies rather than
+    // eagerly retaining every imported macro route in `sources`/`type_aliases`.
+    // Runtime values and macro types are resolved on demand through the
+    // cache-owned lookup path when the owner eval env is built.
     //
     // The cached inputs should therefore:
-    // - keep the macro type source in `sources` for imported type eval
+    // - track the macro type dependency for invalidation
     // - track runtime imports in `canonical_dependencies` for invalidation
     let project = make_project();
     project
@@ -8418,14 +12093,10 @@ const msg = format('hello')
         .expect("expanded resolved state should retain cached eval inputs");
 
     assert!(
-        imported_inputs.sources.iter().any(|source| {
-            source.canonical_id == "/src/types.ts" && source.source.contains("interface ButtonProps")
-        }) || imported_inputs.type_aliases.iter().any(|alias| {
-            alias.local_name == "ButtonProps"
-                && alias.source_canonical_id == "/src/types.ts"
-                && alias.exported_name == "ButtonProps"
-        }),
-        "cached eval inputs should preserve the macro type through either source merging or alias materialization"
+        imported_inputs
+            .canonical_dependencies
+            .contains("/src/types.ts"),
+        "macro type dependencies should still be retained for invalidation"
     );
     assert!(
         imported_inputs.canonical_dependencies.contains("/src/utils.ts"),
@@ -8435,8 +12106,8 @@ const msg = format('hello')
 
 #[test]
 fn type_reachable_count_zero_falls_back_to_all_sources() {
-    // Component with inline defineProps (no macro_type_deps) — type_reachable_count
-    // should be 0, and type eval should fall back to parsing all sources.
+    // Component with inline defineProps (no macro_type_deps) should still
+    // resolve locally without any cross-file imported-eval work.
     let project = make_project();
     let session = project.open_session().unwrap();
 
@@ -8809,6 +12480,8 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
         slots: Vec::new(),
         models: Vec::new(),
         exposed: Vec::new(),
+        public_instance: None,
+        sfc_blocks: None,
         type_registry: Vec::new(),
         components: Vec::new(),
         template_refs: Vec::new(),

@@ -1550,6 +1550,30 @@ impl NapiMetaSession {
         }))?
     }
 
+    #[napi(js_name = "getResolvedComponentMeta")]
+    pub fn get_resolved_component_meta(
+        &self,
+        canonical_or_alias: String,
+    ) -> Result<Option<Buffer>> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let result = session
+                .get_component_meta_with_resolution(&canonical_or_alias)
+                .map_err(meta_err)?;
+            match result {
+                Some((analysis, resolved)) => {
+                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
+                        analysis,
+                        Some(&resolved),
+                    );
+                    let payload = verter_proto::component_meta::encode_component_meta_payload(&ffi);
+                    Ok(Some(Buffer::from(payload)))
+                }
+                None => Ok(None),
+            }
+        }))?
+    }
+
     #[napi(js_name = "getDeclaredComponentMeta")]
     pub fn get_declared_component_meta(
         &self,

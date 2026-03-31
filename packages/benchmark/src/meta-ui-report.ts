@@ -1,5 +1,6 @@
 import {
   summarizeLatencySeries,
+  VOLAR_PARITY_EXCLUDED_COLLECTIONS,
   type MetaUiBackend,
   type MetaUiScenario,
   type NumericSummary,
@@ -162,6 +163,12 @@ export function buildMetaUiMarkdownReport(report: MetaUiAggregateReport): string
     `**${report.target.project}** (\`${report.target.repo}@${report.version.resolvedTargetSha}\`) - ${report.target.componentCount.toLocaleString()} components`,
   );
   lines.push("");
+  if (VOLAR_PARITY_EXCLUDED_COLLECTIONS.length > 0) {
+    lines.push(
+      `Parity totals exclude non-equivalent surfaces: ${VOLAR_PARITY_EXCLUDED_COLLECTIONS.join(", ")}.`,
+    );
+    lines.push("");
+  }
   if (report.missingRuns.length > 0) {
     lines.push(
       `Partial results: missing ${report.missingRuns.length.toLocaleString()} backend/scenario run(s).`,

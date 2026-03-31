@@ -142,7 +142,12 @@ fn extract_shape(
                     return ExpandedObjectShape::empty();
                 }
                 env.active.insert(name.to_string());
-                let saved = crate::type_eval::bind_type_parameters(&decl, type_arguments, env);
+                let saved = crate::type_eval::bind_type_parameters_with_lookup(
+                    &decl,
+                    type_arguments,
+                    env,
+                    lookup,
+                );
                 let shape = extract_shape(&decl.body, env, diagnostics, lookup);
                 crate::type_eval::restore_type_parameters(saved, env);
                 env.active.remove(&**name);

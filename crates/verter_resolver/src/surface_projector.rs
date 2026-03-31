@@ -934,4 +934,57 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             vec!["as", "type", "disabled", "to", "href", "replace"]
         );
     }
+
+    #[test]
+    fn project_local_source_define_props_preserves_jsdoc_and_raw_types_after_vue_ignore_heritage() {
+        let source = r#"
+interface NuxtLinkProps {
+  to?: string
+}
+
+interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+}
+
+interface AnchorHTMLAttributes {
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps, /** @vue-ignore */ Omit<ButtonHTMLAttributes, 'type'>, /** @vue-ignore */ Omit<AnchorHTMLAttributes, 'href'> {
+  /** Force the link to be active independent of the current route. */
+  active?: boolean
+  /** Class to apply when the link is active */
+  activeClass?: string
+}
+"#;
+
+        let projected = project_macro_surfaces_from_source_type_name(
+            source,
+            AnalyzedMacroKind::DefineProps,
+            "LinkProps",
+        )
+        .expect("local source projection should succeed");
+
+        let active = projected
+            .props
+            .iter()
+            .find(|prop| prop.name == "active")
+            .expect("active prop should be projected");
+        assert_eq!(active.type_annotation.as_deref(), Some("boolean"));
+        assert_eq!(
+            active.description.as_deref(),
+            Some("Force the link to be active independent of the current route.")
+        );
+
+        let active_class = projected
+            .props
+            .iter()
+            .find(|prop| prop.name == "activeClass")
+            .expect("activeClass prop should be projected");
+        assert_eq!(active_class.type_annotation.as_deref(), Some("string"));
+        assert_eq!(
+            active_class.description.as_deref(),
+            Some("Class to apply when the link is active")
+        );
+    }
 }

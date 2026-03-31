@@ -3792,6 +3792,7 @@ pub struct AnalyzedExternalTypeSymbol {
     pub kind: AnalyzedExternalTypeSymbolKind,
     pub span: Span,
     pub dependency_names: FxHashSet<String>,
+    pub structural_dependency_names: FxHashSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3801,6 +3802,7 @@ pub struct AnalyzedExternalTypeSource {
     direct_reexport_targets: FxHashMap<String, (String, String)>,
     local_import_symbol_targets: FxHashMap<String, (String, String)>,
     local_export_symbol_targets: FxHashMap<String, String>,
+    exported_local_type_names: FxHashSet<String>,
     local_type_symbols: FxHashMap<String, AnalyzedExternalTypeSymbol>,
     top_level_statement_count: usize,
 }
@@ -3834,7 +3836,7 @@ impl AnalyzedExternalTypeSource {
 
             if let Some(symbol) = self.local_type_symbols.get(&current) {
                 enqueue_required_import_refs(
-                    symbol.dependency_names.clone(),
+                    symbol.structural_dependency_names.clone(),
                     &self.import_locals,
                     &mut required_imports,
                     &mut pending,
@@ -3862,6 +3864,30 @@ impl AnalyzedExternalTypeSource {
         self.local_export_symbol_targets
             .get(exported_name)
             .map(|name| name.as_str())
+    }
+
+    pub fn exported_local_type_names(&self) -> impl Iterator<Item = &str> {
+        self.exported_local_type_names.iter().map(String::as_str)
+    }
+
+    pub fn exported_local_symbol_names(&self) -> impl Iterator<Item = &str> {
+        self.local_export_symbol_targets.keys().map(String::as_str)
+    }
+
+    pub fn direct_reexport_entries(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.direct_reexport_targets
+            .iter()
+            .map(|(exported_name, (source, imported_name))| {
+                (
+                    exported_name.as_str(),
+                    source.as_str(),
+                    imported_name.as_str(),
+                )
+            })
+    }
+
+    pub fn wildcard_reexport_sources(&self) -> &[String] {
+        &self.extracted.wildcard_reexport_sources
     }
 
     pub fn local_symbol_span(&self, symbol_name: &str) -> Option<Span> {
@@ -4219,6 +4245,10 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
                         declaration,
                         &mut result.local_type_symbols,
                     );
+                    record_exported_local_type_names_from_declaration(
+                        declaration,
+                        &mut result.exported_local_type_names,
+                    );
                 }
             }
             Statement::ExportAllDeclaration(export_all) => {
@@ -4229,25 +4259,39 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
             }
             Statement::TSTypeAliasDeclaration(type_alias) => {
                 let mut refs = FxHashSet::default();
+                let mut structural_refs = FxHashSet::default();
                 collect_type_reference_names(&type_alias.type_annotation, &mut refs);
+                collect_structural_type_reference_names(
+                    &type_alias.type_annotation,
+                    StructuralDependencyContext::Root,
+                    &mut structural_refs,
+                );
                 result.local_type_symbols.insert(
                     type_alias.id.name.to_string(),
                     AnalyzedExternalTypeSymbol {
                         kind: AnalyzedExternalTypeSymbolKind::TypeAlias,
                         span: type_alias.span.into(),
                         dependency_names: refs,
+                        structural_dependency_names: structural_refs,
                     },
                 );
             }
             Statement::TSInterfaceDeclaration(interface) => {
                 let mut refs = FxHashSet::default();
+                let mut structural_refs = FxHashSet::default();
                 for parent in &interface.extends {
                     if let Some(name) = get_expression_reference_name(&parent.expression) {
-                        refs.insert(name);
+                        refs.insert(name.clone());
+                        structural_refs.insert(name);
                     }
                     if let Some(type_arguments) = &parent.type_arguments {
                         for param in &type_arguments.params {
                             collect_type_reference_names(param, &mut refs);
+                            collect_structural_type_reference_names(
+                                param,
+                                StructuralDependencyContext::Root,
+                                &mut structural_refs,
+                            );
                         }
                     }
                 }
@@ -4256,25 +4300,34 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
                     &interface.extends,
                     &mut refs,
                 );
+                collect_structural_interface_reference_names(
+                    &interface.body.body,
+                    &interface.extends,
+                    &mut structural_refs,
+                );
                 result.local_type_symbols.insert(
                     interface.id.name.to_string(),
                     AnalyzedExternalTypeSymbol {
                         kind: AnalyzedExternalTypeSymbolKind::Interface,
                         span: interface.span.into(),
                         dependency_names: refs,
+                        structural_dependency_names: structural_refs,
                     },
                 );
             }
             Statement::ClassDeclaration(class_decl) => {
                 if let Some(id) = &class_decl.id {
                     let mut refs = FxHashSet::default();
+                    let mut structural_refs = FxHashSet::default();
                     collect_class_reference_names(class_decl, &mut refs);
+                    collect_structural_class_reference_names(class_decl, &mut structural_refs);
                     result.local_type_symbols.insert(
                         id.name.to_string(),
                         AnalyzedExternalTypeSymbol {
                             kind: AnalyzedExternalTypeSymbolKind::Class,
                             span: class_decl.span.into(),
                             dependency_names: refs,
+                            structural_dependency_names: structural_refs,
                         },
                     );
                 }
@@ -4283,25 +4336,35 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
                 match &export_default.declaration {
                     ExportDefaultDeclarationKind::ClassDeclaration(class_decl) => {
                         let mut refs = FxHashSet::default();
+                        let mut structural_refs = FxHashSet::default();
                         collect_class_reference_names(class_decl, &mut refs);
+                        collect_structural_class_reference_names(class_decl, &mut structural_refs);
                         result.local_type_symbols.insert(
                             "default".to_string(),
                             AnalyzedExternalTypeSymbol {
                                 kind: AnalyzedExternalTypeSymbolKind::Class,
                                 span: export_default.span.into(),
                                 dependency_names: refs,
+                                structural_dependency_names: structural_refs,
                             },
                         );
                     }
                     ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
                         let mut refs = FxHashSet::default();
+                        let mut structural_refs = FxHashSet::default();
                         for parent in &interface.extends {
                             if let Some(name) = get_expression_reference_name(&parent.expression) {
-                                refs.insert(name);
+                                refs.insert(name.clone());
+                                structural_refs.insert(name);
                             }
                             if let Some(type_arguments) = &parent.type_arguments {
                                 for param in &type_arguments.params {
                                     collect_type_reference_names(param, &mut refs);
+                                    collect_structural_type_reference_names(
+                                        param,
+                                        StructuralDependencyContext::Root,
+                                        &mut structural_refs,
+                                    );
                                 }
                             }
                         }
@@ -4310,12 +4373,18 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
                             &interface.extends,
                             &mut refs,
                         );
+                        collect_structural_interface_reference_names(
+                            &interface.body.body,
+                            &interface.extends,
+                            &mut structural_refs,
+                        );
                         result.local_type_symbols.insert(
                             "default".to_string(),
                             AnalyzedExternalTypeSymbol {
                                 kind: AnalyzedExternalTypeSymbolKind::Interface,
                                 span: export_default.span.into(),
                                 dependency_names: refs,
+                                structural_dependency_names: structural_refs,
                             },
                         );
                     }
@@ -4336,50 +4405,93 @@ fn record_local_type_symbol_from_declaration(
     match declaration {
         Declaration::TSTypeAliasDeclaration(type_alias) => {
             let mut refs = FxHashSet::default();
+            let mut structural_refs = FxHashSet::default();
             collect_type_reference_names(&type_alias.type_annotation, &mut refs);
+            collect_structural_type_reference_names(
+                &type_alias.type_annotation,
+                StructuralDependencyContext::Root,
+                &mut structural_refs,
+            );
             local_type_symbols.insert(
                 type_alias.id.name.to_string(),
                 AnalyzedExternalTypeSymbol {
                     kind: AnalyzedExternalTypeSymbolKind::TypeAlias,
                     span: type_alias.span.into(),
                     dependency_names: refs,
+                    structural_dependency_names: structural_refs,
                 },
             );
         }
         Declaration::TSInterfaceDeclaration(interface) => {
             let mut refs = FxHashSet::default();
+            let mut structural_refs = FxHashSet::default();
             for parent in &interface.extends {
                 if let Some(name) = get_expression_reference_name(&parent.expression) {
-                    refs.insert(name);
+                    refs.insert(name.clone());
+                    structural_refs.insert(name);
                 }
                 if let Some(type_arguments) = &parent.type_arguments {
                     for param in &type_arguments.params {
                         collect_type_reference_names(param, &mut refs);
+                        collect_structural_type_reference_names(
+                            param,
+                            StructuralDependencyContext::Root,
+                            &mut structural_refs,
+                        );
                     }
                 }
             }
             collect_interface_reference_names(&interface.body.body, &interface.extends, &mut refs);
+            collect_structural_interface_reference_names(
+                &interface.body.body,
+                &interface.extends,
+                &mut structural_refs,
+            );
             local_type_symbols.insert(
                 interface.id.name.to_string(),
                 AnalyzedExternalTypeSymbol {
                     kind: AnalyzedExternalTypeSymbolKind::Interface,
                     span: interface.span.into(),
                     dependency_names: refs,
+                    structural_dependency_names: structural_refs,
                 },
             );
         }
         Declaration::ClassDeclaration(class_decl) => {
             if let Some(id) = &class_decl.id {
                 let mut refs = FxHashSet::default();
+                let mut structural_refs = FxHashSet::default();
                 collect_class_reference_names(class_decl, &mut refs);
+                collect_structural_class_reference_names(class_decl, &mut structural_refs);
                 local_type_symbols.insert(
                     id.name.to_string(),
                     AnalyzedExternalTypeSymbol {
                         kind: AnalyzedExternalTypeSymbolKind::Class,
                         span: class_decl.span.into(),
                         dependency_names: refs,
+                        structural_dependency_names: structural_refs,
                     },
                 );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn record_exported_local_type_names_from_declaration(
+    declaration: &Declaration<'_>,
+    exported_local_type_names: &mut FxHashSet<String>,
+) {
+    match declaration {
+        Declaration::TSTypeAliasDeclaration(type_alias) => {
+            exported_local_type_names.insert(type_alias.id.name.to_string());
+        }
+        Declaration::TSInterfaceDeclaration(interface) => {
+            exported_local_type_names.insert(interface.id.name.to_string());
+        }
+        Declaration::ClassDeclaration(class_decl) => {
+            if let Some(id) = &class_decl.id {
+                exported_local_type_names.insert(id.name.to_string());
             }
         }
         _ => {}
@@ -4468,6 +4580,70 @@ fn collect_interface_reference_names(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuralDependencyContext {
+    Root,
+    CallableParam,
+    LeafProperty,
+}
+
+fn collect_structural_interface_reference_names(
+    members: &[TSSignature],
+    heritage: &[TSInterfaceHeritage],
+    refs: &mut FxHashSet<String>,
+) {
+    for h in heritage {
+        if let Expression::Identifier(id) = &h.expression {
+            refs.insert(id.name.to_string());
+        }
+        if let Some(type_arguments) = &h.type_arguments {
+            for param in &type_arguments.params {
+                collect_structural_type_reference_names(
+                    param,
+                    StructuralDependencyContext::Root,
+                    refs,
+                );
+            }
+        }
+    }
+
+    for member in members {
+        match member {
+            TSSignature::TSPropertySignature(prop) => {
+                if let Some(type_annotation) = &prop.type_annotation {
+                    collect_structural_type_reference_names(
+                        &type_annotation.type_annotation,
+                        StructuralDependencyContext::LeafProperty,
+                        refs,
+                    );
+                }
+            }
+            TSSignature::TSMethodSignature(method) => {
+                collect_structural_formal_parameter_reference_names(
+                    &method.params,
+                    StructuralDependencyContext::CallableParam,
+                    refs,
+                );
+            }
+            TSSignature::TSCallSignatureDeclaration(call) => {
+                collect_structural_formal_parameter_reference_names(
+                    &call.params,
+                    StructuralDependencyContext::CallableParam,
+                    refs,
+                );
+            }
+            TSSignature::TSIndexSignature(index) => {
+                collect_structural_type_reference_names(
+                    &index.type_annotation.type_annotation,
+                    StructuralDependencyContext::LeafProperty,
+                    refs,
+                );
+            }
+            TSSignature::TSConstructSignatureDeclaration(_) => {}
+        }
+    }
+}
+
 fn collect_class_reference_names(class: &Class<'_>, refs: &mut FxHashSet<String>) {
     if let Some(super_class) = &class.super_class {
         if let Some(name) = get_expression_reference_name(super_class) {
@@ -4506,6 +4682,74 @@ fn collect_class_reference_names(class: &Class<'_>, refs: &mut FxHashSet<String>
             }
             ClassElement::TSIndexSignature(sig) => {
                 collect_type_reference_names(&sig.type_annotation.type_annotation, refs);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_structural_class_reference_names(class: &Class<'_>, refs: &mut FxHashSet<String>) {
+    if let Some(super_class) = &class.super_class {
+        if let Some(name) = get_expression_reference_name(super_class) {
+            refs.insert(name);
+        }
+        if let Some(type_args) = &class.super_type_arguments {
+            for param in &type_args.params {
+                collect_structural_type_reference_names(
+                    param,
+                    StructuralDependencyContext::Root,
+                    refs,
+                );
+            }
+        }
+    }
+
+    for clause in &class.implements {
+        refs.insert(get_type_reference_name(&clause.expression));
+        if let Some(type_args) = &clause.type_arguments {
+            for param in &type_args.params {
+                collect_structural_type_reference_names(
+                    param,
+                    StructuralDependencyContext::Root,
+                    refs,
+                );
+            }
+        }
+    }
+
+    for member in &class.body.body {
+        match member {
+            ClassElement::PropertyDefinition(prop) => {
+                if let Some(type_annotation) = &prop.type_annotation {
+                    collect_structural_type_reference_names(
+                        &type_annotation.type_annotation,
+                        StructuralDependencyContext::LeafProperty,
+                        refs,
+                    );
+                }
+            }
+            ClassElement::MethodDefinition(method) => {
+                collect_structural_formal_parameter_reference_names(
+                    &method.value.params,
+                    StructuralDependencyContext::CallableParam,
+                    refs,
+                );
+            }
+            ClassElement::AccessorProperty(prop) => {
+                if let Some(type_annotation) = &prop.type_annotation {
+                    collect_structural_type_reference_names(
+                        &type_annotation.type_annotation,
+                        StructuralDependencyContext::LeafProperty,
+                        refs,
+                    );
+                }
+            }
+            ClassElement::TSIndexSignature(sig) => {
+                collect_structural_type_reference_names(
+                    &sig.type_annotation.type_annotation,
+                    StructuralDependencyContext::LeafProperty,
+                    refs,
+                );
             }
             _ => {}
         }
@@ -4602,6 +4846,138 @@ fn collect_type_reference_names(ts_type: &TSType<'_>, refs: &mut FxHashSet<Strin
     }
 }
 
+fn collect_structural_type_reference_names(
+    ts_type: &TSType<'_>,
+    context: StructuralDependencyContext,
+    refs: &mut FxHashSet<String>,
+) {
+    match ts_type {
+        TSType::TSTypeReference(type_ref) => {
+            if matches!(
+                context,
+                StructuralDependencyContext::Root | StructuralDependencyContext::CallableParam
+            ) {
+                refs.insert(get_type_reference_name(&type_ref.type_name));
+                if let Some(params) = &type_ref.type_arguments {
+                    for param in &params.params {
+                        collect_structural_type_reference_names(param, context, refs);
+                    }
+                }
+            }
+        }
+        TSType::TSUnionType(union) => {
+            for ty in &union.types {
+                collect_structural_type_reference_names(ty, context, refs);
+            }
+        }
+        TSType::TSIntersectionType(intersection) => {
+            for ty in &intersection.types {
+                collect_structural_type_reference_names(ty, context, refs);
+            }
+        }
+        TSType::TSTypeLiteral(literal) => {
+            collect_structural_interface_reference_names(&literal.members, &[], refs);
+        }
+        TSType::TSArrayType(array) => {
+            collect_structural_type_reference_names(&array.element_type, context, refs);
+        }
+        TSType::TSTupleType(tuple) => {
+            for element in &tuple.element_types {
+                match element {
+                    TSTupleElement::TSOptionalType(optional) => {
+                        collect_structural_type_reference_names(
+                            &optional.type_annotation,
+                            context,
+                            refs,
+                        );
+                    }
+                    TSTupleElement::TSRestType(rest) => {
+                        collect_structural_type_reference_names(
+                            &rest.type_annotation,
+                            context,
+                            refs,
+                        );
+                    }
+                    TSTupleElement::TSNamedTupleMember(named) => {
+                        if let Some(ts_type) = named.element_type.as_ts_type() {
+                            collect_structural_type_reference_names(ts_type, context, refs);
+                        }
+                    }
+                    _ => {
+                        if let Some(ts_type) = element.as_ts_type() {
+                            collect_structural_type_reference_names(ts_type, context, refs);
+                        }
+                    }
+                }
+            }
+        }
+        TSType::TSConditionalType(cond) => {
+            collect_structural_type_reference_names(&cond.check_type, context, refs);
+            collect_structural_type_reference_names(&cond.extends_type, context, refs);
+            collect_structural_type_reference_names(&cond.true_type, context, refs);
+            collect_structural_type_reference_names(&cond.false_type, context, refs);
+        }
+        TSType::TSMappedType(mapped) => {
+            collect_structural_type_reference_names(&mapped.constraint, context, refs);
+            if let Some(type_annotation) = &mapped.type_annotation {
+                collect_structural_type_reference_names(type_annotation, context, refs);
+            }
+        }
+        TSType::TSIndexedAccessType(indexed) => {
+            collect_structural_type_reference_names(
+                &indexed.object_type,
+                StructuralDependencyContext::Root,
+                refs,
+            );
+            collect_structural_type_reference_names(
+                &indexed.index_type,
+                StructuralDependencyContext::Root,
+                refs,
+            );
+        }
+        TSType::TSTypeOperatorType(operator) => {
+            collect_structural_type_reference_names(&operator.type_annotation, context, refs);
+        }
+        TSType::TSParenthesizedType(paren) => {
+            collect_structural_type_reference_names(&paren.type_annotation, context, refs);
+        }
+        TSType::TSTemplateLiteralType(template) => {
+            for ty in &template.types {
+                collect_structural_type_reference_names(ty, context, refs);
+            }
+        }
+        TSType::TSFunctionType(function) => {
+            if context != StructuralDependencyContext::LeafProperty {
+                collect_structural_formal_parameter_reference_names(
+                    &function.params,
+                    StructuralDependencyContext::CallableParam,
+                    refs,
+                );
+            }
+        }
+        TSType::TSConstructorType(constructor) => {
+            if context != StructuralDependencyContext::LeafProperty {
+                collect_structural_formal_parameter_reference_names(
+                    &constructor.params,
+                    StructuralDependencyContext::CallableParam,
+                    refs,
+                );
+            }
+        }
+        TSType::TSTypeQuery(query) => {
+            if matches!(
+                context,
+                StructuralDependencyContext::Root | StructuralDependencyContext::CallableParam
+            ) {
+                if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
+                    refs.insert(ident.name.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_formal_parameter_reference_names(
     params: &FormalParameters<'_>,
     refs: &mut FxHashSet<String>,
@@ -4612,6 +4988,22 @@ fn collect_formal_parameter_reference_names(
     for param in &params.items {
         if let Some(type_annotation) = &param.type_annotation {
             collect_type_reference_names(&type_annotation.type_annotation, refs);
+        }
+    }
+}
+
+fn collect_structural_formal_parameter_reference_names(
+    params: &FormalParameters<'_>,
+    context: StructuralDependencyContext,
+    refs: &mut FxHashSet<String>,
+) {
+    for param in &params.items {
+        if let Some(type_annotation) = &param.type_annotation {
+            collect_structural_type_reference_names(
+                &type_annotation.type_annotation,
+                context,
+                refs,
+            );
         }
     }
 }

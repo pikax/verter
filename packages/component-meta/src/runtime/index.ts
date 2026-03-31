@@ -7,7 +7,9 @@
 
 export {
   computeEngineKey,
+  dirnamePath,
   normalizePath,
+  resolvePath,
   stableHash,
   stableSelectiveConfigHash,
 } from "./engine-key.js";

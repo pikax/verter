@@ -6,6 +6,13 @@ import type {
   AcceptedPropMeta,
   AcceptedEventMeta,
   AcceptedSurfaceCompleteness,
+  SfcBlocksMeta,
+  SfcAttributeMeta,
+  TemplateBlockMeta,
+  ScriptBlockMeta,
+  StyleBlockMeta,
+  CustomBlockMeta,
+  RootInfo,
   RootReachability,
   FallthroughSurface,
   FallthroughBranch,
@@ -83,6 +90,65 @@ export interface NativeExposedMeta {
   type: NativeTypeExprLike;
   typeExpansion?: NativeExpansionMetadata;
   description?: string;
+}
+
+export interface NativePublicInstanceMeta {
+  completeness: "exact" | "partial";
+  members: NativePublicInstanceMemberMeta[];
+}
+
+export interface NativePublicInstanceMemberMeta {
+  name: string;
+  kind: "prop" | "slotContainer" | "exposed";
+  type: NativeTypeExprLike;
+  typeExpansion?: NativeExpansionMetadata;
+  rawType?: string;
+  description?: string;
+}
+
+export interface NativeSfcBlocksMeta {
+  template?: NativeTemplateBlockMeta;
+  script?: NativeScriptBlockMeta;
+  scriptSetup?: NativeScriptBlockMeta;
+  styles: NativeStyleBlockMeta[];
+  custom: NativeCustomBlockMeta[];
+}
+
+export interface NativeSfcAttributeMeta {
+  name: string;
+  value?: string;
+}
+
+export interface NativeTemplateBlockMeta {
+  lang?: string;
+  src?: string;
+  attributes: NativeSfcAttributeMeta[];
+}
+
+export interface NativeScriptBlockMeta {
+  lang?: string;
+  src?: string;
+  generic?: string;
+  attrsType?: string;
+  attributes: NativeSfcAttributeMeta[];
+}
+
+export interface NativeStyleBlockMeta {
+  index: number;
+  lang?: string;
+  src?: string;
+  scoped: boolean;
+  isModule: boolean;
+  moduleName?: string;
+  attributes: NativeSfcAttributeMeta[];
+}
+
+export interface NativeCustomBlockMeta {
+  index: number;
+  blockType: string;
+  lang?: string;
+  src?: string;
+  attributes: NativeSfcAttributeMeta[];
 }
 
 export interface NativeResolvedTypeMeta {
@@ -182,6 +248,14 @@ export interface NativeComponentPropUsage {
   name: string;
   isBound: boolean;
   constness: "const" | "dynamic" | "unknown";
+  expression?: string;
+  referencedBindings?: string[];
+  fromSpread?: boolean;
+  isShorthand?: boolean;
+}
+
+export interface NativeComponentVModelEntry {
+  bindingName: string;
 }
 
 export interface NativeComponentUsage {
@@ -189,10 +263,12 @@ export interface NativeComponentUsage {
   importSource?: string;
   isDynamic: boolean;
   props: NativeComponentPropUsage[];
+  hasSpread?: boolean;
   slotsUsed: string[];
   staticClasses: string[];
   hasDynamicClass: boolean;
   vModels: string[];
+  vModelEntries?: NativeComponentVModelEntry[];
 }
 
 export interface NativeTemplateRefMeta {
@@ -295,6 +371,12 @@ export type NativeAcceptedSurfaceCompleteness = "exact" | "lowerBound";
 export type NativeRootReachability =
   | { kind: "noFallthrough"; reason: NativeNoFallthroughReason }
   | { kind: "branches"; branches: NativeRootBranch[] };
+
+export interface NativeRootInfo {
+  kind: "none" | "single" | "conditional" | "multiple";
+  reason?: NativeNoFallthroughReason;
+  targets: NativeRootTargetRef[];
+}
 
 export type NativeNoFallthroughReason =
   | "inheritAttrsFalse"
@@ -412,6 +494,8 @@ export interface NativeComponentMetaResult {
   slots: NativeSlotMeta[];
   models: NativeModelMeta[];
   exposed: NativeExposedMeta[];
+  publicInstance?: NativePublicInstanceMeta;
+  sfcBlocks?: NativeSfcBlocksMeta;
   typeRegistry?: NativeResolvedTypeMeta[];
   components: NativeComponentUsage[];
   templateRefs: NativeTemplateRefMeta[];
@@ -423,6 +507,7 @@ export interface NativeComponentMetaResult {
   acceptedProps: NativeAcceptedPropMeta[];
   acceptedEvents: NativeAcceptedEventMeta[];
   acceptedSurfaceCompleteness: NativeAcceptedSurfaceCompleteness;
+  rootInfo?: NativeRootInfo;
   rootReachability: NativeRootReachability;
   fallthroughSurface: NativeFallthroughSurface;
   optionsApi: boolean;
@@ -485,6 +570,28 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ...(exposed.typeExpansion !== undefined ? { typeExpansion: exposed.typeExpansion } : {}),
       ...(exposed.description !== undefined ? { description: exposed.description } : {}),
     })),
+    ...(meta.publicInstance !== undefined
+      ? {
+          publicInstance: {
+            completeness: meta.publicInstance.completeness,
+            members: meta.publicInstance.members.map((member) => ({
+              name: member.name,
+              kind: member.kind,
+              type: typeExprToDescriptor(member.type, nativeRegistry),
+              ...(member.typeExpansion !== undefined
+                ? { typeExpansion: member.typeExpansion }
+                : {}),
+              ...(member.rawType !== undefined ? { rawType: member.rawType } : {}),
+              ...(member.description !== undefined ? { description: member.description } : {}),
+            })),
+          },
+        }
+      : {}),
+    ...(meta.sfcBlocks !== undefined
+      ? {
+          sfcBlocks: mapNativeSfcBlocks(meta.sfcBlocks),
+        }
+      : {}),
     components: meta.components.map((component) => ({
       name: component.name,
       ...(component.importSource !== undefined ? { importSource: component.importSource } : {}),
@@ -493,11 +600,21 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
         name: prop.name,
         isBound: prop.isBound,
         constness: prop.constness,
+        ...(prop.expression !== undefined ? { expression: prop.expression } : {}),
+        referencedBindings: [...(prop.referencedBindings ?? [])],
+        fromSpread: prop.fromSpread ?? false,
+        isShorthand: prop.isShorthand ?? false,
       })),
+      hasSpread: component.hasSpread ?? false,
       slotsUsed: [...component.slotsUsed],
       staticClasses: [...component.staticClasses],
       hasDynamicClass: component.hasDynamicClass,
       vModels: [...component.vModels],
+      vModelEntries: (
+        component.vModelEntries ?? component.vModels.map((bindingName) => ({ bindingName }))
+      ).map((entry) => ({
+        bindingName: entry.bindingName,
+      })),
     })),
     templateRefs: meta.templateRefs.map((templateRef) => ({
       name: templateRef.name,
@@ -543,9 +660,98 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     acceptedProps: mapNativeAcceptedProps(meta.acceptedProps, nativeRegistry),
     acceptedEvents: mapNativeAcceptedEvents(meta.acceptedEvents, nativeRegistry),
     acceptedSurfaceCompleteness: meta.acceptedSurfaceCompleteness as AcceptedSurfaceCompleteness,
+    rootInfo: mapNativeRootInfo(meta.rootInfo ?? deriveRootInfo(meta.rootReachability)),
     rootReachability: meta.rootReachability as RootReachability,
     fallthroughSurface: mapNativeFallthroughSurface(meta.fallthroughSurface, nativeRegistry),
     flags: meta.flags,
+  };
+}
+
+function mapNativeRootInfo(info: NativeRootInfo): RootInfo {
+  return {
+    kind: info.kind,
+    ...(info.reason !== undefined ? { reason: info.reason } : {}),
+    targets: info.targets.map((target) => ({ ...target })),
+  };
+}
+
+function mapNativeSfcBlocks(blocks: NativeSfcBlocksMeta): SfcBlocksMeta {
+  return {
+    ...(blocks.template !== undefined ? { template: mapNativeTemplateBlock(blocks.template) } : {}),
+    ...(blocks.script !== undefined ? { script: mapNativeScriptBlock(blocks.script) } : {}),
+    ...(blocks.scriptSetup !== undefined
+      ? { scriptSetup: mapNativeScriptBlock(blocks.scriptSetup) }
+      : {}),
+    styles: blocks.styles.map((style) => mapNativeStyleBlock(style)),
+    custom: blocks.custom.map((block) => mapNativeCustomBlock(block)),
+  };
+}
+
+function mapNativeSfcAttributes(attributes: NativeSfcAttributeMeta[]): SfcAttributeMeta[] {
+  return attributes.map((attribute) => ({
+    name: attribute.name,
+    ...(attribute.value !== undefined ? { value: attribute.value } : {}),
+  }));
+}
+
+function mapNativeTemplateBlock(block: NativeTemplateBlockMeta): TemplateBlockMeta {
+  return {
+    ...(block.lang !== undefined ? { lang: block.lang } : {}),
+    ...(block.src !== undefined ? { src: block.src } : {}),
+    attributes: mapNativeSfcAttributes(block.attributes),
+  };
+}
+
+function mapNativeScriptBlock(block: NativeScriptBlockMeta): ScriptBlockMeta {
+  return {
+    ...(block.lang !== undefined ? { lang: block.lang } : {}),
+    ...(block.src !== undefined ? { src: block.src } : {}),
+    ...(block.generic !== undefined ? { generic: block.generic } : {}),
+    ...(block.attrsType !== undefined ? { attrsType: block.attrsType } : {}),
+    attributes: mapNativeSfcAttributes(block.attributes),
+  };
+}
+
+function mapNativeStyleBlock(block: NativeStyleBlockMeta): StyleBlockMeta {
+  return {
+    index: block.index,
+    ...(block.lang !== undefined ? { lang: block.lang } : {}),
+    ...(block.src !== undefined ? { src: block.src } : {}),
+    scoped: block.scoped,
+    isModule: block.isModule,
+    ...(block.moduleName !== undefined ? { moduleName: block.moduleName } : {}),
+    attributes: mapNativeSfcAttributes(block.attributes),
+  };
+}
+
+function mapNativeCustomBlock(block: NativeCustomBlockMeta): CustomBlockMeta {
+  return {
+    index: block.index,
+    blockType: block.blockType,
+    ...(block.lang !== undefined ? { lang: block.lang } : {}),
+    ...(block.src !== undefined ? { src: block.src } : {}),
+    attributes: mapNativeSfcAttributes(block.attributes),
+  };
+}
+
+function deriveRootInfo(reachability: NativeRootReachability): NativeRootInfo {
+  if (reachability.kind === "branches") {
+    return {
+      kind: reachability.branches.length <= 1 ? "single" : "conditional",
+      targets: reachability.branches.map((branch) => ({ ...branch.target })),
+    };
+  }
+
+  const kind =
+    reachability.reason === "multiRoot" || reachability.reason === "rootVFor"
+      ? "multiple"
+      : reachability.reason === "branchNotSingleRoot"
+        ? "conditional"
+        : "none";
+  return {
+    kind,
+    reason: reachability.reason,
+    targets: [],
   };
 }
 

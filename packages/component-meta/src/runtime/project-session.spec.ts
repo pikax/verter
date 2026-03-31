@@ -79,4 +79,76 @@ describe("ProjectSession", () => {
     expect(compat.props[0]?.type).toEqual({ kind: "primitive", name: "string" });
     expect(compat.slots[0]?.returnType).toBe("VNode[]");
   });
+
+  it("decodes resolved native payloads through a dedicated session method", () => {
+    const resolvedPayload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [
+        { name: "resolvedLabel", type: { kind: "primitive", name: "string" }, required: true },
+      ],
+    });
+    const nativeProject = {
+      upsertBase() {},
+      ensureLoaded() {
+        return false;
+      },
+      refreshBase() {
+        return false;
+      },
+      configureProjects() {},
+      openSession() {
+        throw new Error("not used");
+      },
+      clearCaches() {},
+      shutdown() {},
+      get isShutdown() {
+        return false;
+      },
+      get sessionCount() {
+        return 1;
+      },
+      baseFileIds() {
+        return [];
+      },
+    };
+    const nativeSession = {
+      upsert() {},
+      delete() {},
+      reset() {},
+      getEffectiveSource() {
+        return "<template />" as string | null;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+      get isClosed() {
+        return false;
+      },
+      get overlayGeneration() {
+        return 0;
+      },
+      getComponentMeta() {
+        return null;
+      },
+      getDeclaredComponentMeta() {
+        return null;
+      },
+      getResolvedComponentMeta() {
+        return resolvedPayload;
+      },
+      getProvenance() {
+        return "{}";
+      },
+    };
+    const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+    const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+    const native = session.getResolvedComponentMeta("/project/src/Button.vue") as any;
+
+    expect(native?.props[0]?.name).toBe("resolvedLabel");
+  });
 });

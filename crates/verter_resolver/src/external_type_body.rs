@@ -53,6 +53,25 @@ impl ExternalTypeBodyCache {
         (analysis, inserted)
     }
 
+    pub fn store_source_analysis(
+        &mut self,
+        dep_canonical: &str,
+        effective_source: &str,
+        analysis: AnalyzedExternalTypeSource,
+    ) -> bool {
+        let key = (
+            dep_canonical.to_string(),
+            verter_analysis::hash_16(effective_source.as_bytes()),
+        );
+        match self.source_analysis.entry(key) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(analysis);
+                true
+            }
+        }
+    }
+
     pub fn barrel_state(&self, barrel_canonical: &str) -> Option<&crate::BarrelResolutionState> {
         self.barrel_states.get(barrel_canonical)
     }
@@ -74,6 +93,17 @@ pub trait ExternalTypeBodyResolver {
 
     fn step_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error;
 
+    fn required_import_names_for_type(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        _effective_source: &str,
+        analysis: &AnalyzedExternalTypeSource,
+    ) -> FxHashSet<String> {
+        let _ = dep_canonical;
+        analysis.required_import_names(type_name)
+    }
+
     fn debug_enabled(&self) -> bool {
         false
     }
@@ -81,6 +111,14 @@ pub trait ExternalTypeBodyResolver {
     fn debug_log(&self, _message: String) {}
 
     fn note_cycle_detected(&self) {}
+
+    fn cached_source_analysis(
+        &self,
+        _dep_canonical: &str,
+        _effective_source: &str,
+    ) -> Option<AnalyzedExternalTypeSource> {
+        None
+    }
 
     /// Called after successfully resolving a type from a source body.
     /// Implementations can use this to populate a host-level cache.
@@ -172,7 +210,15 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
 
     let analysis_before = cache.source_analysis_len();
     let (analysis, extracted, required_import_names) = {
-        let (analysis, inserted) = cache.source_analysis(dep_canonical, effective_source);
+        let (analysis, inserted) = if let Some(cached) =
+            resolver.cached_source_analysis(dep_canonical, effective_source)
+        {
+            let inserted = cache.store_source_analysis(dep_canonical, effective_source, cached);
+            let (analysis, _) = cache.source_analysis(dep_canonical, effective_source);
+            (analysis, inserted)
+        } else {
+            cache.source_analysis(dep_canonical, effective_source)
+        };
         if resolver.debug_enabled() {
             resolver.debug_log(format!(
                 "resolve_external_type source-analysis dep={} type={} hit={} cache_entries={}",
@@ -185,7 +231,12 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
         (
             analysis.clone(),
             analysis.extracted.clone(),
-            analysis.required_import_names(type_name),
+            resolver.required_import_names_for_type(
+                dep_canonical,
+                type_name,
+                effective_source,
+                analysis,
+            ),
         )
     };
     let projected_steps = cache.len() + visiting.len() + required_import_names.len();
@@ -356,6 +407,7 @@ mod tests {
     struct TestResolver {
         recursive_results: BTreeMap<(String, String, String), Option<ResolvedElements>>,
         barrel_results: BTreeMap<(String, String), Option<ResolvedElements>>,
+        required_import_names: BTreeMap<(String, String), FxHashSet<String>>,
         recursive_calls: RefCell<Vec<(String, String, String)>>,
         logs: RefCell<Vec<String>>,
     }
@@ -377,6 +429,19 @@ mod tests {
 
         fn debug_log(&self, message: String) {
             self.logs.borrow_mut().push(message);
+        }
+
+        fn required_import_names_for_type(
+            &self,
+            dep_canonical: &str,
+            type_name: &str,
+            _effective_source: &str,
+            analysis: &AnalyzedExternalTypeSource,
+        ) -> FxHashSet<String> {
+            self.required_import_names
+                .get(&(dep_canonical.to_string(), type_name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| analysis.required_import_names(type_name))
         }
 
         fn resolve_external_type_from_analysis(
@@ -640,6 +705,55 @@ export type Emits = Dep\n";
                 "Dep".to_string(),
             )],
             "duplicate companion requests should only resolve once per alias/source/import tuple",
+        );
+    }
+
+    #[test]
+    fn resolve_external_type_from_source_body_prefers_precise_required_import_names() {
+        let mut resolver = TestResolver::default();
+        resolver.required_import_names.insert(
+            ("/src/types.ts".to_string(), "Avatar".to_string()),
+            FxHashSet::from_iter(["Used".to_string()]),
+        );
+        resolver.recursive_results.insert(
+            (
+                "/src/types.ts".to_string(),
+                "./used".to_string(),
+                "Used".to_string(),
+            ),
+            Some(empty_elements()),
+        );
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+
+        let actual = resolve_external_type_from_source_body(
+            &resolver,
+            "/src/types.ts",
+            "Avatar",
+            "import type { Used } from './used'\nimport type { Unused } from './unused'\nexport type Avatar = { active: Used; inactive: Unused }['active']",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("precise companion resolution should succeed");
+
+        assert!(actual.is_some());
+        assert_eq!(
+            resolver.recursive_calls.borrow().as_slice(),
+            &[(
+                "/src/types.ts".to_string(),
+                "./used".to_string(),
+                "Used".to_string(),
+            )],
+            "precise required import names should prevent resolving unrelated sibling companions",
         );
     }
 }

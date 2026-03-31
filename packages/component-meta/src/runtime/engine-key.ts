@@ -7,6 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { dirname as nativeDirname, resolve as nativeResolve, win32 } from "node:path";
 
 export interface EngineKeyInput {
   backend: "napi" | "wasm";
@@ -33,6 +34,23 @@ export function normalizePath(p: string): string {
     norm = norm[0].toLowerCase() + norm.slice(1);
   }
   return norm;
+}
+
+function looksLikeWindowsPath(p: string): boolean {
+  return /^[A-Za-z]:([\\/]|$)/.test(p);
+}
+
+export function resolvePath(root: string, ...segments: string[]): string {
+  const parts = [root, ...segments].filter((part) => part.length > 0);
+  const resolved = parts.some(looksLikeWindowsPath)
+    ? win32.resolve(...parts)
+    : nativeResolve(...parts);
+  return normalizePath(resolved);
+}
+
+export function dirnamePath(p: string): string {
+  const dir = looksLikeWindowsPath(p) ? win32.dirname(p) : nativeDirname(p);
+  return normalizePath(dir);
 }
 
 /**

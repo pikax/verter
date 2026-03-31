@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo};
-use verter_analysis::type_expr::TypeExpr;
+use verter_analysis::type_expand::{expand_object_shape, ExpandedObjectShape, ExpansionBudget};
+use verter_analysis::type_expr::{
+    FunctionExpr, FunctionParam, IndexSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+};
 use verter_analysis::{AnalyzedBinding, AnalyzedImport, AnalyzedMacro, MacroTypeDep};
 
-use crate::{ImportedEvalInputs, ImportedEvalOwnerSnapshot};
+use crate::{choose_preferred_imported_type_body, ImportedEvalInputs, ImportedEvalOwnerSnapshot};
 
 #[derive(Debug, Clone)]
 pub struct PreparedImportedDeclContext {
@@ -181,18 +184,139 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
     result
 }
 
+pub fn materialize_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
+    resolver: &mut R,
+    source_canonical_id: &str,
+    exported_name: &str,
+    canonical_dependencies: &mut BTreeSet<String>,
+) -> Option<TypeExpr> {
+    if resolver.budget_is_exhausted() {
+        return None;
+    }
+
+    let resolved_source_canonical_id = resolver.canonicalize_imported_source(source_canonical_id);
+    if !resolver.enter_alias_env(&resolved_source_canonical_id) {
+        return None;
+    }
+
+    let result = (|| {
+        let context =
+            resolver.load_imported_decl_context(&resolved_source_canonical_id, exported_name)?;
+        let mut decl_required_import_names = resolver.required_import_names_for_exported_type(
+            &resolved_source_canonical_id,
+            exported_name,
+            context.eval_source.as_str(),
+        );
+        if decl_required_import_names.is_empty() && !context.imports.is_empty() {
+            decl_required_import_names = resolver.required_import_names_for_decl(
+                &resolved_source_canonical_id,
+                exported_name,
+                &context.decl,
+                &context.env,
+            );
+        }
+        let imported_inputs = resolver.build_imported_inputs_for_decl(
+            &resolved_source_canonical_id,
+            &context,
+            &decl_required_import_names,
+        );
+        canonical_dependencies.extend(imported_inputs.canonical_dependencies.iter().cloned());
+        if imported_inputs.overflow.is_some() {
+            return None;
+        }
+        let mut dep_env = resolver.build_owner_eval_env_for_decl(
+            &resolved_source_canonical_id,
+            &context,
+            &imported_inputs,
+        )?;
+        let decl = dep_env
+            .type_symbols
+            .get(context.decl.name.as_str())
+            .or_else(|| dep_env.type_symbols.get(exported_name))?
+            .clone();
+        for param in &decl.type_parameters {
+            dep_env.type_bindings.insert(
+                param.name.clone(),
+                std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
+            );
+        }
+        let evaluated = verter_analysis::type_eval::evaluate(&decl.body, &mut dep_env);
+        let materialized = materialize_imported_decl_body(&evaluated, &mut dep_env);
+        choose_preferred_imported_type_body(Some(evaluated), materialized)
+    })();
+
+    resolver.leave_alias_env(&resolved_source_canonical_id);
+    result
+}
+
+fn materialize_imported_decl_body(expr: &TypeExpr, env: &mut EvalEnv) -> Option<TypeExpr> {
+    let expanded = expand_object_shape(expr, env, &ExpansionBudget::default());
+    expanded_object_shape_to_type_expr(&expanded.value)
+}
+
+fn expanded_object_shape_to_type_expr(shape: &ExpandedObjectShape) -> Option<TypeExpr> {
+    if shape.properties.is_empty()
+        && shape.index_signatures.is_empty()
+        && shape.call_signatures.is_empty()
+    {
+        return None;
+    }
+
+    let mut properties = Vec::with_capacity(
+        shape.properties.len() + shape.index_signatures.len() + shape.call_signatures.len(),
+    );
+
+    for prop in &shape.properties {
+        properties.push(ObjectMember::Property(ObjectProperty {
+            name: prop.name.clone(),
+            ty: prop.ty.clone(),
+            optional: prop.optional,
+            readonly: prop.readonly,
+        }));
+    }
+    for sig in &shape.index_signatures {
+        properties.push(ObjectMember::IndexSignature(IndexSignature {
+            key_name: "key".to_string(),
+            key_type: sig.key_type.clone(),
+            value_type: sig.value_type.clone(),
+            readonly: sig.readonly,
+        }));
+    }
+    for sig in &shape.call_signatures {
+        properties.push(ObjectMember::CallSignature(FunctionExpr {
+            parameters: sig
+                .parameters
+                .iter()
+                .map(|param| FunctionParam {
+                    name: Some(param.name.clone()),
+                    ty: param.ty.clone(),
+                    optional: param.optional,
+                    rest: param.rest,
+                })
+                .collect(),
+            return_type: Some(Arc::new(sig.return_type.clone())),
+            type_parameters: sig.type_parameters.clone(),
+        }));
+    }
+
+    Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate_imported_decl_with_owner_env, CachedEvaluatedImportedDecl,
-        ImportedDeclEvalResolver, PreparedImportedDeclContext,
+        evaluate_imported_decl_with_owner_env, materialize_imported_decl_with_owner_env,
+        CachedEvaluatedImportedDecl, ImportedDeclEvalResolver, PreparedImportedDeclContext,
     };
     use crate::{ImportedEvalInputs, ImportedEvalOverflow};
     use rustc_hash::FxHashSet;
     use std::cell::RefCell;
     use std::collections::BTreeSet;
+    use std::sync::Arc;
     use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
-    use verter_analysis::type_expr::{PrimitiveName, TypeExpr, TypeParam};
+    use verter_analysis::type_expr::{
+        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, TypeParam,
+    };
 
     struct TestResolver {
         exhausted: bool,
@@ -669,6 +793,136 @@ mod tests {
             resolver.left.borrow().as_slice(),
             ["/src/types.ts"],
             "cache hits should bypass alias-env entry entirely",
+        );
+    }
+
+    #[test]
+    fn materialize_imported_decl_with_owner_env_prefers_expanded_object_shape() {
+        let mut env = EvalEnv::new();
+        env.add_value(verter_analysis::type_eval::ValueDeclInfo {
+            name: "theme".to_string(),
+            declaration_id: 3,
+            kind: verter_analysis::type_eval::ValueDeclKind::Const,
+            type_annotation: None,
+            function_signature: None,
+            object_shape: Some(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "slots".to_string(),
+                    ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: "base".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        })],
+                    })),
+                    optional: false,
+                    readonly: false,
+                })],
+            }),
+        });
+        env.add_type(TypeDeclInfo {
+            name: "ComponentConfig".to_string(),
+            declaration_id: 2,
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            }],
+            body: TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "ui".to_string(),
+                    ty: TypeExpr::IndexedAccess {
+                        object: Arc::new(TypeExpr::TypeParameter(TypeParam {
+                            name: "T".to_string(),
+                            constraint: None,
+                            default: None,
+                        })),
+                        index: Arc::new(TypeExpr::Literal(
+                            verter_analysis::type_expr::LiteralValue::String("slots".to_string()),
+                        )),
+                    },
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+        });
+        env.add_type(TypeDeclInfo {
+            name: "Button".to_string(),
+            declaration_id: 1,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: TypeExpr::Ref {
+                name: Arc::from("ComponentConfig"),
+                type_arguments: Arc::from([TypeExpr::TypeOf(
+                    verter_analysis::type_expr::ValueRef {
+                        path: vec!["theme".to_string()],
+                    },
+                )]),
+            },
+        });
+
+        let mut contexts = std::collections::BTreeMap::new();
+        contexts.insert(
+            ("/src/button-types.ts".to_string(), "Button".to_string()),
+            PreparedImportedDeclContext {
+                imports: Vec::new(),
+                macros: Vec::new(),
+                bindings: Vec::new(),
+                macro_type_deps: Vec::new(),
+                eval_source: String::new(),
+                env,
+                decl: decl(
+                    "Button",
+                    TypeExpr::Ref {
+                        name: Arc::from("ComponentConfig"),
+                        type_arguments: Arc::from([TypeExpr::TypeOf(
+                            verter_analysis::type_expr::ValueRef {
+                                path: vec!["theme".to_string()],
+                            },
+                        )]),
+                    },
+                ),
+            },
+        );
+        let mut resolver = TestResolver {
+            exhausted: false,
+            allow_alias_enter: true,
+            contexts,
+            entered: RefCell::new(Vec::new()),
+            left: RefCell::new(Vec::new()),
+            built_inputs: ImportedEvalInputs {
+                sources: Vec::new(),
+                type_aliases: Vec::new(),
+                canonical_dependencies: BTreeSet::new(),
+                overflow: None,
+                stats: crate::ImportedEvalStats::default(),
+            },
+            cached: RefCell::new(std::collections::BTreeMap::new()),
+            build_inputs_calls: RefCell::new(0),
+            build_env_calls: RefCell::new(0),
+        };
+
+        let actual = materialize_imported_decl_with_owner_env(
+            &mut resolver,
+            "/src/button-types.ts",
+            "Button",
+            &mut BTreeSet::new(),
+        )
+        .expect("materialized imported decl should exist");
+
+        let TypeExpr::Object(shape) = actual else {
+            panic!(
+                "materialized imported decl should be an object, got {:?}",
+                actual
+            );
+        };
+        assert!(
+            shape.properties.iter().any(
+                |member| matches!(member, ObjectMember::Property(property) if property.name == "ui")
+            ),
+            "materialized imported decl should keep its ui member"
         );
     }
 }

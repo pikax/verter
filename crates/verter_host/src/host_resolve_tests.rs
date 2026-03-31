@@ -3572,6 +3572,29 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             .map(|emit| emit.name.clone())
             .collect::<Vec<_>>()
     );
+
+    let runtime_entry = host.clone_current_imported_dependency_entry(
+        "/workspace/node_modules/fancy/dist/index3.js",
+        None,
+    );
+    assert!(
+        runtime_entry
+            .as_ref()
+            .and_then(|entry| entry.external_type_analysis.as_ref())
+            .is_none(),
+        "runtime-script sidecars should stay shallow when the declaration companion owns the type route",
+    );
+
+    let declaration_entry = host
+        .clone_current_imported_dependency_entry(
+            "/workspace/node_modules/fancy/dist/index3.d.ts",
+            None,
+        )
+        .expect("external type resolution should cache the declaration companion entry");
+    assert!(
+        declaration_entry.external_type_analysis.is_some(),
+        "the declaration companion should own the cached external-type analysis",
+    );
 }
 
 #[test]

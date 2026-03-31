@@ -77,7 +77,10 @@ export interface ArtifactComparison {
   totalExtra: number;
   totalFieldMismatches: number;
   collections: Record<string, CollectionComparison>;
+  excludedCollections: string[];
 }
+
+export const VOLAR_PARITY_EXCLUDED_COLLECTIONS = ["models"] as const;
 
 export interface NumericSummary {
   min: number;
@@ -341,14 +344,20 @@ export function compareNormalizedArtifacts(
     models: compareNamedMembers(actual.models, expected.models),
     propsJsonSchema: compareNamedRecords(actual.propsJsonSchema, expected.propsJsonSchema),
   };
+  const includedCollections = Object.entries(collections).filter(
+    ([name]) =>
+      !VOLAR_PARITY_EXCLUDED_COLLECTIONS.includes(
+        name as (typeof VOLAR_PARITY_EXCLUDED_COLLECTIONS)[number],
+      ),
+  );
 
-  const totalMissing = Object.values(collections).reduce(
-    (sum, entry) => sum + entry.missing.length,
+  const totalMissing = includedCollections.reduce(
+    (sum, [, entry]) => sum + entry.missing.length,
     0,
   );
-  const totalExtra = Object.values(collections).reduce((sum, entry) => sum + entry.extra.length, 0);
-  const totalFieldMismatches = Object.values(collections).reduce(
-    (sum, entry) => sum + entry.fieldMismatches.length,
+  const totalExtra = includedCollections.reduce((sum, [, entry]) => sum + entry.extra.length, 0);
+  const totalFieldMismatches = includedCollections.reduce(
+    (sum, [, entry]) => sum + entry.fieldMismatches.length,
     0,
   );
 
@@ -358,6 +367,7 @@ export function compareNormalizedArtifacts(
     totalExtra,
     totalFieldMismatches,
     collections,
+    excludedCollections: [...VOLAR_PARITY_EXCLUDED_COLLECTIONS],
   };
 }
 

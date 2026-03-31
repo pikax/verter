@@ -197,11 +197,13 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
                 resolved_exported_name.as_str(),
                 canonical_dependencies,
             ),
-        None => resolver.evaluate_imported_decl_with_owner_env(
-            &resolved_source_canonical_id,
-            resolved_exported_name.as_str(),
-            canonical_dependencies,
-        ),
+        None if should_attempt_owner_env_resolution_without_decl(resolved_body.as_ref()) => {
+            resolver.evaluate_imported_decl_with_owner_env(
+                &resolved_source_canonical_id,
+                resolved_exported_name.as_str(),
+                canonical_dependencies,
+            )
+        }
         _ => None,
     };
 
@@ -640,6 +642,18 @@ pub fn choose_preferred_imported_type_body(
                 return Some(if left_non_object { right } else { left });
             }
 
+            let left_bound_generic_penalty = bound_generic_ref_penalty(&left);
+            let right_bound_generic_penalty = bound_generic_ref_penalty(&right);
+            if left_bound_generic_penalty != right_bound_generic_penalty {
+                return Some(
+                    if left_bound_generic_penalty < right_bound_generic_penalty {
+                        left
+                    } else {
+                        right
+                    },
+                );
+            }
+
             if imported_type_body_specificity_score(&right)
                 > imported_type_body_specificity_score(&left)
             {
@@ -682,6 +696,14 @@ pub fn should_attempt_owner_env_resolution(
     }
 
     count_top_level_properties(resolved_body) <= count_top_level_properties(&decl.body)
+}
+
+fn should_attempt_owner_env_resolution_without_decl(resolved_body: Option<&TypeExpr>) -> bool {
+    let Some(resolved_body) = resolved_body else {
+        return true;
+    };
+
+    is_empty_object_surface(resolved_body) || has_non_object_top_level_surface(resolved_body)
 }
 
 fn has_non_object_top_level_surface(expr: &TypeExpr) -> bool {
@@ -775,6 +797,171 @@ fn extracted_surface_property_count(expr: &TypeExpr) -> Option<usize> {
             saw_surface.then_some(total)
         }
         _ => None,
+    }
+}
+
+fn bound_generic_ref_penalty(expr: &TypeExpr) -> usize {
+    match expr {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::Infer { .. } => 0,
+        TypeExpr::TypeOf(_) => 1,
+        TypeExpr::TypeParameter(param) => {
+            param
+                .constraint
+                .as_deref()
+                .map(bound_generic_ref_penalty)
+                .unwrap_or_default()
+                + param
+                    .default
+                    .as_deref()
+                    .map(bound_generic_ref_penalty)
+                    .unwrap_or_default()
+        }
+        TypeExpr::Ref { type_arguments, .. } => {
+            usize::from(!type_arguments.is_empty())
+                + type_arguments
+                    .iter()
+                    .map(bound_generic_ref_penalty)
+                    .sum::<usize>()
+        }
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::KeyOf(inner)
+        | TypeExpr::Rest(inner) => bound_generic_ref_penalty(inner),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .map(|element| bound_generic_ref_penalty(&element.ty))
+            .sum(),
+        TypeExpr::Union(types)
+        | TypeExpr::Intersection(types)
+        | TypeExpr::TemplateLiteral {
+            expressions: types, ..
+        } => types.iter().map(bound_generic_ref_penalty).sum(),
+        TypeExpr::Object(obj) => obj
+            .properties
+            .iter()
+            .map(|member| match member {
+                ObjectMember::Property(prop) => bound_generic_ref_penalty(&prop.ty),
+                ObjectMember::IndexSignature(sig) => {
+                    bound_generic_ref_penalty(&sig.key_type)
+                        + bound_generic_ref_penalty(&sig.value_type)
+                }
+                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                    func.parameters
+                        .iter()
+                        .map(|param| bound_generic_ref_penalty(&param.ty))
+                        .sum::<usize>()
+                        + func
+                            .return_type
+                            .as_deref()
+                            .map(bound_generic_ref_penalty)
+                            .unwrap_or_default()
+                        + func
+                            .type_parameters
+                            .iter()
+                            .map(|param| {
+                                param
+                                    .constraint
+                                    .as_deref()
+                                    .map(bound_generic_ref_penalty)
+                                    .unwrap_or_default()
+                                    + param
+                                        .default
+                                        .as_deref()
+                                        .map(bound_generic_ref_penalty)
+                                        .unwrap_or_default()
+                            })
+                            .sum::<usize>()
+                }
+                ObjectMember::Method(method) => {
+                    method
+                        .function
+                        .parameters
+                        .iter()
+                        .map(|param| bound_generic_ref_penalty(&param.ty))
+                        .sum::<usize>()
+                        + method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .map(bound_generic_ref_penalty)
+                            .unwrap_or_default()
+                        + method
+                            .function
+                            .type_parameters
+                            .iter()
+                            .map(|param| {
+                                param
+                                    .constraint
+                                    .as_deref()
+                                    .map(bound_generic_ref_penalty)
+                                    .unwrap_or_default()
+                                    + param
+                                        .default
+                                        .as_deref()
+                                        .map(bound_generic_ref_penalty)
+                                        .unwrap_or_default()
+                            })
+                            .sum::<usize>()
+                }
+            })
+            .sum(),
+        TypeExpr::Function(func) => {
+            func.parameters
+                .iter()
+                .map(|param| bound_generic_ref_penalty(&param.ty))
+                .sum::<usize>()
+                + func
+                    .return_type
+                    .as_deref()
+                    .map(bound_generic_ref_penalty)
+                    .unwrap_or_default()
+                + func
+                    .type_parameters
+                    .iter()
+                    .map(|param| {
+                        param
+                            .constraint
+                            .as_deref()
+                            .map(bound_generic_ref_penalty)
+                            .unwrap_or_default()
+                            + param
+                                .default
+                                .as_deref()
+                                .map(bound_generic_ref_penalty)
+                                .unwrap_or_default()
+                    })
+                    .sum::<usize>()
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            bound_generic_ref_penalty(object) + bound_generic_ref_penalty(index)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            bound_generic_ref_penalty(check)
+                + bound_generic_ref_penalty(extends)
+                + bound_generic_ref_penalty(true_type)
+                + bound_generic_ref_penalty(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            bound_generic_ref_penalty(source)
+                + bound_generic_ref_penalty(value)
+                + name_type
+                    .as_deref()
+                    .map(bound_generic_ref_penalty)
+                    .unwrap_or_default()
+        }
     }
 }
 
@@ -1350,6 +1537,38 @@ mod tests {
         let actual = prepare_imported_type_alias(&mut resolver, request, &mut deps).unwrap();
 
         assert!(actual.requires_source_merge);
+    }
+
+    #[test]
+    fn prepare_imported_type_alias_skips_owner_env_when_external_resolution_is_already_structured()
+    {
+        let request = ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/App.vue".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalProps".to_string(),
+            imported_name: "ImportedProps".to_string(),
+            source_canonical_id: "/src/types.ts".to_string(),
+            exported_name: "ImportedProps".to_string(),
+        };
+        let mut deps = BTreeSet::new();
+        let mut resolver = TestResolver::default();
+        resolver.resolved_body = Some(object_with_named_prop("item", "NestedRef"));
+        resolver.owner_env_body = Some(object_with_string_prop("from_owner_env"));
+
+        let actual = prepare_imported_type_alias(&mut resolver, request, &mut deps).unwrap();
+
+        assert_eq!(resolver.external_resolution_calls, 1);
+        assert_eq!(
+            resolver.owner_env_resolution_calls, 0,
+            "structured external bodies should stay shallow instead of forcing owner-env resolution"
+        );
+        let TypeExpr::Object(obj) = actual.decl.body else {
+            panic!("expected object body");
+        };
+        let ObjectMember::Property(prop) = &obj.properties[0] else {
+            panic!("expected property");
+        };
+        assert_eq!(prop.name, "item");
     }
 
     #[test]

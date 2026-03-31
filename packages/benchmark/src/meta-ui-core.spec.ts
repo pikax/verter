@@ -162,6 +162,35 @@ describe("compareNormalizedArtifacts", () => {
     expect(comparison.collections.props.extra).toEqual(["tone"]);
     expect(comparison.collections.events.missing).toEqual(["close"]);
   });
+
+  // @ai-generated - Ensures non-equivalent native-only model metadata is excluded from parity totals.
+  it("excludes models from parity scoring while keeping the exclusion explicit", () => {
+    const baseline: NormalizedMetaArtifact = {
+      componentPath: "a.vue",
+      componentName: "A",
+      props: [],
+      events: [],
+      slots: [],
+      exposed: [],
+      models: [],
+      propsJsonSchema: {},
+      diagnostics: [],
+    };
+
+    const actual: NormalizedMetaArtifact = {
+      ...baseline,
+      models: [{ name: "modelValue", type: "string", description: null, tags: [], schema: null }],
+    };
+
+    const comparison = compareNormalizedArtifacts(actual, baseline);
+
+    expect(comparison.exact).toBe(true);
+    expect(comparison.totalMissing).toBe(0);
+    expect(comparison.totalExtra).toBe(0);
+    expect(comparison.totalFieldMismatches).toBe(0);
+    expect(comparison.excludedCollections).toEqual(["models"]);
+    expect(comparison.collections.models.extra).toEqual(["modelValue"]);
+  });
 });
 
 describe("rotateComponentOrder", () => {

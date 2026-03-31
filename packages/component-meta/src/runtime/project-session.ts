@@ -143,6 +143,22 @@ export class ProjectSession {
   }
 
   /**
+   * Full native component-meta query with resolution sidecars.
+   *
+   * Falls back to `getComponentMeta()` when running against an older native
+   * session that does not expose the dedicated resolved query yet.
+   */
+  getResolvedComponentMeta(canonicalId: string): unknown | null {
+    this.ensureOpen();
+    this.engine.markActivity();
+    const payload = this._nativeSession.getResolvedComponentMeta
+      ? this._nativeSession.getResolvedComponentMeta(canonicalId)
+      : this._nativeSession.getComponentMeta(canonicalId);
+    if (payload === null || payload === undefined) return null;
+    return decodeComponentMetaPayload(payload);
+  }
+
+  /**
    * Provenance counters for observability. Returns parsed JSON or null.
    */
   getProvenance(): Record<string, number> {

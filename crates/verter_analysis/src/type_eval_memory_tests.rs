@@ -681,11 +681,7 @@ fn bind_type_parameters_without_args_preserve_generic_metadata() {
     let binding = env.type_bindings.get("T").expect("binding should exist");
     assert_eq!(
         binding.as_ref(),
-        &TypeExpr::type_parameter(TypeParam {
-            name: "T".to_string(),
-            constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
-            default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
-        })
+        &TypeExpr::Primitive(PrimitiveName::Number)
     );
 
     restore_type_parameters(saved, &mut env);

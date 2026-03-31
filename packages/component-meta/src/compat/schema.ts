@@ -7,6 +7,8 @@
 import type { TypeDescriptor } from "../type-ir.js";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 
+const MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH = 1;
+
 /**
  * Convert a TypeDescriptor to a PropertyMetaSchema.
  *
@@ -23,19 +25,29 @@ export function typeDescriptorToSchema(
     return "unknown";
   }
 
-  const ignore = typeof options?.schema === "object" ? options.schema.ignore : undefined;
+  const schemaOptions = typeof options?.schema === "object" ? options.schema : undefined;
 
-  return convertType(td, ignore, typeRegistry, new Set());
+  return convertType(td, schemaOptions, typeRegistry, new Set());
 }
 
 function convertType(
   td: TypeDescriptor,
-  ignore?: (type: string) => boolean,
+  options?: { ignore?: (type: string) => boolean; literalBooleanSchema?: boolean },
   typeRegistry?: Map<string, TypeDescriptor>,
   visited?: Set<string>,
+  registryResolutionDepth = 0,
 ): PropertyMetaSchema {
+  const ignore = options?.ignore;
+
   switch (td.kind) {
     case "primitive":
+      if (td.name === "boolean" && options?.literalBooleanSchema) {
+        return {
+          kind: "enum",
+          type: "boolean",
+          schema: ["false", "true"],
+        };
+      }
       return td.name;
 
     case "literal":
@@ -46,17 +58,27 @@ function convertType(
       // e.g. ('error' | 'primary') | undefined → ['undefined', '"error"', '"primary"']
       // instead of [{ kind: 'enum', schema: [...] }, 'undefined']
       const flat = flattenUnionTypes(td.types);
-      const type = flat.map(typeDescriptorToString).join(" | ");
+      const type = flat
+        .map((entry) =>
+          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(" | ");
       if (ignore?.(type)) return type;
       return {
         kind: "enum",
         type,
-        schema: flat.map((t) => convertType(t, ignore, typeRegistry, visited)),
+        schema: flat.map((t) =>
+          convertType(t, options, typeRegistry, visited, registryResolutionDepth),
+        ),
       };
     }
 
     case "intersection": {
-      const type = td.types.map(typeDescriptorToString).join(" & ");
+      const type = td.types
+        .map((entry) =>
+          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(" & ");
       if (ignore?.(type)) return type;
       // Use array format for Volar compat — cast needed since TypeScript types
       // declare object schema as Record, but arrays work at runtime and match
@@ -65,33 +87,50 @@ function convertType(
         kind: "object" as const,
         type,
         schema: td.types.map((t) =>
-          convertType(t, ignore, typeRegistry, visited),
+          convertType(t, options, typeRegistry, visited, registryResolutionDepth),
         ) as unknown as Record<string, PropertyMetaSchema>,
       };
     }
 
     case "array": {
-      const type = `${typeDescriptorToString(td.element)}[]`;
+      const type = `${schemaDescriptorToString(
+        td.element,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      )}[]`;
       if (ignore?.(type)) return type;
       return {
         kind: "array",
         type,
-        schema: [convertType(td.element, ignore, typeRegistry, visited)],
+        schema: [convertType(td.element, options, typeRegistry, visited, registryResolutionDepth)],
       };
     }
 
     case "tuple": {
-      const type = `[${td.elements.map(typeDescriptorToString).join(", ")}]`;
+      const type = `[${td.elements
+        .map((entry) =>
+          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(", ")}]`;
       if (ignore?.(type)) return type;
       return {
         kind: "array",
         type,
-        schema: td.elements.map((t) => convertType(t, ignore, typeRegistry, visited)),
+        schema: td.elements.map((t) =>
+          convertType(t, options, typeRegistry, visited, registryResolutionDepth),
+        ),
       };
     }
 
     case "object": {
-      const type = objectDescriptorToString(td, true);
+      const type = schemaObjectDescriptorToString(
+        td,
+        true,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      );
       if (ignore?.(type)) return type;
       // Volar uses Record<string, PropertyMeta-like> with property names as keys.
       // Each value includes name, required, type, description, tags, global, schema.
@@ -106,8 +145,8 @@ function convertType(
           description: "",
           tags: [],
           required: !p.optional,
-          type: typeDescriptorToString(p.type),
-          schema: convertType(p.type, ignore, typeRegistry, visited),
+          type: schemaDescriptorToString(p.type, typeRegistry, visited, registryResolutionDepth),
+          schema: convertType(p.type, options, typeRegistry, visited, registryResolutionDepth),
         } as unknown as PropertyMetaSchema;
       });
       return {
@@ -145,11 +184,21 @@ function convertType(
         : td.name;
       if (ignore?.(name)) return name;
       // Try to resolve from type registry (pre-parsed TypeDescriptor)
-      if (typeRegistry && !visited?.has(td.name)) {
+      if (
+        typeRegistry &&
+        registryResolutionDepth < MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH &&
+        !visited?.has(td.name)
+      ) {
         const resolved = typeRegistry.get(td.name);
         if (resolved) {
           visited?.add(td.name);
-          const result = convertType(resolved, ignore, typeRegistry, visited);
+          const result = convertType(
+            resolved,
+            options,
+            typeRegistry,
+            visited,
+            registryResolutionDepth + 1,
+          );
           visited?.delete(td.name);
           return result;
         }
@@ -160,6 +209,114 @@ function convertType(
 
     case "unknown":
       return td.rawType || "unknown";
+  }
+}
+
+function schemaDescriptorToString(
+  td: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
+): string {
+  switch (td.kind) {
+    case "primitive":
+    case "literal":
+    case "enum":
+    case "unknown":
+      return typeDescriptorToString(td);
+    case "union":
+      return flattenUnionTypes(td.types)
+        .map((entry) =>
+          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(" | ");
+    case "intersection":
+      return td.types
+        .map((entry) =>
+          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(" & ");
+    case "array":
+      return `${schemaDescriptorToString(
+        td.element,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      )}[]`;
+    case "tuple":
+      return `[${td.elements
+        .map((entry) =>
+          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(", ")}]`;
+    case "object":
+      if (
+        (td.indexSignatures?.length ?? 0) === 0 &&
+        (td.callSignatures?.length ?? 0) === 0 &&
+        (td.constructSignatures?.length ?? 0) === 0 &&
+        td.properties.length === 0
+      ) {
+        return "{}";
+      }
+      return schemaObjectDescriptorToString(
+        td,
+        false,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      );
+    case "function":
+      return typeDescriptorToString(td);
+    case "typeParameter":
+      return td.name;
+    case "ref": {
+      if (
+        typeRegistry &&
+        registryResolutionDepth < MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH &&
+        !td.typeArguments?.length &&
+        !visited.has(td.name)
+      ) {
+        const resolved = typeRegistry.get(td.name);
+        if (resolved) {
+          visited.add(td.name);
+          const result = schemaDescriptorToString(
+            resolved,
+            typeRegistry,
+            visited,
+            registryResolutionDepth + 1,
+          );
+          visited.delete(td.name);
+          return result;
+        }
+      }
+      return typeDescriptorToString(td);
+    }
+  }
+}
+
+function schemaDescriptorToSafeString(
+  td: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
+): string {
+  switch (td.kind) {
+    case "literal":
+      return typeof td.value === "string" ? td.value : String(td.value);
+    case "union":
+      return flattenUnionTypes(td.types)
+        .map((entry) =>
+          schemaDescriptorToSafeString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(" | ");
+    case "intersection":
+      return td.types
+        .map((entry) =>
+          schemaDescriptorToSafeString(entry, typeRegistry, visited, registryResolutionDepth),
+        )
+        .join(" & ");
+    default:
+      return schemaDescriptorToString(td, typeRegistry, visited, registryResolutionDepth);
   }
 }
 
@@ -244,6 +401,60 @@ function objectDescriptorToString(
       : typeDescriptorToString(indexSignature.valueType);
     members.push(
       `${indexSignature.readonly ? "readonly " : ""}[${indexSignature.keyName}: ${typeDescriptorToString(indexSignature.keyType)}]: ${renderValue}`,
+    );
+    needsTrailingSemicolon = true;
+  }
+
+  for (const signature of td.callSignatures ?? []) {
+    members.push(functionSignatureToString(signature, "call"));
+    needsTrailingSemicolon = true;
+  }
+
+  for (const signature of td.constructSignatures ?? []) {
+    members.push(functionSignatureToString(signature, "construct"));
+    needsTrailingSemicolon = true;
+  }
+
+  if (members.length === 0) {
+    return "{}";
+  }
+
+  return `{ ${members.join("; ")}${needsTrailingSemicolon ? ";" : ""} }`;
+}
+
+function schemaObjectDescriptorToString(
+  td: Extract<TypeDescriptor, { kind: "object" }>,
+  safeValues: boolean,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
+): string {
+  const members: string[] = [];
+  let needsTrailingSemicolon = false;
+
+  for (const prop of td.properties) {
+    const renderValue = safeValues
+      ? schemaDescriptorToSafeString(prop.type, typeRegistry, visited, registryResolutionDepth)
+      : schemaDescriptorToString(prop.type, typeRegistry, visited, registryResolutionDepth);
+    members.push(`${prop.name}${prop.optional ? "?" : ""}: ${renderValue}`);
+  }
+
+  for (const indexSignature of td.indexSignatures ?? []) {
+    const renderValue = safeValues
+      ? schemaDescriptorToSafeString(
+          indexSignature.valueType,
+          typeRegistry,
+          visited,
+          registryResolutionDepth,
+        )
+      : schemaDescriptorToString(
+          indexSignature.valueType,
+          typeRegistry,
+          visited,
+          registryResolutionDepth,
+        );
+    members.push(
+      `${indexSignature.readonly ? "readonly " : ""}[${indexSignature.keyName}: ${schemaDescriptorToString(indexSignature.keyType, typeRegistry, visited, registryResolutionDepth)}]: ${renderValue}`,
     );
     needsTrailingSemicolon = true;
   }

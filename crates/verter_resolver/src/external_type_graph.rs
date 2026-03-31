@@ -35,6 +35,17 @@ pub trait ExternalTypeGraphResolver {
         profile_hash: Option<u64>,
     ) -> Option<String>;
 
+    fn required_import_names_for_type(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        _effective_source: &str,
+        analysis: &AnalyzedExternalTypeSource,
+    ) -> FxHashSet<String> {
+        let _ = dep_canonical;
+        analysis.required_import_names(type_name)
+    }
+
     fn resolve_named_export_target(
         &self,
         _dep_canonical: &str,
@@ -49,6 +60,14 @@ pub trait ExternalTypeGraphResolver {
     }
 
     fn debug_log(&self, _message: String) {}
+
+    fn cached_source_analysis(
+        &self,
+        _dep_canonical: &str,
+        _effective_source: &str,
+    ) -> Option<AnalyzedExternalTypeSource> {
+        None
+    }
 
     fn cached_barrel_state(&self, _barrel_canonical: &str) -> Option<crate::BarrelResolutionState> {
         None
@@ -120,6 +139,30 @@ where
 
     fn debug_log(&self, message: String) {
         self.resolver.debug_log(message);
+    }
+
+    fn cached_source_analysis(
+        &self,
+        dep_canonical: &str,
+        effective_source: &str,
+    ) -> Option<AnalyzedExternalTypeSource> {
+        self.resolver
+            .cached_source_analysis(dep_canonical, effective_source)
+    }
+
+    fn required_import_names_for_type(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        effective_source: &str,
+        analysis: &AnalyzedExternalTypeSource,
+    ) -> FxHashSet<String> {
+        self.resolver.required_import_names_for_type(
+            dep_canonical,
+            type_name,
+            effective_source,
+            analysis,
+        )
     }
 
     fn note_resolved_type(

@@ -373,6 +373,97 @@ impl ComponentMetaSession {
         self.get_component_meta_with_fallthrough(canonical_or_alias, true)
     }
 
+    /// Get component metadata plus the resolved-state sidecar in this session's
+    /// overlay context.
+    pub fn get_component_meta_with_resolution(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<(
+            verter_analysis::component_meta::ComponentMetaAnalysis,
+            crate::meta_resolve::ResolvedComponentMetaState,
+        )>,
+        ComponentMetaHostError,
+    > {
+        let _trace = component_meta_trace_scope!(
+            "component_meta_session_query_with_resolution",
+            format!(
+                "backend={:?} owner={}",
+                self.owner.backend, canonical_or_alias
+            ),
+        );
+        match self.owner.backend {
+            TypeExpansionBackend::Verter => self
+                .inner
+                .get_component_meta_with_resolution(canonical_or_alias)
+                .map_err(ComponentMetaHostError::from),
+            TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => {
+                let Some((canonical, resolved, store_view)) = self
+                    .inner
+                    .resolve_component_meta_state_with_view(
+                        canonical_or_alias,
+                        crate::types::ResolverMode::Expanded,
+                    )
+                    .map_err(ComponentMetaHostError::from)?
+                else {
+                    return Ok(None);
+                };
+                let Some(analysis) = self.get_component_meta_via_external_backend_from_resolved(
+                    &canonical,
+                    &resolved,
+                    true,
+                    Some(&store_view),
+                )?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((analysis, resolved)))
+            }
+            TypeExpansionBackend::Auto => {
+                let canonical = self
+                    .inner
+                    .resolve_alias_or_canonical(canonical_or_alias)
+                    .map_err(ComponentMetaHostError::from)?;
+                let Some((canonical, resolved, store_view)) = self
+                    .inner
+                    .resolve_component_meta_state_with_view(
+                        &canonical,
+                        crate::types::ResolverMode::Expanded,
+                    )
+                    .map_err(ComponentMetaHostError::from)?
+                else {
+                    return Ok(None);
+                };
+
+                let exceeds_threshold =
+                    resolved_state_exceeds_verter_complexity_threshold(&resolved);
+                let analysis = if exceeds_threshold {
+                    let Some(analysis) = self
+                        .get_component_meta_via_external_backend_from_resolved(
+                            &canonical,
+                            &resolved,
+                            true,
+                            Some(&store_view),
+                        )?
+                    else {
+                        return Ok(None);
+                    };
+                    analysis
+                } else {
+                    extract_component_meta_from_resolved_with_evaluated(
+                        self.owner.project.host(),
+                        &canonical,
+                        &resolved,
+                        resolved.evaluated_types.as_ref(),
+                        should_include_fallthrough_surface(&resolved),
+                        Some(&store_view),
+                    )
+                };
+                Ok(Some((analysis, resolved)))
+            }
+        }
+    }
+
     /// Get declared-only component metadata in this session's overlay context.
     ///
     /// This skips accepted-surface and fallthrough resolution so compat callers
@@ -474,13 +565,12 @@ impl ComponentMetaSession {
                 canonical_or_alias, include_fallthrough,
             ),
         );
-        let canonical = self
+        let Some((canonical, resolved, store_view)) = self
             .inner
-            .resolve_alias_or_canonical(canonical_or_alias)
-            .map_err(ComponentMetaHostError::from)?;
-        let Some(resolved) = self
-            .inner
-            .resolve_component_meta_state(&canonical, crate::types::ResolverMode::Expanded)
+            .resolve_component_meta_state_with_view(
+                canonical_or_alias,
+                crate::types::ResolverMode::Expanded,
+            )
             .map_err(ComponentMetaHostError::from)?
         else {
             return Ok(None);
@@ -503,6 +593,7 @@ impl ComponentMetaSession {
                 &canonical,
                 &resolved,
                 include_fallthrough,
+                Some(&store_view),
             );
         }
 
@@ -512,6 +603,7 @@ impl ComponentMetaSession {
             &resolved,
             resolved.evaluated_types.as_ref(),
             include_fallthrough && should_include_fallthrough_surface(&resolved),
+            Some(&store_view),
         )))
     }
 
@@ -520,13 +612,12 @@ impl ComponentMetaSession {
         canonical_or_alias: &str,
         include_fallthrough: bool,
     ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
-        let canonical = self
+        let Some((canonical, resolved, store_view)) = self
             .inner
-            .resolve_alias_or_canonical(canonical_or_alias)
-            .map_err(ComponentMetaHostError::from)?;
-        let Some(resolved) = self
-            .inner
-            .resolve_component_meta_state(&canonical, crate::types::ResolverMode::Expanded)
+            .resolve_component_meta_state_with_view(
+                canonical_or_alias,
+                crate::types::ResolverMode::Expanded,
+            )
             .map_err(ComponentMetaHostError::from)?
         else {
             return Ok(None);
@@ -535,6 +626,7 @@ impl ComponentMetaSession {
             &canonical,
             &resolved,
             include_fallthrough,
+            Some(&store_view),
         )
     }
 
@@ -543,6 +635,7 @@ impl ComponentMetaSession {
         canonical: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         include_fallthrough: bool,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
         let _trace = component_meta_trace_scope!(
             "component_meta_external_backend",
@@ -606,6 +699,7 @@ impl ComponentMetaSession {
             resolved,
             (!evaluated_types.is_empty()).then_some(&evaluated_types),
             include_fallthrough,
+            store_view,
         )))
     }
 }
@@ -1429,6 +1523,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> ComponentMetaAnalysis {
     let resolved_macros = resolver_component_meta_resolved_macros(
         resolved.snapshot.macros.as_ref(),
@@ -1456,7 +1551,14 @@ fn extract_component_meta_from_resolved_with_evaluated(
 
     let mut meta = verter_analysis::component_meta::extract_component_meta(input);
     if include_fallthrough {
-        if let Some(resolution) = host.resolve_fallthrough_surface(canonical_id) {
+        let mut visiting = rustc_hash::FxHashSet::default();
+        if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
+            canonical_id,
+            resolved,
+            None,
+            &mut visiting,
+            store_view,
+        ) {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
@@ -1472,6 +1574,8 @@ fn extract_component_meta_from_resolved_with_evaluated(
         }
     }
 
+    crate::host_manage::populate_public_instance_sidecar(&mut meta);
+    crate::host_manage::populate_sfc_blocks_sidecar(host, canonical_id, &mut meta);
     meta
 }
 
@@ -2465,6 +2569,51 @@ const props = withDefaults(defineProps<Record<string, Array<Foo<Bar>>>>(), {
         assert_eq!(
             &source[span.start as usize..span.end as usize],
             "Record<string, Array<Foo<Bar>>>"
+        );
+    }
+
+    #[test]
+    fn extracted_external_meta_keeps_fallthrough_on_captured_store_view() {
+        let host = make_host();
+        host.upsert_base("/src/Link.vue", "<template><a /></template>")
+            .unwrap();
+        host.upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+import Link from './Link.vue'
+</script>
+<template><Link /></template>"#,
+        )
+        .unwrap();
+
+        let store_view = host.host().resolver_store_view();
+        let resolved = host
+            .host()
+            .resolve_component_meta_in_view(
+                "/src/Button.vue",
+                crate::types::ResolverMode::Expanded,
+                &store_view,
+            )
+            .expect("button resolved state should exist for the captured store view");
+
+        host.upsert_base("/src/Link.vue", "<script setup lang=\"ts\"></script>")
+            .unwrap();
+
+        let meta = extract_component_meta_from_resolved_with_evaluated(
+            host.host(),
+            "/src/Button.vue",
+            &resolved,
+            resolved.evaluated_types.as_ref(),
+            true,
+            Some(&store_view),
+        );
+
+        assert!(
+            matches!(
+                meta.fallthrough_surface,
+                verter_analysis::component_meta::FallthroughSurface::Branches { .. }
+            ),
+            "captured store views should keep child fallthrough resolution pinned to the resolved snapshot",
         );
     }
 }

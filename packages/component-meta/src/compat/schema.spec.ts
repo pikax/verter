@@ -221,4 +221,51 @@ describe("typeDescriptorToSchema", () => {
     });
     expect(typeof schema).toBe("string");
   });
+
+  // @ai-generated - Verifies benchmark-only literal boolean schema expansion stays opt-in.
+  it("can expand booleans into literal enum schema when parity mode is enabled", () => {
+    expect(
+      typeDescriptorToSchema(primitive("boolean"), {
+        schema: { literalBooleanSchema: true },
+      }),
+    ).toEqual({
+      kind: "enum",
+      type: "boolean",
+      schema: ["false", "true"],
+    });
+  });
+
+  it("keeps nested registry refs shallow when resolving a top-level alias", () => {
+    const schema = typeDescriptorToSchema(
+      ref("StringOrVNode"),
+      undefined,
+      new Map([
+        ["StringOrVNode", union([primitive("string"), ref("VNode")])],
+        [
+          "VNode",
+          object([
+            { name: "type", type: primitive("string"), optional: false },
+            { name: "component", type: ref("ComponentInternalInstance"), optional: true },
+          ]),
+        ],
+        [
+          "ComponentInternalInstance",
+          object([{ name: "vnode", type: ref("VNode"), optional: false }]),
+        ],
+      ]),
+    );
+
+    expect(schema).toEqual({
+      kind: "enum",
+      type: "string | VNode",
+      schema: [
+        "string",
+        {
+          kind: "object",
+          type: "VNode",
+          schema: {},
+        },
+      ],
+    });
+  });
 });

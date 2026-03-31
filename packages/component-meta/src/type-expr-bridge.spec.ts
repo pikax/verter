@@ -366,6 +366,518 @@ describe("typeExprToDescriptor", () => {
     expect(result.kind).toBe("unknown");
   });
 
+  it("resolves indexed access through object unions when every branch has the key", () => {
+    const result = typeExprToDescriptor(
+      {
+        kind: "indexedAccess",
+        object: {
+          kind: "ref",
+          name: "Variants",
+          typeArguments: [],
+        },
+        index: {
+          kind: "literal",
+          literalKind: "string",
+          value: "color",
+        },
+      },
+      new Map([
+        [
+          "Variants",
+          {
+            kind: "union",
+            types: [
+              {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "color",
+                    ty: { kind: "literal", literalKind: "string", value: "red" },
+                    optional: false,
+                    readonly: false,
+                  },
+                ],
+              },
+              {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "color",
+                    ty: { kind: "literal", literalKind: "string", value: "blue" },
+                    optional: true,
+                    readonly: false,
+                  },
+                ],
+              },
+            ],
+          } satisfies NativeTypeExpr,
+        ],
+      ]),
+    );
+
+    expect(result).toEqual({
+      kind: "union",
+      types: [
+        {
+          kind: "union",
+          types: [
+            { kind: "literal", value: "red" },
+            { kind: "literal", value: "blue" },
+          ],
+        },
+        { kind: "primitive", name: "undefined" },
+      ],
+    });
+  });
+
+  it("resolves indexed access through object intersections", () => {
+    const result = typeExprToDescriptor(
+      {
+        kind: "indexedAccess",
+        object: {
+          kind: "ref",
+          name: "Props",
+          typeArguments: [],
+        },
+        index: {
+          kind: "literal",
+          literalKind: "string",
+          value: "tone",
+        },
+      },
+      new Map([
+        [
+          "Props",
+          {
+            kind: "intersection",
+            types: [
+              {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "tone",
+                    ty: { kind: "primitive", name: "string" },
+                    optional: false,
+                    readonly: false,
+                  },
+                ],
+              },
+              {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "size",
+                    ty: { kind: "primitive", name: "number" },
+                    optional: false,
+                    readonly: false,
+                  },
+                ],
+              },
+            ],
+          } satisfies NativeTypeExpr,
+        ],
+      ]),
+    );
+
+    expect(result).toEqual({ kind: "primitive", name: "string" });
+  });
+
+  it("preserves symbolic indexed access when a union branch does not have the key", () => {
+    const result = typeExprToDescriptor(
+      {
+        kind: "indexedAccess",
+        object: {
+          kind: "ref",
+          name: "Variants",
+          typeArguments: [],
+        },
+        index: {
+          kind: "literal",
+          literalKind: "string",
+          value: "color",
+        },
+      },
+      new Map([
+        [
+          "Variants",
+          {
+            kind: "union",
+            types: [
+              {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "color",
+                    ty: { kind: "literal", literalKind: "string", value: "red" },
+                    optional: false,
+                    readonly: false,
+                  },
+                ],
+              },
+              {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "size",
+                    ty: { kind: "primitive", name: "number" },
+                    optional: false,
+                    readonly: false,
+                  },
+                ],
+              },
+            ],
+          } satisfies NativeTypeExpr,
+        ],
+      ]),
+    );
+
+    expect(result.kind).toBe("unknown");
+  });
+
+  it("resolves chained indexed access through registry-materialized objects", () => {
+    const result = typeExprToDescriptor(
+      {
+        kind: "indexedAccess",
+        object: {
+          kind: "indexedAccess",
+          object: {
+            kind: "ref",
+            name: "Button",
+            typeArguments: [],
+          },
+          index: {
+            kind: "literal",
+            literalKind: "string",
+            value: "variants",
+          },
+        },
+        index: {
+          kind: "literal",
+          literalKind: "string",
+          value: "color",
+        },
+      },
+      new Map([
+        [
+          "Button",
+          {
+            kind: "object",
+            properties: [
+              {
+                memberKind: "property",
+                name: "variants",
+                ty: {
+                  kind: "object",
+                  properties: [
+                    {
+                      memberKind: "property",
+                      name: "color",
+                      ty: {
+                        kind: "union",
+                        types: [
+                          { kind: "literal", literalKind: "string", value: "primary" },
+                          { kind: "literal", literalKind: "string", value: "secondary" },
+                        ],
+                      },
+                      optional: false,
+                      readonly: false,
+                    },
+                  ],
+                },
+                optional: false,
+                readonly: false,
+              },
+            ],
+          } satisfies NativeTypeExpr,
+        ],
+      ]),
+    );
+
+    expect(result).toEqual({
+      kind: "union",
+      types: [
+        { kind: "literal", value: "primary" },
+        { kind: "literal", value: "secondary" },
+      ],
+    });
+  });
+
+  it("materializes finite mapped variant helpers into object descriptors", () => {
+    const result = typeExprToDescriptor({
+      kind: "mapped",
+      parameter: "K",
+      source: {
+        kind: "keyOf",
+        operand: {
+          kind: "object",
+          properties: [
+            {
+              memberKind: "property",
+              name: "color",
+              ty: {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "primary",
+                    ty: { kind: "primitive", name: "string" },
+                    optional: false,
+                  },
+                  {
+                    memberKind: "property",
+                    name: "secondary",
+                    ty: { kind: "primitive", name: "string" },
+                    optional: false,
+                  },
+                ],
+              },
+              optional: false,
+            },
+            {
+              memberKind: "property",
+              name: "variant",
+              ty: {
+                kind: "object",
+                properties: [
+                  {
+                    memberKind: "property",
+                    name: "solid",
+                    ty: { kind: "primitive", name: "string" },
+                    optional: false,
+                  },
+                ],
+              },
+              optional: false,
+            },
+          ],
+        },
+      },
+      value: {
+        kind: "keyOf",
+        operand: {
+          kind: "indexedAccess",
+          object: {
+            kind: "object",
+            properties: [
+              {
+                memberKind: "property",
+                name: "color",
+                ty: {
+                  kind: "object",
+                  properties: [
+                    {
+                      memberKind: "property",
+                      name: "primary",
+                      ty: { kind: "primitive", name: "string" },
+                      optional: false,
+                    },
+                    {
+                      memberKind: "property",
+                      name: "secondary",
+                      ty: { kind: "primitive", name: "string" },
+                      optional: false,
+                    },
+                  ],
+                },
+                optional: false,
+              },
+              {
+                memberKind: "property",
+                name: "variant",
+                ty: {
+                  kind: "object",
+                  properties: [
+                    {
+                      memberKind: "property",
+                      name: "solid",
+                      ty: { kind: "primitive", name: "string" },
+                      optional: false,
+                    },
+                  ],
+                },
+                optional: false,
+              },
+            ],
+          },
+          index: {
+            kind: "typeParameter",
+            name: "K",
+          },
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      kind: "object",
+      properties: [
+        {
+          name: "color",
+          type: {
+            kind: "union",
+            types: [
+              { kind: "literal", value: "primary" },
+              { kind: "literal", value: "secondary" },
+            ],
+          },
+          optional: false,
+        },
+        {
+          name: "variant",
+          type: { kind: "literal", value: "solid" },
+          optional: false,
+        },
+      ],
+    });
+  });
+
+  it("resolves Id-style mapped values through type-parameter defaults", () => {
+    const mappedSource = {
+      kind: "object",
+      properties: [
+        {
+          memberKind: "property",
+          name: "base",
+          ty: { kind: "primitive", name: "string" },
+          optional: true,
+        },
+        {
+          memberKind: "property",
+          name: "label",
+          ty: { kind: "primitive", name: "string" },
+          optional: true,
+        },
+      ],
+    } satisfies NativeTypeExpr;
+
+    const result = typeExprToDescriptor({
+      kind: "mapped",
+      parameter: "P",
+      source: {
+        kind: "keyOf",
+        operand: {
+          kind: "typeParameter",
+          name: "T",
+          default: mappedSource,
+        },
+      },
+      value: {
+        kind: "indexedAccess",
+        object: {
+          kind: "typeParameter",
+          name: "T",
+          default: mappedSource,
+        },
+        index: {
+          kind: "typeParameter",
+          name: "P",
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      kind: "object",
+      properties: [
+        {
+          name: "base",
+          type: {
+            kind: "union",
+            types: [
+              { kind: "primitive", name: "string" },
+              { kind: "primitive", name: "undefined" },
+            ],
+          },
+          optional: true,
+        },
+        {
+          name: "label",
+          type: {
+            kind: "union",
+            types: [
+              { kind: "primitive", name: "string" },
+              { kind: "primitive", name: "undefined" },
+            ],
+          },
+          optional: true,
+        },
+      ],
+    });
+  });
+
+  it("collapses Id-style empty-object intersections after mapped helper expansion", () => {
+    const result = typeExprToDescriptor({
+      kind: "intersection",
+      types: [
+        {
+          kind: "object",
+          properties: [],
+        },
+        {
+          kind: "mapped",
+          parameter: "K",
+          source: {
+            kind: "keyOf",
+            operand: {
+              kind: "object",
+              properties: [
+                {
+                  memberKind: "property",
+                  name: "base",
+                  ty: { kind: "primitive", name: "string" },
+                  optional: false,
+                },
+                {
+                  memberKind: "property",
+                  name: "label",
+                  ty: { kind: "primitive", name: "string" },
+                  optional: false,
+                },
+              ],
+            },
+          },
+          value: {
+            kind: "function",
+            parameters: [
+              {
+                name: "props",
+                ty: {
+                  kind: "ref",
+                  name: "Record",
+                  typeArguments: [
+                    { kind: "primitive", name: "string" },
+                    { kind: "primitive", name: "any" },
+                  ],
+                },
+                optional: true,
+                rest: false,
+              },
+            ],
+            returnType: { kind: "primitive", name: "string" },
+          },
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      kind: "object",
+      properties: [
+        {
+          name: "base",
+          optional: false,
+        },
+        {
+          name: "label",
+          optional: false,
+        },
+      ],
+    });
+  });
+
   // =============================================================================
   // Parenthesized (unwrap)
   // =============================================================================

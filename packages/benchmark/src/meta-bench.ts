@@ -33,6 +33,7 @@ import {
   type MetaComparisonResult,
   type MetaBenchmarkReport,
 } from "./meta-bench-utils.js";
+import { loadVerterCompatModule } from "./verter-compat.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -131,7 +132,7 @@ logln("=".repeat(74));
 
 log("\n  Initializing Verter checker...");
 const verterInitStart = performance.now();
-const { createChecker: createVerterChecker } = _require("@verter/component-meta/compat");
+const { createChecker: createVerterChecker } = await loadVerterCompatModule();
 const verterChecker = await createVerterChecker(TSCONFIG_PATH);
 const verterInitMs = performance.now() - verterInitStart;
 logln(` done (${formatDuration(verterInitMs)})`);

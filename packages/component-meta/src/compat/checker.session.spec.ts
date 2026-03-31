@@ -22,8 +22,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/runtime session/i);
   });
 
-  it("normalizes session-backed canonical ids before querying native metadata", async () => {
-    const getComponentMeta = vi.fn(() => ({
+  it("normalizes session-backed canonical ids before querying declared native metadata", async () => {
+    const getDeclaredComponentMeta = vi.fn(() => ({
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [],
@@ -66,8 +66,10 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
-        getDeclaredComponentMeta: getComponentMeta,
-        getComponentMeta,
+        getDeclaredComponentMeta,
+        getComponentMeta() {
+          throw new Error("full native query should not be used for default Verter compat");
+        },
         getProvenance() {
           return "{}";
         },
@@ -90,7 +92,7 @@ describe("ComponentMetaChecker session requirement", () => {
     );
     await checker.getComponentMeta("src\\App.vue");
 
-    expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 
   it("propagates native component-meta budget errors to callers", async () => {
@@ -139,8 +141,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
   });
 
-  it("uses one full native query for Verter compat output and _verter", async () => {
-    const fullMeta: any = {
+  it("uses one declared native query for Verter compat output and _verter", async () => {
+    const declaredMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [
@@ -189,7 +191,10 @@ describe("ComponentMetaChecker session requirement", () => {
       rootReachability: { kind: "branches", branches: [] },
       fallthroughSurface: { kind: "branches", branches: [] },
     };
-    const getComponentMeta = vi.fn(() => fullMeta);
+    const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
+    const getComponentMeta = vi.fn(() => {
+      throw new Error("full native query should not be used for default Verter compat");
+    });
 
     const checker = new ComponentMetaChecker(
       {
@@ -203,9 +208,7 @@ describe("ComponentMetaChecker session requirement", () => {
         upsert() {},
         delete() {},
         getComponentMeta,
-        getDeclaredComponentMeta: vi.fn(() => {
-          throw new Error("declared query should not be used on the Verter compat path");
-        }),
+        getDeclaredComponentMeta,
         getProvenance() {
           return "{}";
         },
@@ -229,15 +232,15 @@ describe("ComponentMetaChecker session requirement", () => {
 
     const meta = await checker.getComponentMeta("src\\App.vue");
 
-    expect(getComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
     expect(meta._verter?.acceptedProps.map((prop) => prop.name)).toEqual(["id"]);
     expect(meta._verter?.acceptedSurfaceCompleteness).toBe("exact");
-    expect(getComponentMeta).toHaveBeenCalledTimes(1);
   });
 
-  it("uses the full native query immediately for non-Verter backends even if declared metadata exists", async () => {
+  it("checks declared native metadata first, then retries once with the full native query on non-Verter backends", async () => {
     const declaredMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
@@ -332,7 +335,8 @@ describe("ComponentMetaChecker session requirement", () => {
 
     const meta = await checker.getComponentMeta("src\\App.vue");
 
-    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
     expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
     expect(meta.props.map((prop) => prop.name)).toEqual(["label", "collapsible"]);
   });
@@ -399,10 +403,8 @@ describe("ComponentMetaChecker session requirement", () => {
         },
       ],
     };
-    const getComponentMeta = vi
-      .fn()
-      .mockReturnValueOnce(partialMeta)
-      .mockReturnValueOnce(richerMeta);
+    const getDeclaredComponentMeta = vi.fn(() => partialMeta);
+    const getComponentMeta = vi.fn(() => richerMeta);
 
     const checker = new ComponentMetaChecker(
       {
@@ -417,9 +419,7 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
-        getDeclaredComponentMeta() {
-          return partialMeta;
-        },
+        getDeclaredComponentMeta,
         getComponentMeta,
         getProvenance() {
           return "{}";
@@ -444,7 +444,8 @@ describe("ComponentMetaChecker session requirement", () => {
 
     const meta = await checker.getComponentMeta("src\\App.vue");
 
-    expect(getComponentMeta).toHaveBeenCalledTimes(2);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
     expect(meta.props.map((prop) => prop.name)).toEqual(["label", "collapsible"]);
     expect(meta.slots.map((slot) => slot.name)).toEqual(["default"]);
   });

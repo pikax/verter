@@ -106,9 +106,37 @@ const checker = await createCheckerByJson("/project/root", {
 
 The compat path is the only compatibility surface this package supports. It matches `vue-component-meta` shape while delegating parsing, analysis, import following, type resolution, and caching to native Verter.
 
+Compat schema notes:
+
+- `schema: true` keeps the default consumer-facing behavior.
+- `schema: { literalBooleanSchema: true }` enables benchmark/parity-focused `true | false` enum schema expansion without changing native types or compat display strings.
+
+## Native Vs Compat Contract
+
+The official Verter metadata payload is the semantic source of truth. `./compat` is an interoperability projection for `vue-component-meta`, not a second semantic engine.
+
+- Native `_verter` metadata may include more information than Volar, including `models`, `publicInstance`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface`.
+- Native type descriptors preserve TypeScript meaning. For example, native `boolean` stays `boolean`; any Volar-specific display or schema normalization belongs in compat formatting, not the native payload.
+- Benchmark comparisons against `vue-component-meta` should compare equivalent surfaces only. Native-only `_verter` fields are additional Verter metadata, not compat regressions by themselves.
+- Current parity totals explicitly exclude native-only `models` because `vue-component-meta` has no equivalent surface for them.
+
+## Root And Attrs Metadata
+
+Native Verter metadata already models root fallthrough and root attrs/listeners:
+
+- `acceptedProps` includes inherited attrs with `kind: "attr"`
+- `acceptedEvents` includes inherited listeners with `kind: "listener"`
+- `rootReachability` and `fallthroughSurface` describe single-root / multi-root / conditional-root behavior and root target kind
+- `rootInfo` is a first-class summary with `kind: "none" | "single" | "conditional" | "multiple"` plus direct root targets when known
+- consumed root attrs/listeners live on `rootReachability.branches[].consumed`
+
+This is part of the native API, not compat-only behavior.
+
 ## Returned Metadata
 
 Both supported metadata APIs return Volar-shaped top-level metadata and attach the full Verter-native metadata on `_verter`.
+
+Compat `exposed` stays on the analysis `defineExpose` / Options API `expose` surface. The native `publicInstance` sidecar is available separately on `_verter.publicInstance` for ref-accessible runtime instance data.
 
 The `_verter` payload includes:
 
@@ -117,6 +145,14 @@ The `_verter` payload includes:
 - slots
 - models
 - exposed
+- publicInstance
+- typeRegistry
+- acceptedProps
+- acceptedEvents
+- acceptedSurfaceCompleteness
+- rootInfo
+- rootReachability
+- fallthroughSurface
 - components
 - template refs
 - imports
@@ -124,6 +160,10 @@ The `_verter` payload includes:
 - Vue API calls
 - styles
 - component flags
+
+`components` preserves call-site detail from template analysis, including prop expressions, referenced bindings, spread markers, and structured `vModelEntries` alongside the existing summary fields.
+
+`typeRegistry` keeps both the expanded native type descriptor and the original declaration provenance when the host can resolve it, including `rawType` source text and `declaration.canonicalSource`.
 
 ## Type IR And Adapters
 

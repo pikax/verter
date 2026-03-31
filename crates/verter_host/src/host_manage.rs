@@ -722,7 +722,7 @@ fn component_meta_expansion_budget_with_max_symbolic_work(
     }
 }
 
-fn component_meta_expansion_budget() -> verter_analysis::type_expand::ExpansionBudget {
+pub(crate) fn component_meta_expansion_budget() -> verter_analysis::type_expand::ExpansionBudget {
     component_meta_expansion_budget_with_max_symbolic_work(COMPONENT_META_MAX_SYMBOLIC_STEPS)
 }
 
@@ -828,7 +828,7 @@ pub(crate) type ImportedEvalSource = verter_resolver::ImportedEvalSource;
 pub(crate) type ImportedTypeAlias = verter_resolver::ImportedTypeAlias;
 pub(crate) type ComputedEvaluatedTypes = verter_resolver::ComputedEvaluatedTypes;
 
-struct HostImportedEvalResolver<'a> {
+pub(crate) struct HostImportedEvalResolver<'a> {
     host: &'a VerterHost,
     dep_resolutions: std::borrow::Cow<'a, rustc_hash::FxHashMap<String, DependencyResolution>>,
     alias_env_stack: rustc_hash::FxHashSet<String>,
@@ -874,7 +874,7 @@ impl<'a> HostImportedEvalResolver<'a> {
         }
     }
 
-    fn with_dep_resolutions(
+    pub(crate) fn with_dep_resolutions(
         host: &'a VerterHost,
         owner_canonical_id: &'a str,
         dep_resolutions: &'a rustc_hash::FxHashMap<String, DependencyResolution>,
@@ -931,27 +931,17 @@ impl<'a> HostImportedEvalResolver<'a> {
         dep_canonical: &str,
     ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
         self.host
-            .materialize_imported_dependency_state_in_view(dep_canonical, self.store_view)
+            .clone_current_imported_dependency_entry(dep_canonical, self.store_view)
     }
 
     fn cached_snapshot(&self, canonical_id: &str) -> Option<Arc<FileAnalysisSnapshot>> {
         self.cached_dependency(canonical_id)
             .and_then(|dependency| dependency.snapshot.clone())
-            .or_else(|| {
-                self.host
-                    .get_raw_analysis_snapshot_in_view(canonical_id, self.store_view)
-                    .map(Arc::new)
-            })
     }
 
     fn cached_eval_source(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.cached_dependency(canonical_id)
             .and_then(|dependency| dependency.eval_source.clone())
-            .or_else(|| {
-                self.host
-                    .materialize_imported_dependency_base_in_view(canonical_id, self.store_view)
-                    .and_then(|entry| entry.eval_source.clone())
-            })
     }
 
     fn cached_type_dependency_canonical(
@@ -986,7 +976,13 @@ impl<'a> HostImportedEvalResolver<'a> {
         canonical_id: &str,
     ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
         self.host
-            .base_eval_env_arc_in_view(canonical_id, self.store_view)
+            .clone_current_imported_dependency_entry(canonical_id, self.store_view)
+            .and_then(|dependency| dependency.env.clone())
+            .or_else(|| {
+                self.host
+                    .materialize_imported_dependency_state_in_view(canonical_id, self.store_view)
+                    .and_then(|dependency| dependency.env.clone())
+            })
     }
 
     fn cached_prepared_type_alias(
@@ -1078,40 +1074,12 @@ impl<'a> HostImportedEvalResolver<'a> {
         exported_name: &str,
         eval_source: &str,
     ) -> rustc_hash::FxHashSet<String> {
-        if let Some(cached) = self
-            .host
-            .clone_cached_required_import_names_for_exported_type(
-                canonical_id,
-                exported_name,
-                self.store_view,
-            )
-        {
-            return cached;
-        }
-
-        let analysis = self
-            .host
-            .external_type_analysis_in_view(canonical_id, self.store_view)
-            .unwrap_or_else(|| {
-                let alloc = oxc_allocator::Allocator::new();
-                Arc::new(
-                    verter_core::utils::oxc::vue::resolve_type::analyze_external_type_source(
-                        eval_source,
-                        &alloc,
-                    ),
-                )
-            });
-
-        let required = analysis.required_import_names(exported_name);
-        if self.cached_dependency(canonical_id).is_some() {
-            self.host.cache_required_import_names_for_exported_type(
-                canonical_id,
-                exported_name,
-                required.clone(),
-                self.store_view,
-            );
-        }
-        required
+        let _ = eval_source;
+        self.host.required_import_names_for_exported_type_in_view(
+            canonical_id,
+            exported_name,
+            self.store_view,
+        )
     }
 }
 
@@ -1169,7 +1137,7 @@ fn is_builtin_type_symbol(name: &str) -> bool {
     )
 }
 
-fn collect_type_expr_symbol_refs(
+pub(crate) fn collect_type_expr_symbol_refs(
     expr: &verter_analysis::type_expr::TypeExpr,
     refs: &mut std::collections::BTreeSet<String>,
 ) {
@@ -1376,16 +1344,8 @@ impl DeclarationMetadataResolver for HostImportedEvalResolver<'_> {
 
     fn read_source(&self, canonical_source: &str) -> Option<String> {
         self.host
-            .materialize_imported_dependency_base_in_view(canonical_source, self.store_view)
-            .map(|entry| entry.raw_source.as_ref().to_string())
-            .or_else(|| {
-                self.host
-                    .load_eval_dependency_source_text_with_fallback_in_view(
-                        canonical_source,
-                        self.store_view,
-                    )
-                    .map(|source| source.to_string())
-            })
+            .read_analysis_source_in_view(canonical_source, self.store_view)
+            .map(|source| source.to_string())
     }
 
     fn type_declaration_id(
@@ -1775,7 +1735,6 @@ impl ImportedEvalOwnerResolver for HostImportedEvalResolver<'_> {
         self.host.track_direct_eval_dependencies(
             owner_canonical_id,
             owner_snapshot,
-            self.store_view.is_none(),
             self.dep_resolutions.as_ref(),
             canonical_dependencies,
         );
@@ -1797,13 +1756,13 @@ impl ImportedEvalOwnerContextResolver for HostImportedEvalResolver<'_> {
         &self,
         owner_canonical_id: &str,
         _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-        owner_eval_source: &str,
+        _owner_eval_source: &str,
     ) -> verter_analysis::type_eval::EvalEnv {
         self.host
             .base_eval_env_in_view(owner_canonical_id, self.store_view)
-            .unwrap_or_else(|| {
-                verter_analysis::type_eval_build::parse_and_build_env(owner_eval_source)
-            })
+            // Owner eval env must come from the cache-owning pass. If it is absent,
+            // keep the failure shallow instead of reparsing source in the resolver path.
+            .unwrap_or_default()
     }
 }
 
@@ -1814,10 +1773,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
 
     fn canonicalize_imported_source(&self, source_canonical_id: &str) -> String {
         self.host
-            .load_eval_dependency_canonical_with_fallback_in_view(
-                source_canonical_id,
-                self.store_view,
-            )
+            .resolve_eval_dependency_canonical_in_view(source_canonical_id, self.store_view)
             .unwrap_or_else(|| source_canonical_id.to_string())
     }
 
@@ -1971,6 +1927,8 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
                 imported_inputs.type_aliases.len(),
             ),
         );
+        let required_runtime_value_names =
+            collect_required_runtime_value_names_for_type_decl(&context.decl, &context.env);
         let snapshot = FileAnalysisSnapshot {
             imports: context.imports.clone(),
             bindings: context.bindings.clone(),
@@ -1997,7 +1955,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
                 imported_inputs,
                 None,
                 Some(context.env.clone()),
-                None,
+                Some(&required_runtime_value_names),
                 self.store_view,
             )
             .map(|built| built.env)
@@ -2048,10 +2006,10 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
             canonical_dependencies.insert(canonical_id.to_string());
             return;
         };
-        let Some(eval_source) = dependency.eval_source.clone() else {
+        if dependency.eval_source.is_none() {
             canonical_dependencies.insert(dependency.resolved_canonical_id.clone());
             return;
-        };
+        }
 
         canonical_dependencies.insert(dependency.resolved_canonical_id.clone());
         if !seen_sources.insert(dependency.resolved_canonical_id.clone()) {
@@ -2060,7 +2018,6 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
 
         inputs.push(ImportedEvalSource {
             canonical_id: dependency.resolved_canonical_id.clone(),
-            source: eval_source,
         });
     }
 
@@ -2728,7 +2685,8 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Rc<crate::ParsedEvalProgram>> {
-        let entry = self.materialize_imported_dependency_state_in_view(canonical_id, store_view)?;
+        let entry =
+            self.ensure_shallow_imported_dependency_state_in_view(canonical_id, store_view)?;
         let eval_source = entry
             .eval_source
             .as_ref()
@@ -2756,7 +2714,8 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Rc<crate::ParsedTypeResolutionContext>> {
-        let entry = self.materialize_imported_dependency_state_in_view(canonical_id, store_view)?;
+        let entry =
+            self.ensure_shallow_imported_dependency_state_in_view(canonical_id, store_view)?;
         let eval_source = entry
             .eval_source
             .as_ref()
@@ -2785,17 +2744,14 @@ impl VerterHost {
         });
     }
 
-    pub(crate) fn ensure_shallow_imported_dependency_state_in_view(
+    pub(crate) fn ensure_shallow_imported_export_state_in_view(
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
         if let Some(entry) = self.clone_current_imported_dependency_entry(canonical_id, store_view)
         {
-            if entry.external_type_analysis.is_some()
-                && entry.script_analysis.is_some()
-                && entry.export_signatures.is_some()
-            {
+            if entry.script_analysis.is_some() && entry.export_signatures.is_some() {
                 return Some(entry);
             }
         }
@@ -2821,12 +2777,10 @@ impl VerterHost {
             )
         };
 
-        let (script_analysis, export_signatures, external_type_analysis) = if eval_source.is_empty()
-        {
+        let (script_analysis, export_signatures) = if eval_source.is_empty() {
             (
                 verter_analysis::ScriptAnalysisSnapshot::default(),
                 Vec::new(),
-                verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
             )
         } else {
             let parsed_eval_program = self.cached_parsed_eval_program_entry(
@@ -2839,8 +2793,6 @@ impl VerterHost {
                 (
                     verter_analysis::ScriptAnalysisSnapshot::default(),
                     Vec::new(),
-                    verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
-                    ),
                 )
             } else {
                 let program = parsed_eval_program.program.borrow_dependent();
@@ -2860,15 +2812,14 @@ impl VerterHost {
                         block_ranges,
                     );
                 }
-                (
-                    snapshot.script_analysis,
-                    snapshot.export_signatures,
-                    verter_core::utils::oxc::vue::resolve_type::analyze_external_type_program(
-                        program,
-                    ),
-                )
+                (snapshot.script_analysis, snapshot.export_signatures)
             }
         };
+
+        // Export-only imported state must stay structural: keep export signatures for
+        // route selection, but defer all dependency route publication until a specific
+        // symbol lookup asks for it.
+        let dependency_resolutions = rustc_hash::FxHashMap::default();
 
         Some(self.cache_imported_dependency_shallow_state(
             canonical_id,
@@ -2878,7 +2829,88 @@ impl VerterHost {
             Some(eval_source),
             Some(Arc::new(script_analysis)),
             Some(Arc::new(export_signatures)),
+            None,
+            dependency_resolutions,
+        ))
+    }
+
+    pub(crate) fn ensure_shallow_imported_dependency_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
+        if let Some(entry) = self.clone_current_imported_dependency_entry(canonical_id, store_view)
+        {
+            if entry.external_type_analysis.is_some() {
+                return Some(entry);
+            }
+        }
+
+        let current = self.clone_current_imported_dependency_entry(canonical_id, store_view);
+        let (raw_source, cached_parse, whole_hash) = if let Some(entry) = current.as_ref() {
+            (
+                Arc::clone(&entry.raw_source),
+                entry.cached_parse.clone(),
+                entry.whole_hash,
+            )
+        } else {
+            self.current_eval_state_in_view(canonical_id, store_view)?
+        };
+        let source_type = Self::imported_eval_source_type(
+            canonical_id,
+            raw_source.as_ref(),
+            cached_parse.as_deref(),
+        );
+        let eval_source = current
+            .as_ref()
+            .and_then(|entry| entry.eval_source.clone())
+            .unwrap_or_else(|| {
+                Arc::<str>::from(Self::build_eval_script_source(
+                    raw_source.as_ref(),
+                    cached_parse.as_deref(),
+                ))
+            });
+        let external_type_analysis = if eval_source.is_empty() {
+            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default()
+        } else {
+            let parsed_eval_program = self.cached_parsed_eval_program_entry(
+                canonical_id,
+                whole_hash,
+                &eval_source,
+                source_type,
+            );
+            if parsed_eval_program.parse_failed {
+                verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default()
+            } else {
+                let program = parsed_eval_program.program.borrow_dependent();
+                verter_core::utils::oxc::vue::resolve_type::analyze_external_type_program(program)
+            }
+        };
+
+        // Shallow imported state must stay route-agnostic. Keep import/export
+        // structure for later symbol-specific routing, but do not eagerly
+        // resolve the imported file's dependency map up front.
+        let (script_analysis, export_signatures, dependency_resolutions) =
+            if let Some(entry) = current.as_ref() {
+                (
+                    entry.script_analysis.clone(),
+                    entry.export_signatures.clone(),
+                    entry.dependency_resolutions.clone(),
+                )
+            } else {
+                (None, None, rustc_hash::FxHashMap::default())
+            };
+
+        Some(self.cache_imported_dependency_shallow_state(
+            canonical_id,
+            whole_hash,
+            raw_source,
+            cached_parse,
+            Some(eval_source),
+            script_analysis,
+            export_signatures,
             Some(Arc::new(external_type_analysis)),
+            dependency_resolutions,
         ))
     }
 
@@ -3435,6 +3467,48 @@ impl VerterHost {
             .map(|names| (**names).clone())
     }
 
+    pub(crate) fn required_import_names_for_exported_type_in_view(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> rustc_hash::FxHashSet<String> {
+        if let Some(cached) = self.clone_cached_required_import_names_for_exported_type(
+            canonical_id,
+            exported_name,
+            store_view,
+        ) {
+            return cached;
+        }
+
+        let required = self
+            .clone_current_imported_dependency_entry(canonical_id, store_view)
+            .and_then(|dependency| dependency.env.clone())
+            .and_then(|env| {
+                let decl = env.type_symbols.get(exported_name)?;
+                Some(collect_required_import_names_for_type_decl(decl, &env))
+            })
+            .or_else(|| {
+                self.external_type_analysis_in_view(canonical_id, store_view)
+                    .map(|analysis| analysis.required_import_names(exported_name))
+            })
+            .unwrap_or_default();
+
+        if self
+            .clone_current_imported_dependency_entry(canonical_id, store_view)
+            .is_some()
+        {
+            self.cache_required_import_names_for_exported_type(
+                canonical_id,
+                exported_name,
+                required.clone(),
+                store_view,
+            );
+        }
+
+        required
+    }
+
     fn imported_symbol_dependencies_in_view(
         &self,
         canonical_id: &str,
@@ -3519,6 +3593,167 @@ impl VerterHost {
         dependencies
     }
 
+    pub(crate) fn required_imported_symbol_dependencies_for_type_decl_in_view(
+        &self,
+        canonical_id: &str,
+        decl: &verter_analysis::type_eval::TypeDeclInfo,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Vec<ImportedSymbolDependency> {
+        let analysis = match self.external_type_analysis_in_view(canonical_id, store_view) {
+            Some(analysis) => analysis,
+            None => return Vec::new(),
+        };
+        let env = match self.base_eval_env_in_view(canonical_id, store_view) {
+            Some(env) => env,
+            None => return Vec::new(),
+        };
+        let runtime_value_roots = collect_required_runtime_value_names_for_type_decl(decl, &env);
+        let required_names = collect_required_import_names_for_type_decl(decl, &env);
+        let mut dependencies = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+
+        for required_name in required_names {
+            let root_name = required_name
+                .split('.')
+                .next()
+                .unwrap_or(required_name.as_str());
+            if runtime_value_roots.contains(root_name) || is_builtin_type_symbol(root_name) {
+                continue;
+            }
+
+            let Some((import_source, imported_name)) =
+                analysis.local_import_symbol_target(root_name)
+            else {
+                continue;
+            };
+            let imported_member = if root_name == required_name {
+                imported_name.to_string()
+            } else if let Some(suffix) = required_name.strip_prefix(root_name) {
+                format!("{}{}", imported_name, suffix)
+            } else {
+                imported_name.to_string()
+            };
+            let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
+                canonical_id,
+                import_source,
+                store_view,
+            ) else {
+                continue;
+            };
+            let (resolved_canonical, resolved_name) = self.resolve_imported_type_root_in_view(
+                dep_canonical.as_str(),
+                imported_member.as_str(),
+                store_view,
+            );
+            if seen.insert((
+                required_name.clone(),
+                resolved_canonical.clone(),
+                resolved_name.clone(),
+            )) {
+                dependencies.push(ImportedSymbolDependency {
+                    local_name: required_name,
+                    canonical_id: resolved_canonical,
+                    exported_name: resolved_name,
+                });
+            }
+        }
+
+        dependencies.sort_by(|left, right| {
+            left.local_name
+                .cmp(&right.local_name)
+                .then_with(|| left.canonical_id.cmp(&right.canonical_id))
+                .then_with(|| left.exported_name.cmp(&right.exported_name))
+        });
+        dependencies
+    }
+
+    pub(crate) fn build_shallow_imported_decl_eval_env_in_view(
+        &self,
+        canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        decl: &verter_analysis::type_eval::TypeDeclInfo,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+        let mut visiting = rustc_hash::FxHashSet::default();
+        self.build_shallow_imported_decl_eval_env_with_visiting_in_view(
+            canonical_id,
+            snapshot,
+            decl,
+            store_view,
+            &mut visiting,
+        )
+    }
+
+    fn build_shallow_imported_decl_eval_env_with_visiting_in_view(
+        &self,
+        canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        decl: &verter_analysis::type_eval::TypeDeclInfo,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+        let mut env = self.base_eval_env_in_view(canonical_id, store_view)?;
+        let owner_local_value_names: rustc_hash::FxHashSet<String> =
+            env.value_symbols.keys().cloned().collect();
+        let required_runtime_value_names =
+            collect_required_runtime_value_names_for_type_decl(decl, &env);
+        let mut required_symbol_dependencies = self.imported_symbol_dependencies_in_view(
+            canonical_id,
+            decl.name.as_str(),
+            &decl.body,
+            store_view,
+        );
+        let mut seen_symbol_dependencies = rustc_hash::FxHashSet::default();
+        for dependency in &required_symbol_dependencies {
+            seen_symbol_dependencies.insert((
+                dependency.local_name.clone(),
+                dependency.canonical_id.clone(),
+                dependency.exported_name.clone(),
+            ));
+        }
+        for dependency in self.required_imported_symbol_dependencies_for_type_decl_in_view(
+            canonical_id,
+            decl,
+            store_view,
+        ) {
+            if seen_symbol_dependencies.insert((
+                dependency.local_name.clone(),
+                dependency.canonical_id.clone(),
+                dependency.exported_name.clone(),
+            )) {
+                required_symbol_dependencies.push(dependency);
+            }
+        }
+        required_symbol_dependencies.sort_by(|left, right| {
+            left.local_name
+                .cmp(&right.local_name)
+                .then_with(|| left.canonical_id.cmp(&right.canonical_id))
+                .then_with(|| left.exported_name.cmp(&right.exported_name))
+        });
+
+        for dependency in required_symbol_dependencies {
+            env.type_symbols.remove(dependency.local_name.as_str());
+            self.materialize_shallow_type_symbol_leaf_into_env_in_view(
+                &mut env,
+                dependency.local_name.as_str(),
+                dependency.canonical_id.as_str(),
+                dependency.exported_name.as_str(),
+                store_view,
+                visiting,
+            );
+        }
+
+        self.materialize_imported_runtime_values_into_env_in_view(
+            snapshot,
+            &owner_local_value_names,
+            Some(&required_runtime_value_names),
+            &mut env,
+            store_view,
+        );
+
+        Some(env)
+    }
+
     fn clone_cached_external_type_analysis(
         &self,
         canonical_id: &str,
@@ -3538,7 +3773,22 @@ impl VerterHost {
             "external_type_analysis_in_view",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
-        if let Some(cached) = self.clone_cached_external_type_analysis(canonical_id, store_view) {
+        let resolved_canonical_id = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+        if let Some(cached) = self
+            .clone_cached_external_type_analysis(canonical_id, store_view)
+            .or_else(|| {
+                if resolved_canonical_id != canonical_id {
+                    self.clone_cached_external_type_analysis(
+                        resolved_canonical_id.as_str(),
+                        store_view,
+                    )
+                } else {
+                    None
+                }
+            })
+        {
             let stats = cached.stats();
             component_meta_trace_event!(
                 "external_type_analysis_cache_hit",
@@ -3557,8 +3807,10 @@ impl VerterHost {
             return Some(cached);
         }
 
-        let entry =
-            self.ensure_shallow_imported_dependency_state_in_view(canonical_id, store_view)?;
+        let entry = self.ensure_shallow_imported_dependency_state_in_view(
+            resolved_canonical_id.as_str(),
+            store_view,
+        )?;
         let analysis = entry.external_type_analysis.clone()?;
         let stats = analysis.stats();
         component_meta_trace_event!(
@@ -3598,7 +3850,7 @@ impl VerterHost {
             ),
         );
         let entry =
-            self.materialize_imported_dependency_state_in_view(dep_canonical, store_view)?;
+            self.ensure_shallow_imported_dependency_state_in_view(dep_canonical, store_view)?;
         let analysis = entry.external_type_analysis.as_ref()?;
         let eval_source = entry
             .eval_source
@@ -3750,7 +4002,7 @@ impl VerterHost {
         visited: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<(String, String)> {
         let normalized_canonical = self
-            .load_eval_dependency_canonical_with_fallback_in_view(dep_canonical, store_view)
+            .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
         let visit_key = (normalized_canonical.clone(), requested_name.to_string());
         if !visited.insert(visit_key) {
@@ -3837,10 +4089,6 @@ impl VerterHost {
                     .and_then(|resolutions| resolutions.get(import_source))
                     .and_then(DependencyResolution::effective_target)
                     .map(str::to_string)
-            })
-            .or_else(|| {
-                (store_view.is_none() && import_source.starts_with('.'))
-                    .then(|| crate::id::resolve_external(owner_canonical_id, import_source))
             });
         component_meta_trace_event!(
             "resolve_imported_dependency_canonical_in_view_result",
@@ -3875,7 +4123,7 @@ impl VerterHost {
         }
 
         let normalized_canonical = self
-            .load_eval_dependency_canonical_with_fallback_in_view(dep_canonical, store_view)
+            .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
 
         let _ = self.ensure_shallow_imported_dependency_state_in_view(
@@ -3903,16 +4151,13 @@ impl VerterHost {
             )
             .map(|(canonical, exported_name)| {
                 let canonical = self
-                    .load_eval_dependency_canonical_with_fallback_in_view(
-                        canonical.as_str(),
-                        store_view,
-                    )
+                    .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
                     .unwrap_or(canonical);
                 (canonical, exported_name)
             })
             .unwrap_or_else(|| {
                 let canonical = self
-                    .load_eval_dependency_canonical_with_fallback_in_view(
+                    .resolve_eval_dependency_canonical_in_view(
                         normalized_canonical.as_str(),
                         store_view,
                     )
@@ -3944,7 +4189,7 @@ impl VerterHost {
         }
 
         let normalized_canonical = self
-            .load_eval_dependency_canonical_with_fallback_in_view(dep_canonical, store_view)
+            .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
 
         let _ = self.ensure_shallow_imported_dependency_state_in_view(
@@ -4281,6 +4526,7 @@ impl VerterHost {
         external_type_analysis: Option<
             Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
         >,
+        dependency_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
     ) -> Arc<crate::ImportedDependencyCacheEntry> {
         self.cache_imported_dependency(
             canonical_id,
@@ -4302,7 +4548,7 @@ impl VerterHost {
                 resolved_type_declarations: rustc_hash::FxHashMap::default(),
                 prepared_type_aliases: rustc_hash::FxHashMap::default(),
                 evaluated_type_decls: rustc_hash::FxHashMap::default(),
-                dependency_resolutions: rustc_hash::FxHashMap::default(),
+                dependency_resolutions,
             },
         )
     }
@@ -4411,99 +4657,42 @@ impl VerterHost {
             "base_eval_env",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
-        if let Some(imported_entry) =
-            self.materialize_imported_dependency_state_in_view(canonical_id, store_view)
-        {
-            let whole_hash = imported_entry.whole_hash;
-            if let Some(cached_env) = self.clone_cached_eval_env_arc(canonical_id, whole_hash) {
-                component_meta_trace_event!(
-                    "base_eval_env_cache_hit",
-                    format!("owner={} whole_hash={whole_hash:?}", canonical_id),
-                );
-                return Some(cached_env);
-            }
-
-            if let Some(cached_env) = imported_entry.env.clone() {
-                component_meta_trace_event!(
-                    "base_eval_env_imported_cache_hit",
-                    format!("owner={} whole_hash={whole_hash:?}", canonical_id),
-                );
-                return Some(self.cache_eval_env_arc(
-                    &[canonical_id.to_string()],
-                    whole_hash,
-                    cached_env,
-                ));
-            }
-
-            let eval_source = imported_entry.eval_source.clone().unwrap_or_else(|| {
-                Arc::<str>::from(Self::build_eval_script_source(
-                    imported_entry.raw_source.as_ref(),
-                    imported_entry.cached_parse.as_deref(),
-                ))
-            });
-            let env = imported_entry
-                .env
-                .as_ref()
-                .map(Arc::clone)
-                .unwrap_or_else(|| {
-                    let mut env =
-                        verter_analysis::type_eval_build::parse_and_build_env(eval_source.as_ref());
-                    Self::apply_sfc_script_setup_type_params(
-                        &mut env,
-                        imported_entry.raw_source.as_ref(),
-                        imported_entry.cached_parse.as_deref(),
-                    );
-                    Arc::new(env)
-                });
-            component_meta_trace_event!(
-                "base_eval_env_built",
-                format!(
-                    "owner={} source_len={} eval_source_len={} type_symbols={} value_symbols={}",
-                    canonical_id,
-                    imported_entry.raw_source.len(),
-                    eval_source.len(),
-                    env.type_symbols.len(),
-                    env.value_symbols.len(),
-                ),
-            );
-            return Some(self.cache_eval_env_arc(&[canonical_id.to_string()], whole_hash, env));
-        }
-
-        let (resolved_canonical_id, eval_source) =
-            self.load_eval_dependency_source_with_fallback_in_view(canonical_id, store_view)?;
-        let whole_hash = crate::hash::hash_16(eval_source.as_bytes());
-
-        if let Some(cached_env) = self.clone_cached_eval_env_arc(&resolved_canonical_id, whole_hash)
+        let resolved_canonical_id = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+        let imported_cache_keys = if resolved_canonical_id == canonical_id {
+            vec![canonical_id.to_string()]
+        } else {
+            vec![canonical_id.to_string(), resolved_canonical_id.clone()]
+        };
+        let imported_entry = self.materialize_imported_dependency_state_in_view(
+            resolved_canonical_id.as_str(),
+            store_view,
+        )?;
+        let whole_hash = imported_entry.whole_hash;
+        if let Some(cached_env) = self
+            .clone_cached_eval_env_arc(canonical_id, whole_hash)
+            .or_else(|| {
+                if resolved_canonical_id != canonical_id {
+                    self.clone_cached_eval_env_arc(resolved_canonical_id.as_str(), whole_hash)
+                } else {
+                    None
+                }
+            })
         {
             component_meta_trace_event!(
-                "base_eval_env_dependency_cache_hit",
-                format!(
-                    "owner={} resolved_owner={} whole_hash={whole_hash:?}",
-                    canonical_id, resolved_canonical_id
-                ),
+                "base_eval_env_cache_hit",
+                format!("owner={} whole_hash={whole_hash:?}", canonical_id),
             );
             return Some(cached_env);
         }
 
-        let env = Arc::new(verter_analysis::type_eval_build::parse_and_build_env(
-            eval_source.as_ref(),
-        ));
+        let cached_env = imported_entry.env.clone()?;
         component_meta_trace_event!(
-            "base_eval_env_dependency_built",
-            format!(
-                "owner={} resolved_owner={} eval_source_len={} type_symbols={} value_symbols={}",
-                canonical_id,
-                resolved_canonical_id,
-                eval_source.len(),
-                env.type_symbols.len(),
-                env.value_symbols.len(),
-            ),
+            "base_eval_env_imported_cache_hit",
+            format!("owner={} whole_hash={whole_hash:?}", canonical_id),
         );
-        Some(self.cache_eval_env_arc(
-            &[resolved_canonical_id, canonical_id.to_string()],
-            whole_hash,
-            env,
-        ))
+        Some(self.cache_eval_env_arc(&imported_cache_keys, whole_hash, cached_env))
     }
 
     pub(crate) fn local_type_declaration_id_in_view(
@@ -4582,13 +4771,26 @@ impl VerterHost {
             .collect()
     }
 
-    fn dependency_resolutions_from_snapshot_in_view(
+    fn dependency_resolutions_from_parts_in_view(
         &self,
         canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
+        imports: &[verter_analysis::AnalyzedImport],
+        export_signatures: &[verter_analysis::ExportSignature],
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
-        let mut resolutions = Self::dependency_resolutions_from_snapshot(snapshot);
+        let mut resolutions: rustc_hash::FxHashMap<String, DependencyResolution> = imports
+            .iter()
+            .map(|import| {
+                (
+                    import.source.clone(),
+                    DependencyResolution {
+                        specifier: import.source.clone(),
+                        resolved_canonical_id: import.resolved_canonical_id.clone(),
+                        possible_canonical_ids: Vec::new(),
+                    },
+                )
+            })
+            .collect();
         let declaration_file = canonical_id.ends_with(".d.ts")
             || canonical_id.ends_with(".d.mts")
             || canonical_id.ends_with(".d.cts");
@@ -4596,7 +4798,7 @@ impl VerterHost {
         let mut upsert_resolution =
             |specifier: &str, kind: verter_vfs::ResolveRequestKind, prefer_live_fallback: bool| {
                 let existing = resolutions.get(specifier).cloned();
-                let resolved = existing
+                let resolved: Option<String> = existing
                     .as_ref()
                     .and_then(|resolution| {
                         resolution
@@ -4605,8 +4807,11 @@ impl VerterHost {
                             .or_else(|| resolution.effective_target().map(str::to_string))
                     })
                     .or_else(|| match kind {
+                        // Snapshot dependency maps must stay structural: selecting a route may
+                        // consult these cached targets, but only the eventual chosen target is
+                        // allowed to deepen into eval-source fallback or companion loading.
                         verter_vfs::ResolveRequestKind::TypeImport => self
-                            .resolve_type_dependency_canonical_in_view(
+                            .resolve_type_dependency_canonical_shallow_in_view(
                                 canonical_id,
                                 specifier,
                                 store_view,
@@ -4649,7 +4854,7 @@ impl VerterHost {
                 }
             };
 
-        for import in &snapshot.imports {
+        for import in imports {
             let kind = if import.is_type_only {
                 verter_vfs::ResolveRequestKind::TypeImport
             } else {
@@ -4658,7 +4863,7 @@ impl VerterHost {
             upsert_resolution(import.source.as_str(), kind, false);
         }
 
-        for sig in snapshot.export_signatures.iter() {
+        for sig in export_signatures {
             let Some(source) = sig.reexport_source.as_deref() else {
                 continue;
             };
@@ -4671,6 +4876,20 @@ impl VerterHost {
         }
 
         resolutions
+    }
+
+    fn dependency_resolutions_from_snapshot_in_view(
+        &self,
+        canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
+        self.dependency_resolutions_from_parts_in_view(
+            canonical_id,
+            &snapshot.imports,
+            &snapshot.export_signatures,
+            store_view,
+        )
     }
 
     pub(crate) fn build_snapshot_from_source(
@@ -5025,14 +5244,14 @@ impl VerterHost {
         }
     }
 
-    fn load_eval_dependency_source_with_fallback_in_view(
+    pub(crate) fn resolve_eval_dependency_canonical_in_view(
         &self,
         dep_canonical: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<(String, Arc<str>)> {
-        let read_candidate = |candidate: &str| -> Option<Arc<str>> {
-            self.ensure_shallow_imported_dependency_state_in_view(candidate, store_view)
-                .and_then(|entry| entry.eval_source.clone())
+    ) -> Option<String> {
+        let read_candidate = |candidate: &str| {
+            self.current_eval_state_in_view(candidate, store_view)
+                .is_some()
         };
 
         let prefers_type_companion = dep_canonical.ends_with(".js")
@@ -5063,42 +5282,24 @@ impl VerterHost {
         ]);
 
         if !prefers_type_companion {
-            if let Some(source) = read_candidate(dep_canonical) {
-                return Some((dep_canonical.to_string(), source));
+            if read_candidate(dep_canonical) {
+                return Some(dep_canonical.to_string());
             }
         }
 
         for candidate in candidates {
-            if let Some(source) = read_candidate(&candidate) {
-                return Some((candidate, source));
+            if read_candidate(&candidate) {
+                return Some(candidate);
             }
         }
 
         if prefers_type_companion {
-            if let Some(source) = read_candidate(dep_canonical) {
-                return Some((dep_canonical.to_string(), source));
+            if read_candidate(dep_canonical) {
+                return Some(dep_canonical.to_string());
             }
         }
 
         None
-    }
-
-    pub(crate) fn load_eval_dependency_canonical_with_fallback_in_view(
-        &self,
-        dep_canonical: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<String> {
-        self.load_eval_dependency_source_with_fallback_in_view(dep_canonical, store_view)
-            .map(|(canonical, _)| canonical)
-    }
-
-    fn load_eval_dependency_source_text_with_fallback_in_view(
-        &self,
-        dep_canonical: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Arc<str>> {
-        self.load_eval_dependency_source_with_fallback_in_view(dep_canonical, store_view)
-            .map(|(_, source)| source)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -5276,18 +5477,16 @@ impl VerterHost {
         &self,
         owner_canonical_id: &str,
         owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-        allow_relative_fallback: bool,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         canonical_dependencies: &mut std::collections::BTreeSet<String>,
     ) {
         let _trace = component_meta_trace_scope!(
             "track_direct_eval_dependencies",
             format!(
-                "owner={} macro_type_deps={} imports={} allow_relative_fallback={} dep_resolutions={}",
+                "owner={} macro_type_deps={} imports={} dep_resolutions={}",
                 owner_canonical_id,
                 owner_snapshot.macro_type_deps.len(),
                 owner_snapshot.imports.len(),
-                allow_relative_fallback,
                 dep_resolutions.len(),
             ),
         );
@@ -5299,11 +5498,6 @@ impl VerterHost {
                         .get(&dep.import_source)
                         .and_then(|resolution| resolution.resolved_canonical_id.clone())
                 })
-                .or_else(|| {
-                    (allow_relative_fallback && dep.import_source.starts_with('.')).then(|| {
-                        crate::id::resolve_external(owner_canonical_id, &dep.import_source)
-                    })
-                })
             {
                 canonical_dependencies.insert(dep_canonical);
             }
@@ -5314,20 +5508,12 @@ impl VerterHost {
             .iter()
             .filter(|import| !import.is_type_only)
         {
-            if let Some(dep_canonical) = import
-                .resolved_canonical_id
-                .clone()
-                .or_else(|| {
-                    dep_resolutions
-                        .get(&import.source)
-                        .and_then(DependencyResolution::effective_target)
-                        .map(str::to_string)
-                })
-                .or_else(|| {
-                    (allow_relative_fallback && import.source.starts_with('.'))
-                        .then(|| crate::id::resolve_external(owner_canonical_id, &import.source))
-                })
-            {
+            if let Some(dep_canonical) = import.resolved_canonical_id.clone().or_else(|| {
+                dep_resolutions
+                    .get(&import.source)
+                    .and_then(DependencyResolution::effective_target)
+                    .map(str::to_string)
+            }) {
                 canonical_dependencies.insert(dep_canonical);
             }
         }
@@ -5580,23 +5766,29 @@ impl VerterHost {
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = component_meta_debug_enabled().then(Instant::now);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let store_view = self.resolver_store_view();
 
-        let resolved =
-            self.resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)?;
+        let resolved = self.resolve_component_meta_in_view(
+            canonical.as_str(),
+            crate::types::ResolverMode::Expanded,
+            &store_view,
+        )?;
         let include_fallthrough = match resolved.cached_eval_inputs.as_ref() {
             Some(inputs) => inputs.overflow.is_none(),
             None => true,
         };
         let meta = extract_component_meta_from_resolved(
             self,
-            canonical_or_alias,
+            canonical.as_str(),
             &resolved,
             include_fallthrough,
+            Some(&store_view),
         );
         if let Some(started) = started {
             component_meta_debug(format!(
                 "get_component_meta owner={} took {:?}",
-                self.resolve_alias_or_canonical(canonical_or_alias),
+                canonical,
                 started.elapsed(),
             ));
         }
@@ -5617,18 +5809,24 @@ impl VerterHost {
         self.provenance
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let store_view = self.resolver_store_view();
 
-        let resolved =
-            self.resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)?;
+        let resolved = self.resolve_component_meta_in_view(
+            canonical.as_str(),
+            crate::types::ResolverMode::Expanded,
+            &store_view,
+        )?;
         let include_fallthrough = match resolved.cached_eval_inputs.as_ref() {
             Some(inputs) => inputs.overflow.is_none(),
             None => true,
         };
         let analysis = extract_component_meta_from_resolved(
             self,
-            canonical_or_alias,
+            canonical.as_str(),
             &resolved,
             include_fallthrough,
+            Some(&store_view),
         );
         Some((analysis, resolved))
     }
@@ -5830,6 +6028,25 @@ impl VerterHost {
                 store_view,
             )?
         };
+        self.compute_fallthrough_surface_from_resolved_state(
+            canonical_id,
+            &resolved,
+            prop_type_overrides,
+            visiting,
+            store_view,
+        )
+    }
+
+    pub(crate) fn compute_fallthrough_surface_from_resolved_state(
+        &self,
+        canonical_id: &str,
+        resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+        prop_type_overrides: Option<
+            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+        >,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<crate::types::FallthroughResolution> {
         let fallthrough_fact_versions = resolved.fact_versions.clone();
 
         let resolved_macros = resolver_component_meta_resolved_macros(
@@ -5965,6 +6182,31 @@ impl VerterHost {
         )
     }
 
+    pub(crate) fn build_component_meta_registry_eval_env_in_view(
+        &self,
+        canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        imported_inputs: Option<&ImportedEvalInputs>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+        let owner_env = self.base_eval_env_in_view(canonical_id, store_view);
+        let Some(imported_inputs) = imported_inputs else {
+            return owner_env;
+        };
+
+        self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
+            canonical_id,
+            snapshot,
+            imported_inputs,
+            None,
+            owner_env.clone(),
+            None,
+            store_view,
+        )
+        .map(|built| built.env)
+        .or(owner_env)
+    }
+
     fn build_owner_eval_env_with_inputs_from_owner_env_in_view(
         &self,
         canonical_id: &str,
@@ -6076,7 +6318,27 @@ impl VerterHost {
         );
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn resolve_shallow_symbol_dependency_alias_in_view(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<(
+        String,
+        String,
+        verter_resolver::CachedPreparedImportedTypeAlias,
+    )> {
+        let mut visiting = rustc_hash::FxHashSet::default();
+        self.resolve_shallow_symbol_dependency_alias_with_visiting_in_view(
+            canonical_id,
+            exported_name,
+            store_view,
+            &mut visiting,
+        )
+    }
+
+    pub(crate) fn resolve_prepared_symbol_dependency_alias_in_view(
         &self,
         canonical_id: &str,
         exported_name: &str,
@@ -6125,32 +6387,76 @@ impl VerterHost {
             cached
         };
 
-        let mut hydrated = cached.clone();
-        if hydrated.requires_source_merge {
-            let mut env = self
-                .base_eval_env_in_view(resolved_canonical_id.as_str(), store_view)
-                .unwrap_or_default();
-            let mut visiting = rustc_hash::FxHashSet::default();
-            for child in &hydrated.symbol_dependencies {
-                self.materialize_shallow_type_symbol_into_env_in_view(
-                    &mut env,
-                    child.local_name.as_str(),
-                    child.canonical_id.as_str(),
-                    child.exported_name.as_str(),
-                    store_view,
-                    &mut visiting,
-                );
+        Some((resolved_canonical_id, resolved_exported_name, cached))
+    }
+
+    fn resolve_shallow_symbol_dependency_alias_with_visiting_in_view(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+    ) -> Option<(
+        String,
+        String,
+        verter_resolver::CachedPreparedImportedTypeAlias,
+    )> {
+        let (resolved_canonical_id, resolved_exported_name, cached) = self
+            .resolve_prepared_symbol_dependency_alias_in_view(
+                canonical_id,
+                exported_name,
+                store_view,
+            )?;
+        let visit_key = (
+            resolved_canonical_id.clone(),
+            resolved_exported_name.clone(),
+        );
+        let inserted_visit = visiting.insert(visit_key.clone());
+
+        let result = (|| {
+            let mut hydrated = cached.clone();
+            if hydrated.requires_source_merge {
+                let evaluated = self
+                    .clone_current_imported_dependency_entry(
+                        resolved_canonical_id.as_str(),
+                        store_view,
+                    )
+                    .and_then(|dependency| dependency.snapshot.clone())
+                    .and_then(|snapshot| {
+                        self.build_shallow_imported_decl_eval_env_with_visiting_in_view(
+                            resolved_canonical_id.as_str(),
+                            snapshot.as_ref(),
+                            &hydrated.decl,
+                            store_view,
+                            visiting,
+                        )
+                    })
+                    .map(|mut env| {
+                        verter_analysis::type_eval::evaluate(&hydrated.decl.body, &mut env)
+                    });
+                if let Some(preferred) = verter_resolver::choose_preferred_imported_type_body(
+                    evaluated,
+                    Some(hydrated.decl.body.clone()),
+                ) {
+                    hydrated.decl.body = preferred;
+                    hydrated.requires_source_merge = false;
+                    self.cache_prepared_imported_type_alias(
+                        resolved_canonical_id.as_str(),
+                        resolved_exported_name.as_str(),
+                        hydrated.clone(),
+                        store_view,
+                    );
+                }
             }
-            let evaluated = verter_analysis::type_eval::evaluate(&hydrated.decl.body, &mut env);
-            if let Some(preferred) = verter_resolver::choose_preferred_imported_type_body(
-                Some(evaluated),
-                Some(hydrated.decl.body.clone()),
-            ) {
-                hydrated.decl.body = preferred;
-            }
+
+            Some((resolved_canonical_id, resolved_exported_name, hydrated))
+        })();
+
+        if inserted_visit {
+            visiting.remove(&visit_key);
         }
 
-        Some((resolved_canonical_id, resolved_exported_name, hydrated))
+        result
     }
 
     fn materialize_shallow_type_symbol_into_env_in_view(
@@ -6160,51 +6466,66 @@ impl VerterHost {
         canonical_id: &str,
         exported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-        visiting: &mut rustc_hash::FxHashSet<(String, String, String)>,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+    ) -> bool {
+        self.materialize_shallow_type_symbol_leaf_into_env_in_view(
+            env,
+            local_name,
+            canonical_id,
+            exported_name,
+            store_view,
+            visiting,
+        )
+    }
+
+    fn materialize_shallow_type_symbol_leaf_into_env_in_view(
+        &self,
+        env: &mut verter_analysis::type_eval::EvalEnv,
+        local_name: &str,
+        canonical_id: &str,
+        exported_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> bool {
         if env.type_symbols.contains_key(local_name) {
             return false;
         }
 
-        let visit_key = (
-            local_name.to_string(),
-            canonical_id.to_string(),
-            exported_name.to_string(),
-        );
+        let visit_key = (canonical_id.to_string(), exported_name.to_string());
         if !visiting.insert(visit_key.clone()) {
-            return false;
+            return self
+                .base_eval_env_in_view(canonical_id, store_view)
+                .and_then(|dep_env| dep_env.type_symbols.get(exported_name).cloned())
+                .map(|mut decl| {
+                    decl.name = local_name.to_string();
+                    env.add_type(decl);
+                    true
+                })
+                .unwrap_or(false);
         }
 
-        let prepared = self.resolve_shallow_symbol_dependency_alias_in_view(
+        let prepared = self.resolve_shallow_symbol_dependency_alias_with_visiting_in_view(
             canonical_id,
             exported_name,
             store_view,
+            visiting,
         );
 
         let inserted =
-            if let Some((resolved_canonical_id, _resolved_exported_name, prepared)) = prepared {
-                if !prepared.requires_source_merge && !prepared.symbol_dependencies.is_empty() {
-                    if let Some(dep_env) =
-                        self.base_eval_env_in_view(resolved_canonical_id.as_str(), store_view)
-                    {
-                        env.extend_missing_from_ref(&dep_env);
-                    }
-                }
-                for child in &prepared.symbol_dependencies {
-                    if prepared.requires_source_merge {
-                        self.materialize_shallow_type_symbol_into_env_in_view(
-                            env,
-                            child.local_name.as_str(),
-                            child.canonical_id.as_str(),
-                            child.exported_name.as_str(),
-                            store_view,
-                            visiting,
-                        );
-                    }
-                }
+            if let Some((_resolved_canonical_id, _resolved_exported_name, prepared)) = prepared {
                 let mut decl = prepared.decl.clone();
                 decl.name = local_name.to_string();
                 env.add_type(decl);
+                for dependency in &prepared.symbol_dependencies {
+                    self.materialize_shallow_type_symbol_leaf_into_env_in_view(
+                        env,
+                        dependency.local_name.as_str(),
+                        dependency.canonical_id.as_str(),
+                        dependency.exported_name.as_str(),
+                        store_view,
+                        visiting,
+                    );
+                }
                 true
             } else {
                 self.base_eval_env_in_view(canonical_id, store_view)
@@ -8604,7 +8925,7 @@ impl VerterHost {
         }
 
         if let Some(entry) =
-            self.ensure_shallow_imported_dependency_state_in_view(&canonical, store_view)
+            self.ensure_shallow_imported_export_state_in_view(&canonical, store_view)
         {
             if let (Some(script_analysis), Some(export_signatures)) = (
                 entry.script_analysis.as_ref(),
@@ -8621,27 +8942,7 @@ impl VerterHost {
                 ));
             }
         }
-
-        let source = self.read_analysis_source_in_view(&canonical, store_view)?;
-        if canonical.ends_with(".vue") {
-            let (snapshot, _) = crate::parse::parse_vue_snapshot(
-                &canonical,
-                source.as_ref(),
-                self.config.effective_scope(),
-            );
-            Some((
-                FileKind::VueSfc,
-                snapshot.script_analysis,
-                snapshot.export_signatures,
-            ))
-        } else {
-            let snapshot = crate::parse::parse_non_sfc_snapshot(&canonical, source.as_ref());
-            Some((
-                FileKind::NonSfc,
-                snapshot.script_analysis,
-                snapshot.export_signatures,
-            ))
-        }
+        None
     }
 
     /// Look up the byte span of an exported name in a target file.
@@ -9699,6 +10000,49 @@ fn collect_required_import_names_for_type_decl(
     required
 }
 
+fn collect_required_runtime_value_names_for_type_decl(
+    decl: &verter_analysis::type_eval::TypeDeclInfo,
+    owner_env: &verter_analysis::type_eval::EvalEnv,
+) -> rustc_hash::FxHashSet<String> {
+    let mut required = rustc_hash::FxHashSet::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut type_bindings = rustc_hash::FxHashMap::default();
+
+    for param in &decl.type_parameters {
+        type_bindings.insert(
+            param.name.clone(),
+            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
+        );
+        if let Some(constraint) = param.constraint.as_deref() {
+            collect_runtime_value_names_from_expr(
+                constraint,
+                owner_env,
+                &type_bindings,
+                &mut active_locals,
+                &mut required,
+            );
+        }
+        if let Some(default) = param.default.as_deref() {
+            collect_runtime_value_names_from_expr(
+                default,
+                owner_env,
+                &type_bindings,
+                &mut active_locals,
+                &mut required,
+            );
+        }
+    }
+
+    collect_runtime_value_names_from_expr(
+        &decl.body,
+        owner_env,
+        &type_bindings,
+        &mut active_locals,
+        &mut required,
+    );
+    required
+}
+
 fn collect_required_import_names_for_symbol(
     symbol: &str,
     owner_env: &verter_analysis::type_eval::EvalEnv,
@@ -9815,8 +10159,12 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Infer { .. }
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::TypeOf(_) => {}
+        | TypeExpr::Unknown { .. } => {}
+        TypeExpr::TypeOf(value_ref) => {
+            if let Some(root) = value_ref.path.first() {
+                required.insert(root.clone());
+            }
+        }
         TypeExpr::TypeParameter(param) => {
             if let Some(constraint) = param.constraint.as_deref() {
                 collect_slot_eval_import_names_from_expr_with_mode(
@@ -10629,7 +10977,11 @@ fn collect_surface_eval_import_names_from_expr(
                 }
             }
         }
-        TypeExpr::TypeOf(_) => {}
+        TypeExpr::TypeOf(value_ref) => {
+            if let Some(root) = value_ref.path.first() {
+                required.insert(root.clone());
+            }
+        }
         TypeExpr::IndexedAccess { object, index } => {
             if let TypeExpr::Literal(verter_analysis::type_expr::LiteralValue::String(key)) =
                 index.as_ref()
@@ -10996,20 +11348,18 @@ fn extract_component_meta_from_inputs(
     resolved_macros: &[verter_analysis::component_meta::ResolvedMacroInput],
     resolved_type_registry: &[verter_analysis::component_meta::ResolvedTypeAnalysis],
     evaluated_types: Option<&verter_analysis::type_expand::ExpandedComponentTypes>,
-    include_fallthrough: bool,
 ) -> verter_analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let _trace = component_meta_trace_scope!(
         "extract_component_meta",
         format!(
-            "owner={} macros={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} include_fallthrough={}",
+            "owner={} macros={} resolved_macros={} resolved_type_registry={} has_evaluated_types={}",
             canonical,
             snapshot.macros.len(),
             resolved_macros.len(),
             resolved_type_registry.len(),
             evaluated_types.is_some(),
-            include_fallthrough,
         ),
     );
     let input = verter_analysis::component_meta::ComponentMetaInput {
@@ -11041,35 +11391,282 @@ fn extract_component_meta_from_inputs(
         ),
     );
 
-    if include_fallthrough {
-        if let Some(resolution) = host.resolve_fallthrough_surface(&canonical) {
-            meta.accepted_props = resolution.accepted_props;
-            meta.accepted_events = resolution.accepted_events;
-            meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
-            meta.fallthrough_surface = resolution.fallthrough_surface;
-            component_meta_trace_event!(
-                "extract_component_meta_fallthrough_surface",
-                format!(
-                    "owner={} accepted_props={} accepted_events={} completeness={:?}",
-                    canonical,
-                    meta.accepted_props.len(),
-                    meta.accepted_events.len(),
-                    meta.accepted_surface_completeness,
-                ),
-            );
-        }
-    }
-
     if let Some(started) = started {
         component_meta_debug(format!(
-            "extract_component_meta owner={} include_fallthrough={} took {:?}",
+            "extract_component_meta owner={} took {:?}",
             canonical,
-            include_fallthrough,
             started.elapsed(),
         ));
     }
 
+    populate_public_instance_sidecar(&mut meta);
+    populate_sfc_blocks_sidecar(host, &canonical, &mut meta);
     meta
+}
+
+fn parse_annotation_or_unknown_for_public_instance(
+    raw: &str,
+) -> verter_analysis::type_expr::TypeExpr {
+    let parsed = verter_analysis::type_expr_lower::parse_type_annotation(raw);
+    if parsed.is_unknown() {
+        verter_analysis::type_expr::TypeExpr::Unknown {
+            raw: raw.to_string(),
+        }
+    } else {
+        parsed
+    }
+}
+
+fn build_public_instance_slot_type(
+    slot: &verter_analysis::component_meta::SlotAnalysis,
+) -> verter_analysis::type_expr::TypeExpr {
+    let parameter_type = verter_analysis::type_expr::TypeExpr::Object(Arc::new(
+        verter_analysis::type_expr::ObjectExpr {
+            properties: slot
+                .bindings
+                .iter()
+                .map(|binding| {
+                    verter_analysis::type_expr::ObjectMember::Property(
+                        verter_analysis::type_expr::ObjectProperty {
+                            name: binding.name.clone(),
+                            ty: binding.type_expr.clone(),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )
+                })
+                .collect(),
+        },
+    ));
+    let return_type = slot
+        .return_type
+        .as_deref()
+        .map(parse_annotation_or_unknown_for_public_instance)
+        .unwrap_or(verter_analysis::type_expr::TypeExpr::Primitive(
+            verter_analysis::type_expr::PrimitiveName::Unknown,
+        ));
+    let function = verter_analysis::type_expr::TypeExpr::Function(Arc::new(
+        verter_analysis::type_expr::FunctionExpr {
+            parameters: if slot.bindings.is_empty() {
+                Vec::new()
+            } else {
+                vec![verter_analysis::type_expr::FunctionParam {
+                    name: Some("props".to_string()),
+                    ty: parameter_type,
+                    optional: false,
+                    rest: false,
+                }]
+            },
+            return_type: Some(Arc::new(return_type)),
+            type_parameters: Vec::new(),
+        },
+    ));
+    if slot.is_required {
+        function
+    } else {
+        verter_analysis::type_expr::TypeExpr::union(vec![
+            function,
+            verter_analysis::type_expr::TypeExpr::Primitive(
+                verter_analysis::type_expr::PrimitiveName::Undefined,
+            ),
+        ])
+    }
+}
+
+fn build_public_instance_slots_member(
+    slots: &[verter_analysis::component_meta::SlotAnalysis],
+) -> verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+    let slot_properties = slots
+        .iter()
+        .map(|slot| {
+            verter_analysis::type_expr::ObjectMember::Property(
+                verter_analysis::type_expr::ObjectProperty {
+                    name: slot.name.clone(),
+                    ty: build_public_instance_slot_type(slot),
+                    optional: !slot.is_required,
+                    readonly: false,
+                },
+            )
+        })
+        .collect();
+
+    verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+        name: "$slots".to_string(),
+        kind: verter_analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
+        type_expr: verter_analysis::type_expr::TypeExpr::Object(Arc::new(
+            verter_analysis::type_expr::ObjectExpr {
+                properties: slot_properties,
+            },
+        )),
+        type_expansion: None,
+        raw_type: None,
+        description: None,
+    }
+}
+
+fn string_from_span(source: &str, span: Option<verter_core::common::Span>) -> Option<String> {
+    span.map(|span| source[span.start as usize..span.end as usize].to_string())
+}
+
+fn sfc_attributes_from_props(
+    props: &[verter_core::types::NodeProp],
+    source: &str,
+) -> Vec<verter_analysis::component_meta::SfcAttributeAnalysis> {
+    crate::parse::extract_attrs(props, source)
+        .into_iter()
+        .map(
+            |(name, value)| verter_analysis::component_meta::SfcAttributeAnalysis {
+                name: name.to_string(),
+                value: if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                },
+            },
+        )
+        .collect()
+}
+
+fn sfc_custom_block_type(source: &str, tag_open: &verter_core::types::NodeTag) -> String {
+    source[tag_open.start as usize + 1..tag_open.name_end as usize].to_string()
+}
+
+pub(crate) fn populate_sfc_blocks_sidecar(
+    host: &VerterHost,
+    canonical_id: &str,
+    meta: &mut verter_analysis::component_meta::ComponentMetaAnalysis,
+) {
+    if !canonical_id.ends_with(".vue") {
+        return;
+    }
+
+    let Some((source, cached_parse, _)) = host.current_eval_state(canonical_id) else {
+        return;
+    };
+    let Some(parsed) = cached_parse.as_deref() else {
+        return;
+    };
+    let source = source.as_ref();
+
+    let template = parsed.template_ast().map(|template| {
+        let attrs = crate::parse::extract_attrs(&template.root.attributes, source);
+        verter_analysis::component_meta::TemplateBlockAnalysis {
+            lang: string_from_span(source, template.root.lang),
+            src: crate::parse::find_attr(&attrs, "src"),
+            attributes: sfc_attributes_from_props(&template.root.attributes, source),
+        }
+    });
+
+    let script = parsed.script().map(|script| {
+        let attrs = crate::parse::extract_attrs(&script.attributes, source);
+        verter_analysis::component_meta::ScriptBlockAnalysis {
+            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+            src: crate::parse::find_attr(&attrs, "src"),
+            generic: string_from_span(source, script.generic),
+            attrs_type: string_from_span(source, script.attrs),
+            attributes: sfc_attributes_from_props(&script.attributes, source),
+        }
+    });
+
+    let script_setup = parsed.script_setup().map(|script| {
+        let attrs = crate::parse::extract_attrs(&script.attributes, source);
+        verter_analysis::component_meta::ScriptBlockAnalysis {
+            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+            src: crate::parse::find_attr(&attrs, "src"),
+            generic: string_from_span(source, script.generic),
+            attrs_type: string_from_span(source, script.attrs),
+            attributes: sfc_attributes_from_props(&script.attributes, source),
+        }
+    });
+
+    let styles = parsed
+        .style_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, style)| {
+            let attrs = crate::parse::extract_attrs(&style.attributes, source);
+            verter_analysis::component_meta::StyleBlockInfoAnalysis {
+                index,
+                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+                src: crate::parse::find_attr(&attrs, "src"),
+                scoped: style.scoped,
+                is_module: style.module,
+                module_name: crate::parse::find_attr(&attrs, "module")
+                    .filter(|value| value != "true"),
+                attributes: sfc_attributes_from_props(&style.attributes, source),
+            }
+        })
+        .collect();
+
+    let custom = parsed
+        .unknown_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let attrs = crate::parse::extract_attrs(&block.attributes, source);
+            verter_analysis::component_meta::CustomBlockAnalysis {
+                index,
+                block_type: sfc_custom_block_type(source, &block.tag_open),
+                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+                src: crate::parse::find_attr(&attrs, "src"),
+                attributes: sfc_attributes_from_props(&block.attributes, source),
+            }
+        })
+        .collect();
+
+    meta.sfc_blocks = Some(verter_analysis::component_meta::SfcBlocksAnalysis {
+        template,
+        script,
+        script_setup,
+        styles,
+        custom,
+    });
+}
+
+pub(crate) fn populate_public_instance_sidecar(
+    meta: &mut verter_analysis::component_meta::ComponentMetaAnalysis,
+) {
+    let mut members = Vec::new();
+
+    if !meta.slots.is_empty() {
+        members.push(build_public_instance_slots_member(&meta.slots));
+    }
+
+    members.extend(meta.props.iter().map(|prop| {
+        verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+            name: prop.name.clone(),
+            kind: verter_analysis::component_meta::PublicInstanceMemberKind::Prop,
+            type_expr: prop.type_expr.clone(),
+            type_expansion: prop.type_expansion.clone(),
+            raw_type: prop.raw_type.clone(),
+            description: prop.description.clone(),
+        }
+    }));
+
+    for exposed in &meta.exposed {
+        let next = verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+            name: exposed.name.clone(),
+            kind: verter_analysis::component_meta::PublicInstanceMemberKind::Exposed,
+            type_expr: exposed.type_expr.clone(),
+            type_expansion: exposed.type_expansion.clone(),
+            raw_type: None,
+            description: exposed.description.clone(),
+        };
+        if let Some(existing) = members.iter_mut().find(|member| member.name == next.name) {
+            *existing = next;
+        } else {
+            members.push(next);
+        }
+    }
+
+    meta.public_instance = if members.is_empty() {
+        None
+    } else {
+        Some(verter_analysis::component_meta::PublicInstanceAnalysis {
+            members,
+            completeness: verter_analysis::component_meta::PublicInstanceCompleteness::Partial,
+        })
+    };
 }
 
 pub(crate) fn extract_component_meta_from_resolved(
@@ -11077,6 +11674,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
+    store_view: Option<&HostStoreView>,
 ) -> verter_analysis::component_meta::ComponentMetaAnalysis {
     let resolved_macros = resolver_component_meta_resolved_macros(
         resolved.snapshot.macros.as_ref(),
@@ -11084,15 +11682,31 @@ pub(crate) fn extract_component_meta_from_resolved(
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);
-    extract_component_meta_from_inputs(
+    let mut meta = extract_component_meta_from_inputs(
         host,
         canonical_or_alias,
         &resolved.snapshot,
         &resolved_macros,
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
-        include_fallthrough,
-    )
+    );
+    if include_fallthrough {
+        let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+        let mut visiting = rustc_hash::FxHashSet::default();
+        if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
+            &canonical,
+            resolved,
+            None,
+            &mut visiting,
+            store_view,
+        ) {
+            meta.accepted_props = resolution.accepted_props;
+            meta.accepted_events = resolution.accepted_events;
+            meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+            meta.fallthrough_surface = resolution.fallthrough_surface;
+        }
+    }
+    meta
 }
 
 #[cfg(test)]

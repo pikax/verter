@@ -88,6 +88,35 @@ try {
 
 The compat path is the only compatibility surface this package supports.
 
+Compat schema notes:
+
+- `schema: true` keeps the default consumer-facing behavior.
+- `schema: { literalBooleanSchema: true }` enables parity-focused `true | false` enum schema expansion without changing native types or compat display strings.
+
+## Native Vs Compat Contract
+
+The official Verter metadata payload is the semantic source of truth. The compat checker is a projection for `vue-component-meta` interoperability, not a separate semantic engine.
+
+- Native `_verter` metadata may include more information than Volar, including `models`, `publicInstance`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface`.
+- Native type descriptors preserve TypeScript meaning. For example, native `boolean` stays `boolean`; Volar-specific display or schema normalization should not rewrite the native payload.
+- Benchmark comparisons against `vue-component-meta` should compare equivalent surfaces only. Native-only `_verter` fields are additional Verter metadata, not parity regressions by themselves.
+- Current parity totals explicitly exclude native-only `models` because `vue-component-meta` does not expose an equivalent surface.
+
+## Root And Attrs Metadata
+
+Verter's native metadata already models root fallthrough and root-bound attrs/listeners beyond what `vue-component-meta` exposes.
+
+- `acceptedProps` includes both declared props and inherited root attrs. Use `kind: "declaredProp" | "attr"` to tell them apart.
+- `acceptedEvents` includes both declared emits and inherited root listeners. Use `kind: "declaredEmit" | "listener"` to tell them apart.
+- `rootReachability` tells you whether the template has no fallthrough surface, a single root, or conditional root branches.
+- `rootReachability.branches[].target` and `fallthroughSurface.branches[].rootChain` describe the root target type: native element, component root, or unresolved root.
+- `rootReachability.branches[].consumed.attrs` / `.listeners` record which names are consumed on the root and therefore should not fall through.
+- Native/public API generation already uses this root information to type `$attrs` for native roots.
+
+Current limitation:
+
+- The public component-meta API does not yet expose arbitrary SFC `<template ...>` block attributes as first-class metadata. The host currently tracks template `lang` / `src` for parsing and invalidation, but not a full exported template-block attribute record.
+
 ## Returned Metadata
 
 Both metadata surfaces return Volar-shaped top-level fields:
@@ -97,6 +126,8 @@ Both metadata surfaces return Volar-shaped top-level fields:
 - `slots`
 - `exposed`
 
+Compat `exposed` keeps the analysis `defineExpose` / Options API `expose` semantics. The native ref-accessible runtime surface is exposed separately on `_verter.publicInstance`.
+
 The `_verter` extension carries the full native metadata payload:
 
 - `props`
@@ -104,6 +135,14 @@ The `_verter` extension carries the full native metadata payload:
 - `slots`
 - `models`
 - `exposed`
+- `publicInstance`
+- `typeRegistry`
+- `acceptedProps`
+- `acceptedEvents`
+- `acceptedSurfaceCompleteness`
+- `rootInfo`
+- `rootReachability`
+- `fallthroughSurface`
 - `components`
 - `templateRefs`
 - `imports`
@@ -111,6 +150,12 @@ The `_verter` extension carries the full native metadata payload:
 - `vueApiCalls`
 - `styles`
 - `flags`
+
+`components` preserves call-site detail from template analysis, including prop expressions, referenced bindings, spread markers, and structured `vModelEntries` alongside the existing summary fields.
+
+`typeRegistry` preserves both the expanded native type descriptor and the resolved declaration provenance when available, including the pre-expansion `rawType` text and `declaration.canonicalSource`.
+
+`rootInfo` is the coarse root summary for consumers that do not want to reconstruct it from the full branch graph. It reports `kind: "none" | "single" | "conditional" | "multiple"` and includes direct root targets when those targets are known.
 
 ## Type IR And Adapters
 

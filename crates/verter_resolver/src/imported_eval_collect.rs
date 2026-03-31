@@ -8,51 +8,6 @@ use verter_analysis::type_eval::EvalEnv;
 use verter_analysis::types::ImportBindingKind;
 use verter_analysis::{AnalyzedBinding, AnalyzedImport, AnalyzedMacro, MacroTypeDep};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImportedEvalCollectionMode {
-    Lazy,
-    Eager,
-}
-
-#[cfg(test)]
-thread_local! {
-    static IMPORTED_EVAL_COLLECTION_MODE_OVERRIDE: std::cell::Cell<Option<ImportedEvalCollectionMode>> =
-        const { std::cell::Cell::new(None) };
-}
-
-fn imported_eval_collection_mode() -> ImportedEvalCollectionMode {
-    #[cfg(test)]
-    if let Some(mode) = IMPORTED_EVAL_COLLECTION_MODE_OVERRIDE.with(|cell| cell.get()) {
-        return mode;
-    }
-
-    let requested = std::env::var("VERTER_COMPONENT_META_IMPORTED_EVAL_COLLECTOR")
-        .ok()
-        .or_else(|| std::env::var("VERTER_IMPORTED_EVAL_COLLECTOR").ok());
-    match requested
-        .as_deref()
-        .map(str::trim)
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("eager") => ImportedEvalCollectionMode::Eager,
-        _ => ImportedEvalCollectionMode::Lazy,
-    }
-}
-
-#[cfg(test)]
-fn with_imported_eval_collection_mode_for_test<T>(
-    mode: ImportedEvalCollectionMode,
-    f: impl FnOnce() -> T,
-) -> T {
-    IMPORTED_EVAL_COLLECTION_MODE_OVERRIDE.with(|cell| {
-        let previous = cell.replace(Some(mode));
-        let result = f();
-        cell.set(previous);
-        result
-    })
-}
-
 #[derive(Debug)]
 pub struct ImportedEvalTraversalBudget {
     owner_canonical_id: String,
@@ -527,12 +482,7 @@ fn collect_imported_eval_inputs_lazy<R: ImportedEvalCollectorResolver>(
             if dependency.canonical_id == collected.alias.merge_root_canonical {
                 continue;
             }
-            canonical_dependencies.insert(dependency.canonical_id.clone());
-            let dependency_root = (dependency.canonical_id, dependency.exported_name);
-            if queued_roots.insert(dependency_root.clone()) {
-                stats.worklist_enqueued_from_symbol_deps_count += 1;
-                worklist.push_back(dependency_root);
-            }
+            canonical_dependencies.insert(dependency.canonical_id);
         }
     }
 
@@ -573,97 +523,6 @@ fn collect_imported_eval_inputs_lazy<R: ImportedEvalCollectorResolver>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect_imported_eval_inputs_eager<R: ImportedEvalCollectorResolver>(
-    resolver: &mut R,
-    owner_canonical_id: &str,
-    imports: &[AnalyzedImport],
-    required_import_names: &FxHashSet<String>,
-    seen_sources: &mut FxHashSet<String>,
-    inputs: &mut Vec<ImportedEvalSource>,
-    type_aliases: &mut Vec<ImportedTypeAlias>,
-    canonical_dependencies: &mut BTreeSet<String>,
-    visited_type_roots: &mut FxHashSet<(String, String)>,
-    budget: &mut ImportedEvalTraversalBudget,
-    stats: &mut ImportedEvalStats,
-) {
-    let mut alias_names = FxHashSet::default();
-
-    for import in imports {
-        if budget.is_exhausted() {
-            break;
-        }
-        for binding in &import.bindings {
-            if budget.is_exhausted() {
-                break;
-            }
-            let required_alias_names = required_type_alias_names_for_import_binding(
-                binding.name.as_str(),
-                matches!(binding.kind, ImportBindingKind::Namespace),
-                required_import_names,
-            );
-            if required_alias_names.is_empty() {
-                continue;
-            }
-
-            let Some(dep_canonical) =
-                resolver.resolve_imported_type_dependency(owner_canonical_id, import)
-            else {
-                continue;
-            };
-
-            canonical_dependencies.insert(dep_canonical.clone());
-            for required_alias_name in required_alias_names {
-                let Some(imported_name) = imported_member_name_for_type_alias(
-                    binding.name.as_str(),
-                    binding.imported_name.as_deref(),
-                    matches!(binding.kind, ImportBindingKind::Namespace),
-                    &required_alias_name,
-                ) else {
-                    continue;
-                };
-
-                let merge_root =
-                    normalized_imported_type_root(resolver, &dep_canonical, &imported_name, stats);
-                canonical_dependencies.insert(merge_root.0.clone());
-
-                if alias_names.insert(required_alias_name.clone()) {
-                    stats.worklist_seed_count += 1;
-                    if let Some(collected) = resolver.collect_imported_type_alias(
-                        ImportedTypeAliasResolveRequest {
-                            owner_canonical_id: owner_canonical_id.to_string(),
-                            import_source: import.source.clone(),
-                            local_name: required_alias_name.clone(),
-                            imported_name: imported_name.clone(),
-                            source_canonical_id: dep_canonical.clone(),
-                            exported_name: imported_name.clone(),
-                        },
-                        canonical_dependencies,
-                        budget,
-                    ) {
-                        stats.worklist_resolved_count += 1;
-                        if collected.alias.requires_source_merge {
-                            stats.reached_merge_roots_count += 1;
-                            record_required_source_merge_inputs_recursive(
-                                resolver,
-                                &merge_root.0,
-                                &merge_root.1,
-                                seen_sources,
-                                inputs,
-                                canonical_dependencies,
-                                visited_type_roots,
-                                budget,
-                                stats,
-                            );
-                        }
-                        type_aliases.push(collected.alias);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn collect_imported_eval_inputs<R: ImportedEvalCollectorResolver>(
     resolver: &mut R,
     owner_canonical_id: &str,
@@ -677,34 +536,19 @@ pub fn collect_imported_eval_inputs<R: ImportedEvalCollectorResolver>(
     budget: &mut ImportedEvalTraversalBudget,
     stats: &mut ImportedEvalStats,
 ) {
-    match imported_eval_collection_mode() {
-        ImportedEvalCollectionMode::Lazy => collect_imported_eval_inputs_lazy(
-            resolver,
-            owner_canonical_id,
-            imports,
-            required_import_names,
-            seen_sources,
-            inputs,
-            type_aliases,
-            canonical_dependencies,
-            visited_type_roots,
-            budget,
-            stats,
-        ),
-        ImportedEvalCollectionMode::Eager => collect_imported_eval_inputs_eager(
-            resolver,
-            owner_canonical_id,
-            imports,
-            required_import_names,
-            seen_sources,
-            inputs,
-            type_aliases,
-            canonical_dependencies,
-            visited_type_roots,
-            budget,
-            stats,
-        ),
-    }
+    collect_imported_eval_inputs_lazy(
+        resolver,
+        owner_canonical_id,
+        imports,
+        required_import_names,
+        seen_sources,
+        inputs,
+        type_aliases,
+        canonical_dependencies,
+        visited_type_roots,
+        budget,
+        stats,
+    );
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -728,6 +572,12 @@ pub fn build_imported_eval_inputs<R: ImportedEvalOwnerResolver>(
         owner_snapshot,
         owner_eval_source,
         owner_env,
+    );
+    required_import_names.extend(
+        owner_snapshot
+            .macro_type_deps
+            .iter()
+            .map(|dep| dep.type_name.clone()),
     );
     if let Some(additional) = additional_required_import_names {
         required_import_names.extend(additional.iter().cloned());
@@ -806,10 +656,9 @@ mod tests {
         build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
         collect_imported_eval_inputs, imported_member_name_for_type_alias,
         record_required_source_merge_inputs_recursive,
-        required_type_alias_names_for_import_binding, with_imported_eval_collection_mode_for_test,
-        ImportedEvalBinding, ImportedEvalCollectionMode, ImportedEvalCollectorResolver,
-        ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot,
-        ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
+        required_type_alias_names_for_import_binding, ImportedEvalBinding,
+        ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver,
+        ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
     };
     use crate::{
         CollectedImportedTypeAlias, DeclarationMetadataResolver, ImportedEvalSource,
@@ -942,9 +791,9 @@ mod tests {
             }
             self.recorded_sources.push(canonical_id.to_string());
             if let Some(source) = self.source_texts.get(canonical_id) {
+                let _ = source;
                 inputs.push(ImportedEvalSource {
                     canonical_id: canonical_id.to_string(),
-                    source: Arc::from(source.as_str()),
                 });
             }
         }
@@ -1251,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_imported_eval_inputs_enqueues_discovered_symbol_dependencies_lazily() {
+    fn collect_imported_eval_inputs_keeps_discovered_symbol_dependencies_attached_lazily() {
         let imports = vec![analyzed_import(
             "./dep",
             vec![
@@ -1323,8 +1172,8 @@ mod tests {
             .collect();
         assert_eq!(
             prepared,
-            vec!["/src/dep.ts#Foo".to_string(), "/src/bar.ts#Bar".to_string()],
-            "reached symbol dependencies should be resolved only after their parent symbol is prepared"
+            vec!["/src/dep.ts#Foo".to_string()],
+            "discovered symbol dependencies should stay attached to the reached parent root during lazy collection"
         );
         assert_eq!(type_aliases.len(), 1);
         assert_eq!(type_aliases[0].local_name, "Foo");
@@ -1342,6 +1191,99 @@ mod tests {
             inputs.is_empty(),
             "lazy dependency expansion should not collect merge sources when no reached symbol needs source merge"
         );
+        assert_eq!(
+            stats.worklist_enqueued_from_symbol_deps_count, 0,
+            "symbol dependencies should not become separate lazy worklist roots"
+        );
+    }
+
+    #[test]
+    fn collect_imported_eval_inputs_keeps_symbol_dependencies_attached_to_their_parent_root() {
+        let imports = vec![analyzed_import(
+            "./dep",
+            vec![binding("Foo", ImportBindingKind::Named, Some("Foo"), true)],
+            true,
+        )];
+        let required_import_names = FxHashSet::from_iter(["Foo".to_string()].into_iter());
+        let mut resolver = TestCollectorResolver::default();
+        resolver
+            .import_targets
+            .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
+        resolver.collected_aliases.insert(
+            ("/src/dep.ts".to_string(), "Foo".to_string()),
+            collected_alias(
+                "Foo",
+                "/src/dep.ts",
+                "Foo",
+                "/src/dep.ts",
+                "Foo",
+                false,
+                vec![ImportedSymbolDependency {
+                    local_name: "Bar".to_string(),
+                    canonical_id: "/src/bar.ts".to_string(),
+                    exported_name: "Bar".to_string(),
+                }],
+            ),
+        );
+        resolver.collected_aliases.insert(
+            ("/src/bar.ts".to_string(), "Bar".to_string()),
+            collected_alias(
+                "Bar",
+                "/src/bar.ts",
+                "Bar",
+                "/src/bar.ts",
+                "Bar",
+                false,
+                Vec::new(),
+            ),
+        );
+
+        let mut seen_sources = FxHashSet::default();
+        let mut inputs = Vec::new();
+        let mut type_aliases = Vec::new();
+        let mut canonical_dependencies = BTreeSet::new();
+        let mut visited_type_roots = FxHashSet::default();
+        let mut budget = ImportedEvalTraversalBudget::new("/src/App.vue", 8);
+        let mut stats = ImportedEvalStats::default();
+
+        collect_imported_eval_inputs(
+            &mut resolver,
+            "/src/App.vue",
+            &imports,
+            &required_import_names,
+            &mut seen_sources,
+            &mut inputs,
+            &mut type_aliases,
+            &mut canonical_dependencies,
+            &mut visited_type_roots,
+            &mut budget,
+            &mut stats,
+        );
+
+        let prepared: Vec<_> = resolver
+            .prepared_requests
+            .iter()
+            .map(|request| format!("{}#{}", request.source_canonical_id, request.exported_name))
+            .collect();
+        assert_eq!(
+            prepared,
+            vec!["/src/dep.ts#Foo".to_string()],
+            "symbol dependencies should stay attached to the reached root instead of becoming sibling worklist roots"
+        );
+        assert_eq!(
+            stats.worklist_resolved_count, 1,
+            "lazy collection should only resolve the owner-reached root here"
+        );
+        assert_eq!(
+            stats.worklist_enqueued_from_symbol_deps_count, 0,
+            "symbol dependencies should not seed a second deepening frontier during collection"
+        );
+        assert!(
+            canonical_dependencies.contains("/src/bar.ts"),
+            "the parent alias should still track its child dependency for invalidation"
+        );
+        assert_eq!(type_aliases.len(), 1);
+        assert_eq!(type_aliases[0].local_name, "Foo");
     }
 
     #[test]
@@ -1421,7 +1363,7 @@ mod tests {
             .collect();
         assert_eq!(
             prepared,
-            vec!["/src/dep.ts#Foo".to_string(), "/src/bar.ts#Bar".to_string()],
+            vec!["/src/dep.ts#Foo".to_string()],
             "same-file support symbols should stay attached to the reached alias and must not become separate worklist roots"
         );
         assert!(
@@ -1500,12 +1442,12 @@ mod tests {
             "only owner-reachable imported bindings should seed the worklist"
         );
         assert_eq!(
-            inputs.stats.worklist_resolved_count, 2,
-            "the lazy worklist should resolve the reached root and its discovered cross-file dependency"
+            inputs.stats.worklist_resolved_count, 1,
+            "the lazy worklist should resolve only the owner-reached root"
         );
         assert_eq!(
-            inputs.stats.worklist_enqueued_from_symbol_deps_count, 1,
-            "only the discovered Bar dependency should be enqueued from symbol deps"
+            inputs.stats.worklist_enqueued_from_symbol_deps_count, 0,
+            "symbol dependencies should stay attached to the reached root instead of becoming new worklist entries"
         );
         assert_eq!(
             inputs.stats.reached_merge_roots_count, 1,
@@ -1525,8 +1467,8 @@ mod tests {
         );
         assert_eq!(
             resolver.prepared_requests.len(),
-            2,
-            "lazy collection should prepare the reached root and its discovered dependency"
+            1,
+            "lazy collection should prepare only the reached root here"
         );
         assert!(
             !inputs.sources.is_empty(),
@@ -1535,89 +1477,67 @@ mod tests {
     }
 
     #[test]
-    fn collect_imported_eval_inputs_rollout_switch_restores_eager_collection_for_triage() {
+    fn build_imported_eval_inputs_seeds_macro_type_deps_without_source_heuristics() {
         let imports = vec![analyzed_import(
-            "./dep",
-            vec![binding("Foo", ImportBindingKind::Named, Some("Foo"), true)],
+            "./types",
+            vec![binding(
+                "ButtonProps",
+                ImportBindingKind::Named,
+                Some("ButtonProps"),
+                true,
+            )],
             true,
         )];
-        let required_import_names = FxHashSet::from_iter(["Foo".to_string()].into_iter());
         let mut resolver = TestCollectorResolver::default();
-        resolver
-            .import_targets
-            .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
-        resolver.collected_aliases.insert(
-            ("/src/dep.ts".to_string(), "Foo".to_string()),
-            collected_alias(
-                "Foo",
-                "/src/dep.ts",
-                "Foo",
-                "/src/dep.ts",
-                "Foo",
-                false,
-                vec![ImportedSymbolDependency {
-                    local_name: "Bar".to_string(),
-                    canonical_id: "/src/bar.ts".to_string(),
-                    exported_name: "Bar".to_string(),
-                }],
-            ),
+        resolver.import_targets.insert(
+            "/src/App.vue:./types".to_string(),
+            "/src/types.ts".to_string(),
         );
         resolver.collected_aliases.insert(
-            ("/src/bar.ts".to_string(), "Bar".to_string()),
+            ("/src/types.ts".to_string(), "ButtonProps".to_string()),
             collected_alias(
-                "Bar",
-                "/src/bar.ts",
-                "Bar",
-                "/src/bar.ts",
-                "Bar",
+                "ButtonProps",
+                "/src/types.ts",
+                "ButtonProps",
+                "/src/types.ts",
+                "ButtonProps",
                 false,
                 Vec::new(),
             ),
         );
+        resolver.owner_eval_source = "defineProps<ButtonProps>()".to_string();
 
-        let mut seen_sources = FxHashSet::default();
-        let mut inputs = Vec::new();
-        let mut type_aliases = Vec::new();
-        let mut canonical_dependencies = BTreeSet::new();
-        let mut visited_type_roots = FxHashSet::default();
-        let mut budget = ImportedEvalTraversalBudget::new("/src/App.vue", 8);
-        let mut stats = ImportedEvalStats::default();
+        let owner_snapshot = ImportedEvalOwnerSnapshot {
+            imports: &imports,
+            macros: &[],
+            bindings: &[],
+            macro_type_deps: &[MacroTypeDep {
+                type_name: "ButtonProps".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: verter_analysis::AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::default(),
+            }],
+        };
 
-        with_imported_eval_collection_mode_for_test(ImportedEvalCollectionMode::Eager, || {
-            collect_imported_eval_inputs(
-                &mut resolver,
-                "/src/App.vue",
-                &imports,
-                &required_import_names,
-                &mut seen_sources,
-                &mut inputs,
-                &mut type_aliases,
-                &mut canonical_dependencies,
-                &mut visited_type_roots,
-                &mut budget,
-                &mut stats,
-            );
-        });
+        let owner_eval_source = resolver.owner_eval_source.clone();
+        let owner_env = resolver.owner_env.clone();
 
-        let prepared: Vec<_> = resolver
-            .prepared_requests
-            .iter()
-            .map(|request| format!("{}#{}", request.source_canonical_id, request.exported_name))
-            .collect();
-        assert_eq!(
-            prepared,
-            vec!["/src/dep.ts#Foo".to_string()],
-            "the rollout switch should restore eager triage mode and skip lazy symbol-dependency expansion"
+        let inputs = build_imported_eval_inputs(
+            &mut resolver,
+            "/src/App.vue",
+            &owner_snapshot,
+            owner_eval_source.as_str(),
+            &owner_env,
+            None,
+            &mut ImportedEvalTraversalBudget::new("/src/App.vue", 8),
         );
-        assert_eq!(
-            type_aliases.len(),
-            1,
-            "eager triage mode should still keep the requested owner alias"
-        );
-        assert!(
-            !canonical_dependencies.contains("/src/bar.ts"),
-            "eager triage mode should not enqueue lazy symbol-dependency roots"
-        );
+
+        assert!(inputs.type_aliases.iter().any(|alias| {
+            alias.local_name == "ButtonProps"
+                && alias.source_canonical_id == "/src/types.ts"
+                && alias.exported_name == "ButtonProps"
+        }));
     }
 
     #[test]

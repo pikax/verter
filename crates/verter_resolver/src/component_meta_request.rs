@@ -43,6 +43,7 @@ struct ComponentMetaRequestExecutor<'a, H: ComponentMetaRequestHost> {
     host: &'a H,
     canonical: String,
     mode: H::Mode,
+    fixed_store_view: Option<H::View>,
     last_snapshot_epoch: Option<u64>,
     captured_inputs: Option<H::CapturedInputs>,
     max_attempts: usize,
@@ -54,10 +55,16 @@ impl<'a, H: ComponentMetaRequestHost> ComponentMetaRequestExecutor<'a, H> {
             host,
             canonical,
             mode,
+            fixed_store_view: None,
             last_snapshot_epoch: None,
             captured_inputs: None,
             max_attempts,
         }
+    }
+
+    fn with_fixed_view(mut self, store_view: Option<&H::View>) -> Self {
+        self.fixed_store_view = store_view.cloned();
+        self
     }
 }
 
@@ -74,6 +81,14 @@ where
     }
 
     fn snapshot_view(&mut self) -> Self::View {
+        if let Some(view) = self.fixed_store_view.as_ref() {
+            self.last_snapshot_epoch = Some(self.host.view_mutation_epoch(view));
+            self.captured_inputs = self
+                .host
+                .capture_component_meta_inputs(&self.canonical, view);
+            return view.clone();
+        }
+
         for _ in 0..self.max_attempts {
             let view = self.host.snapshot_store_view();
             let captured_inputs = self
@@ -111,6 +126,9 @@ where
     }
 
     fn is_stable(&mut self, _view: &Self::View) -> bool {
+        if self.fixed_store_view.is_some() {
+            return true;
+        }
         self.last_snapshot_epoch
             .is_some_and(|epoch| self.host.current_store_view_epoch() == epoch)
     }
@@ -136,13 +154,15 @@ pub fn run_component_meta_request<H>(
     >,
     canonical: &str,
     mode: H::Mode,
+    fixed_store_view: Option<&H::View>,
     max_attempts: usize,
 ) -> RequestRunResult<Option<H::Resolution>>
 where
     H: ComponentMetaRequestHost,
 {
     let mut executor =
-        ComponentMetaRequestExecutor::new(host, canonical.to_string(), mode, max_attempts);
+        ComponentMetaRequestExecutor::new(host, canonical.to_string(), mode, max_attempts)
+            .with_fixed_view(fixed_store_view);
     run_stable_request(singleflight, &mut executor)
         .expect("component-meta request execution is infallible")
 }

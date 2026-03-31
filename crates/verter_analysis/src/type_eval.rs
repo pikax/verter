@@ -1062,17 +1062,28 @@ fn instantiate_generic(
         return TypeExpr::named_with_args(&decl.name, args.to_vec());
     }
 
-    let saved = bind_type_parameters(decl, args, env);
+    let saved = bind_type_parameters_with_lookup(decl, args, env, lookup);
     let result = evaluate_with_lookup(&decl.body, env, lookup);
     restore_type_parameters(saved, env);
 
     result
 }
 
+#[allow(dead_code)]
 pub(crate) fn bind_type_parameters(
     decl: &TypeDeclInfo,
     args: &[TypeExpr],
     env: &mut EvalEnv,
+) -> Vec<(String, Option<Arc<TypeExpr>>)> {
+    let mut lookup = NoopEvalLookup;
+    bind_type_parameters_with_lookup(decl, args, env, &mut lookup)
+}
+
+pub(crate) fn bind_type_parameters_with_lookup(
+    decl: &TypeDeclInfo,
+    args: &[TypeExpr],
+    env: &mut EvalEnv,
+    lookup: &mut dyn EvalLookup,
 ) -> Vec<(String, Option<Arc<TypeExpr>>)> {
     // Save current bindings
     let saved = decl
@@ -1084,7 +1095,23 @@ pub(crate) fn bind_type_parameters(
     // Bind type parameters to arguments
     for (i, param) in decl.type_parameters.iter().enumerate() {
         let arg = if i < args.len() {
-            Arc::new(args[i].clone())
+            if env.type_bindings.contains_key(&param.name) {
+                Arc::new(evaluate_with_lookup(&args[i], env, lookup))
+            } else {
+                Arc::new(args[i].clone())
+            }
+        } else if let Some(default) = &param.default {
+            if env.type_bindings.contains_key(&param.name) {
+                Arc::new(evaluate_with_lookup(default, env, lookup))
+            } else {
+                default.clone()
+            }
+        } else if let Some(constraint) = &param.constraint {
+            if env.type_bindings.contains_key(&param.name) {
+                Arc::new(evaluate_with_lookup(constraint, env, lookup))
+            } else {
+                constraint.clone()
+            }
         } else {
             Arc::new(TypeExpr::type_parameter(param.clone()))
         };
@@ -1226,7 +1253,7 @@ where
         return None;
     }
     env.active.insert(name.to_string());
-    let saved = bind_type_parameters(&decl, type_arguments, env);
+    let saved = bind_type_parameters_with_lookup(&decl, type_arguments, env, lookup);
     let result = f(&decl, env);
     restore_type_parameters(saved, env);
     env.active.remove(name);
@@ -1691,6 +1718,18 @@ fn unwrap_awaited(ty: &TypeExpr, env: &mut EvalEnv, lookup: &mut dyn EvalLookup)
 
 fn evaluate_keyof(ty: &TypeExpr) -> TypeExpr {
     match ty {
+        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+            let keys: Vec<TypeExpr> = types
+                .iter()
+                .flat_map(|branch| extract_string_keys_recursive(&evaluate_keyof(branch)))
+                .map(TypeExpr::string_literal)
+                .collect();
+            if keys.is_empty() {
+                TypeExpr::KeyOf(Arc::new(ty.clone()))
+            } else {
+                TypeExpr::union(keys)
+            }
+        }
         TypeExpr::Object(obj) => {
             let keys: Vec<TypeExpr> = obj
                 .properties
@@ -1745,7 +1784,10 @@ fn resolve_typeof(
 
     // If there's an explicit type annotation, use it
     if let Some(ref ty) = decl.type_annotation {
-        return Some(evaluate_with_lookup(ty, env, lookup));
+        let resolved = evaluate_with_lookup(ty, env, lookup);
+        if !is_const_assertion_marker(&resolved) {
+            return Some(resolved);
+        }
     }
 
     // Classes need their constructor shape preserved for utilities like
@@ -1771,6 +1813,16 @@ fn resolve_typeof(
     }
 
     None
+}
+
+fn is_const_assertion_marker(expr: &TypeExpr) -> bool {
+    matches!(
+        expr,
+        TypeExpr::Unknown { raw } if raw == "const"
+    ) || matches!(
+        expr,
+        TypeExpr::Ref { name, type_arguments } if name.as_ref() == "const" && type_arguments.is_empty()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1864,7 +1916,7 @@ fn try_lazy_member_lookup(
                 return result;
             }
             env.active.insert(name.to_string());
-            let saved = bind_type_parameters(&decl, type_arguments, env);
+            let saved = bind_type_parameters_with_lookup(&decl, type_arguments, env, lookup);
             let result = try_lazy_member_lookup(&decl.body, key, env, lookup);
             restore_type_parameters(saved, env);
             env.active.remove(&**name);
@@ -1946,7 +1998,7 @@ fn try_project_object_shape(
                     return None;
                 }
                 env.active.insert(name.to_string());
-                let saved = bind_type_parameters(&decl, type_arguments, env);
+                let saved = bind_type_parameters_with_lookup(&decl, type_arguments, env, lookup);
                 let projected = try_project_object_shape(&decl.body, keys, omit_mode, env, lookup);
                 restore_type_parameters(saved, env);
                 env.active.remove(&**name);
@@ -2061,6 +2113,25 @@ fn project_object_members(
 
 fn evaluate_indexed_access(object: &TypeExpr, index: &TypeExpr) -> TypeExpr {
     match (object, index) {
+        (TypeExpr::Intersection(types), _) => {
+            let results: Vec<TypeExpr> = types
+                .iter()
+                .map(|branch| evaluate_indexed_access(branch, index))
+                .filter(|result| !matches!(result, TypeExpr::Primitive(PrimitiveName::Undefined)))
+                .collect();
+            match results.len() {
+                0 => TypeExpr::Primitive(PrimitiveName::Undefined),
+                1 => results.into_iter().next().unwrap(),
+                _ => merge_intersection(results),
+            }
+        }
+        (TypeExpr::Union(types), _) => {
+            let results: Vec<TypeExpr> = types
+                .iter()
+                .map(|branch| evaluate_indexed_access(branch, index))
+                .collect();
+            TypeExpr::union(results)
+        }
         (TypeExpr::Object(obj), TypeExpr::Literal(LiteralValue::String(key))) => {
             // Look up named property
             for member in &obj.properties {
@@ -2372,10 +2443,6 @@ fn merge_intersection(types: Vec<TypeExpr>) -> TypeExpr {
     // Check if all branches are objects — if so, merge
     let all_objects = types.iter().all(|t| matches!(t, TypeExpr::Object(_)));
     if all_objects {
-        // Last definition wins: for `Base & Child` (from interface extends),
-        // the child's own declaration takes precedence over the base's.
-        // This preserves own-declaration order when both base and child
-        // declare the same property name.
         let mut merged = Vec::new();
         for t in types {
             if let TypeExpr::Object(obj) = t {
@@ -2384,7 +2451,17 @@ fn merge_intersection(types: Vec<TypeExpr>) -> TypeExpr {
                         if let Some(existing_index) = merged.iter().position(|existing| {
                             matches!(existing, ObjectMember::Property(existing_prop) if existing_prop.name == p.name)
                         }) {
-                            merged.remove(existing_index);
+                            if let Some(ObjectMember::Property(existing_prop)) =
+                                merged.get_mut(existing_index)
+                            {
+                                existing_prop.ty = merge_intersection(vec![
+                                    existing_prop.ty.clone(),
+                                    p.ty.clone(),
+                                ]);
+                                existing_prop.optional &= p.optional;
+                                existing_prop.readonly &= p.readonly;
+                                continue;
+                            }
                         }
                         merged.push(member.clone());
                     } else {
@@ -2500,6 +2577,8 @@ pub(crate) fn is_assignable_to(check: &TypeExpr, target: &TypeExpr) -> bool {
     }
 
     match (check, target) {
+        (TypeExpr::Parenthesized(inner), _) => is_assignable_to(inner, target),
+        (_, TypeExpr::Parenthesized(inner)) => is_assignable_to(check, inner),
         // any extends anything
         (TypeExpr::Primitive(PrimitiveName::Any), _) => true,
         // never extends anything
@@ -2525,8 +2604,61 @@ pub(crate) fn is_assignable_to(check: &TypeExpr, target: &TypeExpr) -> bool {
             TypeExpr::Literal(LiteralValue::Boolean(_)),
             TypeExpr::Primitive(PrimitiveName::Boolean),
         ) => true,
+        (TypeExpr::Object(check_obj), TypeExpr::Object(target_obj)) => {
+            object_is_assignable_to(check_obj, target_obj)
+        }
         _ => false,
     }
+}
+
+fn object_is_assignable_to(check: &ObjectExpr, target: &ObjectExpr) -> bool {
+    target.properties.iter().all(|member| match member {
+        ObjectMember::Property(target_prop) => {
+            let Some(check_prop) = check
+                .properties
+                .iter()
+                .find_map(|candidate| match candidate {
+                    ObjectMember::Property(prop) if prop.name == target_prop.name => Some(prop),
+                    _ => None,
+                })
+            else {
+                return target_prop.optional;
+            };
+
+            if !target_prop.optional && check_prop.optional {
+                return false;
+            }
+
+            is_assignable_to(&check_prop.ty, &target_prop.ty)
+        }
+        ObjectMember::Method(target_method) => {
+            let Some(check_method) =
+                check
+                    .properties
+                    .iter()
+                    .find_map(|candidate| match candidate {
+                        ObjectMember::Method(method) if method.name == target_method.name => {
+                            Some(method)
+                        }
+                        _ => None,
+                    })
+            else {
+                return target_method.optional;
+            };
+
+            if !target_method.optional && check_method.optional {
+                return false;
+            }
+
+            is_assignable_to(
+                &TypeExpr::Function(Arc::new(check_method.function.clone())),
+                &TypeExpr::Function(Arc::new(target_method.function.clone())),
+            )
+        }
+        ObjectMember::IndexSignature(_)
+        | ObjectMember::CallSignature(_)
+        | ObjectMember::ConstructSignature(_) => false,
+    })
 }
 
 /// Check if T is definitely NOT assignable to U.

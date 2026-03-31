@@ -28,6 +28,15 @@ export interface PropertyMeta {
   schema: PropertyMetaSchema;
 }
 
+export interface CompatSchemaOptions {
+  ignore?: (type: string) => boolean;
+  /**
+   * Expand `boolean` schema nodes to `true | false` enum members for parity-focused
+   * callers without changing native descriptors or compat display text.
+   */
+  literalBooleanSchema?: boolean;
+}
+
 /**
  * Recursive schema type for property metadata.
  * Matches Volar's discriminated union: enum/array/event use arrays, object uses Record.
@@ -36,6 +45,7 @@ export interface PropertyMeta {
  */
 export type PropertyMetaSchema =
   | string
+  | PropertyMetaSchema[]
   | { kind: "enum"; type: string; schema?: PropertyMetaSchema[] }
   | { kind: "array"; type: string; schema?: PropertyMetaSchema[] }
   | { kind: "event"; type: string; schema?: PropertyMetaSchema[] }
@@ -67,7 +77,7 @@ export interface VolarComponentMeta {
 /** Options for the meta checker. */
 export interface MetaCheckerOptions {
   /** Whether to compute schemas. `false` disables schema computation. */
-  schema?: boolean | { ignore?: (type: string) => boolean };
+  schema?: boolean | CompatSchemaOptions;
   /** Printer options (unused in Verter, kept for Volar compat). */
   printer?: unknown;
   /** Force TypeScript usage (no-op in Verter — always uses TS). Kept for Volar compat. */

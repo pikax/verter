@@ -22,6 +22,10 @@ export interface ComponentMeta {
   models: ModelMeta[];
   /** Members exposed via `defineExpose` or Options API `expose`. */
   exposed: ExposedMeta[];
+  /** Host-derived runtime public-instance surface for ref-accessible members. */
+  publicInstance?: PublicInstanceMeta;
+  /** Parsed SFC root block metadata for template/script/style/custom blocks. */
+  sfcBlocks?: SfcBlocksMeta;
 
   // ── Template usage ─────────────────────────────────────────────
 
@@ -52,6 +56,8 @@ export interface ComponentMeta {
   acceptedEvents: AcceptedEventMeta[];
   /** Whether `acceptedProps`/`acceptedEvents` are exact or only a sound lower bound. */
   acceptedSurfaceCompleteness: AcceptedSurfaceCompleteness;
+  /** First-class root summary for consumers that do not want the full branch graph. */
+  rootInfo?: RootInfo;
   /** Root reachability classification for fallthrough inheritance. */
   rootReachability: RootReachability;
   /** Branch-structured inherited surface (declared members do NOT appear here). */
@@ -188,6 +194,108 @@ export interface ExposedMeta {
   description?: string;
 }
 
+/** Host-derived public-instance surface. */
+export interface PublicInstanceMeta {
+  /** Whether the current public-instance contract is complete. */
+  completeness: "exact" | "partial";
+  /** Runtime-observable members exposed on the component instance proxy. */
+  members: PublicInstanceMemberMeta[];
+}
+
+/** A single runtime-observable public-instance member. */
+export interface PublicInstanceMemberMeta {
+  /** Public member name. */
+  name: string;
+  /** What kind of instance member this is. */
+  kind: "prop" | "slotContainer" | "exposed";
+  /** Type descriptor for the public value. */
+  type: TypeDescriptor;
+  /** Native expansion completeness for the member type, when available. */
+  typeExpansion?: TypeExpansionMeta;
+  /** Original TS type annotation text when available. */
+  rawType?: string;
+  /** JSDoc description carried onto the public member, when available. */
+  description?: string;
+}
+
+/** Parsed SFC root block metadata. */
+export interface SfcBlocksMeta {
+  /** The `<template>` block when present. */
+  template?: TemplateBlockMeta;
+  /** The classic `<script>` block when present. */
+  script?: ScriptBlockMeta;
+  /** The `<script setup>` block when present. */
+  scriptSetup?: ScriptBlockMeta;
+  /** All `<style>` blocks in source order. */
+  styles: StyleBlockMeta[];
+  /** All custom root blocks such as `<i18n>` in source order. */
+  custom: CustomBlockMeta[];
+}
+
+/** A single raw root-block attribute. */
+export interface SfcAttributeMeta {
+  /** Attribute name as written in source. */
+  name: string;
+  /** Attribute value when present; omitted for boolean attributes. */
+  value?: string;
+}
+
+/** Metadata for a `<template>` block. */
+export interface TemplateBlockMeta {
+  /** `lang="..."` when present. */
+  lang?: string;
+  /** `src="..."` when present. */
+  src?: string;
+  /** All raw root-block attributes in source order. */
+  attributes: SfcAttributeMeta[];
+}
+
+/** Metadata for a `<script>` or `<script setup>` block. */
+export interface ScriptBlockMeta {
+  /** `lang="..."` when present. */
+  lang?: string;
+  /** `src="..."` when present. */
+  src?: string;
+  /** `<script setup generic="...">` when present. */
+  generic?: string;
+  /** `<script setup attrs="...">` or `attributes="..."` when present. */
+  attrsType?: string;
+  /** All raw root-block attributes in source order. */
+  attributes: SfcAttributeMeta[];
+}
+
+/** Metadata for a `<style>` block. */
+export interface StyleBlockMeta {
+  /** Source-order block index among `<style>` blocks. */
+  index: number;
+  /** `lang="..."` when present. */
+  lang?: string;
+  /** `src="..."` when present. */
+  src?: string;
+  /** Whether the block has the `scoped` attribute. */
+  scoped: boolean;
+  /** Whether the block has the `module` attribute. */
+  isModule: boolean;
+  /** Custom module name from `module="..."` when present. */
+  moduleName?: string;
+  /** All raw root-block attributes in source order. */
+  attributes: SfcAttributeMeta[];
+}
+
+/** Metadata for a custom root block such as `<i18n>`. */
+export interface CustomBlockMeta {
+  /** Source-order block index among custom blocks. */
+  index: number;
+  /** Raw custom tag name, for example `"i18n"`. */
+  blockType: string;
+  /** `lang="..."` when present. */
+  lang?: string;
+  /** `src="..."` when present. */
+  src?: string;
+  /** All raw root-block attributes in source order. */
+  attributes: SfcAttributeMeta[];
+}
+
 // ── Template usage types ───────────────────────────────────────────
 
 /** A prop usage on a child component in the template. */
@@ -198,6 +306,20 @@ export interface ComponentPropUsage {
   isBound: boolean;
   /** Constness classification. */
   constness: "const" | "dynamic" | "unknown";
+  /** Raw prop expression text when available. */
+  expression?: string;
+  /** Script bindings referenced by the prop expression. */
+  referencedBindings?: string[];
+  /** Whether this entry came from `v-bind="obj"` spread input. */
+  fromSpread?: boolean;
+  /** Whether this was a same-name shorthand binding such as `:foo`. */
+  isShorthand?: boolean;
+}
+
+/** A v-model directive used on a child component. */
+export interface ComponentVModelUsage {
+  /** The bound model prop name, such as `modelValue` or `title`. */
+  bindingName: string;
 }
 
 /** A child component used in the template. */
@@ -210,6 +332,8 @@ export interface ComponentUsage {
   isDynamic: boolean;
   /** Props passed to this component. */
   props: ComponentPropUsage[];
+  /** Whether `v-bind="obj"` spread is used on the component. */
+  hasSpread?: boolean;
   /** Slot names used on this component. */
   slotsUsed: string[];
   /** Static class names from `class="foo bar"`. */
@@ -218,6 +342,8 @@ export interface ComponentUsage {
   hasDynamicClass: boolean;
   /** v-model binding names. */
   vModels: string[];
+  /** Structured v-model usage entries for call-site-aware consumers. */
+  vModelEntries?: ComponentVModelUsage[];
 }
 
 /** A template ref usage (`ref="foo"` or `:ref="expr"`). */
@@ -367,6 +493,16 @@ export interface AcceptedEventMeta {
 export type RootReachability =
   | { kind: "noFallthrough"; reason: NoFallthroughReason }
   | { kind: "branches"; branches: RootBranch[] };
+
+/** First-class root summary derived from reachability facts. */
+export interface RootInfo {
+  /** Coarse root shape. */
+  kind: "none" | "single" | "conditional" | "multiple";
+  /** Why the component did not resolve to a single direct root target, when applicable. */
+  reason?: NoFallthroughReason;
+  /** Direct root targets in source order when they are known. */
+  targets: RootTargetRef[];
+}
 
 /** Why a component has no fallthrough surface. */
 export type NoFallthroughReason =

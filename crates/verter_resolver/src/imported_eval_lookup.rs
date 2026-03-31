@@ -86,6 +86,7 @@ pub struct ImportedEvalLookup<'a, R> {
     imports: &'a [AnalyzedImport],
     discovered_dependencies: BTreeSet<String>,
     type_decl_cache: FxHashMap<String, Option<TypeDeclInfo>>,
+    type_root_cache: FxHashMap<String, Option<(String, String)>>,
     value_decl_cache: FxHashMap<Vec<String>, Option<ValueDeclInfo>>,
 }
 
@@ -101,6 +102,7 @@ impl<'a, R> ImportedEvalLookup<'a, R> {
             imports,
             discovered_dependencies: BTreeSet::new(),
             type_decl_cache: FxHashMap::default(),
+            type_root_cache: FxHashMap::default(),
             value_decl_cache: FxHashMap::default(),
         }
     }
@@ -241,8 +243,19 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
 
         let resolved = self.resolve_type_lookup_target(name).and_then(|target| {
             let (source_canonical_id, exported_name) = self
-                .resolver
-                .resolve_imported_type_root(&target.dep_canonical_id, &target.imported_name);
+                .type_root_cache
+                .get(name)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| {
+                    let resolved = self.resolver.resolve_imported_type_root(
+                        &target.dep_canonical_id,
+                        &target.imported_name,
+                    );
+                    self.type_root_cache
+                        .insert(name.to_string(), Some(resolved.clone()));
+                    resolved
+                });
 
             self.discovered_dependencies
                 .insert(target.dep_canonical_id.clone());
@@ -268,6 +281,10 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
     }
 
     fn resolve_type_root_identity(&mut self, name: &str) -> Option<(String, String)> {
+        if let Some(cached) = self.type_root_cache.get(name) {
+            return cached.clone();
+        }
+
         let target = self.resolve_type_lookup_target(name)?;
         let (source_canonical_id, exported_name) = self
             .resolver
@@ -278,7 +295,10 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
         self.discovered_dependencies
             .insert(source_canonical_id.clone());
 
-        Some((source_canonical_id, exported_name))
+        let resolved = Some((source_canonical_id, exported_name));
+        self.type_root_cache
+            .insert(name.to_string(), resolved.clone());
+        resolved
     }
 
     fn resolve_value_decl(&mut self, path: &[String]) -> Option<ValueDeclInfo> {
@@ -316,6 +336,41 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
         self.value_decl_cache
             .insert(path.to_vec(), resolved.clone());
         resolved
+    }
+
+    fn resolve_member_projection(&mut self, object: &TypeExpr, key: &str) -> Option<TypeExpr> {
+        match object {
+            TypeExpr::TypeOf(value_ref) => {
+                let decl = self.resolve_value_decl(&value_ref.path)?;
+                if let Some(shape) = decl.object_shape {
+                    return shape.properties.iter().find_map(|member| match member {
+                        verter_analysis::type_expr::ObjectMember::Property(prop)
+                            if prop.name == key =>
+                        {
+                            Some(prop.ty.clone())
+                        }
+                        verter_analysis::type_expr::ObjectMember::Method(method)
+                            if method.name == key =>
+                        {
+                            Some(TypeExpr::Function(std::sync::Arc::new(
+                                method.function.clone(),
+                            )))
+                        }
+                        _ => None,
+                    });
+                }
+
+                let ty = decl.type_annotation?;
+                Some(verter_analysis::type_eval::evaluate(
+                    &TypeExpr::IndexedAccess {
+                        object: std::sync::Arc::new(ty),
+                        index: std::sync::Arc::new(TypeExpr::string_literal(key)),
+                    },
+                    &mut verter_analysis::type_eval::EvalEnv::new(),
+                ))
+            }
+            _ => None,
+        }
     }
 
     fn utility_source(&mut self, name: &str) -> BuiltinUtilitySource {
@@ -616,5 +671,35 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].source_canonical_id, "/src/types.ts");
         assert_eq!(requests[0].exported_name, "ResolvedUser");
+    }
+
+    #[test]
+    fn imported_eval_lookup_caches_repeated_root_identity_queries() {
+        let imports = vec![analyzed_import(
+            "./dep",
+            Some("/src/dep.ts"),
+            vec![binding("Types", ImportBindingKind::Namespace, None, true)],
+            true,
+        )];
+        let mut resolver = TestResolver::default();
+        resolver.root_targets.insert(
+            ("/src/dep.ts".to_string(), "User".to_string()),
+            ("/src/types.ts".to_string(), "ResolvedUser".to_string()),
+        );
+        let mut lookup = ImportedEvalLookup::new(&mut resolver, "/src/App.vue", &imports);
+
+        let first = lookup.resolve_type_root_identity("Types.User");
+        let second = lookup.resolve_type_root_identity("Types.User");
+
+        assert_eq!(
+            first,
+            Some(("/src/types.ts".to_string(), "ResolvedUser".to_string()))
+        );
+        assert_eq!(second, first);
+        assert_eq!(
+            *resolver.root_lookups.borrow(),
+            1,
+            "repeated root identity queries should stay inside the imported lookup cache",
+        );
     }
 }

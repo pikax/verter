@@ -439,6 +439,13 @@ function decodeComponentMetaBody(
   graph: DecodedTypeGraph,
 ): Omit<NativeComponentMetaResult, "typeRegistry"> {
   const resolution = decodeOptionalResolution(body.resolution as ProtoRecord | undefined, graph);
+  const rootReachability = decodeRootReachability(
+    requireProtoMessage(body.rootReachability as ProtoRecord | undefined, "root reachability"),
+    graph,
+  );
+  const rootInfo =
+    decodeOptionalRootInfo(body.rootInfo as ProtoRecord | undefined, graph) ??
+    deriveRootInfo(rootReachability);
   return {
     filePath: graph.getString(readRequiredId(body.filePathId, "file path")),
     componentName: "",
@@ -453,6 +460,14 @@ function decodeComponentMetaBody(
     ),
     exposed: ((body.exposed as ProtoRecord[] | undefined) ?? []).map((exposed) =>
       decodeExposed(exposed, graph),
+    ),
+    ...maybe(
+      "publicInstance",
+      decodeOptionalPublicInstance(body.publicInstance as ProtoRecord | undefined, graph),
+    ),
+    ...maybe(
+      "sfcBlocks",
+      decodeOptionalSfcBlocks(body.sfcBlocks as ProtoRecord | undefined, graph),
     ),
     components: ((body.components as ProtoRecord[] | undefined) ?? []).map((component) =>
       decodeComponentUsage(component, graph),
@@ -482,10 +497,8 @@ function decodeComponentMetaBody(
     acceptedSurfaceCompleteness: decodeAcceptedSurfaceCompleteness(
       Number(body.acceptedSurfaceCompleteness ?? 0),
     ),
-    rootReachability: decodeRootReachability(
-      requireProtoMessage(body.rootReachability as ProtoRecord | undefined, "root reachability"),
-      graph,
-    ),
+    ...maybe("rootInfo", rootInfo),
+    rootReachability,
     fallthroughSurface: decodeFallthroughSurface(
       requireProtoMessage(
         body.fallthroughSurface as ProtoRecord | undefined,
@@ -495,6 +508,185 @@ function decodeComponentMetaBody(
     ),
     ...maybe("resolution", resolution),
   } as unknown as Omit<NativeComponentMetaResult, "typeRegistry">;
+}
+
+function decodeOptionalPublicInstance(
+  publicInstance: ProtoRecord | undefined,
+  graph: DecodedTypeGraph,
+): Record<string, unknown> | undefined {
+  if (!publicInstance) {
+    return undefined;
+  }
+
+  return {
+    completeness: Number(publicInstance.completeness ?? 0) === 1 ? "exact" : "partial",
+    members: ((publicInstance.members as ProtoRecord[] | undefined) ?? []).map((member) => ({
+      name: graph.getString(readRequiredId(member.nameId, "public instance member name")),
+      kind:
+        Number(member.kind ?? 0) === 1
+          ? "prop"
+          : Number(member.kind ?? 0) === 2
+            ? "slotContainer"
+            : "exposed",
+      type: createGraphTypeExprRef(
+        graph,
+        readRequiredId(member.typeNodeId, "public instance member type"),
+      ),
+      ...maybe(
+        "typeExpansion",
+        decodeOptionalExpansionMetadata(member.typeExpansion as ProtoRecord | undefined, graph),
+      ),
+      ...maybe("rawType", graph.getStringMaybe(Number(member.rawTypeId ?? 0))),
+      ...maybe("description", graph.getStringMaybe(Number(member.descriptionId ?? 0))),
+    })),
+  };
+}
+
+function decodeOptionalSfcBlocks(
+  blocks: ProtoRecord | undefined,
+  graph: DecodedTypeGraph,
+): Record<string, unknown> | undefined {
+  if (!blocks) {
+    return undefined;
+  }
+
+  return {
+    ...maybe(
+      "template",
+      decodeOptionalTemplateBlock(blocks.template as ProtoRecord | undefined, graph),
+    ),
+    ...maybe("script", decodeOptionalScriptBlock(blocks.script as ProtoRecord | undefined, graph)),
+    ...maybe(
+      "scriptSetup",
+      decodeOptionalScriptBlock(blocks.scriptSetup as ProtoRecord | undefined, graph),
+    ),
+    styles: ((blocks.styles as ProtoRecord[] | undefined) ?? []).map((style) =>
+      decodeStyleBlock(style, graph),
+    ),
+    custom: ((blocks.custom as ProtoRecord[] | undefined) ?? []).map((block) =>
+      decodeCustomBlock(block, graph),
+    ),
+  };
+}
+
+function decodeOptionalTemplateBlock(
+  block: ProtoRecord | undefined,
+  graph: DecodedTypeGraph,
+): Record<string, unknown> | undefined {
+  if (!block) {
+    return undefined;
+  }
+  return {
+    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
+    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
+    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
+  };
+}
+
+function decodeOptionalScriptBlock(
+  block: ProtoRecord | undefined,
+  graph: DecodedTypeGraph,
+): Record<string, unknown> | undefined {
+  if (!block) {
+    return undefined;
+  }
+  return {
+    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
+    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
+    ...maybe("generic", graph.getStringMaybe(Number(block.genericId ?? 0))),
+    ...maybe("attrsType", graph.getStringMaybe(Number(block.attrsTypeId ?? 0))),
+    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
+  };
+}
+
+function decodeStyleBlock(block: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+  return {
+    index: Number(block.index ?? 0),
+    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
+    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
+    scoped: Boolean(block.scoped),
+    isModule: Boolean(block.isModule),
+    ...maybe("moduleName", graph.getStringMaybe(Number(block.moduleNameId ?? 0))),
+    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
+  };
+}
+
+function decodeCustomBlock(block: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+  return {
+    index: Number(block.index ?? 0),
+    blockType: graph.getString(readRequiredId(block.blockTypeId, "custom block type")),
+    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
+    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
+    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
+  };
+}
+
+function decodeSfcAttributes(
+  attributes: ProtoRecord[],
+  graph: DecodedTypeGraph,
+): Record<string, unknown>[] {
+  return attributes.map((attribute) => ({
+    name: graph.getString(readRequiredId(attribute.nameId, "SFC attribute name")),
+    ...maybe("value", graph.getStringMaybe(Number(attribute.valueId ?? 0))),
+  }));
+}
+
+function decodeOptionalRootInfo(
+  info: ProtoRecord | undefined,
+  graph: DecodedTypeGraph,
+): Record<string, unknown> | undefined {
+  if (!info) {
+    return undefined;
+  }
+
+  const kind = Number(info.kind ?? 0);
+  const decodedKind =
+    kind === 1
+      ? "none"
+      : kind === 2
+        ? "single"
+        : kind === 3
+          ? "conditional"
+          : kind === 4
+            ? "multiple"
+            : undefined;
+  if (!decodedKind) {
+    throw graphError(`component-meta graph payload has unknown root info kind ${kind}`);
+  }
+
+  return {
+    kind: decodedKind,
+    ...maybe(
+      "reason",
+      Number(info.reason ?? 0) === 0 ? undefined : decodeNoFallthroughReason(Number(info.reason)),
+    ),
+    targets: ((info.targets as ProtoRecord[] | undefined) ?? []).map((target) =>
+      decodeRootTargetRef(target, graph),
+    ),
+  };
+}
+
+function deriveRootInfo(
+  reachability: NativeComponentMetaResult["rootReachability"],
+): Record<string, unknown> {
+  if (reachability.kind === "branches") {
+    return {
+      kind: reachability.branches.length <= 1 ? "single" : "conditional",
+      targets: reachability.branches.map((branch) => ({ ...branch.target })),
+    };
+  }
+
+  const kind =
+    reachability.reason === "multiRoot" || reachability.reason === "rootVFor"
+      ? "multiple"
+      : reachability.reason === "branchNotSingleRoot"
+        ? "conditional"
+        : "none";
+  return {
+    kind,
+    ...(reachability.reason !== undefined ? { reason: reachability.reason } : {}),
+    targets: [],
+  };
 }
 
 function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {

@@ -32,11 +32,23 @@ describe("nativeComponentMetaToComponentMeta", () => {
           name: "FancyButton",
           importSource: "./FancyButton.vue",
           isDynamic: false,
-          props: [{ name: "label", isBound: true, constness: "dynamic" }],
+          props: [
+            {
+              name: "label",
+              isBound: true,
+              constness: "dynamic",
+              expression: "labelExpr",
+              referencedBindings: ["labelRef"],
+              fromSpread: false,
+              isShorthand: false,
+            },
+          ],
+          hasSpread: false,
           slotsUsed: ["default"],
           staticClasses: ["primary"],
           hasDynamicClass: true,
           vModels: ["modelValue"],
+          vModelEntries: [{ bindingName: "modelValue" }],
         },
       ],
       templateRefs: [{ name: "button", isDynamic: false, targetTag: "FancyButton" }],
@@ -90,11 +102,23 @@ describe("nativeComponentMetaToComponentMeta", () => {
         name: "FancyButton",
         importSource: "./FancyButton.vue",
         isDynamic: false,
-        props: [{ name: "label", isBound: true, constness: "dynamic" }],
+        props: [
+          {
+            name: "label",
+            isBound: true,
+            constness: "dynamic",
+            expression: "labelExpr",
+            referencedBindings: ["labelRef"],
+            fromSpread: false,
+            isShorthand: false,
+          },
+        ],
+        hasSpread: false,
         slotsUsed: ["default"],
         staticClasses: ["primary"],
         hasDynamicClass: true,
         vModels: ["modelValue"],
+        vModelEntries: [{ bindingName: "modelValue" }],
       },
     ]);
     expect(meta.templateRefs).toEqual([
@@ -412,6 +436,222 @@ describe("nativeComponentMetaToComponentMeta", () => {
     expect(compat.props).toEqual([]);
   });
 
+  it("maps additive public-instance members separately from defineExpose metadata", () => {
+    const meta = nativeComponentMetaToComponentMeta({
+      filePath: "/project/src/App.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [
+        {
+          name: "default",
+          isScoped: true,
+          isRequired: false,
+          bindings: [{ name: "item", type: { kind: "primitive", name: "number" } }],
+        },
+      ],
+      models: [],
+      exposed: [
+        {
+          name: "focus",
+          type: { kind: "primitive", name: "number" },
+        },
+      ],
+      publicInstance: {
+        completeness: "partial",
+        members: [
+          {
+            name: "label",
+            kind: "prop",
+            type: { kind: "primitive", name: "string" },
+          },
+          {
+            name: "$slots",
+            kind: "slotContainer",
+            type: {
+              kind: "object",
+              properties: [
+                {
+                  name: "default",
+                  optional: true,
+                  type: { kind: "primitive", name: "unknown" },
+                },
+              ],
+            },
+          },
+          {
+            name: "focus",
+            kind: "exposed",
+            type: { kind: "primitive", name: "number" },
+          },
+        ],
+      },
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      ...defaultFallthroughFields,
+    } as any);
+
+    expect(meta.exposed.map((member) => member.name)).toEqual(["focus"]);
+    expect(meta.publicInstance?.members.map((member) => member.name)).toEqual([
+      "label",
+      "$slots",
+      "focus",
+    ]);
+    expect(meta.publicInstance?.members[1]).toMatchObject({
+      name: "$slots",
+      kind: "slotContainer",
+    });
+  });
+
+  it("maps additive SFC block metadata from the native payload", () => {
+    const meta = nativeComponentMetaToComponentMeta({
+      filePath: "/project/src/App.vue",
+      optionsApi: false,
+      props: [],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      publicInstance: {
+        completeness: "partial",
+        members: [],
+      },
+      sfcBlocks: {
+        script: {
+          lang: "ts",
+          attributes: [{ name: "lang", value: "ts" }],
+        },
+        scriptSetup: {
+          lang: "ts",
+          generic: "T extends string = string",
+          attrsType: "ButtonAttrs",
+          attributes: [
+            { name: "setup" },
+            { name: "lang", value: "ts" },
+            { name: "generic", value: "T extends string = string" },
+            { name: "attrs", value: "ButtonAttrs" },
+          ],
+        },
+        template: {
+          lang: "html",
+          attributes: [
+            { name: "lang", value: "html" },
+            { name: "data-layout", value: "stack" },
+          ],
+        },
+        styles: [
+          {
+            index: 0,
+            lang: "scss",
+            scoped: true,
+            isModule: true,
+            moduleName: "theme",
+            attributes: [
+              { name: "scoped" },
+              { name: "module", value: "theme" },
+              { name: "lang", value: "scss" },
+            ],
+          },
+        ],
+        custom: [
+          {
+            index: 0,
+            blockType: "i18n",
+            lang: "json",
+            attributes: [{ name: "lang", value: "json" }],
+          },
+        ],
+      },
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      ...defaultFallthroughFields,
+    } as any);
+
+    expect(meta.sfcBlocks).toEqual({
+      script: {
+        lang: "ts",
+        attributes: [{ name: "lang", value: "ts" }],
+      },
+      scriptSetup: {
+        lang: "ts",
+        generic: "T extends string = string",
+        attrsType: "ButtonAttrs",
+        attributes: [
+          { name: "setup" },
+          { name: "lang", value: "ts" },
+          { name: "generic", value: "T extends string = string" },
+          { name: "attrs", value: "ButtonAttrs" },
+        ],
+      },
+      template: {
+        lang: "html",
+        attributes: [
+          { name: "lang", value: "html" },
+          { name: "data-layout", value: "stack" },
+        ],
+      },
+      styles: [
+        {
+          index: 0,
+          lang: "scss",
+          scoped: true,
+          isModule: true,
+          moduleName: "theme",
+          attributes: [
+            { name: "scoped" },
+            { name: "module", value: "theme" },
+            { name: "lang", value: "scss" },
+          ],
+        },
+      ],
+      custom: [
+        {
+          index: 0,
+          blockType: "i18n",
+          lang: "json",
+          attributes: [{ name: "lang", value: "json" }],
+        },
+      ],
+    });
+  });
+
   it("preserves structured fallthrough reason payloads", () => {
     const meta = nativeComponentMetaToComponentMeta({
       filePath: "/project/src/App.vue",
@@ -510,6 +750,98 @@ describe("nativeComponentMetaToComponentMeta", () => {
               importSource: "./Child.vue",
             },
           },
+        },
+      ],
+    });
+  });
+
+  it("derives a direct root summary from root reachability branches", () => {
+    const meta = nativeComponentMetaToComponentMeta({
+      filePath: "/project/src/App.vue",
+      optionsApi: false,
+      props: [],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "exact",
+      rootReachability: {
+        kind: "branches",
+        branches: [
+          {
+            branchIndex: 0,
+            target: {
+              kind: "componentUsage",
+              elementIndex: 1,
+              usageIndex: 0,
+              name: "PrimaryButton",
+              importSource: "./PrimaryButton.vue",
+            },
+            consumed: {
+              attrs: ["class"],
+              listeners: ["click"],
+              hasDynamicAttrName: false,
+              hasDynamicListenerName: false,
+            },
+            hasUnknownSpread: false,
+          },
+          {
+            branchIndex: 1,
+            conditionText: "isFallback",
+            target: {
+              kind: "nativeElement",
+              elementIndex: 2,
+              tag: "button",
+            },
+            consumed: {
+              attrs: [],
+              listeners: [],
+              hasDynamicAttrName: false,
+              hasDynamicListenerName: false,
+            },
+            hasUnknownSpread: false,
+          },
+        ],
+      },
+      fallthroughSurface: {
+        kind: "branches",
+        branches: [],
+      },
+    } as any);
+
+    expect(meta.rootInfo).toEqual({
+      kind: "conditional",
+      targets: [
+        {
+          kind: "componentUsage",
+          elementIndex: 1,
+          usageIndex: 0,
+          name: "PrimaryButton",
+          importSource: "./PrimaryButton.vue",
+        },
+        {
+          kind: "nativeElement",
+          elementIndex: 2,
+          tag: "button",
         },
       ],
     });

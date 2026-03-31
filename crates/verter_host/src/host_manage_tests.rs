@@ -76,20 +76,6 @@ fn resolved_imported_alias_body(
     .expect("imported alias should materialize through the host cache")
 }
 
-fn resolved_imported_alias_dependencies(
-    host: &VerterHost,
-    alias: &verter_resolver::ImportedTypeAlias,
-) -> Vec<verter_resolver::ImportedSymbolDependency> {
-    let view = host.resolver_store_view();
-    host.resolve_shallow_symbol_dependency_alias_in_view(
-        alias.merge_root_canonical.as_str(),
-        alias.merge_root_exported.as_str(),
-        Some(&view),
-    )
-    .map(|prepared| prepared.2.symbol_dependencies)
-    .expect("imported alias should materialize through the host cache")
-}
-
 struct CountingWorkspace {
     inner: Arc<verter_vfs::MemoryWorkspace>,
     read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
@@ -110,6 +96,10 @@ impl CountingWorkspace {
     fn inject_file(&self, path: &str, source: &str) {
         self.inner
             .inject_file(path.to_string(), Arc::<str>::from(source.to_string()));
+    }
+
+    fn remove_file(&self, path: &str) {
+        self.inner.remove_file(path);
     }
 
     fn reset_reads(&self) {
@@ -3638,42 +3628,143 @@ defineProps<Props>()
         vec![exact_dependency("./types", "/src/types.ts")],
     );
 
-    let snapshot = host
-        .get_analysis_snapshot_internal("/src/App.vue", None)
-        .expect("analysis snapshot should exist");
-    let dep_resolutions = host.dependency_resolutions_for_eval("/src/App.vue");
-    let imported_inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
-    let props_alias = imported_inputs
-        .type_aliases
-        .iter()
-        .find(|alias| alias.local_name == "Props")
-        .expect("Props alias should be collected");
-    let props_dependencies = resolved_imported_alias_dependencies(&host, props_alias);
+    let _seeded = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed imported state");
+
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .expect("Props alias should resolve from cached imported state");
     assert!(
-        props_dependencies.iter().any(|dependency| {
+        prepared.2.symbol_dependencies.iter().any(|dependency| {
             dependency.local_name == "ImportedBase"
                 && dependency.canonical_id == "/src/base.ts"
                 && dependency.exported_name == "BaseProps"
         }),
         "shallow imported aliases should keep imported symbol lookup links, got {:?}",
-        props_dependencies
+        prepared.2.symbol_dependencies
     );
 
-    let built = host
-        .build_owner_eval_env_with_inputs_from_owner_env_in_view(
-            "/src/App.vue",
-            &snapshot,
-            &imported_inputs,
+    let mut env = host
+        .base_eval_env_in_view("/src/App.vue", None)
+        .expect("owner base env should build");
+    let mut visiting = rustc_hash::FxHashSet::default();
+    assert!(
+        host.materialize_shallow_type_symbol_into_env_in_view(
+            &mut env,
+            "Props",
+            "/src/types.ts",
+            "Props",
             None,
-            None,
-            None,
-            None,
-        )
-        .expect("owner env should build");
+            &mut visiting,
+        ),
+        "owner env should materialize the shallow imported root alias"
+    );
 
     assert!(
-        built.env.type_symbols.contains_key("Props"),
-        "builder should materialize shallow imported aliases into the owner env"
+        env.type_symbols.contains_key("Props"),
+        "owner env should contain the shallow imported alias"
+    );
+    assert!(
+        env.type_symbols.contains_key("ImportedBase"),
+        "owner env should also contain the alias's attached symbol dependency"
+    );
+
+    let props_decl = env
+        .type_symbols
+        .get("Props")
+        .cloned()
+        .expect("materialized Props decl should exist");
+    let evaluated = verter_analysis::type_eval::evaluate(&props_decl.body, &mut env);
+    let TypeExpr::Object(object) = evaluated else {
+        panic!("Props should evaluate to an object");
+    };
+    let prop_names: std::collections::BTreeSet<_> = object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        prop_names,
+        std::collections::BTreeSet::from(["activeClass", "replace"]),
+        "attached shallow symbol dependencies should be sufficient to evaluate the imported alias in the owner env",
+    );
+}
+
+#[test]
+fn imported_eval_inputs_collect_owner_local_inherited_import_roots() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+export interface LinkProps {
+  as?: string
+  class?: any
+  href?: string
+  target?: string
+  active?: boolean
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'active'
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  label?: string
+  color?: string
+  variant?: string
+  ui?: object
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+interface Props extends Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: 'primary'
+  variant?: 'solid'
+  side?: 'left' | 'right'
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let dep_resolutions = host
+        .dependency_resolutions_for_eval_in_view("/src/App.vue", None)
+        .unwrap_or_default();
+    let imported_inputs = host.imported_eval_inputs_with_owner_context_in_view(
+        "/src/App.vue",
+        &snapshot,
+        &dep_resolutions,
+        None,
+        None,
+        None,
+    );
+
+    let alias_names: std::collections::BTreeSet<_> = imported_inputs
+        .type_aliases
+        .iter()
+        .map(|alias| alias.local_name.as_str())
+        .collect();
+    assert!(
+        alias_names.contains("ButtonProps") && alias_names.contains("LinkPropsKeys"),
+        "owner-local inherited import surfaces should seed imported eval roots, got {:?}",
+        alias_names,
     );
 }
 
@@ -3734,6 +3825,81 @@ import { unused } from './unused'
 }
 
 #[test]
+fn extract_component_meta_from_resolved_keeps_fallthrough_on_captured_store_view() {
+    let host = make_host();
+    upsert_vue(&host, "/src/Link.vue", r#"<template><a /></template>"#);
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script setup lang="ts">
+import Link from './Link.vue'
+</script>
+<template><Link /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![exact_dependency("./Link.vue", "/src/Link.vue")],
+    );
+
+    let store_view = host.resolver_store_view();
+
+    upsert_non_sfc(&host, "/src/shared.ts", "export const shared = 'shared'");
+    upsert_vue(
+        &host,
+        "/src/UnrelatedA.vue",
+        r#"<script setup lang="ts">
+import { shared } from './shared'
+</script>
+<template><div :title="shared" /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/UnrelatedB.vue",
+        r#"<script setup lang="ts">
+import { shared } from './shared'
+</script>
+<template><div :title="shared" /></template>"#,
+    );
+
+    host.raw_analysis_snapshot_cache.lock().clear();
+    host.provenance().reset();
+
+    let resolved = host
+        .resolve_component_meta_in_view(
+            "/src/Button.vue",
+            crate::types::ResolverMode::Expanded,
+            &store_view,
+        )
+        .expect("resolved meta should be computed from the captured view");
+
+    let meta = extract_component_meta_from_resolved(
+        &host,
+        "/src/Button.vue",
+        &resolved,
+        true,
+        Some(&store_view),
+    );
+
+    assert!(
+        matches!(
+            meta.fallthrough_surface,
+            verter_analysis::component_meta::FallthroughSurface::Branches { .. }
+        ),
+        "button fallthrough should still resolve through the imported Link root",
+    );
+    assert!(
+        host.raw_analysis_snapshot_cache_entry("/src/UnrelatedA.vue")
+            .is_none(),
+        "fallthrough extraction should not take a fresh store snapshot that backfills unrelated late files",
+    );
+    assert!(
+        host.raw_analysis_snapshot_cache_entry("/src/UnrelatedB.vue")
+            .is_none(),
+        "fallthrough extraction should stay on the captured store view for all child lookups",
+    );
+}
+
+#[test]
 fn resolve_shallow_symbol_dependency_alias_follows_barrel_root_to_cached_defining_file() {
     let host = make_host();
     upsert_non_sfc(
@@ -3782,6 +3948,154 @@ fn resolve_shallow_symbol_dependency_alias_follows_barrel_root_to_cached_definin
     assert!(
         base_cached.prepared_type_aliases.contains_key("BaseProps"),
         "builder should cache the shallow defining-file alias for later requests"
+    );
+}
+
+#[test]
+fn resolve_shallow_symbol_dependency_alias_materializes_package_imported_pick_aliases() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/node_modules/vue/index.d.ts",
+        r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/runtime/types/html.ts",
+        r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![exact_dependency("vue", "/node_modules/vue/index.d.ts")],
+    );
+
+    let view = host.resolver_store_view();
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view(
+            "/src/runtime/types/html.ts",
+            "ButtonHTMLAttributes",
+            Some(&view),
+        )
+        .expect("shallow alias should materialize package-imported Pick helpers");
+
+    let TypeExpr::Object(shape) = &prepared.2.decl.body else {
+        panic!(
+            "package-imported Pick alias should hydrate to an object surface, got {:?}",
+            prepared.2.decl.body
+        );
+    };
+    let prop_names: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        prop_names.contains("form")
+            && prop_names.contains("formaction")
+            && prop_names.contains("formenctype")
+            && prop_names.contains("formmethod")
+            && prop_names.contains("formnovalidate")
+            && prop_names.contains("formtarget"),
+        "package-imported Pick alias should preserve button form attrs after shallow hydration, got {prop_names:?}"
+    );
+}
+
+#[test]
+fn resolve_shallow_symbol_dependency_alias_materializes_reexported_vue_pick_aliases() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/node_modules/vue/dist/vue.d.ts",
+        "export * from '@vue/runtime-dom'",
+    );
+    upsert_non_sfc(
+        &host,
+        "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts",
+        r#"export interface HTMLAttributes {
+  class?: any
+}
+
+export interface ButtonHTMLAttributes extends HTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/runtime/types/html.ts",
+        r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/runtime/types/html.ts",
+        vec![exact_dependency("vue", "/node_modules/vue/dist/vue.d.ts")],
+    );
+    host.set_import_dependencies(
+        "/node_modules/vue/dist/vue.d.ts",
+        vec![exact_dependency(
+            "@vue/runtime-dom",
+            "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts",
+        )],
+    );
+
+    let view = host.resolver_store_view();
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view(
+            "/src/runtime/types/html.ts",
+            "ButtonHTMLAttributes",
+            Some(&view),
+        )
+        .expect("shallow alias should materialize vue re-exported Pick helpers");
+
+    let TypeExpr::Object(shape) = &prepared.2.decl.body else {
+        panic!(
+            "vue re-exported Pick alias should hydrate to an object surface, got {:?}",
+            prepared.2.decl.body
+        );
+    };
+    let prop_names: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        prop_names.contains("form")
+            && prop_names.contains("formaction")
+            && prop_names.contains("formenctype")
+            && prop_names.contains("formmethod")
+            && prop_names.contains("formnovalidate")
+            && prop_names.contains("formtarget"),
+        "vue re-exported Pick alias should preserve button form attrs after shallow hydration, got {prop_names:?}"
     );
 }
 
@@ -7284,6 +7598,122 @@ fn external_type_analysis_in_view_reuses_cached_analysis_for_same_dependency() {
 }
 
 #[test]
+fn external_type_analysis_in_view_prefers_declaration_companion_for_runtime_js_dependencies() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js".to_string(),
+        Arc::from("export const runtimeOnly = true\n"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
+        Arc::from("export interface Props { label: string }\n"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws);
+
+    let analysis = host
+        .external_type_analysis_in_view("/workspace/node_modules/pkg/dist/index.js", None)
+        .expect("runtime-script analysis requests should prefer the declaration companion");
+
+    assert!(
+        analysis.local_symbol_span("Props").is_some(),
+        "the declaration companion analysis should expose declaration symbols",
+    );
+
+    let runtime_entry = host
+        .clone_current_imported_dependency_entry("/workspace/node_modules/pkg/dist/index.js", None);
+    assert!(
+        runtime_entry
+            .as_ref()
+            .and_then(|entry| entry.external_type_analysis.as_ref())
+            .is_none(),
+        "runtime-script entries should stay shallow when a declaration companion exists",
+    );
+
+    let declaration_entry = host
+        .clone_current_imported_dependency_entry(
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+            None,
+        )
+        .expect("the declaration companion should own the cached analysis");
+    assert!(
+        declaration_entry.external_type_analysis.is_some(),
+        "the declaration companion should cache the analysis surface",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_in_view_prefers_declaration_companion_shallowly() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js",
+        "export const runtimeOnly = true\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "export interface Props { label: string }\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    let resolved = host.resolve_eval_dependency_canonical_in_view(
+        "/workspace/node_modules/pkg/dist/index.js",
+        None,
+    );
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/node_modules/pkg/dist/index.d.ts"),
+        "runtime-script dependency canonicalization should prefer the declaration companion",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/index.js"),
+        0,
+        "companion selection should not read the runtime script when a declaration companion exists",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/pkg/dist/index.d.ts"),
+        1,
+        "companion selection should only probe the chosen declaration target",
+    );
+
+    let runtime_entry = host
+        .clone_current_imported_dependency_entry("/workspace/node_modules/pkg/dist/index.js", None);
+    assert!(
+        runtime_entry
+            .as_ref()
+            .and_then(|entry| entry.snapshot.as_ref())
+            .is_none()
+            && runtime_entry
+                .as_ref()
+                .and_then(|entry| entry.external_type_analysis.as_ref())
+                .is_none()
+            && runtime_entry
+                .as_ref()
+                .and_then(|entry| entry.env.as_ref())
+                .is_none(),
+        "runtime-script entries must stay untouched during shallow companion selection",
+    );
+
+    let declaration_entry = host
+        .clone_current_imported_dependency_entry(
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+            None,
+        )
+        .expect("the declaration companion should be cached after canonicalization");
+    assert!(
+        declaration_entry.snapshot.is_none()
+            && declaration_entry.export_signatures.is_none()
+            && declaration_entry.external_type_analysis.is_none()
+            && declaration_entry.env.is_none(),
+        "companion canonicalization must remain raw-source-only until the selected target is materialized",
+    );
+}
+
+#[test]
 fn external_type_analysis_in_view_uses_eval_source_for_vue_dependencies() {
     let host = make_host();
     upsert_non_sfc(
@@ -7328,6 +7758,68 @@ export interface Props extends Base {
 }
 
 #[test]
+fn resolve_external_type_from_cached_dependency_state_in_view_keeps_local_type_resolution_shallow()
+{
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export interface Props { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let shallow = host
+        .ensure_shallow_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed shallow imported state");
+    assert!(
+        shallow.snapshot.is_none() && shallow.env.is_none(),
+        "shallow imported state should stay export-only before local type resolution",
+    );
+
+    ws.reset_reads();
+    let resolved = host
+        .resolve_external_type_from_cached_dependency_state_in_view(
+            "/src/types.ts",
+            "Props",
+            &rustc_hash::FxHashMap::default(),
+            None,
+        )
+        .expect("local type resolution should succeed from shallow imported state");
+
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        "resolved props should include the local interface member, got {:?}",
+        resolved.props,
+    );
+
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("types dependency should remain cached after local type resolution");
+    assert!(
+        cached.snapshot.is_none() && cached.env.is_none(),
+        "local cached type resolution must not deepen imported dependencies beyond shallow analysis",
+    );
+    assert!(
+        cached.dependency_resolutions.is_empty(),
+        "local cached type resolution must not prewarm dependency routes",
+    );
+    assert_eq!(
+        ws.read_count("/src/types.ts"),
+        0,
+        "local cached type resolution should reuse shallow cached state without rereading source",
+    );
+}
+
+#[test]
 fn external_type_analysis_in_view_preserves_vue_tsx_source_type() {
     let host = make_host();
     upsert_vue(
@@ -7362,6 +7854,193 @@ export type Props = {
     assert!(
         analysis.required_import_names("Props").is_empty(),
         "local tsx-only types should not invent import dependencies",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_external_type_from_loaded_files_skips_leaf_imported_prop_companions() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { UseComponentIconsProps } from './useComponentIcons'
+
+defineProps<UseComponentIconsProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/useComponentIcons.ts",
+        r#"import type { AvatarProps, IconProps } from './types'
+
+export interface UseComponentIconsProps {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+}"#,
+    );
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './Avatar.vue'\nexport * from './Icon.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Icon.vue",
+        r#"<script lang="ts">
+export interface IconProps {
+  name: string
+  mode?: 'svg' | 'css'
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Avatar.vue",
+        r#"<script lang="ts">
+import type { ChipProps } from './Chip.vue'
+
+export interface AvatarProps {
+  chip?: ChipProps
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Chip.vue",
+        r#"<script lang="ts">
+export interface ChipProps {
+  tone?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency(
+            "./useComponentIcons",
+            "/src/useComponentIcons.ts",
+        )],
+    );
+    host.set_import_dependencies(
+        "/src/useComponentIcons.ts",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![
+            exact_dependency("./Avatar.vue", "/src/Avatar.vue"),
+            exact_dependency("./Icon.vue", "/src/Icon.vue"),
+        ],
+    );
+    host.set_import_dependencies(
+        "/src/Avatar.vue",
+        vec![exact_dependency("./Chip.vue", "/src/Chip.vue")],
+    );
+
+    ws.reset_reads();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut visiting = rustc_hash::FxHashSet::default();
+
+    let resolved = host
+        .resolve_external_type_from_loaded_files(
+            "/src/App.vue",
+            "./useComponentIcons",
+            "UseComponentIconsProps",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut cache,
+            &mut visiting,
+            true,
+            verter_vfs::ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("external type resolution should complete")
+        .expect("UseComponentIconsProps should resolve");
+
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("icon")),
+        "Icon-backed props should still resolve through structural indexed access, got {:?}",
+        resolved.props
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("avatar")),
+        "leaf imported prop aliases should remain present without resolving the companion body, got {:?}",
+        resolved.props
+    );
+    assert_eq!(
+        ws.read_count("/src/Avatar.vue"),
+        1,
+        "flat barrel BFS may touch earlier siblings once while searching for IconProps, but it must not deepen into the leaf companion body",
+    );
+    assert_eq!(
+        ws.read_count("/src/Chip.vue"),
+        0,
+        "skipping the leaf companion should also avoid its transitive imported graph",
+    );
+}
+
+#[test]
+fn base_eval_env_in_view_prefers_declaration_companion_for_runtime_js_dependencies() {
+    let ws = Arc::new(verter_vfs::MemoryWorkspace::new(
+        verter_vfs::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.js".to_string(),
+        Arc::from("export const runtimeOnly = true\n"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
+        Arc::from("export declare function useForwardProps<T>(value: T): T\n"),
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws);
+
+    let env = host
+        .base_eval_env_in_view("/workspace/node_modules/pkg/dist/index.js", None)
+        .expect("runtime-script env requests should prefer the declaration companion");
+
+    assert!(
+        env.value_symbols.contains_key("useForwardProps"),
+        "the declaration companion env should expose value declarations",
+    );
+
+    let runtime_entry = host
+        .clone_current_imported_dependency_entry("/workspace/node_modules/pkg/dist/index.js", None);
+    assert!(
+        runtime_entry
+            .as_ref()
+            .and_then(|entry| entry.env.as_ref())
+            .is_none(),
+        "runtime-script entries should stay shallow when a declaration companion exists",
+    );
+
+    let declaration_entry = host
+        .clone_current_imported_dependency_entry(
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+            None,
+        )
+        .expect("the declaration companion should own the cached env");
+    assert!(
+        declaration_entry.env.is_some(),
+        "the declaration companion should cache the eval env",
     );
 }
 
@@ -7406,8 +8085,8 @@ fn resolve_named_type_export_target_seeds_shallow_dependency_state_without_snaps
         "barrel routing should seed shallow external type analysis for the imported barrel file",
     );
     assert!(
-        target_entry.external_type_analysis.is_some(),
-        "barrel routing should seed shallow external type analysis for the resolved imported file",
+        target_entry.external_type_analysis.is_none(),
+        "barrel routing should keep the resolved imported file export-only until its body is actually needed",
     );
     assert!(
         barrel_entry.snapshot.is_none() && target_entry.snapshot.is_none(),
@@ -7422,14 +8101,177 @@ fn resolve_named_type_export_target_seeds_shallow_dependency_state_without_snaps
         target_entry.env.is_some(),
     );
     assert!(
-        barrel_entry.dependency_resolutions.is_empty()
-            && target_entry.dependency_resolutions.is_empty(),
-        "shallow seeding should not hydrate dependency resolutions as a side effect",
+        target_entry.dependency_resolutions.is_empty(),
+        "barrel routing should leave the resolved target export-only instead of prewarming its dependency routes",
     );
     assert_eq!(
         ws.read_count("/src/base.ts"),
         0,
         "shallow export routing should not touch transitive children that are not on the requested path",
+    );
+}
+
+#[test]
+fn import_bindings_for_merge_uses_cached_external_analysis_without_materializing_snapshot() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/base.ts", "export interface Base { id: string }\n");
+    ws.inject_file(
+        "/src/types.ts",
+        "import type { Base } from './base'\nexport interface Props extends Base { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let seeded = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed imported state");
+    let eval_source = seeded
+        .eval_source
+        .as_ref()
+        .expect("seeded dependency should have eval source")
+        .as_ref()
+        .to_string();
+
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = cache
+            .get_mut("/src/types.ts")
+            .expect("types dependency should stay cached");
+        Arc::make_mut(entry).snapshot = None;
+    }
+
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/types.ts", None)
+            .and_then(|entry| entry.snapshot.clone())
+            .is_none(),
+        "test setup should keep the imported dependency snapshotless",
+    );
+
+    let mut resolver = HostImportedEvalResolver::new(&host, "/src/owner.ts", None);
+    let bindings = ImportedEvalSourceMergeResolver::import_bindings_for_merge(
+        &mut resolver,
+        "/src/types.ts",
+        &eval_source,
+    );
+
+    assert!(
+        bindings
+            .iter()
+            .any(|binding| binding.local_name == "Base" && binding.source == "./base"),
+        "cached external analysis should still surface import bindings, got {:?}",
+        bindings,
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/types.ts", None)
+            .and_then(|entry| entry.snapshot.clone())
+            .is_none(),
+        "import binding lookup must not materialize a raw snapshot from source-walk fallback",
+    );
+}
+
+#[test]
+fn resolve_shallow_symbol_dependency_alias_skips_raw_snapshot_fallback_for_source_merge_aliases() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/base.ts", "export interface Base { id: string }\n");
+    ws.inject_file(
+        "/src/types.ts",
+        "import type { Base } from './base'\nexport type Props = Base & { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let _seeded = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed imported state");
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = cache
+            .get_mut("/src/types.ts")
+            .expect("types dependency should stay cached");
+        Arc::make_mut(entry).snapshot = None;
+    }
+
+    let prepared = host
+        .resolve_prepared_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .expect("prepared alias should resolve from cached imported state");
+    assert!(
+        prepared.2.requires_source_merge,
+        "test setup should exercise the source-merge alias path, got {:?}",
+        prepared.2.decl.body,
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/types.ts", None)
+            .and_then(|entry| entry.snapshot.clone())
+            .is_none(),
+        "prepared alias resolution should stay snapshotless during shallow setup",
+    );
+
+    let resolved = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .expect("shallow alias hydration should still resolve");
+
+    assert_eq!(
+        resolved.2.decl.body,
+        prepared.2.decl.body,
+        "without a cache-owned snapshot, shallow alias hydration should keep the prepared body instead of bouncing into raw snapshot recovery",
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/types.ts", None)
+            .and_then(|entry| entry.snapshot.clone())
+            .is_none(),
+        "source-merge alias hydration must not materialize a raw snapshot fallback",
+    );
+}
+
+#[test]
+fn resolve_shallow_symbol_dependency_alias_caches_hydrated_recursive_aliases() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+export type ClassNameValue = ClassNameArray | string | false
+export type ClassNameArray = ClassNameValue[]
+"#,
+    );
+
+    let resolved = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "ClassNameValue", None)
+        .expect("recursive alias should hydrate through the shallow cache path");
+    assert_eq!(resolved.0, "/src/types.ts");
+    assert_eq!(resolved.1, "ClassNameValue");
+
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("types dependency should remain cached after hydration");
+    let cached_value = cached
+        .prepared_type_aliases
+        .get("ClassNameValue")
+        .expect("resolved root should populate the prepared alias cache");
+    let cached_array = cached
+        .prepared_type_aliases
+        .get("ClassNameArray")
+        .expect("recursive dependency should populate the prepared alias cache");
+
+    assert!(
+        !cached_value.requires_source_merge,
+        "once a recursive alias has been hydrated through the shallow env, later passes should reuse that cached result instead of rebuilding it",
+    );
+    assert!(
+        !cached_array.requires_source_merge,
+        "recursive support aliases should also be frozen after the first shallow hydration pass",
     );
 }
 
@@ -7464,6 +8306,92 @@ export type Props = {
         resolved,
         Some(("/src/types.vue".to_string(), "Props".to_string())),
         "registry routing should preserve the vue script lang and find tsx exports behind barrels",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn ensure_shallow_imported_dependency_state_for_vue_exports_stays_local() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Link.vue'\nexport * from './Unused.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface ButtonProps extends Omit<LinkProps, 'raw'> {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><a /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let entry = host
+        .ensure_shallow_imported_dependency_state_in_view("/src/Button.vue", None)
+        .expect("button dependency should build shallow state");
+
+    let export_names: BTreeSet<_> = entry
+        .export_signatures
+        .as_ref()
+        .expect("shallow state should include export signatures")
+        .iter()
+        .map(|sig| sig.name.as_str())
+        .collect();
+
+    assert!(
+        export_names.contains("ButtonProps"),
+        "shallow vue export state should keep ButtonProps visible for registry routing, got {:?}",
+        export_names,
+    );
+    assert!(
+        entry.dependency_resolutions.is_empty(),
+        "shallow vue imported state must not eagerly publish dependency resolutions before a symbol route requests them",
+    );
+    assert_eq!(
+        ws.read_count("/src/types.ts"),
+        0,
+        "shallow vue export state should not read imported barrels while building export signatures",
+    );
+    assert_eq!(
+        ws.read_count("/src/Link.vue"),
+        0,
+        "shallow vue export state should not branch into imported type targets",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        0,
+        "shallow vue export state should stay local and avoid unrelated siblings",
     );
 }
 
@@ -7540,6 +8468,232 @@ defineProps<IconProps>()
         ws.read_count("/src/types/b.ts") <= 1,
         "flat barrel lookup should avoid rereading later same-level siblings, got {} reads for /src/types/b.ts",
         ws.read_count("/src/types/b.ts"),
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn get_component_meta_registry_materialization_skips_unrelated_imported_siblings() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Avatar } from './types'
+defineProps<{ avatar?: Avatar }>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        r#"import theme from './theme'
+import type { Used } from './used'
+import type { Unused } from './unused'
+
+type LocalPayload = {
+  used: Used
+  unused: Unused
+}
+
+export type Avatar = {
+  slots: typeof theme['slots']
+  payload: LocalPayload['used']
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/theme.ts",
+        r#"export default {
+  slots: {
+    base: '',
+  },
+} as const
+"#,
+    );
+    ws.inject_file("/src/used.ts", "export interface Used { label: string }\n");
+    ws.inject_file(
+        "/src/unused.ts",
+        "export interface Unused { noisy: number }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./theme", "/src/theme.ts"),
+            exact_dependency("./used", "/src/used.ts"),
+            exact_dependency("./unused", "/src/unused.ts"),
+        ],
+    );
+
+    ws.reset_reads();
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "Avatar", None)
+        .expect("Avatar should hydrate through the shallow cache path");
+    assert!(
+        matches!(prepared.2.decl.body, TypeExpr::Object(_)),
+        "shallow alias hydration should still materialize Avatar enough for downstream evaluation",
+    );
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/types.ts", None)
+        .expect("types snapshot should exist");
+    let mut prepared_env = host
+        .build_shallow_imported_decl_eval_env_in_view(
+            "/src/types.ts",
+            &snapshot,
+            &prepared.2.decl,
+            None,
+        )
+        .expect("prepared env should build");
+    let prepared_avatar =
+        verter_analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
+    assert!(
+        matches!(prepared_avatar, TypeExpr::Object(_)),
+        "prepared Avatar should evaluate without widening through unrelated imported siblings",
+    );
+    assert_eq!(
+        ws.read_count("/src/unused.ts"),
+        0,
+        "shallow alias hydration should not branch into unrelated imported siblings",
+    );
+
+    ws.reset_reads();
+    let resolved = host
+        .resolve_component_meta("/src/Consumer.vue", ResolverMode::Expanded)
+        .expect("resolved component meta should exist for the consumer");
+    assert!(
+        resolved
+            .resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "Avatar"),
+        "resolved type registry should keep the requested type available for projection",
+    );
+    assert!(
+        resolved
+            .resolved_type_registry
+            .iter()
+            .all(|entry| entry.name != "LocalPayload"),
+        "resolved type registry should not branch into unrelated local helper siblings",
+    );
+    assert_eq!(
+        ws.read_count("/src/unused.ts"),
+        0,
+        "resolved component meta should not branch into unrelated imported siblings",
+    );
+
+    ws.reset_reads();
+    let meta =
+        extract_component_meta_from_resolved(&host, "/src/Consumer.vue", &resolved, true, None);
+
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "avatar"),
+        "resolved props should include avatar, got {:?}",
+        meta.props,
+    );
+    assert_eq!(
+        ws.read_count("/src/unused.ts"),
+        0,
+        "registry materialization should not branch into unrelated imported siblings",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn shallow_imported_decl_env_hydrates_same_file_support_symbols_without_new_roots() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+export interface LinkProps {
+  as?: string
+  class?: any
+  href?: string
+}
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  label?: string
+}
+"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+
+    let _seeded = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed imported state");
+
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "ButtonProps", None)
+        .expect("ButtonProps should hydrate through the shallow cache path");
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/types.ts", None)
+        .expect("types snapshot should exist");
+    let mut prepared_env = host
+        .build_shallow_imported_decl_eval_env_in_view(
+            "/src/types.ts",
+            &snapshot,
+            &prepared.2.decl,
+            None,
+        )
+        .expect("prepared env should build");
+    let evaluated = verter_analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
+    let TypeExpr::Object(object) = evaluated else {
+        panic!("ButtonProps should evaluate to an object");
+    };
+    let prop_names: std::collections::BTreeSet<_> = object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        prop_names,
+        std::collections::BTreeSet::from(["as", "class", "label"]),
+        "same-file support symbols should hydrate inside the shallow eval env without spawning new roots",
+    );
+    assert_eq!(
+        ws.read_count("/src/types.ts"),
+        1,
+        "same-file shallow helper hydration should stay within the already loaded source",
     );
 }
 
@@ -7626,5 +8780,618 @@ export type TargetEmits = { change: [value: string] }
         ws.read_count("/src/types/b.ts") <= 1,
         "multiple late barrel exports should not reread unrelated sibling 'b', got {}",
         ws.read_count("/src/types/b.ts"),
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn shallow_imported_barrel_state_keeps_reexport_routes_lazy_until_lookup() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './a'\nexport * from './b'\nexport * from './target'\n",
+    );
+    ws.inject_file(
+        "/src/types/a.ts",
+        "export interface AOnly { unused: string }\n",
+    );
+    ws.inject_file(
+        "/src/types/b.ts",
+        "export interface BOnly { unused: number }\n",
+    );
+    ws.inject_file(
+        "/src/types/target.ts",
+        r#"
+export interface TargetProps { label: string }
+export type TargetEmits = { change: [value: string] }
+"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let shallow = host
+        .ensure_shallow_imported_dependency_state_in_view("/src/types/index.ts", None)
+        .expect("barrel should materialize shallow imported state");
+
+    assert!(
+        shallow.dependency_resolutions.is_empty(),
+        "shallow imported barrel state must not eagerly publish dependency resolutions for wildcard reexports",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./a"),
+        0,
+        "shallow imported barrel state must not resolve earlier wildcard siblings before a symbol route is requested",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./b"),
+        0,
+        "shallow imported barrel state must not resolve intermediate wildcard siblings before a symbol route is requested",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./target"),
+        0,
+        "shallow imported barrel state must not resolve the eventual wildcard target before lookup",
+    );
+
+    ws.reset_resolves();
+    let props_root =
+        host.resolve_imported_type_root_in_view("/src/types/index.ts", "TargetProps", None);
+    let emits_root =
+        host.resolve_imported_type_root_in_view("/src/types/index.ts", "TargetEmits", None);
+
+    assert_eq!(
+        props_root,
+        (
+            "/src/types/target.ts".to_string(),
+            "TargetProps".to_string()
+        ),
+        "TargetProps should resolve through the cached shallow barrel route",
+    );
+    assert_eq!(
+        emits_root,
+        (
+            "/src/types/target.ts".to_string(),
+            "TargetEmits".to_string()
+        ),
+        "TargetEmits should resolve through the cached shallow barrel route",
+    );
+    assert!(
+        ws.resolve_count("/src/types/index.ts", "./a") <= 1,
+        "shallow barrel routes should not repeatedly resolve earlier siblings, got {} resolves for ./a",
+        ws.resolve_count("/src/types/index.ts", "./a"),
+    );
+    assert!(
+        ws.resolve_count("/src/types/index.ts", "./b") <= 1,
+        "shallow barrel routes should not repeatedly resolve intermediate siblings, got {} resolves for ./b",
+        ws.resolve_count("/src/types/index.ts", "./b"),
+    );
+    assert!(
+        ws.resolve_count("/src/types/index.ts", "./target") <= 1,
+        "shallow barrel routes should resolve the matched sibling once, got {} resolves for ./target",
+        ws.resolve_count("/src/types/index.ts", "./target"),
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn ensure_export_registry_keeps_imported_barrels_export_only() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './a'\nexport * from './target'\n",
+    );
+    ws.inject_file(
+        "/src/types/a.ts",
+        "export interface AOnly { unused: string }\n",
+    );
+    ws.inject_file(
+        "/src/types/target.ts",
+        "export interface TargetProps { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let registry = host
+        .ensure_export_registry_in_view("/src/types/index.ts", None)
+        .expect("barrel should materialize an export registry");
+    assert_eq!(
+        registry.wildcard_edges.len(),
+        2,
+        "barrel export registry should preserve wildcard edges",
+    );
+
+    let shallow = host
+        .clone_current_imported_dependency_entry("/src/types/index.ts", None)
+        .expect("barrel should be cached after registry seeding");
+    assert!(
+        shallow.dependency_resolutions.is_empty(),
+        "registry seeding must stay export-only and defer wildcard dependency routes until lookup",
+    );
+    assert!(
+        shallow.export_signatures.is_none(),
+        "registry seeding should stay on the shallow registry path and avoid building export-signature snapshots",
+    );
+    assert!(
+        shallow.script_analysis.is_none(),
+        "registry seeding should not build script analysis for barrel routing alone",
+    );
+    assert!(
+        shallow.external_type_analysis.is_some(),
+        "registry seeding should rely on cached shallow external type analysis",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_named_type_export_target_registry_seeding_keeps_barrel_children_shallow() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Button.vue'\nexport * from './Link.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface ButtonProps {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+}
+</script>
+<template><a /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let resolved =
+        host.resolve_named_type_export_target_in_view("/src/types.ts", "LinkProps", None);
+
+    assert_eq!(
+        resolved,
+        Some(("/src/Link.vue".to_string(), "LinkProps".to_string())),
+        "wildcard barrel routing should still resolve the requested child",
+    );
+
+    let barrel = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("barrel should be cached after routing");
+    assert!(
+        barrel.external_type_analysis.is_some(),
+        "barrel routing should keep only shallow external type analysis in cache",
+    );
+    assert!(
+        barrel.export_signatures.is_none(),
+        "barrel routing should not build export signatures for the barrel cache entry",
+    );
+
+    let child = host
+        .clone_current_imported_dependency_entry("/src/Link.vue", None)
+        .expect("matched child should be cached after routing");
+    assert!(
+        child.external_type_analysis.is_some(),
+        "matched child should be cached through shallow external type analysis",
+    );
+    assert!(
+        child.export_signatures.is_none(),
+        "matched child routing should not build export signatures before a span/export-graph query asks for them",
+    );
+    assert!(
+        child.script_analysis.is_none(),
+        "matched child routing should stay shallow and avoid script-analysis publication",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn store_view_dependency_routes_do_not_depend_on_live_owner_state() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/types/index.ts", "export * from './target'\n");
+    ws.inject_file(
+        "/src/types/target.ts",
+        "export interface TargetProps { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.ensure_shallow_imported_export_state_in_view("/src/types/index.ts", None)
+        .expect("barrel should materialize shallow export state");
+    let view = host.resolver_store_view();
+
+    ws.remove_file("/src/types/index.ts");
+    host.imported_dependency_cache
+        .lock()
+        .remove("/src/types/index.ts");
+    host.compile_cache.remove("/src/types/index.ts");
+
+    let resolved = host.resolve_type_dependency_canonical_shallow_in_view(
+        "/src/types/index.ts",
+        "./target",
+        Some(&view),
+    );
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/src/types/target.ts"),
+        "store-view dependency routes should resolve from the captured snapshot without reloading the live owner file",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn shallow_imported_export_state_skips_non_reexport_import_resolution() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+import type { SharedProps } from './shared'
+
+export interface LinkProps extends SharedProps {
+  href?: string
+}
+</script>
+<template><a /></template>"#,
+    );
+    ws.inject_file(
+        "/src/shared.ts",
+        "export interface SharedProps { label?: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_resolves();
+    let entry = host
+        .ensure_shallow_imported_export_state_in_view("/src/Link.vue", None)
+        .expect("component should materialize shallow export state");
+
+    assert!(
+        entry.export_signatures.is_some(),
+        "export-only shallow state should still capture export signatures",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/Link.vue", "./shared"),
+        0,
+        "export-only shallow state must not resolve ordinary imports that are irrelevant to the export surface",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn dependency_route_lookup_reuses_imported_dependency_cache_without_live_owner_state() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Button.vue'\nexport * from './Unused.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface ButtonProps {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.ensure_shallow_imported_export_state_in_view("/src/types.ts", None)
+        .expect("barrel should seed shallow dependency routes");
+
+    ws.remove_file("/src/types.ts");
+    host.compile_cache.remove("/src/types.ts");
+
+    let resolved = host.resolve_type_dependency_canonical_shallow_in_view(
+        "/src/types.ts",
+        "./Button.vue",
+        None,
+    );
+
+    assert_eq!(
+        resolved,
+        Some("/src/Button.vue".to_string()),
+        "dependency lookup should reuse cached imported dependency routes",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_named_type_export_target_nested_barrel_alias_skips_later_unrelated_siblings() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Button.vue'\nexport * from './Link.vue'\nexport * from './Unused.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface ButtonProps extends Omit<LinkProps, 'raw'> {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><a /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./Button.vue", "/src/Button.vue"),
+            exact_dependency("./Link.vue", "/src/Link.vue"),
+            exact_dependency("./Unused.vue", "/src/Unused.vue"),
+        ],
+    );
+
+    ws.reset_reads();
+    let resolved =
+        host.resolve_named_type_export_target_in_view("/src/types.ts", "ButtonProps", None);
+
+    let button_registry = host
+        .compile_cache
+        .get("/src/Button.vue")
+        .and_then(|entry| entry.export_registry.clone())
+        .expect("button export registry should be cached during named export routing");
+
+    assert_eq!(
+        resolved,
+        Some(("/src/Button.vue".to_string(), "ButtonProps".to_string())),
+        "named export target resolution should route to the first matching nested barrel child",
+    );
+    assert!(
+        button_registry.named.contains_key("ButtonProps"),
+        "button export registry should expose ButtonProps for the barrel route, got {:?}",
+        button_registry.named.keys().collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        0,
+        "named export target resolution should stop at the matched route instead of loading later unrelated siblings",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_named_type_export_target_unseeded_barrel_keeps_wildcard_children_shallow() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Button.vue'\nexport * from './Link.vue'\nexport * from './Unused.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface ButtonProps {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+}
+</script>
+<template><a /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let resolved =
+        host.resolve_named_type_export_target_in_view("/src/types.ts", "ButtonProps", None);
+
+    assert_eq!(
+        resolved,
+        Some(("/src/Button.vue".to_string(), "ButtonProps".to_string())),
+        "unseeded wildcard barrel routing should still resolve the first matching child",
+    );
+    assert_eq!(
+        ws.read_count("/src/Link.vue"),
+        0,
+        "route selection should not preload later wildcard siblings while seeding the barrel cache",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        0,
+        "route selection should stop after the matched first-level wildcard child",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_component_meta_nested_barrel_alias_skips_later_unrelated_siblings() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Button.vue'\nexport * from './Link.vue'\nexport * from './Unused.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface ButtonProps extends Omit<LinkProps, 'raw'> {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><a /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./Button.vue", "/src/Button.vue"),
+            exact_dependency("./Link.vue", "/src/Link.vue"),
+            exact_dependency("./Unused.vue", "/src/Unused.vue"),
+        ],
+    );
+
+    ws.reset_reads();
+    let resolved = host
+        .resolve_component_meta("/src/Consumer.vue", crate::types::ResolverMode::Expanded)
+        .expect("expanded component meta should resolve");
+
+    let prop_names: std::collections::BTreeSet<_> = resolved
+        .resolved_macros
+        .iter()
+        .flat_map(|resolved_macro| resolved_macro.props.iter())
+        .map(|field| field.name.as_str())
+        .collect();
+    assert!(
+        prop_names.contains("label") && prop_names.contains("href"),
+        "nested barrel alias should still resolve reached props, got {prop_names:?}",
+    );
+    assert!(
+        !prop_names.contains("raw"),
+        "nested barrel alias should still respect Omit, got {prop_names:?}",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        0,
+        "nested alias resolution should not branch out into later unrelated barrel siblings",
     );
 }

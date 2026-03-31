@@ -25,6 +25,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
     analysis: verter_analysis::component_meta::ComponentMetaAnalysis,
     resolved_state: Option<&host::meta_resolve::ResolvedComponentMetaState>,
 ) -> FfiComponentMeta {
+    let root_info = root_info_to_ffi(&analysis.root_reachability);
     FfiComponentMeta {
         props: analysis
             .props
@@ -93,6 +94,30 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                 description: e.description,
             })
             .collect(),
+        public_instance: analysis
+            .public_instance
+            .map(|public_instance| FfiPublicInstanceMeta {
+                completeness: public_instance_completeness_to_string(public_instance.completeness),
+                members: public_instance
+                    .members
+                    .into_iter()
+                    .map(|member| FfiPublicInstanceMemberMeta {
+                        name: member.name,
+                        kind: public_instance_member_kind_to_string(member.kind),
+                        r#type: member.type_expr,
+                        type_expansion: member.type_expansion.map(expansion_metadata_to_ffi),
+                        raw_type: member.raw_type,
+                        description: member.description,
+                    })
+                    .collect(),
+            }),
+        sfc_blocks: analysis.sfc_blocks.map(|blocks| FfiSfcBlocksMeta {
+            template: blocks.template.map(template_block_to_ffi),
+            script: blocks.script.map(script_block_to_ffi),
+            script_setup: blocks.script_setup.map(script_block_to_ffi),
+            styles: blocks.styles.into_iter().map(style_block_to_ffi).collect(),
+            custom: blocks.custom.into_iter().map(custom_block_to_ffi).collect(),
+        }),
         type_registry: analysis
             .type_registry
             .into_iter()
@@ -139,12 +164,24 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                         name: prop.name,
                         is_bound: prop.is_bound,
                         constness: component_prop_constness_to_string(prop.constness),
+                        expression: prop.expression,
+                        referenced_bindings: prop.referenced_bindings,
+                        from_spread: prop.from_spread,
+                        is_shorthand: prop.is_shorthand,
                     })
                     .collect(),
+                has_spread: component.has_spread,
                 slots_used: component.slots_used,
                 static_classes: component.static_classes,
                 has_dynamic_class: component.has_dynamic_class,
                 v_models: component.v_models,
+                v_model_entries: component
+                    .v_model_entries
+                    .into_iter()
+                    .map(|entry| FfiComponentVModelEntry {
+                        binding_name: entry.binding_name,
+                    })
+                    .collect(),
             })
             .collect(),
         template_refs: analysis
@@ -248,6 +285,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
         accepted_surface_completeness: accepted_surface_completeness_to_ffi(
             analysis.accepted_surface_completeness,
         ),
+        root_info,
         root_reachability: root_reachability_to_ffi(analysis.root_reachability),
         fallthrough_surface: fallthrough_surface_to_ffi(analysis.fallthrough_surface),
         options_api: analysis.options_api,
@@ -435,6 +473,47 @@ fn root_reachability_to_ffi(
                 branches: branches.into_iter().map(root_branch_to_ffi).collect(),
             }
         }
+    }
+}
+
+fn root_info_to_ffi(
+    reachability: &verter_analysis::component_meta::RootReachability,
+) -> FfiRootInfo {
+    match reachability {
+        verter_analysis::component_meta::RootReachability::NoFallthrough { reason } => {
+            let kind = match reason {
+                verter_analysis::component_meta::NoFallthroughReason::MultiRoot
+                | verter_analysis::component_meta::NoFallthroughReason::RootVFor => {
+                    FfiRootInfoKind::Multiple
+                }
+                verter_analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot => {
+                    FfiRootInfoKind::Conditional
+                }
+                verter_analysis::component_meta::NoFallthroughReason::InheritAttrsFalse
+                | verter_analysis::component_meta::NoFallthroughReason::NoTemplate
+                | verter_analysis::component_meta::NoFallthroughReason::EmptyTemplate
+                | verter_analysis::component_meta::NoFallthroughReason::TextOrInterpolationRoot => {
+                    FfiRootInfoKind::None
+                }
+            };
+            FfiRootInfo {
+                kind,
+                reason: Some(no_fallthrough_reason_to_ffi(reason.clone())),
+                targets: Vec::new(),
+            }
+        }
+        verter_analysis::component_meta::RootReachability::Branches { branches } => FfiRootInfo {
+            kind: if branches.len() <= 1 {
+                FfiRootInfoKind::Single
+            } else {
+                FfiRootInfoKind::Conditional
+            },
+            reason: None,
+            targets: branches
+                .iter()
+                .map(|branch| root_target_ref_to_ffi(branch.target.clone()))
+                .collect(),
+        },
     }
 }
 
@@ -881,6 +960,102 @@ fn resolved_declaration_kind_to_string(
         host::meta_resolve::ResolvedDeclarationKind::TypeAlias => "typeAlias".to_string(),
         host::meta_resolve::ResolvedDeclarationKind::Class => "class".to_string(),
         host::meta_resolve::ResolvedDeclarationKind::Unknown => "unknown".to_string(),
+    }
+}
+
+fn public_instance_completeness_to_string(
+    completeness: verter_analysis::component_meta::PublicInstanceCompleteness,
+) -> String {
+    match completeness {
+        verter_analysis::component_meta::PublicInstanceCompleteness::Exact => "exact".to_string(),
+        verter_analysis::component_meta::PublicInstanceCompleteness::Partial => {
+            "partial".to_string()
+        }
+    }
+}
+
+fn public_instance_member_kind_to_string(
+    kind: verter_analysis::component_meta::PublicInstanceMemberKind,
+) -> String {
+    match kind {
+        verter_analysis::component_meta::PublicInstanceMemberKind::Prop => "prop".to_string(),
+        verter_analysis::component_meta::PublicInstanceMemberKind::SlotContainer => {
+            "slotContainer".to_string()
+        }
+        verter_analysis::component_meta::PublicInstanceMemberKind::Exposed => "exposed".to_string(),
+    }
+}
+
+fn sfc_attribute_to_ffi(
+    attribute: verter_analysis::component_meta::SfcAttributeAnalysis,
+) -> FfiSfcAttributeMeta {
+    FfiSfcAttributeMeta {
+        name: attribute.name,
+        value: attribute.value,
+    }
+}
+
+fn template_block_to_ffi(
+    block: verter_analysis::component_meta::TemplateBlockAnalysis,
+) -> FfiTemplateBlockMeta {
+    FfiTemplateBlockMeta {
+        lang: block.lang,
+        src: block.src,
+        attributes: block
+            .attributes
+            .into_iter()
+            .map(sfc_attribute_to_ffi)
+            .collect(),
+    }
+}
+
+fn script_block_to_ffi(
+    block: verter_analysis::component_meta::ScriptBlockAnalysis,
+) -> FfiScriptBlockMeta {
+    FfiScriptBlockMeta {
+        lang: block.lang,
+        src: block.src,
+        generic: block.generic,
+        attrs_type: block.attrs_type,
+        attributes: block
+            .attributes
+            .into_iter()
+            .map(sfc_attribute_to_ffi)
+            .collect(),
+    }
+}
+
+fn style_block_to_ffi(
+    block: verter_analysis::component_meta::StyleBlockInfoAnalysis,
+) -> FfiStyleBlockMeta {
+    FfiStyleBlockMeta {
+        index: block.index as u32,
+        lang: block.lang,
+        src: block.src,
+        scoped: block.scoped,
+        is_module: block.is_module,
+        module_name: block.module_name,
+        attributes: block
+            .attributes
+            .into_iter()
+            .map(sfc_attribute_to_ffi)
+            .collect(),
+    }
+}
+
+fn custom_block_to_ffi(
+    block: verter_analysis::component_meta::CustomBlockAnalysis,
+) -> FfiCustomBlockMeta {
+    FfiCustomBlockMeta {
+        index: block.index as u32,
+        block_type: block.block_type,
+        lang: block.lang,
+        src: block.src,
+        attributes: block
+            .attributes
+            .into_iter()
+            .map(sfc_attribute_to_ffi)
+            .collect(),
     }
 }
 
@@ -1722,6 +1897,8 @@ mod tests {
             slots: Vec::new(),
             models: Vec::new(),
             exposed: Vec::new(),
+            public_instance: None,
+            sfc_blocks: None,
             type_registry: vec![verter_analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Props".to_string(),
                 type_expr: verter_analysis::type_expr::TypeExpr::Unknown {
@@ -1792,6 +1969,92 @@ mod tests {
             Some("/src/types.ts"),
             "native payload should also retain declaration provenance",
         );
+    }
+
+    #[test]
+    fn component_meta_ffi_exposes_root_info_summary() {
+        let analysis = verter_analysis::component_meta::ComponentMetaAnalysis {
+            props: Vec::new(),
+            events: Vec::new(),
+            slots: Vec::new(),
+            models: Vec::new(),
+            exposed: Vec::new(),
+            public_instance: None,
+            sfc_blocks: None,
+            type_registry: Vec::new(),
+            components: Vec::new(),
+            template_refs: Vec::new(),
+            imports: Vec::new(),
+            bindings: Vec::new(),
+            vue_api_calls: Vec::new(),
+            styles: Vec::new(),
+            flags: verter_analysis::component_meta::ComponentMetaFlags::default(),
+            root_reachability: verter_analysis::component_meta::RootReachability::Branches {
+                branches: vec![
+                    verter_analysis::component_meta::RootBranch {
+                        branch_index: 0,
+                        condition_text: None,
+                        target: verter_analysis::component_meta::RootTargetRef::ComponentUsage {
+                            element_index: 1,
+                            usage_index: 0,
+                            name: "PrimaryButton".to_string(),
+                            import_source: Some("./PrimaryButton.vue".to_string()),
+                        },
+                        consumed: verter_analysis::component_meta::ConsumedRootBindings {
+                            attrs: vec!["class".to_string()],
+                            listeners: vec!["click".to_string()],
+                            has_dynamic_attr_name: false,
+                            has_dynamic_listener_name: false,
+                        },
+                        has_unknown_spread: false,
+                    },
+                    verter_analysis::component_meta::RootBranch {
+                        branch_index: 1,
+                        condition_text: Some("isFallback".to_string()),
+                        target: verter_analysis::component_meta::RootTargetRef::NativeElement {
+                            element_index: 2,
+                            tag: "button".to_string(),
+                        },
+                        consumed: verter_analysis::component_meta::ConsumedRootBindings {
+                            attrs: Vec::new(),
+                            listeners: Vec::new(),
+                            has_dynamic_attr_name: false,
+                            has_dynamic_listener_name: false,
+                        },
+                        has_unknown_spread: false,
+                    },
+                ],
+            },
+            accepted_props: Vec::new(),
+            accepted_events: Vec::new(),
+            accepted_surface_completeness:
+                verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface: verter_analysis::component_meta::FallthroughSurface::Branches {
+                branches: Vec::new(),
+            },
+            options_api: false,
+            file_path: "/src/App.vue".to_string(),
+        };
+
+        let ffi = component_meta_analysis_to_ffi(analysis);
+        match ffi.root_info {
+            FfiRootInfo {
+                kind: FfiRootInfoKind::Conditional,
+                reason: None,
+                targets,
+            } => {
+                assert_eq!(targets.len(), 2);
+                assert!(matches!(
+                    targets.first(),
+                    Some(FfiRootTargetRef::ComponentUsage { name, .. }) if name == "PrimaryButton"
+                ));
+                assert!(matches!(
+                    targets.get(1),
+                    Some(FfiRootTargetRef::NativeElement { tag, .. }) if tag == "button"
+                ));
+            }
+            other => panic!("unexpected root info payload: {other:?}"),
+        }
     }
 
     #[test]

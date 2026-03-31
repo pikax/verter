@@ -10,11 +10,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   EXPECTED_ARTIFACTS_MANIFEST,
+  createWorkerBackendInstance,
   maybeRunGarbageCollection,
   parseMetaUiBenchArgs,
   prepareMetaUiProject,
   tryLoadExpectedArtifacts,
 } from "./meta-ui-bench.js";
+import { resolveVerterCompatSourceEntry } from "./verter-compat.js";
 
 function writeJson(filePath: string, value: unknown): void {
   writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
@@ -66,6 +68,12 @@ describe("parseMetaUiBenchArgs", () => {
 
     expect(args.outputDir).toBe(resolve("D:/bench/out"));
     expect(args.expectedDir).toBe(resolve("D:/bench/out", ".expected-vue-component-meta"));
+  });
+
+  it("supports configuring the per-query timeout", () => {
+    const args = parseMetaUiBenchArgs(["--query-timeout-ms=250"]);
+
+    expect(args.queryTimeoutMs).toBe(250);
   });
 });
 
@@ -125,5 +133,78 @@ describe("maybeRunGarbageCollection", () => {
     }
 
     expect(calls).toBe(1);
+  });
+});
+
+describe("resolveVerterCompatSourceEntry", () => {
+  it("prefers the workspace source entry when it exists", () => {
+    const repoRoot = mkdtempSync(resolve(tmpdir(), "verter-benchmark-workspace-"));
+    const compatEntry = resolve(
+      repoRoot,
+      "packages",
+      "component-meta",
+      "src",
+      "compat",
+      "index.ts",
+    );
+    mkdirSync(resolve(repoRoot, "packages", "component-meta", "src", "compat"), {
+      recursive: true,
+    });
+    writeFileSync(compatEntry, "export {};\n", "utf8");
+
+    expect(resolveVerterCompatSourceEntry(repoRoot)).toBe(compatEntry);
+  });
+
+  it("returns null when the workspace source entry is absent", () => {
+    const repoRoot = mkdtempSync(resolve(tmpdir(), "verter-benchmark-no-workspace-"));
+
+    expect(resolveVerterCompatSourceEntry(repoRoot)).toBeNull();
+  });
+});
+
+describe("createWorkerBackendInstance", () => {
+  it("fails fast when a worker never answers a query", async () => {
+    const workerRoot = mkdtempSync(resolve(tmpdir(), "verter-meta-ui-worker-"));
+    const workerPath = resolve(workerRoot, "stalled-worker.mjs");
+    writeFileSync(
+      workerPath,
+      [
+        "process.on('message', (message) => {",
+        "  if (message?.type === 'init') {",
+        "    process.send?.({ type: 'ready' });",
+        "    return;",
+        "  }",
+        "  if (message?.type === 'query') {",
+        "    return;",
+        "  }",
+        "});",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const instance = await createWorkerBackendInstance(
+      {
+        backend: "verter",
+        uiRoot: workerRoot,
+        checkerConfig: {},
+        components: [],
+      },
+      {
+        workerEntryPath: workerPath,
+        queryTimeoutMs: 25,
+        setupTimeoutMs: 1_000,
+      },
+    );
+
+    await expect(
+      instance.query({
+        absolutePath: resolve(workerRoot, "Component.vue"),
+        relativePath: "src/runtime/components/Component.vue",
+        transformedSource: "<template />",
+      }),
+    ).rejects.toThrow(/timed out after 25ms/i);
+
+    expect(instance.isAvailable()).toBe(false);
+    await instance.dispose();
   });
 });

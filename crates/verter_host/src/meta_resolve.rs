@@ -20,16 +20,19 @@
 //! ```
 
 use crate::host_manage::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_trace_event,
-    component_meta_trace_scope,
+    collect_type_expr_symbol_refs, component_meta_debug, component_meta_debug_enabled,
+    component_meta_trace_event, component_meta_trace_scope, HostImportedEvalResolver,
 };
+use crate::resolver_store::HostStoreView;
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
+use verter_analysis::type_eval::EvalLookup;
 use verter_resolver::{
-    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
-    SingleflightRole,
+    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost,
+    ImportedEvalLookup, RequestSource, SingleflightRole,
 };
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
@@ -223,6 +226,138 @@ pub struct ResolvedComponentMetaState {
     pub fact_versions: Vec<verter_resolver::FactVersionRef>,
 }
 
+fn collect_expanded_slot_binding_param_types<'a>(
+    ty: &'a verter_analysis::type_expr::TypeExpr,
+    out: &mut Vec<&'a verter_analysis::type_expr::TypeExpr>,
+) {
+    match ty {
+        verter_analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+            collect_expanded_slot_binding_param_types(inner, out);
+        }
+        verter_analysis::type_expr::TypeExpr::Intersection(types)
+        | verter_analysis::type_expr::TypeExpr::Union(types) => {
+            for inner in types.iter() {
+                collect_expanded_slot_binding_param_types(inner, out);
+            }
+        }
+        verter_analysis::type_expr::TypeExpr::Function(func) => {
+            if let Some(first) = func.parameters.first() {
+                out.push(&first.ty);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_expanded_slot_bindings_from_object_type(
+    ty: &verter_analysis::type_expr::TypeExpr,
+    seen: &mut rustc_hash::FxHashSet<String>,
+    out: &mut Vec<(String, verter_analysis::type_expr::TypeExpr, bool)>,
+) {
+    match ty {
+        verter_analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+            collect_expanded_slot_bindings_from_object_type(inner, seen, out);
+        }
+        verter_analysis::type_expr::TypeExpr::Intersection(types)
+        | verter_analysis::type_expr::TypeExpr::Union(types) => {
+            for inner in types.iter() {
+                collect_expanded_slot_bindings_from_object_type(inner, seen, out);
+            }
+        }
+        verter_analysis::type_expr::TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                let verter_analysis::type_expr::ObjectMember::Property(prop) = member else {
+                    continue;
+                };
+                if !seen.insert(prop.name.clone()) {
+                    continue;
+                }
+                out.push((prop.name.clone(), prop.ty.clone(), prop.optional));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn enrich_missing_slot_bindings(
+    resolved_macros: &[ResolvedMacroMeta],
+    evaluated_types: &mut verter_analysis::type_expand::ExpandedComponentTypes,
+) {
+    let mut seen_names: rustc_hash::FxHashSet<String> = evaluated_types
+        .slot_bindings
+        .iter()
+        .map(|binding| binding.name.clone())
+        .collect();
+
+    for entry in &evaluated_types.define_slots {
+        for slot in &entry.result.value.properties {
+            let mut binding_param_types = Vec::new();
+            collect_expanded_slot_binding_param_types(&slot.ty, &mut binding_param_types);
+            if binding_param_types.is_empty() {
+                continue;
+            }
+
+            let mut seen_bindings = rustc_hash::FxHashSet::default();
+            let mut bindings = Vec::new();
+            for binding_param_ty in binding_param_types {
+                collect_expanded_slot_bindings_from_object_type(
+                    binding_param_ty,
+                    &mut seen_bindings,
+                    &mut bindings,
+                );
+            }
+
+            for (binding_name, binding_type, optional) in bindings {
+                let field_name = format!("{}.{}", slot.name, binding_name);
+                if !seen_names.insert(field_name.clone()) {
+                    continue;
+                }
+                evaluated_types
+                    .slot_bindings
+                    .push(verter_analysis::type_expand::ExpandedField {
+                        name: field_name,
+                        r#type: binding_type,
+                        raw_type: None,
+                        optional,
+                        completeness: entry.result.completeness.clone(),
+                        diagnostics: Vec::new(),
+                    });
+            }
+        }
+    }
+
+    for resolved in resolved_macros
+        .iter()
+        .filter(|resolved| resolved.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+    {
+        for slot in &resolved.slots {
+            for binding in &slot.bindings {
+                let field_name = format!("{}.{}", slot.name, binding.name);
+                if !seen_names.insert(field_name.clone()) {
+                    continue;
+                }
+                let raw_type = binding.type_annotation.clone();
+                let parsed_type = raw_type
+                    .as_deref()
+                    .map(verter_analysis::type_expr_lower::parse_type_annotation)
+                    .unwrap_or_else(|| verter_analysis::type_expr::TypeExpr::Unknown {
+                        raw: "unknown".to_string(),
+                    });
+                evaluated_types
+                    .slot_bindings
+                    .push(verter_analysis::type_expand::ExpandedField {
+                        name: field_name,
+                        r#type: parsed_type,
+                        raw_type,
+                        optional: false,
+                        completeness: verter_analysis::type_expand::ExpansionCompleteness::Exact,
+                        diagnostics: Vec::new(),
+                    });
+            }
+        }
+    }
+}
+
 impl VerterHost {
     fn clone_cached_raw_analysis_snapshot(
         &self,
@@ -283,6 +418,24 @@ impl VerterHost {
         canonical_or_alias: &str,
         mode: ResolverMode,
     ) -> Option<ResolvedComponentMetaState> {
+        self.resolve_component_meta_with_view(canonical_or_alias, mode, None)
+    }
+
+    pub(crate) fn resolve_component_meta_in_view(
+        &self,
+        canonical_or_alias: &str,
+        mode: ResolverMode,
+        store_view: &HostStoreView,
+    ) -> Option<ResolvedComponentMetaState> {
+        self.resolve_component_meta_with_view(canonical_or_alias, mode, Some(store_view))
+    }
+
+    fn resolve_component_meta_with_view(
+        &self,
+        canonical_or_alias: &str,
+        mode: ResolverMode,
+        store_view: Option<&HostStoreView>,
+    ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let _trace = component_meta_trace_scope!(
@@ -294,6 +447,7 @@ impl VerterHost {
             self.resolver_runtime().component_meta.singleflight(),
             &canonical,
             mode,
+            store_view,
             STORE_VIEW_STABILITY_MAX_ATTEMPTS,
         );
 
@@ -448,8 +602,12 @@ impl VerterHost {
             captured,
         );
         let mut parts = parts;
+        if let Some(evaluated_types) = parts.evaluated_types.as_mut() {
+            enrich_missing_slot_bindings(&parts.resolved_macros, evaluated_types);
+        }
         self.append_component_meta_registry_entries(
             canonical,
+            &snapshot,
             &mut parts.resolved_type_registry,
             &mut parts.resolved_type_registry_meta,
             parts.cached_eval_inputs.as_deref(),
@@ -488,90 +646,250 @@ impl VerterHost {
     fn append_component_meta_registry_entries(
         &self,
         owner_canonical: &str,
+        snapshot: &FileAnalysisSnapshot,
         resolved_type_registry: &mut Vec<verter_analysis::component_meta::ResolvedTypeAnalysis>,
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
         cached_eval_inputs: Option<&crate::host_manage::ImportedEvalInputs>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
-        let mut upsert_entry =
-            |name: String,
-             type_expr: verter_analysis::type_expr::TypeExpr,
-             declaration: ResolvedTypeDeclaration| {
-                if let Some(index) = resolved_type_registry
-                    .iter()
-                    .position(|entry| entry.name == name)
-                {
-                    let existing = resolved_type_registry[index].type_expr.clone();
-                    let preferred = verter_resolver::choose_preferred_imported_type_body(
-                        Some(existing.clone()),
-                        Some(type_expr.clone()),
-                    )
-                    .unwrap_or(existing.clone());
-                    if preferred != existing {
-                        resolved_type_registry[index].type_expr = preferred;
-                        if let Some(meta) = resolved_type_registry_meta.get_mut(index) {
-                            *meta = ResolvedTypeRegistryMeta {
-                                name: name.clone(),
-                                declaration,
-                            };
-                        }
-                    }
-                    return;
-                }
-
-                resolved_type_registry.push(
-                    verter_analysis::component_meta::ResolvedTypeAnalysis {
-                        name: name.clone(),
-                        type_expr,
-                        type_expansion: None,
-                    },
-                );
-                resolved_type_registry_meta.push(ResolvedTypeRegistryMeta { name, declaration });
+        for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
+            let Some(meta) = resolved_type_registry_meta.get(index) else {
+                continue;
             };
+            let declaration_source = meta.declaration.canonical_source.as_str();
+            if declaration_source.is_empty() || declaration_source == owner_canonical {
+                continue;
+            }
+            let requested_exported_name = if meta.declaration.resolved_name.is_empty() {
+                entry.name.as_str()
+            } else {
+                meta.declaration.resolved_name.as_str()
+            };
+            let Some((resolved_canonical_id, _resolved_exported_name, prepared)) = self
+                .resolve_prepared_symbol_dependency_alias_in_view(
+                    declaration_source,
+                    requested_exported_name,
+                    store_view,
+                )
+            else {
+                continue;
+            };
+            let materialized = if is_component_meta_registry_package_source(Some(
+                resolved_canonical_id.as_str(),
+            )) {
+                prepared.decl.body.clone()
+            } else {
+                materialize_imported_component_meta_registry_decl_body_in_view(
+                    self,
+                    resolved_canonical_id.as_str(),
+                    &prepared.decl,
+                    &prepared.symbol_dependencies,
+                    store_view,
+                )
+            };
+            entry.type_expr = choose_preferred_component_meta_registry_candidate(
+                Some(entry.type_expr.clone()),
+                Some(materialized),
+            )
+            .unwrap_or_else(|| entry.type_expr.clone());
+        }
+
+        let mut referenced_names: VecDeque<PendingComponentMetaRegistryRef> = VecDeque::new();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut published_names: rustc_hash::FxHashSet<String> = resolved_type_registry
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        for (index, entry) in resolved_type_registry.iter().enumerate() {
+            collect_component_meta_registry_refs(
+                &entry.type_expr,
+                &published_names,
+                &mut queued_names,
+                &mut referenced_names,
+                resolved_type_registry_meta
+                    .get(index)
+                    .map(|meta| meta.declaration.canonical_source.as_str()),
+            );
+        }
+
+        let dep_resolutions = self
+            .dependency_resolutions_for_eval_in_view(owner_canonical, store_view)
+            .unwrap_or_default();
+        let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
+            self,
+            owner_canonical,
+            &dep_resolutions,
+            store_view,
+        );
+        let mut lookup =
+            ImportedEvalLookup::new(&mut resolver, owner_canonical, snapshot.imports.as_slice());
+        let mut registry_eval_env: Option<verter_analysis::type_eval::EvalEnv> = None;
 
         if let Some(inputs) = cached_eval_inputs {
             for alias in &inputs.type_aliases {
+                let alias_is_demanded = queued_names.contains(alias.local_name.as_str());
+                if !alias_is_demanded {
+                    continue;
+                }
                 if let Some((_resolved_canonical_id, _resolved_exported_name, prepared)) = self
-                    .resolve_shallow_symbol_dependency_alias_in_view(
+                    .resolve_prepared_symbol_dependency_alias_in_view(
                         alias.merge_root_canonical.as_str(),
                         alias.merge_root_exported.as_str(),
                         store_view,
                     )
                 {
-                    upsert_entry(
-                        alias.local_name.clone(),
-                        prepared.decl.body.clone(),
-                        resolve_type_declaration_in_view(
+                    let mut declaration = resolve_type_declaration_in_view(
+                        self,
+                        alias.merge_root_canonical.as_str(),
+                        alias.merge_root_exported.as_str(),
+                        store_view,
+                    );
+                    if declaration.canonical_source.is_empty() {
+                        declaration.canonical_source = alias.merge_root_canonical.clone();
+                    }
+                    let type_expr = if is_component_meta_registry_package_source(Some(
+                        alias.merge_root_canonical.as_str(),
+                    )) {
+                        prepared.decl.body.clone()
+                    } else {
+                        materialize_imported_component_meta_registry_decl_body_in_view(
                             self,
                             alias.merge_root_canonical.as_str(),
-                            alias.merge_root_exported.as_str(),
+                            &prepared.decl,
+                            &prepared.symbol_dependencies,
                             store_view,
-                        ),
+                        )
+                    };
+                    upsert_component_meta_registry_entry(
+                        resolved_type_registry,
+                        resolved_type_registry_meta,
+                        &mut published_names,
+                        &mut queued_names,
+                        &mut referenced_names,
+                        alias.local_name.clone(),
+                        type_expr,
+                        declaration,
                     );
                 }
             }
         }
 
-        let Some(owner_env) = self.base_eval_env_in_view(owner_canonical, store_view) else {
-            return;
-        };
-
-        let mut local_type_names: Vec<String> = owner_env.type_symbols.keys().cloned().collect();
-        local_type_names.sort();
-
-        for type_name in local_type_names {
-            let Some(decl) = owner_env.type_symbols.get(type_name.as_str()) else {
+        while let Some(pending) = referenced_names.pop_front() {
+            let type_name = pending.name;
+            if published_names.contains(&type_name) {
                 continue;
-            };
-            upsert_entry(
-                type_name.clone(),
-                decl.body.clone(),
-                resolve_type_declaration_in_view(
+            }
+            let requested_exported_name = pending
+                .exported_name
+                .as_deref()
+                .unwrap_or(type_name.as_str());
+            if let Some(source_hint) = pending
+                .source_hint
+                .as_deref()
+                .filter(|source| !source.is_empty() && *source != owner_canonical)
+            {
+                if let Some((resolved_canonical_id, resolved_exported_name, prepared)) = self
+                    .resolve_prepared_symbol_dependency_alias_in_view(
+                        source_hint,
+                        requested_exported_name,
+                        store_view,
+                    )
+                {
+                    let mut declaration = resolve_type_declaration_in_view(
+                        self,
+                        resolved_canonical_id.as_str(),
+                        resolved_exported_name.as_str(),
+                        store_view,
+                    );
+                    if declaration.canonical_source.is_empty() {
+                        declaration.canonical_source = resolved_canonical_id.clone();
+                    }
+                    let type_expr = if is_component_meta_registry_package_source(Some(
+                        resolved_canonical_id.as_str(),
+                    )) {
+                        prepared.decl.body.clone()
+                    } else {
+                        materialize_imported_component_meta_registry_decl_body_in_view(
+                            self,
+                            resolved_canonical_id.as_str(),
+                            &prepared.decl,
+                            &prepared.symbol_dependencies,
+                            store_view,
+                        )
+                    };
+                    upsert_component_meta_registry_entry(
+                        resolved_type_registry,
+                        resolved_type_registry_meta,
+                        &mut published_names,
+                        &mut queued_names,
+                        &mut referenced_names,
+                        type_name.clone(),
+                        type_expr,
+                        declaration,
+                    );
+                    continue;
+                }
+            }
+            let declaration_owner = pending
+                .source_hint
+                .as_deref()
+                .filter(|source| !source.is_empty())
+                .unwrap_or(owner_canonical);
+            let mut declaration = resolve_type_declaration_in_view(
+                self,
+                declaration_owner,
+                type_name.as_str(),
+                store_view,
+            );
+            if declaration.canonical_source.is_empty() && declaration_owner != owner_canonical {
+                declaration = resolve_type_declaration_in_view(
                     self,
                     owner_canonical,
                     type_name.as_str(),
                     store_view,
-                ),
+                );
+            }
+            let materialized = registry_eval_env
+                .as_mut()
+                .and_then(|env| env.type_symbols.get(type_name.as_str()).cloned())
+                .or_else(|| lookup.resolve_type_decl(type_name.as_str()))
+                .or_else(|| {
+                    if registry_eval_env.is_none() {
+                        let mut env = self.build_component_meta_registry_eval_env_in_view(
+                            owner_canonical,
+                            snapshot,
+                            cached_eval_inputs,
+                            store_view,
+                        )?;
+                        if let Some(inputs) = cached_eval_inputs {
+                            prune_package_imported_registry_aliases(&mut env, inputs);
+                        }
+                        registry_eval_env = Some(env);
+                    }
+                    registry_eval_env
+                        .as_mut()
+                        .and_then(|env| env.type_symbols.get(type_name.as_str()).cloned())
+                })
+                .map(|decl| {
+                    materialize_component_meta_registry_decl_body(
+                        &decl,
+                        registry_eval_env
+                            .get_or_insert_with(verter_analysis::type_eval::EvalEnv::default),
+                        &mut lookup,
+                    )
+                });
+            let Some(materialized) = materialized else {
+                continue;
+            };
+            upsert_component_meta_registry_entry(
+                resolved_type_registry,
+                resolved_type_registry_meta,
+                &mut published_names,
+                &mut queued_names,
+                &mut referenced_names,
+                type_name.clone(),
+                materialized,
+                declaration,
             );
         }
     }
@@ -1115,6 +1433,1026 @@ impl VerterHost {
     }
 }
 
+const COMPONENT_META_REGISTRY_MATERIALIZATION_DEPTH: usize = 3;
+const COMPONENT_META_REGISTRY_MAX_SYMBOLIC_STEPS: usize = 256;
+
+#[derive(Debug, Clone)]
+struct PendingComponentMetaRegistryRef {
+    name: String,
+    source_hint: Option<String>,
+    exported_name: Option<String>,
+}
+
+fn upsert_component_meta_registry_entry(
+    resolved_type_registry: &mut Vec<verter_analysis::component_meta::ResolvedTypeAnalysis>,
+    resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
+    published_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    name: String,
+    type_expr: verter_analysis::type_expr::TypeExpr,
+    declaration: ResolvedTypeDeclaration,
+) {
+    let declaration_source_hint =
+        (!declaration.canonical_source.is_empty()).then(|| declaration.canonical_source.clone());
+    let collect_nested_refs =
+        should_collect_component_meta_registry_nested_refs(declaration_source_hint.as_deref());
+    if let Some(index) = resolved_type_registry
+        .iter()
+        .position(|entry| entry.name == name)
+    {
+        let existing = resolved_type_registry[index].type_expr.clone();
+        let preferred = choose_preferred_component_meta_registry_candidate(
+            Some(existing.clone()),
+            Some(type_expr),
+        )
+        .unwrap_or(existing.clone());
+        if preferred != existing {
+            resolved_type_registry[index].type_expr = preferred.clone();
+            if let Some(meta) = resolved_type_registry_meta.get_mut(index) {
+                *meta = ResolvedTypeRegistryMeta {
+                    name: name.clone(),
+                    declaration,
+                };
+            }
+            if collect_nested_refs {
+                collect_component_meta_registry_refs(
+                    &preferred,
+                    published_names,
+                    queued_names,
+                    referenced_names,
+                    declaration_source_hint.as_deref(),
+                );
+            }
+        }
+        return;
+    }
+
+    if collect_nested_refs {
+        collect_component_meta_registry_refs(
+            &type_expr,
+            published_names,
+            queued_names,
+            referenced_names,
+            declaration_source_hint.as_deref(),
+        );
+    }
+    resolved_type_registry.push(verter_analysis::component_meta::ResolvedTypeAnalysis {
+        name: name.clone(),
+        type_expr,
+        type_expansion: None,
+    });
+    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+        name: name.clone(),
+        declaration,
+    });
+    published_names.insert(name);
+}
+
+fn is_component_meta_registry_package_source(source_hint: Option<&str>) -> bool {
+    source_hint.is_some_and(|source| source.contains("/node_modules/"))
+}
+
+fn should_collect_component_meta_registry_nested_refs(source_hint: Option<&str>) -> bool {
+    !is_component_meta_registry_package_source(source_hint)
+}
+
+fn prune_package_imported_registry_aliases(
+    env: &mut verter_analysis::type_eval::EvalEnv,
+    imported_inputs: &crate::host_manage::ImportedEvalInputs,
+) {
+    for alias in &imported_inputs.type_aliases {
+        if is_component_meta_registry_package_source(Some(alias.merge_root_canonical.as_str()))
+            || is_component_meta_registry_package_source(Some(alias.source_canonical_id.as_str()))
+        {
+            env.type_symbols.remove(alias.local_name.as_str());
+        }
+    }
+}
+
+fn enqueue_component_meta_registry_ref(
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    name: &str,
+    source_hint: Option<&str>,
+    exported_name: Option<&str>,
+) {
+    if published_names.contains(name) {
+        return;
+    }
+    let source_hint = source_hint
+        .filter(|source| !source.is_empty())
+        .map(str::to_string);
+    let exported_name = exported_name
+        .filter(|exported| !exported.is_empty())
+        .map(str::to_string);
+    if !queued_names.insert(name.to_string()) {
+        if let Some(existing) = referenced_names
+            .iter_mut()
+            .find(|pending| pending.name == name)
+        {
+            if existing.source_hint.is_none() {
+                existing.source_hint = source_hint;
+            }
+            if existing.exported_name.is_none() {
+                existing.exported_name = exported_name;
+            }
+        }
+        return;
+    }
+    referenced_names.push_back(PendingComponentMetaRegistryRef {
+        name: name.to_string(),
+        source_hint,
+        exported_name,
+    });
+}
+
+fn materialize_component_meta_registry_decl_body(
+    decl: &verter_analysis::type_eval::TypeDeclInfo,
+    registry_eval_env: &mut verter_analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+) -> verter_analysis::type_expr::TypeExpr {
+    let saved = decl
+        .type_parameters
+        .iter()
+        .map(|param| {
+            (
+                param.name.clone(),
+                registry_eval_env.type_bindings.get(&param.name).cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for param in &decl.type_parameters {
+        registry_eval_env.type_bindings.insert(
+            param.name.clone(),
+            Arc::new(verter_analysis::type_expr::TypeExpr::type_parameter(
+                param.clone(),
+            )),
+        );
+    }
+
+    let evaluated =
+        verter_analysis::type_eval::evaluate_with_lookup(&decl.body, registry_eval_env, lookup);
+    let materialized = materialize_component_meta_registry_type(
+        &evaluated,
+        registry_eval_env,
+        lookup,
+        COMPONENT_META_REGISTRY_MATERIALIZATION_DEPTH,
+    );
+    for (name, previous) in saved {
+        if let Some(previous) = previous {
+            registry_eval_env.type_bindings.insert(name, previous);
+        } else {
+            registry_eval_env.type_bindings.remove(&name);
+        }
+    }
+
+    choose_preferred_component_meta_registry_candidate(
+        verter_resolver::choose_preferred_imported_type_body(Some(evaluated), Some(materialized)),
+        Some(decl.body.clone()),
+    )
+    .unwrap_or_else(|| decl.body.clone())
+}
+
+fn choose_preferred_component_meta_registry_candidate(
+    left: Option<verter_analysis::type_expr::TypeExpr>,
+    right: Option<verter_analysis::type_expr::TypeExpr>,
+) -> Option<verter_analysis::type_expr::TypeExpr> {
+    match (left, right) {
+        (Some(left), Some(right))
+            if component_meta_registry_indexed_ref_penalty(&left)
+                != component_meta_registry_indexed_ref_penalty(&right) =>
+        {
+            Some(
+                if component_meta_registry_indexed_ref_penalty(&left)
+                    < component_meta_registry_indexed_ref_penalty(&right)
+                {
+                    left
+                } else {
+                    right
+                },
+            )
+        }
+        (left, right) => verter_resolver::choose_preferred_imported_type_body(left, right),
+    }
+}
+
+fn component_meta_registry_indexed_ref_penalty(
+    expr: &verter_analysis::type_expr::TypeExpr,
+) -> usize {
+    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::IndexedAccess { object, index } => {
+            let local_penalty = matches!(object.as_ref(), TypeExpr::Ref { .. }) as usize;
+            local_penalty
+                + component_meta_registry_indexed_ref_penalty(object)
+                + component_meta_registry_indexed_ref_penalty(index)
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .map(component_meta_registry_indexed_ref_penalty)
+            .sum(),
+        TypeExpr::Array { element, .. }
+        | TypeExpr::Rest(element)
+        | TypeExpr::Parenthesized(element)
+        | TypeExpr::KeyOf(element) => component_meta_registry_indexed_ref_penalty(element),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .map(|element| component_meta_registry_indexed_ref_penalty(&element.ty))
+            .sum(),
+        TypeExpr::Object(obj) => obj
+            .properties
+            .iter()
+            .map(|member| match member {
+                ObjectMember::Property(prop) => {
+                    component_meta_registry_indexed_ref_penalty(&prop.ty)
+                }
+                ObjectMember::IndexSignature(sig) => {
+                    component_meta_registry_indexed_ref_penalty(&sig.key_type)
+                        + component_meta_registry_indexed_ref_penalty(&sig.value_type)
+                }
+                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                    func.parameters
+                        .iter()
+                        .map(|param| component_meta_registry_indexed_ref_penalty(&param.ty))
+                        .sum::<usize>()
+                        + func
+                            .return_type
+                            .as_deref()
+                            .map(component_meta_registry_indexed_ref_penalty)
+                            .unwrap_or(0)
+                }
+                ObjectMember::Method(method) => {
+                    method
+                        .function
+                        .parameters
+                        .iter()
+                        .map(|param| component_meta_registry_indexed_ref_penalty(&param.ty))
+                        .sum::<usize>()
+                        + method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .map(component_meta_registry_indexed_ref_penalty)
+                            .unwrap_or(0)
+                }
+            })
+            .sum(),
+        TypeExpr::Function(func) => {
+            func.parameters
+                .iter()
+                .map(|param| component_meta_registry_indexed_ref_penalty(&param.ty))
+                .sum::<usize>()
+                + func
+                    .return_type
+                    .as_deref()
+                    .map(component_meta_registry_indexed_ref_penalty)
+                    .unwrap_or(0)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            component_meta_registry_indexed_ref_penalty(check)
+                + component_meta_registry_indexed_ref_penalty(extends)
+                + component_meta_registry_indexed_ref_penalty(true_type)
+                + component_meta_registry_indexed_ref_penalty(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            component_meta_registry_indexed_ref_penalty(source)
+                + component_meta_registry_indexed_ref_penalty(value)
+                + name_type
+                    .as_deref()
+                    .map(component_meta_registry_indexed_ref_penalty)
+                    .unwrap_or(0)
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .map(component_meta_registry_indexed_ref_penalty)
+            .sum(),
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::Ref { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => 0,
+    }
+}
+
+fn materialize_imported_component_meta_registry_decl_body_in_view(
+    host: &VerterHost,
+    canonical_id: &str,
+    decl: &verter_analysis::type_eval::TypeDeclInfo,
+    _symbol_dependencies: &[verter_resolver::ImportedSymbolDependency],
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> verter_analysis::type_expr::TypeExpr {
+    let Some(snapshot) = host
+        .clone_current_imported_dependency_entry(canonical_id, store_view)
+        .and_then(|dependency| dependency.snapshot.clone())
+    else {
+        return decl.body.clone();
+    };
+    let Some(mut env) = host.build_shallow_imported_decl_eval_env_in_view(
+        canonical_id,
+        snapshot.as_ref(),
+        decl,
+        store_view,
+    ) else {
+        return decl.body.clone();
+    };
+    let mut lookup = verter_analysis::type_eval::NoopEvalLookup;
+    materialize_component_meta_registry_decl_body(decl, &mut env, &mut lookup)
+}
+
+fn materialize_component_meta_registry_type(
+    expr: &verter_analysis::type_expr::TypeExpr,
+    env: &mut verter_analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    remaining_depth: usize,
+) -> verter_analysis::type_expr::TypeExpr {
+    use verter_analysis::type_expr::{
+        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    };
+
+    if remaining_depth == 0 {
+        return expr.clone();
+    }
+
+    let next_depth = remaining_depth.saturating_sub(1);
+
+    match expr {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Infer { .. } => expr.clone(),
+        TypeExpr::TypeParameter(param) => env
+            .type_bindings
+            .get(param.name.as_str())
+            .cloned()
+            .filter(|_| remaining_depth > 0)
+            .map(|bound| {
+                materialize_component_meta_registry_type(bound.as_ref(), env, lookup, next_depth)
+            })
+            .unwrap_or_else(|| expr.clone()),
+        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
+            materialize_component_meta_registry_type(inner, env, lookup, next_depth),
+        )),
+        TypeExpr::Array { element, readonly } => TypeExpr::Array {
+            element: Arc::new(materialize_component_meta_registry_type(
+                element, env, lookup, next_depth,
+            )),
+            readonly: *readonly,
+        },
+        TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+            elements: elements
+                .iter()
+                .map(|element| verter_analysis::type_expr::TupleElement {
+                    label: element.label.clone(),
+                    ty: materialize_component_meta_registry_type(
+                        &element.ty,
+                        env,
+                        lookup,
+                        next_depth,
+                    ),
+                    optional: element.optional,
+                    rest: element.rest,
+                })
+                .collect(),
+            readonly: *readonly,
+        },
+        TypeExpr::Union(types) => TypeExpr::Union(
+            types
+                .iter()
+                .map(|ty| materialize_component_meta_registry_type(ty, env, lookup, next_depth))
+                .collect(),
+        ),
+        TypeExpr::Intersection(types) => TypeExpr::Intersection(
+            types
+                .iter()
+                .map(|ty| materialize_component_meta_registry_type(ty, env, lookup, next_depth))
+                .collect(),
+        ),
+        TypeExpr::Object(object) => {
+            let properties = object
+                .properties
+                .iter()
+                .map(|member| match member {
+                    ObjectMember::Property(property) => ObjectMember::Property(ObjectProperty {
+                        name: property.name.clone(),
+                        ty: materialize_component_meta_registry_type(
+                            &property.ty,
+                            env,
+                            lookup,
+                            next_depth,
+                        ),
+                        optional: property.optional,
+                        readonly: property.readonly,
+                    }),
+                    ObjectMember::IndexSignature(signature) => {
+                        ObjectMember::IndexSignature(verter_analysis::type_expr::IndexSignature {
+                            key_name: signature.key_name.clone(),
+                            key_type: materialize_component_meta_registry_type(
+                                &signature.key_type,
+                                env,
+                                lookup,
+                                next_depth,
+                            ),
+                            value_type: materialize_component_meta_registry_type(
+                                &signature.value_type,
+                                env,
+                                lookup,
+                                next_depth,
+                            ),
+                            readonly: signature.readonly,
+                        })
+                    }
+                    ObjectMember::CallSignature(function) => {
+                        ObjectMember::CallSignature(materialize_component_meta_registry_function(
+                            function, env, lookup, next_depth,
+                        ))
+                    }
+                    ObjectMember::ConstructSignature(function) => ObjectMember::ConstructSignature(
+                        materialize_component_meta_registry_function(
+                            function, env, lookup, next_depth,
+                        ),
+                    ),
+                    ObjectMember::Method(method) => {
+                        ObjectMember::Method(verter_analysis::type_expr::MethodSignature {
+                            name: method.name.clone(),
+                            function: materialize_component_meta_registry_function(
+                                &method.function,
+                                env,
+                                lookup,
+                                next_depth,
+                            ),
+                            optional: method.optional,
+                        })
+                    }
+                })
+                .collect();
+            TypeExpr::Object(Arc::new(ObjectExpr { properties }))
+        }
+        TypeExpr::Function(function) => TypeExpr::Function(Arc::new(FunctionExpr {
+            parameters: function
+                .parameters
+                .iter()
+                .map(|parameter| FunctionParam {
+                    name: parameter.name.clone(),
+                    ty: materialize_component_meta_registry_type(
+                        &parameter.ty,
+                        env,
+                        lookup,
+                        next_depth,
+                    ),
+                    optional: parameter.optional,
+                    rest: parameter.rest,
+                })
+                .collect(),
+            return_type: function.return_type.as_ref().map(|ret| {
+                Arc::new(materialize_component_meta_registry_type(
+                    ret, env, lookup, next_depth,
+                ))
+            }),
+            type_parameters: function.type_parameters.clone(),
+        })),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if type_arguments.is_empty() {
+                if let Some(bound) = env.type_bindings.get(name.as_ref()).cloned() {
+                    return materialize_component_meta_registry_type(
+                        bound.as_ref(),
+                        env,
+                        lookup,
+                        next_depth,
+                    );
+                }
+            }
+
+            if let Some(decl) = env.type_symbols.get(name.as_ref()).cloned() {
+                let saved = bind_component_meta_registry_type_parameters(
+                    &decl,
+                    type_arguments,
+                    env,
+                    lookup,
+                );
+                let materialized =
+                    materialize_component_meta_registry_type(&decl.body, env, lookup, next_depth);
+                restore_component_meta_registry_type_parameters(saved, env);
+                return materialized;
+            }
+
+            if let Some(decl) = lookup.resolve_type_decl(name) {
+                let saved = bind_component_meta_registry_type_parameters(
+                    &decl,
+                    type_arguments,
+                    env,
+                    lookup,
+                );
+                let materialized =
+                    materialize_component_meta_registry_type(&decl.body, env, lookup, next_depth);
+                restore_component_meta_registry_type_parameters(saved, env);
+                return materialized;
+            }
+
+            materialize_component_meta_registry_non_structural_type(expr, env, lookup, next_depth)
+        }
+        _ => materialize_component_meta_registry_non_structural_type(expr, env, lookup, next_depth),
+    }
+}
+
+fn bind_component_meta_registry_type_parameters(
+    decl: &verter_analysis::type_eval::TypeDeclInfo,
+    args: &[verter_analysis::type_expr::TypeExpr],
+    env: &mut verter_analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+) -> Vec<(String, Option<Arc<verter_analysis::type_expr::TypeExpr>>)> {
+    let saved = decl
+        .type_parameters
+        .iter()
+        .map(|param| {
+            (
+                param.name.clone(),
+                env.type_bindings.get(&param.name).cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (index, param) in decl.type_parameters.iter().enumerate() {
+        let binding = if index < args.len() {
+            Arc::new(verter_analysis::type_eval::evaluate_with_lookup(
+                &args[index],
+                env,
+                lookup,
+            ))
+        } else if let Some(default) = &param.default {
+            Arc::new(verter_analysis::type_eval::evaluate_with_lookup(
+                default, env, lookup,
+            ))
+        } else if let Some(constraint) = &param.constraint {
+            Arc::new(verter_analysis::type_eval::evaluate_with_lookup(
+                constraint, env, lookup,
+            ))
+        } else {
+            Arc::new(verter_analysis::type_expr::TypeExpr::type_parameter(
+                param.clone(),
+            ))
+        };
+        env.type_bindings.insert(param.name.clone(), binding);
+    }
+
+    saved
+}
+
+fn restore_component_meta_registry_type_parameters(
+    saved: Vec<(String, Option<Arc<verter_analysis::type_expr::TypeExpr>>)>,
+    env: &mut verter_analysis::type_eval::EvalEnv,
+) {
+    for (name, previous) in saved {
+        if let Some(previous) = previous {
+            env.type_bindings.insert(name, previous);
+        } else {
+            env.type_bindings.remove(&name);
+        }
+    }
+}
+
+fn materialize_component_meta_registry_non_structural_type(
+    expr: &verter_analysis::type_expr::TypeExpr,
+    env: &mut verter_analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    remaining_depth: usize,
+) -> verter_analysis::type_expr::TypeExpr {
+    let registry_budget = verter_analysis::type_expand::ExpansionBudget {
+        max_symbolic_work: COMPONENT_META_REGISTRY_MAX_SYMBOLIC_STEPS,
+        ..Default::default()
+    };
+    if remaining_depth > 0 {
+        let shape = verter_analysis::type_expand::expand_object_shape_with_lookup(
+            expr,
+            env,
+            &registry_budget,
+            lookup,
+        );
+        if component_meta_registry_shape_has_members(&shape.value) {
+            return component_meta_registry_shape_to_type_expr(
+                shape.value,
+                env,
+                lookup,
+                remaining_depth.saturating_sub(1),
+            );
+        }
+    }
+
+    let evaluated = verter_analysis::type_eval::evaluate_with_lookup(expr, env, lookup);
+    if evaluated == *expr {
+        expr.clone()
+    } else {
+        materialize_component_meta_registry_type(&evaluated, env, lookup, remaining_depth)
+    }
+}
+
+fn materialize_component_meta_registry_function(
+    function: &verter_analysis::type_expr::FunctionExpr,
+    env: &mut verter_analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    remaining_depth: usize,
+) -> verter_analysis::type_expr::FunctionExpr {
+    verter_analysis::type_expr::FunctionExpr {
+        parameters: function
+            .parameters
+            .iter()
+            .map(|parameter| verter_analysis::type_expr::FunctionParam {
+                name: parameter.name.clone(),
+                ty: materialize_component_meta_registry_type(
+                    &parameter.ty,
+                    env,
+                    lookup,
+                    remaining_depth,
+                ),
+                optional: parameter.optional,
+                rest: parameter.rest,
+            })
+            .collect(),
+        return_type: function.return_type.as_ref().map(|ret| {
+            Arc::new(materialize_component_meta_registry_type(
+                ret,
+                env,
+                lookup,
+                remaining_depth,
+            ))
+        }),
+        type_parameters: function.type_parameters.clone(),
+    }
+}
+
+fn component_meta_registry_shape_has_members(
+    shape: &verter_analysis::type_expand::ExpandedObjectShape,
+) -> bool {
+    !shape.properties.is_empty()
+        || !shape.index_signatures.is_empty()
+        || !shape.call_signatures.is_empty()
+}
+
+fn component_meta_registry_shape_to_type_expr(
+    shape: verter_analysis::type_expand::ExpandedObjectShape,
+    env: &mut verter_analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    remaining_depth: usize,
+) -> verter_analysis::type_expr::TypeExpr {
+    let mut properties = Vec::new();
+    let next_depth = remaining_depth.saturating_sub(1);
+
+    for property in shape.properties {
+        properties.push(verter_analysis::type_expr::ObjectMember::Property(
+            verter_analysis::type_expr::ObjectProperty {
+                name: property.name,
+                ty: materialize_component_meta_registry_type(&property.ty, env, lookup, next_depth),
+                optional: property.optional,
+                readonly: property.readonly,
+            },
+        ));
+    }
+
+    for signature in shape.index_signatures {
+        properties.push(verter_analysis::type_expr::ObjectMember::IndexSignature(
+            verter_analysis::type_expr::IndexSignature {
+                key_name: "key".to_string(),
+                key_type: materialize_component_meta_registry_type(
+                    &signature.key_type,
+                    env,
+                    lookup,
+                    next_depth,
+                ),
+                value_type: materialize_component_meta_registry_type(
+                    &signature.value_type,
+                    env,
+                    lookup,
+                    next_depth,
+                ),
+                readonly: signature.readonly,
+            },
+        ));
+    }
+
+    for signature in shape.call_signatures {
+        let function = verter_analysis::type_expr::FunctionExpr {
+            parameters: signature
+                .parameters
+                .into_iter()
+                .map(|parameter| verter_analysis::type_expr::FunctionParam {
+                    name: (!parameter.name.is_empty()).then_some(parameter.name),
+                    ty: materialize_component_meta_registry_type(
+                        &parameter.ty,
+                        env,
+                        lookup,
+                        next_depth,
+                    ),
+                    optional: parameter.optional,
+                    rest: parameter.rest,
+                })
+                .collect(),
+            return_type: Some(Arc::new(materialize_component_meta_registry_type(
+                &signature.return_type,
+                env,
+                lookup,
+                next_depth,
+            ))),
+            type_parameters: signature.type_parameters,
+        };
+        properties.push(verter_analysis::type_expr::ObjectMember::CallSignature(
+            function,
+        ));
+    }
+
+    verter_analysis::type_expr::TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
+        properties,
+    }))
+}
+
+fn collect_component_meta_registry_refs(
+    expr: &verter_analysis::type_expr::TypeExpr,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+) {
+    use verter_analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            enqueue_component_meta_registry_ref(
+                published_names,
+                queued_names,
+                output,
+                name.as_ref(),
+                source_hint,
+                None,
+            );
+            for arg in type_arguments.iter() {
+                collect_component_meta_registry_refs(
+                    arg,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::Parenthesized(element)
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element) => {
+            collect_component_meta_registry_refs(
+                element,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+        }
+        TypeExpr::Tuple { elements, .. } => {
+            for element in elements.iter() {
+                collect_component_meta_registry_refs(
+                    &element.ty,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+        }
+        TypeExpr::Union(types)
+        | TypeExpr::Intersection(types)
+        | TypeExpr::TemplateLiteral {
+            expressions: types, ..
+        } => {
+            for ty in types.iter() {
+                collect_component_meta_registry_refs(
+                    ty,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+        }
+        TypeExpr::Object(object) => {
+            for member in object.properties.iter() {
+                match member {
+                    verter_analysis::type_expr::ObjectMember::Property(property) => {
+                        collect_component_meta_registry_refs(
+                            &property.ty,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                        );
+                    }
+                    verter_analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                        collect_component_meta_registry_refs(
+                            &signature.key_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                        );
+                        collect_component_meta_registry_refs(
+                            &signature.value_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                        );
+                    }
+                    verter_analysis::type_expr::ObjectMember::CallSignature(function)
+                    | verter_analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                        for parameter in function.parameters.iter() {
+                            collect_component_meta_registry_refs(
+                                &parameter.ty,
+                                published_names,
+                                queued_names,
+                                output,
+                                source_hint,
+                            );
+                        }
+                        if let Some(return_type) = function.return_type.as_deref() {
+                            collect_component_meta_registry_refs(
+                                return_type,
+                                published_names,
+                                queued_names,
+                                output,
+                                source_hint,
+                            );
+                        }
+                    }
+                    verter_analysis::type_expr::ObjectMember::Method(method) => {
+                        for parameter in method.function.parameters.iter() {
+                            collect_component_meta_registry_refs(
+                                &parameter.ty,
+                                published_names,
+                                queued_names,
+                                output,
+                                source_hint,
+                            );
+                        }
+                        if let Some(return_type) = method.function.return_type.as_deref() {
+                            collect_component_meta_registry_refs(
+                                return_type,
+                                published_names,
+                                queued_names,
+                                output,
+                                source_hint,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        TypeExpr::Function(function) => {
+            for parameter in function.parameters.iter() {
+                collect_component_meta_registry_refs(
+                    &parameter.ty,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+            if let Some(return_type) = function.return_type.as_deref() {
+                collect_component_meta_registry_refs(
+                    return_type,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_component_meta_registry_refs(
+                object,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+            collect_component_meta_registry_refs(
+                index,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            collect_component_meta_registry_refs(
+                check,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+            collect_component_meta_registry_refs(
+                extends,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+            collect_component_meta_registry_refs(
+                true_type,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+            collect_component_meta_registry_refs(
+                false_type,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            collect_component_meta_registry_refs(
+                source,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+            collect_component_meta_registry_refs(
+                value,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+            if let Some(name_type) = name_type.as_deref() {
+                collect_component_meta_registry_refs(
+                    name_type,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+        }
+        TypeExpr::TypeParameter(param) => {
+            if let Some(constraint) = param.constraint.as_deref() {
+                collect_component_meta_registry_refs(
+                    constraint,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+            if let Some(default) = param.default.as_deref() {
+                collect_component_meta_registry_refs(
+                    default,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                );
+            }
+        }
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Infer { .. } => {}
+    }
+}
+
 fn resolved_meta_cache_key(
     canonical: &str,
     mode: ResolverMode,
@@ -1559,25 +2897,16 @@ fn map_jsdoc_tag(
     canonical_source: &str,
     mode: ResolverMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    cache: &mut verter_resolver::ExternalTypeBodyCache,
-    visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    kind: verter_vfs::ResolveRequestKind,
+    _cache: &mut verter_resolver::ExternalTypeBodyCache,
+    _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+    _kind: verter_vfs::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,
     tag: verter_analysis::types::JsdocTag,
 ) -> ResolvedJsdocTag {
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
     let resolved_type = if mode == ResolverMode::Expanded {
         raw_type.as_deref().and_then(|raw_type| {
-            resolve_jsdoc_tag_type(
-                host,
-                canonical_source,
-                raw_type,
-                tracked_deps,
-                cache,
-                visiting,
-                kind,
-                store_view,
-            )
+            resolve_jsdoc_tag_type(host, canonical_source, raw_type, tracked_deps, store_view)
         })
     } else {
         None
@@ -1646,78 +2975,67 @@ fn parse_jsdoc_tag_payload(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_jsdoc_tag_type(
     host: &VerterHost,
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    cache: &mut verter_resolver::ExternalTypeBodyCache,
-    visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    kind: verter_vfs::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> Option<verter_analysis::type_expr::TypeExpr> {
-    let source = read_full_source(host, canonical_source, store_view)?;
-    let synthetic_source = format!("{source}\nexport type __VerterJsdocTag = {raw_type};");
+    let parsed = verter_analysis::type_expr_lower::parse_type_annotation(raw_type);
+    let parsed = if parsed.is_unknown() {
+        verter_analysis::type_expr::TypeExpr::Unknown {
+            raw: raw_type.to_string(),
+        }
+    } else {
+        parsed
+    };
 
-    let import_alloc = oxc_allocator::Allocator::new();
-    let extracted = verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
-        &synthetic_source,
-        &import_alloc,
-    );
-    let required_import_names =
-        verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
-            "__VerterJsdocTag",
-            &synthetic_source,
-            &import_alloc,
-        );
-
-    let mut companion_types = rustc_hash::FxHashMap::default();
-    for binding in &extracted.bindings {
-        let required_aliases =
-            verter_core::utils::oxc::vue::resolve_type::required_import_alias_names_for_binding(
-                binding,
-                &required_import_names,
-            );
-        for required_alias in required_aliases {
-            let Some(imported_name) =
-                verter_core::utils::oxc::vue::resolve_type::imported_member_name_for_required_alias(
-                    binding,
-                    &required_alias,
-                )
-            else {
+    let snapshot = host.get_raw_analysis_snapshot_in_view(canonical_source, store_view)?;
+    let mut owner_env = host
+        .base_eval_env_in_view(canonical_source, store_view)
+        .unwrap_or_default();
+    let dep_resolutions = host
+        .dependency_resolutions_for_eval_in_view(canonical_source, store_view)
+        .unwrap_or_default();
+    let mut referenced_names = std::collections::BTreeSet::new();
+    collect_type_expr_symbol_refs(&parsed, &mut referenced_names);
+    for referenced_name in referenced_names {
+        let root_name = referenced_name
+            .split('.')
+            .next()
+            .unwrap_or(referenced_name.as_str());
+        for import in snapshot.imports.iter() {
+            let Some(_binding) = import.bindings.iter().find(|binding| {
+                binding.name == root_name && (binding.is_type_only || import.is_type_only)
+            }) else {
                 continue;
             };
-            let mut resolution_deps = std::collections::BTreeSet::new();
-            if let Ok(Some(resolved)) = host.resolve_external_type_from_loaded_files_in_view(
-                canonical_source,
-                &binding.source,
-                &imported_name,
-                tracked_deps,
-                &mut resolution_deps,
-                cache,
-                visiting,
-                false,
-                kind,
-                true,
-                None,
-                0,
-                store_view,
-            ) {
-                companion_types.entry(required_alias).or_insert(resolved);
+            let dep_canonical = dep_resolutions
+                .get(import.source.as_str())
+                .and_then(crate::types::DependencyResolution::effective_target)
+                .map(str::to_string)
+                .or_else(|| import.resolved_canonical_id.clone());
+            if let Some(dep_canonical) = dep_canonical {
+                let _ = host.ensure_shallow_imported_dependency_state_in_view(
+                    dep_canonical.as_str(),
+                    store_view,
+                );
             }
         }
     }
-
-    let resolve_alloc = oxc_allocator::Allocator::new();
+    let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
+        host,
+        canonical_source,
+        &dep_resolutions,
+        store_view,
+    );
+    let mut lookup =
+        ImportedEvalLookup::new(&mut resolver, canonical_source, snapshot.imports.as_slice());
     let resolved =
-        verter_core::utils::oxc::vue::resolve_type::resolve_external_type_with_companion(
-            "__VerterJsdocTag",
-            &synthetic_source,
-            &companion_types,
-            &resolve_alloc,
-        )?;
-    Some(verter_resolver::resolved_elements_to_type_expr_via_type_text(&resolved))
+        verter_analysis::type_eval::evaluate_with_lookup(&parsed, &mut owner_env, &mut lookup);
+    tracked_deps.extend(lookup.into_discovered_dependencies());
+    Some(resolved)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use super::type_eval_build::parse_and_build_env;
 use super::type_expr::*;
 use super::type_expr_lower::parse_type_annotation;
 use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 fn env_with_user_type() -> EvalEnv {
@@ -43,6 +44,31 @@ fn env_with_user_type() -> EvalEnv {
         })),
     });
     env
+}
+
+fn assert_union_string_literals(expr: &TypeExpr, expected: &[&str]) {
+    let mut actual = BTreeSet::new();
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(value)) => {
+            actual.insert(value.as_str());
+        }
+        TypeExpr::Union(types) => {
+            for ty in types.iter() {
+                match ty {
+                    TypeExpr::Literal(LiteralValue::String(value)) => {
+                        actual.insert(value.as_str());
+                    }
+                    TypeExpr::Primitive(PrimitiveName::Undefined) => {}
+                    other => panic!(
+                        "expected only string literal members (plus optional undefined), got {other:?}"
+                    ),
+                }
+            }
+        }
+        other => panic!("expected string literal union, got {other:?}"),
+    }
+
+    assert_eq!(actual, BTreeSet::from_iter(expected.iter().copied()));
 }
 
 #[test]
@@ -678,14 +704,7 @@ fn eval_generic_with_default() {
     match &result {
         TypeExpr::Object(obj) => {
             if let ObjectMember::Property(p) = &obj.properties[0] {
-                assert_eq!(
-                    p.ty,
-                    TypeExpr::type_parameter(TypeParam {
-                        name: "T".to_string(),
-                        constraint: None,
-                        default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
-                    })
-                );
+                assert_eq!(p.ty, TypeExpr::Primitive(PrimitiveName::Number));
             }
         }
         _ => panic!("expected object, got {result:?}"),
@@ -703,6 +722,38 @@ fn eval_generic_with_default() {
         }
         _ => panic!("expected object, got {result3:?}"),
     }
+}
+
+#[test]
+fn eval_generic_without_default_falls_back_to_constraint() {
+    let mut env = EvalEnv::new();
+    env.add_type(TypeDeclInfo {
+        name: "Wrapper".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Alias,
+        type_parameters: vec![TypeParam {
+            name: "T".to_string(),
+            constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+            default: None,
+        }],
+        body: TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "data".to_string(),
+                ty: TypeExpr::named("T"),
+                optional: false,
+                readonly: false,
+            })],
+        })),
+    });
+
+    let result = evaluate(&TypeExpr::named("Wrapper"), &mut env);
+    let TypeExpr::Object(obj) = result else {
+        panic!("expected object");
+    };
+    let ObjectMember::Property(prop) = &obj.properties[0] else {
+        panic!("expected property");
+    };
+    assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::String));
 }
 
 // =============================================================================
@@ -1580,6 +1631,159 @@ fn eval_conditional_false_branch() {
     };
     let result = evaluate(&expr, &mut env);
     assert_eq!(result, TypeExpr::boolean_literal(false));
+}
+
+#[test]
+fn eval_conditional_resolves_required_object_record_assignability() {
+    let mut env = EvalEnv::new();
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "ui".to_string(),
+                ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(ObjectProperty {
+                        name: "button".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    })],
+                })),
+                optional: false,
+                readonly: false,
+            })],
+        }))),
+        extends: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "ui".to_string(),
+                ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(ObjectProperty {
+                        name: "button".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::Any),
+                        optional: false,
+                        readonly: false,
+                    })],
+                })),
+                optional: false,
+                readonly: false,
+            })],
+        }))),
+        true_type: Arc::new(TypeExpr::string_literal("yes")),
+        false_type: Arc::new(TypeExpr::string_literal("no")),
+    };
+
+    let result = evaluate(&expr, &mut env);
+    assert_eq!(result, TypeExpr::string_literal("yes"));
+}
+
+#[test]
+fn eval_keyof_merges_intersection_object_keys() {
+    let mut env = EvalEnv::new();
+    let expr = TypeExpr::KeyOf(Arc::new(TypeExpr::Intersection(
+        vec![
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "primary".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "neutral".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    readonly: false,
+                })],
+            })),
+        ]
+        .into(),
+    )));
+
+    let result = evaluate(&expr, &mut env);
+    assert_union_string_literals(&result, &["neutral", "primary"]);
+}
+
+#[test]
+fn eval_indexed_access_merges_intersection_object_members() {
+    let mut env = EvalEnv::new();
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::Intersection(
+            vec![
+                TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(ObjectProperty {
+                        name: "color".to_string(),
+                        ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                            properties: vec![ObjectMember::Property(ObjectProperty {
+                                name: "primary".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: false,
+                                readonly: false,
+                            })],
+                        })),
+                        optional: false,
+                        readonly: false,
+                    })],
+                })),
+                TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(ObjectProperty {
+                        name: "color".to_string(),
+                        ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                            properties: vec![ObjectMember::Property(ObjectProperty {
+                                name: "neutral".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: false,
+                                readonly: false,
+                            })],
+                        })),
+                        optional: false,
+                        readonly: false,
+                    })],
+                })),
+            ]
+            .into(),
+        )),
+        index: Arc::new(TypeExpr::string_literal("color")),
+    };
+
+    let result = evaluate(&expr, &mut env);
+    match result {
+        TypeExpr::Object(_) => {
+            let keys = evaluate(&TypeExpr::KeyOf(Arc::new(result.clone())), &mut env);
+            assert_union_string_literals(&keys, &["neutral", "primary"]);
+        }
+        other => panic!("expected merged intersection member, got {other:?}"),
+    }
+}
+
+#[test]
+fn eval_ref_uses_outer_binding_when_generic_arg_shadows_type_parameter_name() {
+    let mut env = EvalEnv::new();
+    env.type_symbols.insert(
+        "Id".to_string(),
+        TypeDeclInfo {
+            name: "Id".to_string(),
+            declaration_id: 0,
+            kind: TypeDeclKind::Alias,
+            type_parameters: vec![TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            }],
+            body: TypeExpr::named("T"),
+        },
+    );
+    env.type_bindings.insert(
+        "T".to_string(),
+        Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+    );
+
+    let expr = TypeExpr::named_with_args("Id", vec![TypeExpr::named("T")]);
+
+    assert_eq!(
+        evaluate(&expr, &mut env),
+        TypeExpr::Primitive(PrimitiveName::String)
+    );
 }
 
 // =============================================================================

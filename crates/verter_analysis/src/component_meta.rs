@@ -81,6 +81,10 @@ pub struct ComponentMetaAnalysis {
     pub slots: Vec<SlotAnalysis>,
     pub models: Vec<ModelAnalysis>,
     pub exposed: Vec<ExposedAnalysis>,
+    /// Host-populated public-instance sidecar derived from runtime-observable members.
+    pub public_instance: Option<PublicInstanceAnalysis>,
+    /// Host-populated SFC block metadata sidecar derived from parsed root blocks.
+    pub sfc_blocks: Option<SfcBlocksAnalysis>,
     pub type_registry: Vec<ResolvedTypeAnalysis>,
     pub components: Vec<ComponentUsageAnalysis>,
     pub template_refs: Vec<TemplateRefAnalysis>,
@@ -169,6 +173,96 @@ pub struct ExposedAnalysis {
     pub description: Option<String>,
 }
 
+/// Host-populated public-instance sidecar exposed by the official API.
+#[derive(Debug, Clone)]
+pub struct PublicInstanceAnalysis {
+    pub members: Vec<PublicInstanceMemberAnalysis>,
+    pub completeness: PublicInstanceCompleteness,
+}
+
+/// A single runtime-observable public-instance member.
+#[derive(Debug, Clone)]
+pub struct PublicInstanceMemberAnalysis {
+    pub name: String,
+    pub kind: PublicInstanceMemberKind,
+    pub type_expr: TypeExpr,
+    pub type_expansion: Option<crate::type_expand::ExpansionMetadata>,
+    pub raw_type: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Host-populated SFC root block metadata exposed by the official API.
+#[derive(Debug, Clone)]
+pub struct SfcBlocksAnalysis {
+    pub template: Option<TemplateBlockAnalysis>,
+    pub script: Option<ScriptBlockAnalysis>,
+    pub script_setup: Option<ScriptBlockAnalysis>,
+    pub styles: Vec<StyleBlockInfoAnalysis>,
+    pub custom: Vec<CustomBlockAnalysis>,
+}
+
+/// A single raw SFC root-block attribute.
+#[derive(Debug, Clone)]
+pub struct SfcAttributeAnalysis {
+    pub name: String,
+    pub value: Option<String>,
+}
+
+/// Metadata for the `<template>` block.
+#[derive(Debug, Clone)]
+pub struct TemplateBlockAnalysis {
+    pub lang: Option<String>,
+    pub src: Option<String>,
+    pub attributes: Vec<SfcAttributeAnalysis>,
+}
+
+/// Metadata for a `<script>` or `<script setup>` block.
+#[derive(Debug, Clone)]
+pub struct ScriptBlockAnalysis {
+    pub lang: Option<String>,
+    pub src: Option<String>,
+    pub generic: Option<String>,
+    pub attrs_type: Option<String>,
+    pub attributes: Vec<SfcAttributeAnalysis>,
+}
+
+/// Metadata for a `<style>` block.
+#[derive(Debug, Clone)]
+pub struct StyleBlockInfoAnalysis {
+    pub index: usize,
+    pub lang: Option<String>,
+    pub src: Option<String>,
+    pub scoped: bool,
+    pub is_module: bool,
+    pub module_name: Option<String>,
+    pub attributes: Vec<SfcAttributeAnalysis>,
+}
+
+/// Metadata for a custom root block such as `<i18n>`.
+#[derive(Debug, Clone)]
+pub struct CustomBlockAnalysis {
+    pub index: usize,
+    pub block_type: String,
+    pub lang: Option<String>,
+    pub src: Option<String>,
+    pub attributes: Vec<SfcAttributeAnalysis>,
+}
+
+/// What kind of member this public-instance entry represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicInstanceMemberKind {
+    Prop,
+    SlotContainer,
+    Exposed,
+}
+
+/// Whether the host believes the surfaced public-instance contract is complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicInstanceCompleteness {
+    Exact,
+    Partial,
+}
+
 /// A named resolved type available for schema expansion.
 #[derive(Debug, Clone)]
 pub struct ResolvedTypeAnalysis {
@@ -184,10 +278,12 @@ pub struct ComponentUsageAnalysis {
     pub import_source: Option<String>,
     pub is_dynamic: bool,
     pub props: Vec<ComponentPropUsageAnalysis>,
+    pub has_spread: bool,
     pub slots_used: Vec<String>,
     pub static_classes: Vec<String>,
     pub has_dynamic_class: bool,
     pub v_models: Vec<String>,
+    pub v_model_entries: Vec<ComponentVModelUsageAnalysis>,
 }
 
 /// A single prop passed to a child component in the template.
@@ -196,6 +292,16 @@ pub struct ComponentPropUsageAnalysis {
     pub name: String,
     pub is_bound: bool,
     pub constness: crate::template::PropValueConstness,
+    pub expression: Option<String>,
+    pub referenced_bindings: Vec<String>,
+    pub from_spread: bool,
+    pub is_shorthand: bool,
+}
+
+/// A v-model directive used on a child component in the template.
+#[derive(Debug, Clone)]
+pub struct ComponentVModelUsageAnalysis {
+    pub binding_name: String,
 }
 
 /// A template ref usage.
@@ -1104,6 +1210,8 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         slots,
         models,
         exposed,
+        public_instance: None,
+        sfc_blocks: None,
         type_registry,
         components,
         template_refs,
@@ -1370,7 +1478,9 @@ fn merged_resolved_macro_input(
         });
 
         for prop in &resolved.props {
-            if seen_props.insert(prop.name.clone()) {
+            if let Some(existing) = entry.props.iter_mut().find(|field| field.name == prop.name) {
+                merge_prop_field(existing, prop);
+            } else if seen_props.insert(prop.name.clone()) {
                 entry.props.push(prop.clone());
             }
         }
@@ -1437,6 +1547,13 @@ fn symbolic_type_from_evaluated_and_source(
 
     match (evaluated_raw_type, source_annotation) {
         (Some(raw_type), Some(source_annotation))
+            if backend_raw_type_is_suspicious_identifier(raw_type)
+                && normalize_type_text_for_compare(raw_type)
+                    != normalize_type_text_for_compare(source_annotation) =>
+        {
+            Some(source_annotation.to_string())
+        }
+        (Some(raw_type), Some(source_annotation))
             if source_annotation_beats_backend_prop_display(raw_type, source_annotation) =>
         {
             Some(source_annotation.to_string())
@@ -1479,8 +1596,13 @@ fn should_prefer_symbolic_prop_type_expr(
         return false;
     };
 
+    let raw_type_supports_symbolic_fallback =
+        source_annotation_beats_placeholder_backend_type(raw_type)
+            || (matches!(raw_type, "any" | "unknown")
+                && type_expr_is_suspicious_identifier_ref(evaluated_type));
+
     metadata.completeness == crate::type_expand::ExpansionCompleteness::Partial
-        && source_annotation_beats_placeholder_backend_type(raw_type)
+        && raw_type_supports_symbolic_fallback
         && (type_expr_exceeds_node_limit(evaluated_type, LARGE_PARTIAL_PROP_TYPE_NODE_LIMIT)
             || type_expr_is_placeholder_for_symbolic_fallback(evaluated_type))
 }
@@ -1594,10 +1716,30 @@ fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
 
 fn type_expr_is_placeholder_for_symbolic_fallback(type_expr: &TypeExpr) -> bool {
     match type_expr {
-        TypeExpr::Primitive(PrimitiveName::Any | PrimitiveName::Unknown) => true,
+        TypeExpr::Primitive(
+            PrimitiveName::Any | PrimitiveName::Unknown | PrimitiveName::Undefined,
+        ) => true,
         TypeExpr::Unknown { .. } => true,
+        TypeExpr::Ref { .. }
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. } => true,
         TypeExpr::Parenthesized(inner) => type_expr_is_placeholder_for_symbolic_fallback(inner),
-        TypeExpr::Object(object) => object.properties.is_empty(),
+        TypeExpr::Object(object) => {
+            object.properties.is_empty()
+                || object.properties.iter().all(|member| match member {
+                    crate::type_expr::ObjectMember::Property(property) => {
+                        type_expr_is_placeholder_for_symbolic_fallback(&property.ty)
+                    }
+                    crate::type_expr::ObjectMember::IndexSignature(signature) => {
+                        type_expr_is_placeholder_for_symbolic_fallback(&signature.value_type)
+                    }
+                    crate::type_expr::ObjectMember::CallSignature(_)
+                    | crate::type_expr::ObjectMember::ConstructSignature(_)
+                    | crate::type_expr::ObjectMember::Method(_) => false,
+                })
+        }
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
             !types.is_empty()
                 && types
@@ -1610,6 +1752,46 @@ fn type_expr_is_placeholder_for_symbolic_fallback(type_expr: &TypeExpr) -> bool 
 
 fn prop_raw_type_is_placeholder(raw_type: &str) -> bool {
     matches!(raw_type.trim(), "" | "any" | "unknown")
+}
+
+fn backend_raw_type_is_suspicious_identifier(raw_type: &str) -> bool {
+    let trimmed = raw_type.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+        && trimmed
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_' || ch == '$')
+        && !matches!(
+            trimmed,
+            "any"
+                | "unknown"
+                | "string"
+                | "number"
+                | "boolean"
+                | "symbol"
+                | "bigint"
+                | "void"
+                | "never"
+                | "null"
+                | "undefined"
+                | "object"
+                | "true"
+                | "false"
+        )
+}
+
+fn type_expr_is_suspicious_identifier_ref(type_expr: &TypeExpr) -> bool {
+    match type_expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => type_arguments.is_empty() && backend_raw_type_is_suspicious_identifier(name),
+        TypeExpr::Parenthesized(inner) => type_expr_is_suspicious_identifier_ref(inner),
+        _ => false,
+    }
 }
 
 fn source_annotation_beats_placeholder_backend_type(annotation: &str) -> bool {
@@ -2502,16 +2684,52 @@ fn merged_prop_fields(
     resolved: Option<&ResolvedMacroInput>,
 ) -> Vec<AnalyzedPropField> {
     let mut fields = mac.prop_fields.clone();
-    let mut seen: rustc_hash::FxHashSet<String> =
-        fields.iter().map(|field| field.name.clone()).collect();
     if let Some(resolved) = resolved {
         for prop in &resolved.props {
-            if seen.insert(prop.name.clone()) {
+            if let Some(existing) = fields.iter_mut().find(|field| field.name == prop.name) {
+                merge_prop_field(existing, prop);
+            } else {
                 fields.push(prop.clone());
             }
         }
     }
     fields
+}
+
+fn merge_prop_field(target: &mut AnalyzedPropField, candidate: &AnalyzedPropField) {
+    if should_replace_merged_prop_type_annotation(
+        target.type_annotation.as_deref(),
+        candidate.type_annotation.as_deref(),
+    ) {
+        target.type_annotation = candidate.type_annotation.clone();
+    }
+    if target.description.is_none() {
+        target.description = candidate.description.clone();
+    }
+    if target.tags.is_empty() {
+        target.tags = candidate.tags.clone();
+    }
+    if target.resolution_error.is_none() {
+        target.resolution_error = candidate.resolution_error.clone();
+    }
+}
+
+fn should_replace_merged_prop_type_annotation(
+    current: Option<&str>,
+    candidate: Option<&str>,
+) -> bool {
+    let Some(candidate) = candidate.map(str::trim).filter(|text| !text.is_empty()) else {
+        return false;
+    };
+    let Some(current) = current.map(str::trim).filter(|text| !text.is_empty()) else {
+        return true;
+    };
+
+    prop_raw_type_is_placeholder(current)
+        || (backend_raw_type_is_suspicious_identifier(current)
+            && !backend_raw_type_is_suspicious_identifier(candidate))
+        || (source_annotation_contains_indexed_access(candidate)
+            && !source_annotation_contains_indexed_access(current))
 }
 
 fn merged_emit_fields(
@@ -2656,8 +2874,13 @@ fn extract_components(
                     name: prop.name.clone(),
                     is_bound: prop.is_bound,
                     constness: prop.constness,
+                    expression: prop.expression.clone(),
+                    referenced_bindings: prop.referenced_bindings.clone(),
+                    from_spread: prop.from_spread,
+                    is_shorthand: prop.is_shorthand,
                 })
                 .collect(),
+            has_spread: component.has_spread,
             slots_used: component.slots_used.clone(),
             static_classes: component.static_classes.clone(),
             has_dynamic_class: component.has_dynamic_class,
@@ -2665,6 +2888,13 @@ fn extract_components(
                 .v_models
                 .iter()
                 .map(|model| model.binding_name.clone())
+                .collect(),
+            v_model_entries: component
+                .v_models
+                .iter()
+                .map(|model| ComponentVModelUsageAnalysis {
+                    binding_name: model.binding_name.clone(),
+                })
                 .collect(),
         })
         .collect()

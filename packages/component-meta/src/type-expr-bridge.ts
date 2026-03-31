@@ -169,6 +169,11 @@ export type NativeTypeExprLike = NativeTypeExpr | GraphTypeExprRef;
 
 type NativeTypeRegistry = Map<string, NativeTypeExprLike>;
 
+interface FinitePropertyEntry {
+  name: string;
+  optional: boolean;
+}
+
 interface NativeTupleElement {
   label?: string | null;
   ty: NativeTypeExpr;
@@ -266,7 +271,7 @@ export function typeExprToDescriptor(
       );
 
     case "intersection":
-      return intersection(
+      return simplifyIntersectionDescriptor(
         expr.types.map((type) =>
           typeExprToDescriptor(type, nativeRegistry, visiting, graphVisiting),
         ),
@@ -354,16 +359,27 @@ export function typeExprToDescriptor(
     case "typeParameter":
       return nativeTypeParameterToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
 
-    case "keyOf":
+    case "keyOf": {
+      const resolved = resolveKeyOfDescriptor(
+        expr.operand,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+      return resolved ?? unknown(nativeTypeExprToString(expr));
+    }
     case "typeOf":
     case "conditional":
-    case "mapped":
     case "templateLiteral":
     case "infer":
     case "rest":
       // These operator forms should be evaluated by the native evaluator.
       // If they reach here, they couldn't be reduced — fall back to unknown.
       return unknown(nativeTypeExprToString(expr));
+    case "mapped": {
+      const resolved = resolveMappedDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+      return resolved ?? unknown(nativeTypeExprToString(expr));
+    }
 
     case "indexedAccess": {
       const resolved = nativeRegistry
@@ -452,19 +468,22 @@ function resolveIndexedAccessDescriptor(
     return undefined;
   }
 
-  const property = resolveObjectProperty(resolvedObject, propertyName);
+  const property = resolveObjectProperty(
+    resolvedObject,
+    propertyName,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
+  );
   if (!property) {
     return undefined;
   }
 
   if (!property.optional) {
-    return typeExprToDescriptor(property.ty, nativeRegistry, visiting, graphVisiting);
+    return property.ty;
   }
 
-  return union([
-    typeExprToDescriptor(property.ty, nativeRegistry, visiting, graphVisiting),
-    primitive("undefined"),
-  ]);
+  return union([property.ty, primitive("undefined")]);
 }
 
 function resolveRegistryExpr(
@@ -495,6 +514,22 @@ function resolveRegistryExpr(
       visiting.delete(name);
       return next;
     }
+    if (node.kind === NODE_TYPE_PARAMETER) {
+      if (node.defaultNodeId) {
+        return resolveRegistryExpr(
+          createGraphTypeExprRef(expr.graph, node.defaultNodeId),
+          nativeRegistry,
+          visiting,
+        );
+      }
+      if (node.constraintNodeId) {
+        return resolveRegistryExpr(
+          createGraphTypeExprRef(expr.graph, node.constraintNodeId),
+          nativeRegistry,
+          visiting,
+        );
+      }
+    }
     return expr;
   }
 
@@ -516,6 +551,15 @@ function resolveRegistryExpr(
     return resolveRegistryExpr(expr.inner, nativeRegistry, visiting);
   }
 
+  if (expr.kind === "typeParameter") {
+    if (expr.default) {
+      return resolveRegistryExpr(expr.default, nativeRegistry, visiting);
+    }
+    if (expr.constraint) {
+      return resolveRegistryExpr(expr.constraint, nativeRegistry, visiting);
+    }
+  }
+
   return expr;
 }
 
@@ -535,46 +579,1161 @@ function resolveStringLiteralValue(expr: NativeTypeExprLike): string | undefined
   return undefined;
 }
 
-function resolveObjectProperty(
-  expr: NativeTypeExprLike,
-  propertyName: string,
-): { ty: NativeTypeExprLike; optional: boolean } | undefined {
-  if (isGraphTypeExprRef(expr)) {
-    const node = expr.graph.getNode(expr.nodeId);
-    if (node.kind !== NODE_OBJECT) {
-      return undefined;
-    }
-
-    const member = node.members.find(
-      (candidate) =>
-        candidate.kind === MEMBER_PROPERTY &&
-        candidate.nameId !== 0 &&
-        expr.graph.getString(candidate.nameId) === propertyName,
-    );
-    if (!member) {
-      return undefined;
-    }
-
-    return {
-      ty: createGraphTypeExprRef(expr.graph, member.typeNodeId),
-      optional: member.optional,
-    };
+function isSameTypeExprReference(left: NativeTypeExprLike, right: NativeTypeExprLike): boolean {
+  if (isGraphTypeExprRef(left) && isGraphTypeExprRef(right)) {
+    return left.graph === right.graph && left.nodeId === right.nodeId;
   }
 
-  if (expr.kind !== "object") {
+  return left === right;
+}
+
+function resolveRegistryRefDescriptor(
+  name: string,
+  typeArguments: NativeTypeExprLike[],
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  if (!nativeRegistry || visiting.has(name)) {
     return undefined;
   }
 
-  const member = expr.properties.find(
-    (candidate) => candidate.memberKind === "property" && candidate.name === propertyName,
+  const resolved = nativeRegistry.get(name);
+  if (!resolved) {
+    return undefined;
+  }
+
+  visiting.add(name);
+  try {
+    const base = typeExprToDescriptor(resolved, nativeRegistry, visiting, graphVisiting);
+    if (typeArguments.length === 0) {
+      return base;
+    }
+
+    const parameterNames = collectDescriptorTypeParameterNames(base);
+    if (parameterNames.length === 0) {
+      return base;
+    }
+
+    const bindings = new Map<string, TypeDescriptor>();
+    parameterNames.forEach((parameterName, index) => {
+      const typeArgument = typeArguments[index];
+      if (!typeArgument) {
+        return;
+      }
+      bindings.set(
+        parameterName,
+        typeExprToDescriptor(typeArgument, nativeRegistry, visiting, graphVisiting),
+      );
+    });
+    return substituteDescriptorTypeParameters(base, bindings);
+  } finally {
+    visiting.delete(name);
+  }
+}
+
+function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+
+  const visit = (current: TypeDescriptor) => {
+    switch (current.kind) {
+      case "primitive":
+      case "literal":
+      case "enum":
+      case "unknown":
+        return;
+      case "union":
+      case "intersection":
+        current.types.forEach(visit);
+        return;
+      case "array":
+        visit(current.element);
+        return;
+      case "tuple":
+        current.elements.forEach(visit);
+        return;
+      case "object":
+        current.properties.forEach((property) => visit(property.type));
+        current.indexSignatures?.forEach((signature) => {
+          visit(signature.keyType);
+          visit(signature.valueType);
+        });
+        current.callSignatures?.forEach(visit);
+        current.constructSignatures?.forEach(visit);
+        return;
+      case "function":
+        current.parameters.forEach((parameter) => visit(parameter.type));
+        visit(current.returnType);
+        current.typeParameters?.forEach(visit);
+        return;
+      case "ref":
+        current.typeArguments?.forEach(visit);
+        return;
+      case "typeParameter":
+        if (!seen.has(current.name)) {
+          seen.add(current.name);
+          names.push(current.name);
+        }
+        if (current.constraint) {
+          visit(current.constraint);
+        }
+        if (current.default) {
+          visit(current.default);
+        }
+        return;
+    }
+  };
+
+  visit(descriptor);
+  return names;
+}
+
+function maskTypeParameterBindings(
+  bindings: Map<string, TypeDescriptor>,
+  names: string[],
+): Map<string, TypeDescriptor> {
+  if (names.length === 0) {
+    return bindings;
+  }
+
+  const masked = new Map(bindings);
+  names.forEach((name) => masked.delete(name));
+  return masked;
+}
+
+function substituteDescriptorTypeParameters(
+  descriptor: TypeDescriptor,
+  bindings: Map<string, TypeDescriptor>,
+): TypeDescriptor {
+  switch (descriptor.kind) {
+    case "primitive":
+    case "literal":
+    case "enum":
+    case "unknown":
+      return descriptor;
+    case "union":
+      return union(
+        descriptor.types.map((type) => substituteDescriptorTypeParameters(type, bindings)),
+      );
+    case "intersection":
+      return intersection(
+        descriptor.types.map((type) => substituteDescriptorTypeParameters(type, bindings)),
+      );
+    case "array":
+      return array(substituteDescriptorTypeParameters(descriptor.element, bindings));
+    case "tuple":
+      return tuple(
+        descriptor.elements.map((element) => substituteDescriptorTypeParameters(element, bindings)),
+      );
+    case "object":
+      return object(
+        descriptor.properties.map((property) => ({
+          ...property,
+          type: substituteDescriptorTypeParameters(property.type, bindings),
+        })),
+        {
+          ...(descriptor.indexSignatures
+            ? {
+                indexSignatures: descriptor.indexSignatures.map((signature) => ({
+                  ...signature,
+                  keyType: substituteDescriptorTypeParameters(signature.keyType, bindings),
+                  valueType: substituteDescriptorTypeParameters(signature.valueType, bindings),
+                })),
+              }
+            : {}),
+          ...(descriptor.callSignatures
+            ? {
+                callSignatures: descriptor.callSignatures.map((signature) =>
+                  substituteDescriptorTypeParameters(signature, bindings),
+                ) as Extract<TypeDescriptor, { kind: "function" }>[],
+              }
+            : {}),
+          ...(descriptor.constructSignatures
+            ? {
+                constructSignatures: descriptor.constructSignatures.map((signature) =>
+                  substituteDescriptorTypeParameters(signature, bindings),
+                ) as Extract<TypeDescriptor, { kind: "function" }>[],
+              }
+            : {}),
+        },
+      );
+    case "function": {
+      const maskedBindings = maskTypeParameterBindings(
+        bindings,
+        descriptor.typeParameters?.map((typeParameter) => typeParameter.name) ?? [],
+      );
+      return func(
+        descriptor.parameters.map((parameter) => ({
+          ...parameter,
+          type: substituteDescriptorTypeParameters(parameter.type, maskedBindings),
+        })),
+        substituteDescriptorTypeParameters(descriptor.returnType, maskedBindings),
+        {
+          ...(descriptor.typeParameters
+            ? {
+                typeParameters: descriptor.typeParameters.map((typeParameterDescriptor) =>
+                  substituteDescriptorTypeParameters(typeParameterDescriptor, maskedBindings),
+                ) as Extract<TypeDescriptor, { kind: "typeParameter" }>[],
+              }
+            : {}),
+        },
+      );
+    }
+    case "ref":
+      return typeRef(
+        descriptor.name,
+        descriptor.typeArguments?.map((typeArgument) =>
+          substituteDescriptorTypeParameters(typeArgument, bindings),
+        ),
+      );
+    case "typeParameter": {
+      const bound = bindings.get(descriptor.name);
+      if (bound) {
+        return bound;
+      }
+      if (descriptor.default) {
+        return substituteDescriptorTypeParameters(descriptor.default, bindings);
+      }
+      if (descriptor.constraint) {
+        return substituteDescriptorTypeParameters(descriptor.constraint, bindings);
+      }
+      return descriptor;
+    }
+  }
+}
+
+function resolveRefProperty(
+  name: string,
+  typeArguments: NativeTypeExprLike[],
+  propertyName: string,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): { ty: TypeDescriptor; optional: boolean } | undefined {
+  if (
+    (name === "Required" || name === "Partial" || name === "Readonly" || name === "Id") &&
+    typeArguments.length > 0
+  ) {
+    const property = resolveObjectProperty(
+      typeArguments[0],
+      propertyName,
+      nativeRegistry,
+      visiting,
+      graphVisiting,
+    );
+    if (!property) {
+      return undefined;
+    }
+    if (name === "Required") {
+      return { ...property, optional: false };
+    }
+    if (name === "Partial") {
+      return { ...property, optional: true };
+    }
+    return property;
+  }
+
+  const descriptor = resolveRegistryRefDescriptor(
+    name,
+    typeArguments,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
   );
-  if (!member?.ty) {
+  return descriptor
+    ? resolveDescriptorProperty(descriptor, propertyName, nativeRegistry, visiting, graphVisiting)
+    : undefined;
+}
+
+function resolveObjectProperty(
+  expr: NativeTypeExprLike,
+  propertyName: string,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): { ty: TypeDescriptor; optional: boolean } | undefined {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    switch (node.kind) {
+      case NODE_OBJECT: {
+        const member = node.members.find(
+          (candidate) =>
+            candidate.kind === MEMBER_PROPERTY &&
+            candidate.nameId !== 0 &&
+            expr.graph.getString(candidate.nameId) === propertyName,
+        );
+        if (!member) {
+          return undefined;
+        }
+
+        return {
+          ty: typeExprToDescriptor(
+            createGraphTypeExprRef(expr.graph, member.typeNodeId),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ),
+          optional: member.optional,
+        };
+      }
+      case NODE_UNION:
+        return resolveUnionObjectProperty(
+          node.typeNodeIds.map((id) => createGraphTypeExprRef(expr.graph, id)),
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      case NODE_INTERSECTION:
+        return resolveIntersectionObjectProperty(
+          node.typeNodeIds.map((id) => createGraphTypeExprRef(expr.graph, id)),
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      case NODE_PARENTHESIZED:
+        return resolveObjectProperty(
+          createGraphTypeExprRef(expr.graph, node.innerNodeId),
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      case NODE_TYPE_PARAMETER: {
+        const resolved = resolveRegistryExpr(expr, nativeRegistry, visiting);
+        return isSameTypeExprReference(resolved, expr)
+          ? undefined
+          : resolveObjectProperty(resolved, propertyName, nativeRegistry, visiting, graphVisiting);
+      }
+      case NODE_INDEXED_ACCESS: {
+        const resolved = resolveIndexedAccessDescriptor(
+          createGraphTypeExprRef(expr.graph, node.objectNodeId),
+          createGraphTypeExprRef(expr.graph, node.indexNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+        return resolved
+          ? resolveDescriptorProperty(
+              resolved,
+              propertyName,
+              nativeRegistry,
+              visiting,
+              graphVisiting,
+            )
+          : undefined;
+      }
+      case NODE_REF:
+        return resolveRefProperty(
+          expr.graph.getString(node.nameId),
+          node.typeArgumentNodeIds.map((id) => createGraphTypeExprRef(expr.graph, id)),
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      default:
+        return undefined;
+    }
+  }
+
+  switch (expr.kind) {
+    case "object": {
+      const member = expr.properties.find(
+        (candidate) => candidate.memberKind === "property" && candidate.name === propertyName,
+      );
+      if (!member?.ty) {
+        return undefined;
+      }
+
+      return {
+        ty: typeExprToDescriptor(member.ty, nativeRegistry, visiting, graphVisiting),
+        optional: member.optional ?? false,
+      };
+    }
+    case "union":
+      return resolveUnionObjectProperty(
+        expr.types,
+        propertyName,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    case "intersection":
+      return resolveIntersectionObjectProperty(
+        expr.types,
+        propertyName,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    case "parenthesized":
+      return resolveObjectProperty(
+        expr.inner,
+        propertyName,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    case "typeParameter": {
+      const resolved = resolveRegistryExpr(expr, nativeRegistry, visiting);
+      return isSameTypeExprReference(resolved, expr)
+        ? undefined
+        : resolveObjectProperty(resolved, propertyName, nativeRegistry, visiting, graphVisiting);
+    }
+    case "indexedAccess": {
+      const resolved = resolveIndexedAccessDescriptor(
+        expr.object,
+        expr.index,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+      return resolved
+        ? resolveDescriptorProperty(resolved, propertyName, nativeRegistry, visiting, graphVisiting)
+        : undefined;
+    }
+    case "ref":
+      return resolveRefProperty(
+        expr.name,
+        expr.typeArguments,
+        propertyName,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    default:
+      return undefined;
+  }
+}
+
+function resolveDescriptorProperty(
+  descriptor: TypeDescriptor,
+  propertyName: string,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): { ty: TypeDescriptor; optional: boolean } | undefined {
+  switch (descriptor.kind) {
+    case "object": {
+      const property = descriptor.properties.find((candidate) => candidate.name === propertyName);
+      if (!property) {
+        return undefined;
+      }
+      return {
+        ty: property.type,
+        optional: property.optional,
+      };
+    }
+    case "union": {
+      const members = descriptor.types.map((candidate) =>
+        resolveDescriptorProperty(candidate, propertyName, nativeRegistry, visiting, graphVisiting),
+      );
+      if (members.some((member) => !member)) {
+        return undefined;
+      }
+      const resolved = members as Array<{ ty: TypeDescriptor; optional: boolean }>;
+      return {
+        ty: union(resolved.map((member) => member.ty)),
+        optional: resolved.some((member) => member.optional),
+      };
+    }
+    case "intersection": {
+      const members = descriptor.types
+        .map((candidate) =>
+          resolveDescriptorProperty(
+            candidate,
+            propertyName,
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ),
+        )
+        .filter(
+          (member): member is { ty: TypeDescriptor; optional: boolean } => member !== undefined,
+        );
+      if (members.length === 0) {
+        return undefined;
+      }
+      return {
+        ty: intersection(members.map((member) => member.ty)),
+        optional: members.every((member) => member.optional),
+      };
+    }
+    case "ref": {
+      if (descriptor.typeArguments?.length || visiting.has(descriptor.name)) {
+        return undefined;
+      }
+      const resolved = nativeRegistry.get(descriptor.name);
+      if (!resolved) {
+        return undefined;
+      }
+      visiting.add(descriptor.name);
+      const next = typeExprToDescriptor(resolved, nativeRegistry, visiting, graphVisiting);
+      const property = resolveDescriptorProperty(
+        next,
+        propertyName,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+      visiting.delete(descriptor.name);
+      return property;
+    }
+    default:
+      return undefined;
+  }
+}
+
+function resolveKeyOfDescriptor(
+  expr: NativeTypeExprLike,
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  const entries = resolveFiniteSourceEntries(expr, nativeRegistry, visiting, graphVisiting);
+  if (!entries || entries.length === 0) {
+    return undefined;
+  }
+  return union(entries.map((entry) => literal(entry.name)));
+}
+
+function resolveMappedDescriptor(
+  expr: NativeTypeExprLike,
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  const registry = nativeRegistry ?? new Map<string, NativeTypeExprLike>();
+
+  const mapped = readMappedInfo(expr);
+  if (!mapped) {
+    return undefined;
+  }
+
+  const entries = resolveFiniteSourceEntries(mapped.source, registry, visiting, graphVisiting);
+  if (!entries || entries.length === 0) {
+    return undefined;
+  }
+
+  return object(
+    entries.map((entry) => ({
+      name: entry.name,
+      type: resolveMappedValueDescriptor(
+        mapped.value,
+        mapped.parameterName,
+        entry.name,
+        registry,
+        visiting,
+        graphVisiting,
+      ),
+      optional: applyMappedOptionalModifier(entry.optional, mapped.optionalModifier),
+    })),
+  );
+}
+
+function resolveMappedValueDescriptor(
+  expr: NativeTypeExprLike,
+  parameterName: string,
+  propertyName: string,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    switch (node.kind) {
+      case NODE_KEY_OF: {
+        const resolved =
+          resolveFiniteSourceEntries(
+            createGraphTypeExprRef(expr.graph, node.operandNodeId),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ) ??
+          resolveFiniteDescriptorEntries(
+            resolveMappedIndexedAccessDescriptor(
+              createGraphTypeExprRef(expr.graph, node.operandNodeId),
+              parameterName,
+              propertyName,
+              nativeRegistry,
+              visiting,
+              graphVisiting,
+            ),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          );
+        return resolved && resolved.length > 0
+          ? union(resolved.map((entry) => literal(entry.name)))
+          : typeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+      }
+      case NODE_INDEXED_ACCESS: {
+        const resolved = resolveMappedIndexedAccessDescriptor(
+          expr,
+          parameterName,
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+        return resolved ?? typeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+      }
+      case NODE_TYPE_PARAMETER:
+        if (expr.graph.getString(node.nameId) === parameterName) {
+          return literal(propertyName);
+        }
+        break;
+      case NODE_PARENTHESIZED:
+        return resolveMappedValueDescriptor(
+          createGraphTypeExprRef(expr.graph, node.innerNodeId),
+          parameterName,
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+    }
+  } else {
+    switch (expr.kind) {
+      case "keyOf": {
+        const resolved =
+          resolveFiniteSourceEntries(expr.operand, nativeRegistry, visiting, graphVisiting) ??
+          resolveFiniteDescriptorEntries(
+            resolveMappedIndexedAccessDescriptor(
+              expr.operand,
+              parameterName,
+              propertyName,
+              nativeRegistry,
+              visiting,
+              graphVisiting,
+            ),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          );
+        return resolved && resolved.length > 0
+          ? union(resolved.map((entry) => literal(entry.name)))
+          : typeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+      }
+      case "indexedAccess": {
+        const resolved = resolveMappedIndexedAccessDescriptor(
+          expr,
+          parameterName,
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+        return resolved ?? typeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+      }
+      case "typeParameter":
+        if (expr.name === parameterName) {
+          return literal(propertyName);
+        }
+        break;
+      case "parenthesized":
+        return resolveMappedValueDescriptor(
+          expr.inner,
+          parameterName,
+          propertyName,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+    }
+  }
+
+  return typeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+}
+
+function resolveMappedIndexedAccessDescriptor(
+  expr: NativeTypeExprLike,
+  parameterName: string,
+  propertyName: string,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  const parts = readIndexedAccessInfo(expr);
+  if (!parts) {
+    return undefined;
+  }
+  const index = mappedIndexMatchesParameter(parts.index, parameterName)
+    ? ({
+        kind: "literal",
+        literalKind: "string",
+        value: propertyName,
+      } satisfies NativeTypeExpr)
+    : parts.index;
+  return resolveIndexedAccessDescriptor(
+    parts.object,
+    index,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
+  );
+}
+
+function resolveFiniteSourceEntries(
+  expr: NativeTypeExprLike,
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): FinitePropertyEntry[] | undefined {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    switch (node.kind) {
+      case NODE_KEY_OF:
+        return resolveFiniteObjectEntries(
+          createGraphTypeExprRef(expr.graph, node.operandNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      case NODE_UNION: {
+        const entries = node.typeNodeIds.map((id) =>
+          resolveStringLiteralValue(createGraphTypeExprRef(expr.graph, id)),
+        );
+        return entries.every((entry): entry is string => entry !== undefined)
+          ? entries.map((name) => ({ name, optional: false }))
+          : undefined;
+      }
+      default:
+        return resolveFiniteObjectEntries(expr, nativeRegistry, visiting, graphVisiting);
+    }
+  }
+
+  switch (expr.kind) {
+    case "keyOf":
+      return resolveFiniteObjectEntries(expr.operand, nativeRegistry, visiting, graphVisiting);
+    case "union": {
+      const entries = expr.types.map((type) => resolveStringLiteralValue(type));
+      return entries.every((entry): entry is string => entry !== undefined)
+        ? entries.map((name) => ({ name, optional: false }))
+        : undefined;
+    }
+    default:
+      return resolveFiniteObjectEntries(expr, nativeRegistry, visiting, graphVisiting);
+  }
+}
+
+function resolveFiniteObjectEntries(
+  expr: NativeTypeExprLike,
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): FinitePropertyEntry[] | undefined {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    switch (node.kind) {
+      case NODE_OBJECT:
+        return node.members
+          .filter((member) => member.kind === MEMBER_PROPERTY && member.nameId !== 0)
+          .map((member) => ({
+            name: expr.graph.getString(member.nameId),
+            optional: member.optional,
+          }));
+      case NODE_INTERSECTION: {
+        const entries = node.typeNodeIds
+          .map((id) =>
+            resolveFiniteObjectEntries(
+              createGraphTypeExprRef(expr.graph, id),
+              nativeRegistry,
+              visiting,
+              graphVisiting,
+            ),
+          )
+          .filter((value): value is FinitePropertyEntry[] => value !== undefined);
+        return entries.length > 0 ? mergeFiniteEntrySets(entries) : undefined;
+      }
+      case NODE_PARENTHESIZED:
+        return resolveFiniteObjectEntries(
+          createGraphTypeExprRef(expr.graph, node.innerNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      case NODE_TYPE_PARAMETER: {
+        const resolved = resolveRegistryExpr(
+          expr,
+          nativeRegistry ?? new Map<string, NativeTypeExprLike>(),
+          visiting,
+        );
+        return isSameTypeExprReference(resolved, expr)
+          ? undefined
+          : resolveFiniteObjectEntries(resolved, nativeRegistry, visiting, graphVisiting);
+      }
+      case NODE_REF:
+        return resolveFiniteEntriesFromRef(
+          expr.graph.getString(node.nameId),
+          node.typeArgumentNodeIds.map((id) => createGraphTypeExprRef(expr.graph, id)),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      case NODE_INDEXED_ACCESS:
+        return resolveFiniteDescriptorEntries(
+          resolveIndexedAccessDescriptor(
+            createGraphTypeExprRef(expr.graph, node.objectNodeId),
+            createGraphTypeExprRef(expr.graph, node.indexNodeId),
+            nativeRegistry,
+            visiting,
+            graphVisiting,
+          ),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      case NODE_MAPPED:
+        return resolveFiniteDescriptorEntries(
+          resolveMappedDescriptor(expr, nativeRegistry, visiting, graphVisiting),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+      default:
+        return undefined;
+    }
+  }
+
+  switch (expr.kind) {
+    case "object":
+      return expr.properties
+        .filter((member) => member.memberKind === "property" && member.name)
+        .map((member) => ({
+          name: member.name!,
+          optional: member.optional ?? false,
+        }));
+    case "intersection": {
+      const entries = expr.types
+        .map((type) => resolveFiniteObjectEntries(type, nativeRegistry, visiting, graphVisiting))
+        .filter((value): value is FinitePropertyEntry[] => value !== undefined);
+      return entries.length > 0 ? mergeFiniteEntrySets(entries) : undefined;
+    }
+    case "parenthesized":
+      return resolveFiniteObjectEntries(expr.inner, nativeRegistry, visiting, graphVisiting);
+    case "typeParameter": {
+      const resolved = resolveRegistryExpr(
+        expr,
+        nativeRegistry ?? new Map<string, NativeTypeExprLike>(),
+        visiting,
+      );
+      return isSameTypeExprReference(resolved, expr)
+        ? undefined
+        : resolveFiniteObjectEntries(resolved, nativeRegistry, visiting, graphVisiting);
+    }
+    case "ref":
+      return resolveFiniteEntriesFromRef(
+        expr.name,
+        expr.typeArguments,
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    case "indexedAccess":
+      return resolveFiniteDescriptorEntries(
+        resolveIndexedAccessDescriptor(
+          expr.object,
+          expr.index,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    case "mapped":
+      return resolveFiniteDescriptorEntries(
+        resolveMappedDescriptor(expr, nativeRegistry, visiting, graphVisiting),
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    default:
+      return undefined;
+  }
+}
+
+function resolveFiniteEntriesFromRef(
+  name: string,
+  typeArguments: NativeTypeExprLike[],
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): FinitePropertyEntry[] | undefined {
+  if (name === "Required" && typeArguments.length > 0) {
+    return resolveFiniteObjectEntries(
+      typeArguments[0],
+      nativeRegistry,
+      visiting,
+      graphVisiting,
+    )?.map((entry) => ({ ...entry, optional: false }));
+  }
+  if (name === "Partial" && typeArguments.length > 0) {
+    return resolveFiniteObjectEntries(
+      typeArguments[0],
+      nativeRegistry,
+      visiting,
+      graphVisiting,
+    )?.map((entry) => ({ ...entry, optional: true }));
+  }
+  if ((name === "Id" || name === "Readonly") && typeArguments.length > 0) {
+    return resolveFiniteObjectEntries(typeArguments[0], nativeRegistry, visiting, graphVisiting);
+  }
+  const descriptor = resolveRegistryRefDescriptor(
+    name,
+    typeArguments,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
+  );
+  if (!descriptor) {
+    return undefined;
+  }
+  return resolveFiniteDescriptorEntries(descriptor, nativeRegistry, visiting, graphVisiting);
+}
+
+function resolveFiniteDescriptorEntries(
+  descriptor: TypeDescriptor | undefined,
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): FinitePropertyEntry[] | undefined {
+  if (!descriptor) {
+    return undefined;
+  }
+  switch (descriptor.kind) {
+    case "object":
+      return descriptor.properties.map((property) => ({
+        name: property.name,
+        optional: property.optional,
+      }));
+    case "intersection": {
+      const entries = descriptor.types
+        .map((type) =>
+          resolveFiniteDescriptorEntries(type, nativeRegistry, visiting, graphVisiting),
+        )
+        .filter((value): value is FinitePropertyEntry[] => value !== undefined);
+      return entries.length > 0 ? mergeFiniteEntrySets(entries) : undefined;
+    }
+    case "ref":
+      return resolveFiniteDescriptorEntries(
+        resolveRegistryRefDescriptor(
+          descriptor.name,
+          descriptor.typeArguments ?? [],
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+    default:
+      return undefined;
+  }
+}
+
+function mergeFiniteEntrySets(entrySets: FinitePropertyEntry[][]): FinitePropertyEntry[] {
+  const merged = new Map<string, FinitePropertyEntry>();
+  for (const entrySet of entrySets) {
+    for (const entry of entrySet) {
+      const existing = merged.get(entry.name);
+      if (existing) {
+        existing.optional = existing.optional && entry.optional;
+      } else {
+        merged.set(entry.name, { ...entry });
+      }
+    }
+  }
+  return [...merged.values()];
+}
+
+function applyMappedOptionalModifier(optional: boolean, modifier: number): boolean {
+  if (modifier === 2) {
+    return true;
+  }
+  if (modifier === 3) {
+    return false;
+  }
+  return optional;
+}
+
+function readMappedInfo(expr: NativeTypeExprLike):
+  | {
+      parameterName: string;
+      source: NativeTypeExprLike;
+      value: NativeTypeExprLike;
+      optionalModifier: number;
+    }
+  | undefined {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    if (node.kind !== NODE_MAPPED) {
+      return undefined;
+    }
+    return {
+      parameterName: expr.graph.getString(node.parameterId),
+      source: createGraphTypeExprRef(expr.graph, node.sourceNodeId),
+      value: createGraphTypeExprRef(expr.graph, node.valueNodeId),
+      optionalModifier: node.optionalModifier,
+    };
+  }
+  if (expr.kind !== "mapped") {
+    return undefined;
+  }
+  return {
+    parameterName: expr.parameter,
+    source: expr.source,
+    value: expr.value,
+    optionalModifier: 1,
+  };
+}
+
+function readIndexedAccessInfo(
+  expr: NativeTypeExprLike,
+): { object: NativeTypeExprLike; index: NativeTypeExprLike } | undefined {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    if (node.kind !== NODE_INDEXED_ACCESS) {
+      return undefined;
+    }
+    return {
+      object: createGraphTypeExprRef(expr.graph, node.objectNodeId),
+      index: createGraphTypeExprRef(expr.graph, node.indexNodeId),
+    };
+  }
+  if (expr.kind !== "indexedAccess") {
+    return undefined;
+  }
+  return { object: expr.object, index: expr.index };
+}
+
+function mappedIndexMatchesParameter(expr: NativeTypeExprLike, parameterName: string): boolean {
+  if (isGraphTypeExprRef(expr)) {
+    const node = expr.graph.getNode(expr.nodeId);
+    return node.kind === NODE_TYPE_PARAMETER && expr.graph.getString(node.nameId) === parameterName;
+  }
+  return expr.kind === "typeParameter" && expr.name === parameterName;
+}
+
+function simplifyIntersectionDescriptor(types: TypeDescriptor[]): TypeDescriptor {
+  const flattened = types.flatMap((type) => (type.kind === "intersection" ? type.types : [type]));
+  const filtered = flattened.filter((type) => !isEmptyObjectDescriptor(type));
+  if (filtered.length === 0) {
+    return object([]);
+  }
+  if (filtered.every((type) => type.kind === "object")) {
+    return mergeObjectDescriptors(filtered as Array<Extract<TypeDescriptor, { kind: "object" }>>);
+  }
+  return intersection(filtered);
+}
+
+function isEmptyObjectDescriptor(type: TypeDescriptor): boolean {
+  return (
+    type.kind === "object" &&
+    type.properties.length === 0 &&
+    !type.indexSignatures?.length &&
+    !type.callSignatures?.length &&
+    !type.constructSignatures?.length
+  );
+}
+
+function mergeObjectDescriptors(
+  types: Array<Extract<TypeDescriptor, { kind: "object" }>>,
+): TypeDescriptor {
+  const properties = new Map<string, { type: TypeDescriptor; optional: boolean }>();
+  const indexSignatures: NonNullable<
+    Extract<TypeDescriptor, { kind: "object" }>["indexSignatures"]
+  > = [];
+  const callSignatures: NonNullable<Extract<TypeDescriptor, { kind: "object" }>["callSignatures"]> =
+    [];
+  const constructSignatures: NonNullable<
+    Extract<TypeDescriptor, { kind: "object" }>["constructSignatures"]
+  > = [];
+
+  for (const type of types) {
+    for (const property of type.properties) {
+      const existing = properties.get(property.name);
+      if (existing) {
+        existing.type = simplifyIntersectionDescriptor([existing.type, property.type]);
+        existing.optional = existing.optional && property.optional;
+      } else {
+        properties.set(property.name, {
+          type: property.type,
+          optional: property.optional,
+        });
+      }
+    }
+    if (type.indexSignatures) {
+      indexSignatures.push(...type.indexSignatures);
+    }
+    if (type.callSignatures) {
+      callSignatures.push(...type.callSignatures);
+    }
+    if (type.constructSignatures) {
+      constructSignatures.push(...type.constructSignatures);
+    }
+  }
+
+  return object(
+    [...properties.entries()].map(([name, property]) => ({
+      name,
+      type: property.type,
+      optional: property.optional,
+    })),
+    {
+      ...(indexSignatures.length > 0 ? { indexSignatures } : {}),
+      ...(callSignatures.length > 0 ? { callSignatures } : {}),
+      ...(constructSignatures.length > 0 ? { constructSignatures } : {}),
+    },
+  );
+}
+
+function resolveUnionObjectProperty(
+  exprs: readonly NativeTypeExprLike[],
+  propertyName: string,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): { ty: TypeDescriptor; optional: boolean } | undefined {
+  const members = exprs.map((expr) =>
+    resolveObjectProperty(expr, propertyName, nativeRegistry, visiting, graphVisiting),
+  );
+  if (members.some((member) => !member)) {
+    return undefined;
+  }
+
+  const resolved = members as Array<{ ty: TypeDescriptor; optional: boolean }>;
+  return {
+    ty: union(resolved.map((member) => member.ty)),
+    optional: resolved.some((member) => member.optional),
+  };
+}
+
+function resolveIntersectionObjectProperty(
+  exprs: readonly NativeTypeExprLike[],
+  propertyName: string,
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): { ty: TypeDescriptor; optional: boolean } | undefined {
+  const members = exprs
+    .map((expr) =>
+      resolveObjectProperty(expr, propertyName, nativeRegistry, visiting, graphVisiting),
+    )
+    .filter((member): member is { ty: TypeDescriptor; optional: boolean } => member !== undefined);
+  if (members.length === 0) {
     return undefined;
   }
 
   return {
-    ty: member.ty,
-    optional: member.optional ?? false,
+    ty: intersection(members.map((member) => member.ty)),
+    optional: members.every((member) => member.optional),
   };
 }
 
@@ -662,7 +1821,7 @@ function graphNodeToDescriptor(
         ),
       );
     case NODE_INTERSECTION:
-      return intersection(
+      return simplifyIntersectionDescriptor(
         node.typeNodeIds.map((id) =>
           typeExprToDescriptor(
             createGraphTypeExprRef(expr.graph, id),
@@ -832,14 +1991,25 @@ function graphNodeToDescriptor(
             }
           : {}),
       });
-    case NODE_KEY_OF:
+    case NODE_KEY_OF: {
+      const resolved = resolveKeyOfDescriptor(
+        createGraphTypeExprRef(expr.graph, node.operandNodeId),
+        nativeRegistry,
+        visiting,
+        graphVisiting,
+      );
+      return resolved ?? unknown(graphTypeExprToString(expr));
+    }
     case NODE_TYPE_OF:
     case NODE_CONDITIONAL:
-    case NODE_MAPPED:
     case NODE_TEMPLATE_LITERAL:
     case NODE_INFER:
     case NODE_REST:
       return unknown(graphTypeExprToString(expr));
+    case NODE_MAPPED: {
+      const resolved = resolveMappedDescriptor(expr, nativeRegistry, visiting, graphVisiting);
+      return resolved ?? unknown(graphTypeExprToString(expr));
+    }
     case NODE_INDEXED_ACCESS: {
       const resolved = nativeRegistry
         ? resolveIndexedAccessDescriptor(

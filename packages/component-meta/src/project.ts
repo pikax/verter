@@ -15,7 +15,6 @@
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
 import { mapComponentMeta } from "./compat/checker.js";
 import type { CheckerWorkspace } from "./compat/checker.js";
 import type { MetaCheckerOptions, VolarComponentMeta } from "./compat/types.js";
@@ -31,6 +30,7 @@ import {
   getMetaRuntime,
   normalizePath,
   parseTsconfig,
+  resolvePath,
   shutdownMetaRuntime as _shutdownMetaRuntime,
   stableHash,
   stableSelectiveConfigHash,
@@ -99,7 +99,7 @@ export class ComponentMetaSession {
 
   updateFile(filePath: string, source: string): void {
     this.ensureOpen();
-    const abs = normalizePath(resolve(this._root, filePath));
+    const abs = resolvePath(this._root, filePath);
     this._touchedFiles.add(abs);
     this._baseFiles.delete(abs);
     this._deletedFiles.delete(abs);
@@ -108,7 +108,7 @@ export class ComponentMetaSession {
 
   deleteFile(filePath: string): void {
     this.ensureOpen();
-    const abs = normalizePath(resolve(this._root, filePath));
+    const abs = resolvePath(this._root, filePath);
     this._touchedFiles.add(abs);
     this._baseFiles.delete(abs);
     this._deletedFiles.add(abs);
@@ -145,8 +145,8 @@ export class ComponentMetaSession {
     this._session.engine.clearCaches();
   }
 
-  private loadNativeComponentMeta(filePath: string): NativeComponentMetaResult | undefined {
-    const abs = normalizePath(resolve(this._root, filePath));
+  private ensureNativeMetaFile(filePath: string): string | undefined {
+    const abs = resolvePath(this._root, filePath);
 
     if (this._deletedFiles.has(abs)) {
       return undefined;
@@ -160,7 +160,38 @@ export class ComponentMetaSession {
       return undefined;
     }
 
-    const nativeMeta = this._session.getComponentMeta(abs);
+    return abs;
+  }
+
+  private loadCompatNativeMeta(filePath: string): NativeComponentMetaResult | undefined {
+    const abs = this.ensureNativeMetaFile(filePath);
+    if (!abs) {
+      return undefined;
+    }
+
+    const nativeMeta =
+      typeof this._session.getDeclaredComponentMeta === "function"
+        ? this._session.getDeclaredComponentMeta(abs)
+        : this._session.getComponentMeta(abs);
+    if (!nativeMeta) {
+      return undefined;
+    }
+
+    return nativeMeta as NativeComponentMetaResult;
+  }
+
+  private loadResolvedNativeMeta(filePath: string): NativeComponentMetaResult | undefined {
+    const abs = this.ensureNativeMetaFile(filePath);
+    if (!abs) {
+      return undefined;
+    }
+
+    const session = this._session as ProjectSession & {
+      getResolvedComponentMeta?: (canonicalId: string) => unknown | null;
+    };
+    const nativeMeta = session.getResolvedComponentMeta
+      ? session.getResolvedComponentMeta(abs)
+      : this._session.getComponentMeta(abs);
     if (!nativeMeta) {
       return undefined;
     }
@@ -170,7 +201,7 @@ export class ComponentMetaSession {
 
   async getComponentMeta(filePath: string): Promise<VolarComponentMeta> {
     this.ensureOpen();
-    const nativeMeta = this.loadNativeComponentMeta(filePath);
+    const nativeMeta = this.loadCompatNativeMeta(filePath);
     if (!nativeMeta) {
       return { type: 0, props: [], events: [], slots: [], exposed: [] };
     }
@@ -184,7 +215,7 @@ export class ComponentMetaSession {
 
   async getNativeComponentMeta(filePath: string): Promise<NativeComponentMetaResult | undefined> {
     this.ensureOpen();
-    return this.loadNativeComponentMeta(filePath);
+    return this.loadResolvedNativeMeta(filePath);
   }
 
   async getExportNames(_filePath: string): Promise<string[]> {
@@ -216,13 +247,13 @@ function hashTsconfigConfig(tsconfigPath: string): string {
     const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
     return stableSelectiveConfigHash(JSON.parse(stripped));
   } catch {
-    return stableHash({ tsconfigPath: normalizePath(resolve(tsconfigPath)) });
+    return stableHash({ tsconfigPath: resolvePath(tsconfigPath) });
   }
 }
 
 function buildEngineKeyInput(options: ComponentMetaSessionConfig): EngineKeyInput {
-  const root = normalizePath(resolve(options.root));
-  const tsconfigPath = options.tsconfig ? normalizePath(resolve(options.tsconfig)) : undefined;
+  const root = resolvePath(options.root);
+  const tsconfigPath = options.tsconfig ? resolvePath(options.tsconfig) : undefined;
 
   return {
     backend: options.backend ?? "napi",
@@ -231,7 +262,7 @@ function buildEngineKeyInput(options: ComponentMetaSessionConfig): EngineKeyInpu
     tsconfigPath,
     configHash: options.config
       ? stableSelectiveConfigHash(options.config)
-      : hashTsconfigConfig(resolve(options.tsconfig)),
+      : hashTsconfigConfig(resolvePath(options.tsconfig)),
     nativeFlags: { analysisLevel: "full" },
     typeExpansionBackend: options.typeExpansionBackend ?? "verter",
   };
@@ -244,11 +275,11 @@ async function openComponentMetaSessionInternal(
   const runtime =
     checkerOptions?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
   const ownsRuntime = checkerOptions?.runtimeMode === "dedicated";
-  const root = resolve(options.root);
+  const root = resolvePath(options.root);
   const native = loadNative();
-  const workspace: CheckerWorkspace = new native.Workspace([normalizePath(root)]);
+  const workspace: CheckerWorkspace = new native.Workspace([root]);
   const parsedConfig = options.tsconfig
-    ? await parseTsconfig(resolve(options.tsconfig), workspace)
+    ? await parseTsconfig(resolvePath(options.tsconfig), workspace)
     : null;
   const input = buildEngineKeyInput(options);
 

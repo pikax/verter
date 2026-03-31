@@ -88,8 +88,8 @@ pub use fallthrough::{
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use imported_decl_eval::{
-    evaluate_imported_decl_with_owner_env, CachedEvaluatedImportedDecl, ImportedDeclEvalResolver,
-    PreparedImportedDeclContext,
+    evaluate_imported_decl_with_owner_env, materialize_imported_decl_with_owner_env,
+    CachedEvaluatedImportedDecl, ImportedDeclEvalResolver, PreparedImportedDeclContext,
 };
 pub use imported_eval_collect::{
     build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,

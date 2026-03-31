@@ -194,6 +194,9 @@ message ComponentMetaBody {
   RootReachability root_reachability = 18;
   FallthroughSurface fallthrough_surface = 19;
   ComponentMetaResolution resolution = 20;
+  RootInfo root_info = 21;
+  PublicInstanceMeta public_instance = 22;
+  SfcBlocksMeta sfc_blocks = 23;
 }
 
 message JsdocTag {
@@ -260,6 +263,65 @@ message ExposedMeta {
   uint32 type_node_id = 2;
   ExpansionMetadata type_expansion = 3;
   uint32 description_id = 4;
+}
+
+message PublicInstanceMeta {
+  PublicInstanceCompleteness completeness = 1;
+  repeated PublicInstanceMemberMeta members = 2;
+}
+
+message PublicInstanceMemberMeta {
+  uint32 name_id = 1;
+  PublicInstanceMemberKind kind = 2;
+  uint32 type_node_id = 3;
+  ExpansionMetadata type_expansion = 4;
+  uint32 raw_type_id = 5;
+  uint32 description_id = 6;
+}
+
+message SfcBlocksMeta {
+  TemplateBlockMeta template = 1;
+  ScriptBlockMeta script = 2;
+  ScriptBlockMeta script_setup = 3;
+  repeated StyleBlockMeta styles = 4;
+  repeated CustomBlockMeta custom = 5;
+}
+
+message SfcAttributeMeta {
+  uint32 name_id = 1;
+  uint32 value_id = 2;
+}
+
+message TemplateBlockMeta {
+  uint32 lang_id = 1;
+  uint32 src_id = 2;
+  repeated SfcAttributeMeta attributes = 3;
+}
+
+message ScriptBlockMeta {
+  uint32 lang_id = 1;
+  uint32 src_id = 2;
+  uint32 generic_id = 3;
+  uint32 attrs_type_id = 4;
+  repeated SfcAttributeMeta attributes = 5;
+}
+
+message StyleBlockMeta {
+  uint32 index = 1;
+  uint32 lang_id = 2;
+  uint32 src_id = 3;
+  bool scoped = 4;
+  bool is_module = 5;
+  uint32 module_name_id = 6;
+  repeated SfcAttributeMeta attributes = 7;
+}
+
+message CustomBlockMeta {
+  uint32 index = 1;
+  uint32 block_type_id = 2;
+  uint32 lang_id = 3;
+  uint32 src_id = 4;
+  repeated SfcAttributeMeta attributes = 5;
 }
 
 message ResolvedTypeDeclaration {
@@ -392,6 +454,12 @@ message RootReachability {
   RootReachabilityKind kind = 1;
   NoFallthroughReason reason = 2;
   repeated RootBranch branches = 3;
+}
+
+message RootInfo {
+  RootInfoKind kind = 1;
+  NoFallthroughReason reason = 2;
+  repeated RootTargetRef targets = 3;
 }
 
 message RootBranch {
@@ -611,6 +679,19 @@ enum AcceptedSurfaceCompleteness {
   ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
 }
 
+enum PublicInstanceCompleteness {
+  PUBLIC_INSTANCE_COMPLETENESS_UNSPECIFIED = 0;
+  PUBLIC_INSTANCE_COMPLETENESS_EXACT = 1;
+  PUBLIC_INSTANCE_COMPLETENESS_PARTIAL = 2;
+}
+
+enum PublicInstanceMemberKind {
+  PUBLIC_INSTANCE_MEMBER_KIND_UNSPECIFIED = 0;
+  PUBLIC_INSTANCE_MEMBER_KIND_PROP = 1;
+  PUBLIC_INSTANCE_MEMBER_KIND_SLOT_CONTAINER = 2;
+  PUBLIC_INSTANCE_MEMBER_KIND_EXPOSED = 3;
+}
+
 enum AcceptedPropKind {
   ACCEPTED_PROP_KIND_UNSPECIFIED = 0;
   ACCEPTED_PROP_KIND_DECLARED_PROP = 1;
@@ -656,6 +737,14 @@ enum RootReachabilityKind {
   ROOT_REACHABILITY_KIND_UNSPECIFIED = 0;
   ROOT_REACHABILITY_KIND_NO_FALLTHROUGH = 1;
   ROOT_REACHABILITY_KIND_BRANCHES = 2;
+}
+
+enum RootInfoKind {
+  ROOT_INFO_KIND_UNSPECIFIED = 0;
+  ROOT_INFO_KIND_NONE = 1;
+  ROOT_INFO_KIND_SINGLE = 2;
+  ROOT_INFO_KIND_CONDITIONAL = 3;
+  ROOT_INFO_KIND_MULTIPLE = 4;
 }
 
 enum RootTargetKind {

@@ -617,15 +617,24 @@ impl MetaSession {
         self.with_overlay_context(|host| host.evaluate_types(canonical_or_alias))
     }
 
-    /// Return the host-owned resolved component-meta state for this session's
-    /// overlay view using the explicit shared resolver API.
-    pub fn resolve_component_meta_state(
+    pub(crate) fn resolve_component_meta_state_with_view(
         &self,
         canonical_or_alias: &str,
         mode: crate::ResolverMode,
-    ) -> Result<Option<crate::meta_resolve::ResolvedComponentMetaState>, MetaError> {
+    ) -> Result<
+        Option<(
+            String,
+            crate::meta_resolve::ResolvedComponentMetaState,
+            crate::resolver_store::HostStoreView,
+        )>,
+        MetaError,
+    > {
         self.check_alive()?;
-        self.with_overlay_context(|host| host.resolve_component_meta(canonical_or_alias, mode))
+        self.with_overlay_context_view(|host, store_view| {
+            let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+            host.resolve_component_meta_in_view(canonical.as_str(), mode, store_view)
+                .map(|resolved| (canonical, resolved, store_view.clone()))
+        })
     }
 
     /// Single native component-meta query through this session's overlay view.
@@ -667,21 +676,25 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<Option<verter_analysis::component_meta::ComponentMetaAnalysis>, MetaError> {
         self.check_alive()?;
-        self.with_overlay_context(|host| {
-            let Some(resolved) = host
-                .resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)
-            else {
+        self.with_overlay_context_view(|host, store_view| {
+            let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+            let Some(resolved) = host.resolve_component_meta_in_view(
+                canonical.as_str(),
+                crate::types::ResolverMode::Expanded,
+                store_view,
+            ) else {
                 return Ok(None);
             };
             let analysis = crate::host_manage::extract_component_meta_from_resolved(
                 host,
-                canonical_or_alias,
+                canonical.as_str(),
                 &resolved,
                 false,
+                Some(store_view),
             );
 
             if let Some(err) = component_meta_resolution_budget_error(
-                canonical_or_alias,
+                canonical.as_str(),
                 Some(&analysis),
                 &resolved,
             ) {
@@ -693,10 +706,8 @@ impl MetaSession {
     }
 
     /// Combined component-meta query: returns BOTH the analysis projection AND
-    /// the resolved-meta sidecar in a single call. Avoids the double
-    /// `resolve_component_meta(Expanded)` call that would happen if
-    /// `get_component_meta()` and `resolve_component_meta_state()` were
-    /// called separately.
+    /// the resolved-meta sidecar in a single call, avoiding a duplicate
+    /// resolved-state query when callers need both views.
     #[allow(dead_code)]
     pub fn get_component_meta_with_resolution(
         &self,
@@ -819,6 +830,13 @@ impl MetaSession {
     // -----------------------------------------------------------------------
 
     fn with_overlay_context<T>(&self, f: impl FnOnce(&VerterHost) -> T) -> Result<T, MetaError> {
+        self.with_overlay_context_view(|host, _store_view| f(host))
+    }
+
+    fn with_overlay_context_view<T>(
+        &self,
+        f: impl FnOnce(&VerterHost, &crate::resolver_store::HostStoreView) -> T,
+    ) -> Result<T, MetaError> {
         // Always acquire the gate. Even overlay-free sessions must ensure
         // no other session's overlays are left applied in the host.
         let mut gate = self
@@ -839,7 +857,8 @@ impl MetaSession {
             self.project.ensure_session_context(&mut gate, self.id);
         }
 
-        let result = f(&self.project.host);
+        let store_view = self.project.host.resolver_store_view();
+        let result = f(&self.project.host, &store_view);
         Ok(result)
     }
 }

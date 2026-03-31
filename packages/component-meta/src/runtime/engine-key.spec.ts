@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   computeEngineKey,
+  dirnamePath,
   normalizePath,
+  resolvePath,
   stableHash,
   stableSelectiveConfigHash,
 } from "./engine-key.js";
@@ -22,6 +24,22 @@ describe("normalizePath", () => {
 
   it("passes through already-normalized Unix paths", () => {
     expect(normalizePath("/home/user/project")).toBe("/home/user/project");
+  });
+});
+
+describe("resolvePath", () => {
+  it("resolves Windows-style roots consistently on non-Windows hosts", () => {
+    expect(resolvePath("C:\\project", "src\\App.vue")).toBe("c:/project/src/App.vue");
+  });
+
+  it("resolves Unix-style roots normally", () => {
+    expect(resolvePath("/project", "src/App.vue")).toBe("/project/src/App.vue");
+  });
+});
+
+describe("dirnamePath", () => {
+  it("returns a normalized dirname for Windows-style paths", () => {
+    expect(dirnamePath("C:\\project\\tsconfig.json")).toBe("c:/project");
   });
 });
 

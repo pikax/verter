@@ -18,7 +18,7 @@ import {
   normalizePath as runtimeNormalizePath,
   shutdownMetaRuntime,
 } from "../runtime/index.js";
-import { array, func, literal, object, primitive, ref, union, unknown } from "../type-ir.js";
+import { array, func, literal, object, primitive, ref, tuple, union, unknown } from "../type-ir.js";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 
 let nextProjectRootId = 1;
@@ -168,6 +168,40 @@ describe("mapPropMeta", () => {
     expect(result.type).toBe("boolean | undefined");
   });
 
+  it("adds undefined to optional prop schema when native descriptors omit it", () => {
+    const prop: PropMeta = {
+      name: "active",
+      type: primitive("boolean"),
+      required: false,
+      hasDefault: false,
+      rawType: "boolean",
+    };
+
+    const result = mapPropMeta(prop, {
+      schema: { literalBooleanSchema: true },
+    });
+
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "boolean | undefined",
+      schema: ["false", "true", "undefined"],
+    });
+  });
+
+  it("treats comment-fragment raw prop types as lossy", () => {
+    const prop: PropMeta = {
+      name: "active",
+      type: primitive("boolean"),
+      required: false,
+      hasDefault: false,
+      rawType: "te. */",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("boolean | undefined");
+  });
+
   it("resolves simple ref aliases through the type registry when that is more concrete", () => {
     const prop: PropMeta = {
       name: "type",
@@ -240,6 +274,62 @@ describe("mapPropMeta", () => {
     expect(result.type).toBe("DateValue | undefined");
   });
 
+  it("keeps nested registry refs shallow in compat prop display and schema", () => {
+    const prop: PropMeta = {
+      name: "title",
+      type: ref("StringOrVNode"),
+      required: false,
+      hasDefault: false,
+      rawType: "StringOrVNode",
+    };
+    const typeRegistry = new Map<string, any>([
+      ["StringOrVNode", union([primitive("string"), ref("VNode")])],
+      [
+        "VNode",
+        object([
+          { name: "type", type: primitive("string"), optional: false },
+          { name: "component", type: ref("ComponentInternalInstance"), optional: true },
+        ]),
+      ],
+      [
+        "ComponentInternalInstance",
+        object([{ name: "vnode", type: ref("VNode"), optional: false }]),
+      ],
+    ]);
+
+    const result = mapPropMeta(prop, undefined, typeRegistry);
+
+    expect(result.type).toBe("string | VNode | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "string | VNode | undefined",
+      schema: [
+        "string",
+        {
+          kind: "object",
+          type: "VNode",
+          schema: {},
+        },
+        "undefined",
+      ],
+    });
+  });
+
+  // @ai-generated - Guards optional raw prop normalization when generic type arguments contain `>`.
+  it("keeps optional generic raw prop types without crashing", () => {
+    const prop: PropMeta = {
+      name: "searchInput",
+      type: primitive("boolean"),
+      required: false,
+      hasDefault: false,
+      rawType: "boolean | Omit<InputProps, 'modelValue'>",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe('boolean | Omit<InputProps, "modelValue"> | undefined');
+  });
+
   it("normalizes chained indexed-access raw prop types without corrupting the key quotes", () => {
     const prop: PropMeta = {
       name: "color",
@@ -252,6 +342,106 @@ describe("mapPropMeta", () => {
     const result = mapPropMeta(prop);
 
     expect(result.type).toBe('Calendar["variants"]["color"] | undefined');
+  });
+
+  it("prefers descriptor text over chained indexed-access raw prop types", () => {
+    const prop: PropMeta = {
+      name: "activeColor",
+      type: union([literal("primary"), literal("secondary"), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+      rawType: "Button['variants']['color']",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe('"primary" | "secondary" | undefined');
+  });
+
+  it("prefers registry-resolved object descriptors over symbolic indexed-access raw prop text", () => {
+    const prop: PropMeta = {
+      name: "ui",
+      type: object([
+        {
+          name: "root",
+          type: object([
+            {
+              name: "base",
+              type: primitive("string"),
+              optional: false,
+            },
+          ]),
+          optional: true,
+        },
+      ]),
+      required: false,
+      hasDefault: false,
+      rawType: "Button['slots']",
+    };
+    const typeRegistry = new Map<string, TypeDescriptor>([
+      [
+        "Button",
+        object([
+          {
+            name: "slots",
+            type: object([
+              {
+                name: "root",
+                type: object([
+                  {
+                    name: "base",
+                    type: primitive("string"),
+                    optional: false,
+                  },
+                ]),
+                optional: true,
+              },
+            ]),
+            optional: false,
+          },
+        ]),
+      ],
+    ]);
+
+    const result = mapPropMeta(prop, undefined, typeRegistry);
+
+    expect(result.type).toBe("{ root?: { base: string; }; } | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "{ root?: { base: string; }; } | undefined",
+      schema: [
+        {
+          kind: "object",
+          schema: {
+            root: {
+              name: "root",
+              global: false,
+              required: false,
+              type: "{ base: string }",
+              description: "",
+              tags: [],
+              schema: {
+                kind: "object",
+                schema: {
+                  base: {
+                    name: "base",
+                    global: false,
+                    required: true,
+                    type: "string",
+                    description: "",
+                    tags: [],
+                    schema: "string",
+                  },
+                },
+                type: "{ base: string }",
+              },
+            },
+          },
+          type: "{ root?: { base: string } }",
+        },
+        "undefined",
+      ],
+    });
   });
 });
 
@@ -272,6 +462,58 @@ describe("mapEventMeta", () => {
     expect(result.description).toBe("Fired on click");
     expect(result.required).toBe(false);
     expect(result.tags).toEqual([{ name: "deprecated" }]);
+  });
+
+  // @ai-generated - Verifies Volar-style tuple event schemas and registry-backed payload expansion.
+  it("maps tuple payload events to schema arrays and resolves registry refs", () => {
+    const event: EventMeta = {
+      name: "select",
+      payload: tuple([ref("Item"), primitive("boolean")]),
+      hasValidator: false,
+      isDeclared: true,
+      rawSignature: '(event: "select", item: Item, exact: boolean) => void',
+    };
+    const typeRegistry = new Map<string, any>([
+      ["Item", object([{ name: "label", type: primitive("string"), optional: false }])],
+    ]);
+
+    const result = mapEventMeta(event, undefined, typeRegistry);
+
+    expect(result.type).toBe("[item: Item, exact: boolean]");
+    expect(result.schema).toEqual([
+      {
+        kind: "object",
+        type: "{ label: string }",
+        schema: {
+          label: {
+            name: "label",
+            global: false,
+            description: "",
+            tags: [],
+            required: true,
+            type: "string",
+            schema: "string",
+          },
+        },
+      },
+      "boolean",
+    ]);
+  });
+
+  // @ai-generated - Guards tuple parsing when an event payload parameter itself is a function type.
+  it("keeps later tuple parameters when raw signatures include arrow function payloads", () => {
+    const event: EventMeta = {
+      name: "change",
+      payload: unknown("event tuple"),
+      hasValidator: false,
+      isDeclared: true,
+      rawSignature:
+        '(event: "change", transform: (value: string, count: number) => void, exact: boolean) => void',
+    };
+
+    const result = mapEventMeta(event);
+
+    expect(result.type).toBe("[transform: (value: string, count: number) => void, exact: boolean]");
   });
 });
 
@@ -349,6 +591,78 @@ describe("mapSlotMeta", () => {
       "ui: { root: (props?: Record<string, any> | undefined): string; label: (props?: Record<string, any> | undefined): string; }",
     );
   });
+
+  // @ai-generated - Verifies slot schemas are structured objects and use the shared type registry.
+  it("builds structured slot schemas from bindings and resolves registry refs", () => {
+    const slot: SlotMeta = {
+      name: "default",
+      isScoped: true,
+      bindings: [{ name: "item", type: ref("Item"), rawType: "Item" }],
+      isRequired: true,
+    };
+    const typeRegistry = new Map<string, any>([
+      ["Item", object([{ name: "label", type: primitive("string"), optional: false }])],
+    ]);
+
+    const result = mapSlotMeta(slot, undefined, typeRegistry);
+
+    expect(result.type).toBe("{ item: { label: string; }; }");
+    expect(result.schema).toEqual({
+      kind: "object",
+      type: "{ item: { label: string } }",
+      schema: {
+        item: {
+          name: "item",
+          global: false,
+          description: "",
+          tags: [],
+          required: true,
+          type: "{ label: string }",
+          schema: {
+            kind: "object",
+            type: "{ label: string }",
+            schema: {
+              label: {
+                name: "label",
+                global: false,
+                description: "",
+                tags: [],
+                required: true,
+                type: "string",
+                schema: "string",
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  // @ai-generated - Verifies optional empty slots follow the Volar compat shape.
+  it("normalizes optional empty slots to {} | undefined", () => {
+    const slot: SlotMeta = {
+      name: "empty",
+      isScoped: false,
+      bindings: [],
+      isRequired: false,
+    };
+
+    const result = mapSlotMeta(slot);
+
+    expect(result.type).toBe("{} | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "{} | undefined",
+      schema: [
+        {
+          kind: "object",
+          type: "{}",
+          schema: {},
+        },
+        "undefined",
+      ],
+    });
+  });
 });
 
 describe("mapExposedMeta", () => {
@@ -364,6 +678,35 @@ describe("mapExposedMeta", () => {
     expect(result.name).toBe("focus");
     expect(result.description).toBe("Focus the input");
     expect(result.type).toBe("() => void");
+  });
+
+  // @ai-generated - Verifies exposed member schemas can expand shared registry refs.
+  it("resolves exposed member schema through the type registry", () => {
+    const exposed: ExposedMeta = {
+      name: "focus",
+      type: ref("Handle"),
+    };
+    const typeRegistry = new Map<string, any>([
+      ["Handle", object([{ name: "active", type: primitive("boolean"), optional: false }])],
+    ]);
+
+    const result = mapExposedMeta(exposed, undefined, typeRegistry);
+
+    expect(result.schema).toEqual({
+      kind: "object",
+      type: "{ active: boolean }",
+      schema: {
+        active: {
+          name: "active",
+          global: false,
+          description: "",
+          tags: [],
+          required: true,
+          type: "boolean",
+          schema: "boolean",
+        },
+      },
+    });
   });
 });
 
@@ -459,12 +802,71 @@ describe("mapComponentMeta", () => {
 
     expect(result.slots.map((slot) => slot.name)).toEqual(["default"]);
   });
+
+  it("keeps compat exposed on the analysis surface when a public-instance sidecar exists", () => {
+    const meta = {
+      filePath: "test.vue",
+      componentName: "Test",
+      optionsApi: false,
+      props: [],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [
+        {
+          name: "analysisOnly",
+          type: primitive("number"),
+        },
+      ],
+      publicInstance: {
+        completeness: "partial",
+        members: [
+          {
+            name: "$slots",
+            kind: "slotContainer",
+            type: object([]),
+          },
+          {
+            name: "label",
+            kind: "prop",
+            type: primitive("string"),
+          },
+          {
+            name: "focus",
+            kind: "exposed",
+            type: primitive("number"),
+          },
+        ],
+      },
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+    };
+
+    const result = mapComponentMeta(meta as any);
+
+    expect(result.exposed.map((member) => member.name)).toEqual(["analysisOnly"]);
+  });
 });
 
 // ── Checker integration tests ───────────────────────────────────────
 
 describe("ComponentMetaChecker", () => {
-  it("uses the native component-meta query instead of rebuilding from analysis snapshots", async () => {
+  it("uses the declared native component-meta query instead of rebuilding from analysis snapshots", async () => {
     const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const session = {
@@ -504,11 +906,11 @@ describe("ComponentMetaChecker", () => {
     const meta = await checker.getComponentMeta("Single.vue");
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
-    expect(getComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getComponentMeta).toHaveBeenCalledWith(
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(
       runtimeNormalizePath(resolve("/tmp", "Single.vue")),
     );
-    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
+    expect(getComponentMeta).not.toHaveBeenCalled();
   });
 
   it("createCheckerByJson reuses one pooled engine across include differences in selective-loading mode", async () => {
@@ -836,9 +1238,9 @@ describe("ComponentMetaChecker", () => {
 
     expect(ensureBaseFile).toHaveBeenCalledWith(canonicalId);
     expect(workspace.readFile).not.toHaveBeenCalled();
-    expect(getComponentMeta).toHaveBeenCalledWith(canonicalId);
-    expect(getComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(canonicalId);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
 
@@ -900,7 +1302,7 @@ defineEmits<{
     expect(meta._verter!.componentName).toBeDefined();
   });
 
-  it("uses the full native query even when a compat query exists", async () => {
+  it("uses the declared native query by default when a compat query exists", async () => {
     const canonicalId = "Fast.vue";
     const getDeclaredComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
@@ -942,10 +1344,10 @@ defineEmits<{
 
     const meta = await checker.getComponentMeta(canonicalId);
 
-    expect(getDeclaredComponentMeta).not.toHaveBeenCalled();
-    expect(getComponentMeta).toHaveBeenCalledWith(
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(
       runtimeNormalizePath(resolve("/project", canonicalId)),
     );
+    expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
 
@@ -1414,7 +1816,7 @@ defineEmits<ContextMenuContentEmits>()
     expect(Object.keys(events)).not.toEqual(
       expect.arrayContaining(["openAutoFocus", "entryFocus"]),
     );
-    expect(events.escapeKeyDown).toContain("event: Event");
+    expect(events.escapeKeyDown).toContain("Event");
 
     checker.close();
   });

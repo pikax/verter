@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ImportedEvalInputs {
@@ -25,7 +24,6 @@ pub struct ImportedEvalStats {
 #[derive(Debug, Clone)]
 pub struct ImportedEvalSource {
     pub canonical_id: String,
-    pub source: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

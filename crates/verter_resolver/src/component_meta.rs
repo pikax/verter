@@ -283,21 +283,8 @@ where
             &mut visiting,
         ) {
             let declaration_source = host.read_source(declaration.canonical_source.as_str());
-            let mut projected =
+            let projected =
                 project_macro_surfaces(declaration_source.as_deref(), dep.macro_kind, &elements);
-            if dep.macro_kind == AnalyzedMacroKind::DefineSlots {
-                if let Some(source_projected) = declaration_source.as_deref().and_then(|source| {
-                    project_macro_surfaces_from_source_type_name(
-                        source,
-                        dep.macro_kind,
-                        declaration.resolved_name.as_str(),
-                    )
-                }) {
-                    if source_projected.slots.len() > projected.slots.len() {
-                        projected.slots = source_projected.slots;
-                    }
-                }
-            }
             if seen_registry_names.insert(dep.type_name.clone()) {
                 resolved_type_registry.push(ResolvedTypeAnalysis {
                     name: dep.type_name.clone(),

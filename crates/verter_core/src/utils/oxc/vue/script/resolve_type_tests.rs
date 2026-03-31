@@ -1851,7 +1851,9 @@ fn analyze_external_type_source_tracks_local_export_symbol_targets_and_stats() {
     let source = "\
 import type { Foo as LocalFoo } from './dep';\n\
 type Inner = { label: string };\n\
+export interface DirectProps { value: string }\n\
 export { LocalFoo as Props, Inner as Alias };\n\
+export { RemoteFoo as RemoteProps } from './remote';\n\
 export * from './barrel';\n";
     let analysis = analyze_external_type_source(source, &allocator);
     let stats = analysis.stats();
@@ -1864,9 +1866,30 @@ export * from './barrel';\n";
     assert_eq!(analysis.local_symbol_target_name("Alias"), "Inner");
     assert!(analysis.has_local_symbol_target("Alias"));
     assert!(analysis.local_symbol_span("Inner").is_some());
-    assert_eq!(stats.top_level_statement_count, 4);
-    assert_eq!(stats.binding_count, 1);
-    assert_eq!(stats.direct_reexport_count, 1);
+    assert!(
+        analysis
+            .exported_local_type_names()
+            .any(|name| name == "DirectProps"),
+        "direct exported local declarations should stay available for shallow registry publication",
+    );
+    assert!(
+        analysis
+            .exported_local_symbol_names()
+            .any(|name| name == "Props"),
+        "local export aliases should stay available for shallow registry publication",
+    );
+    assert!(
+        analysis
+            .direct_reexport_entries()
+            .any(|(name, source, imported)| {
+                name == "RemoteProps" && source == "./remote" && imported == "RemoteFoo"
+            }),
+        "direct reexports should stay available for shallow registry publication",
+    );
+    assert_eq!(analysis.wildcard_reexport_sources(), ["./barrel"]);
+    assert_eq!(stats.top_level_statement_count, 6);
+    assert_eq!(stats.binding_count, 2);
+    assert_eq!(stats.direct_reexport_count, 2);
     assert_eq!(stats.wildcard_reexport_count, 1);
     assert_eq!(stats.local_export_symbol_count, 2);
 }
@@ -1893,9 +1916,19 @@ export interface Props extends Inner { id: string }\n";
         inner.dependency_names
     );
     assert!(
+        inner.structural_dependency_names.contains("ImportedFoo"),
+        "structural deps should retain imported bases that affect the exported shape, got {:?}",
+        inner.structural_dependency_names
+    );
+    assert!(
         props.dependency_names.contains("Inner"),
         "props should keep shallow local refs, got {:?}",
         props.dependency_names
+    );
+    assert!(
+        props.structural_dependency_names.contains("Inner"),
+        "structural deps should retain local alias-chain refs that affect the exported shape, got {:?}",
+        props.structural_dependency_names
     );
     assert_eq!(
         analysis.local_import_symbol_target("ImportedFoo"),
@@ -2023,7 +2056,7 @@ fn extract_bindings_keeps_namespace_type_imports() {
 }
 
 #[test]
-fn collect_required_import_names_for_external_type_is_targeted() {
+fn collect_required_import_names_for_external_type_skips_leaf_prop_aliases() {
     let allocator = Allocator::new();
     let source = r#"
 import { computed, toValue } from 'vue'
@@ -2048,14 +2081,27 @@ export function useComponentIcons(componentProps: MaybeRefOrGetter<UseComponentI
         source,
         &allocator,
     );
+    let analysis = analyze_external_type_source(source, &allocator);
+    let props = analysis
+        .local_type_symbol("UseComponentIconsProps")
+        .expect("UseComponentIconsProps should be tracked");
 
     assert_eq!(
         required.len(),
-        2,
-        "only the exported interface's imports should be followed"
+        1,
+        "leaf prop aliases should stay symbolic instead of becoming required companions"
     );
-    assert!(required.contains("AvatarProps"));
     assert!(required.contains("IconProps"));
+    assert!(!required.contains("AvatarProps"));
+    assert!(
+        props.dependency_names.contains("AvatarProps"),
+        "the shallow symbol graph should still remember all refs for local bookkeeping"
+    );
+    assert!(
+        !props.structural_dependency_names.contains("AvatarProps"),
+        "leaf prop aliases must not become structural import requirements"
+    );
+    assert!(props.structural_dependency_names.contains("IconProps"));
     assert!(!required.contains("computed"));
     assert!(!required.contains("toValue"));
     assert!(!required.contains("MaybeRefOrGetter"));

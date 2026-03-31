@@ -305,6 +305,22 @@ fn extracts_const_object_literal() {
 }
 
 #[test]
+fn extracts_const_asserted_object_literal_without_degrading_to_unknown_const() {
+    let env = parse_and_build_env(r#"const theme = { color: { primary: "" } } as const"#);
+    let decl = &env.value_symbols["theme"];
+
+    assert!(
+        decl.object_shape.is_some(),
+        "const assertions should preserve the underlying object literal shape"
+    );
+    assert!(
+        matches!(decl.type_annotation, Some(TypeExpr::Object(_))),
+        "const assertions should infer the object literal type instead of an opaque const marker, got {:?}",
+        decl.type_annotation
+    );
+}
+
+#[test]
 fn extracts_let_variable() {
     let env = parse_and_build_env("let count: number = 0");
     let decl = &env.value_symbols["count"];
