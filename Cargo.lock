@@ -3714,6 +3714,7 @@ dependencies = [
  "verter_actions",
  "verter_analysis",
  "verter_diagnostics",
+ "verter_semantic",
  "verter_session",
  "verter_span",
  "verter_workspace",

@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 verter_session = { path = "../verter_session" }
+verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
 verter_analysis = { path = "../verter_analysis" }
 verter_diagnostics = { path = "../verter_diagnostics" }

@@ -47,10 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create host backed by the filesystem workspace
     let host = Arc::new(VerterHost::new(
-        HostConfig {
-            analysis_scope: Some(verter_analysis::AnalysisScope::LSP),
-            dev_mode: true,
-            ..Default::default()
+        {
+            let mut config =
+                HostConfig::from_query_profile(verter_semantic::profile::QueryProfile::Mcp);
+            config.dev_mode = true;
+            config
         },
         workspace,
     ));
