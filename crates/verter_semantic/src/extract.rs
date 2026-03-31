@@ -3,13 +3,15 @@
 //! Converts `verter_analysis` types into `verter_semantic` fact types.
 //! This is the bridge between the raw analysis layer and the semantic DB.
 
-use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind, ReactivityKind};
 use verter_analysis::ScriptAnalysisSnapshot;
 
+use crate::facts::binding::{BindingDeclaration, BindingKind, BindingUsage, UsageBlock, UsageKind};
 use crate::facts::component::{
     ComponentSurface, DeclaredSurface, EventFact, ExposeFact, ModelFact, PropFact, SlotBindingFact,
     SlotFact,
 };
+use crate::facts::reactivity::{ReactivityFact, ReactivitySource, ReactivityStatus};
 
 /// Extract the declared component surface from a script analysis snapshot.
 ///
@@ -169,6 +171,114 @@ fn extract_expose_from_macro(mac: &AnalyzedMacro, expose: &mut Vec<ExposeFact>) 
     }
 }
 
+// ── Binding and reactivity extraction ──────────────────────────────────────
+
+/// Extract binding declarations with reactivity facts from a script analysis.
+///
+/// Each `AnalyzedBinding` is converted to a `BindingDeclaration` with an
+/// associated `ReactivityFact`. Usage tracking is populated from the
+/// analysis snapshot's `used_in_script` / `used_in_style` flags and
+/// template-side binding occurrences.
+pub fn extract_bindings(
+    analysis: &ScriptAnalysisSnapshot,
+) -> Vec<(BindingDeclaration, ReactivityFact)> {
+    analysis
+        .bindings
+        .iter()
+        .map(|b| {
+            let kind = match b.kind {
+                verter_analysis::types::AnalyzedBindingKind::Const => BindingKind::Const,
+                verter_analysis::types::AnalyzedBindingKind::Let => BindingKind::Let,
+                verter_analysis::types::AnalyzedBindingKind::Var => BindingKind::Var,
+                verter_analysis::types::AnalyzedBindingKind::Function => BindingKind::Function,
+                verter_analysis::types::AnalyzedBindingKind::AsyncFunction => {
+                    BindingKind::AsyncFunction
+                }
+                verter_analysis::types::AnalyzedBindingKind::Class => BindingKind::Class,
+            };
+
+            let mut usages = Vec::new();
+            if b.used_in_script {
+                usages.push(BindingUsage {
+                    kind: UsageKind::Read,
+                    span: b.span,
+                    block: UsageBlock::Script,
+                });
+            }
+            if b.used_in_style {
+                usages.push(BindingUsage {
+                    kind: UsageKind::StyleVBind,
+                    span: b.span,
+                    block: UsageBlock::Style,
+                });
+            }
+
+            let decl = BindingDeclaration {
+                name: b.name.clone(),
+                kind,
+                span: b.span,
+                usages,
+            };
+
+            let reactivity = classify_reactivity(b);
+
+            (decl, reactivity)
+        })
+        .collect()
+}
+
+/// Classify the reactivity of an analyzed binding.
+fn classify_reactivity(binding: &verter_analysis::types::AnalyzedBinding) -> ReactivityFact {
+    let (status, source) = match binding.reactivity_kind {
+        ReactivityKind::Ref => (ReactivityStatus::Reactive, Some(ReactivitySource::Ref)),
+        ReactivityKind::Computed => (ReactivityStatus::Reactive, Some(ReactivitySource::Computed)),
+        ReactivityKind::Reactive => (ReactivityStatus::Reactive, Some(ReactivitySource::Reactive)),
+        ReactivityKind::MaybeRef => (ReactivityStatus::MaybeReactive, None),
+        ReactivityKind::Mutable => (ReactivityStatus::NonReactive, None),
+        ReactivityKind::None => (ReactivityStatus::NonReactive, None),
+    };
+
+    // Enrich source from initializer if available
+    let source = source.or_else(|| classify_source_from_initializer(binding));
+
+    ReactivityFact {
+        status,
+        source,
+        trace: Vec::new(), // Trace is populated by deeper analysis
+    }
+}
+
+/// Try to determine reactivity source from the binding's initializer.
+fn classify_source_from_initializer(
+    binding: &verter_analysis::types::AnalyzedBinding,
+) -> Option<ReactivitySource> {
+    use verter_analysis::types::BindingInitializer;
+
+    match &binding.initializer {
+        Some(BindingInitializer::FunctionCall { vue_api, .. }) => {
+            use verter_analysis::VueApiClassification;
+            match vue_api.as_ref()? {
+                VueApiClassification::Ref
+                | VueApiClassification::ShallowRef
+                | VueApiClassification::CustomRef => Some(ReactivitySource::Ref),
+                VueApiClassification::Reactive | VueApiClassification::ShallowReactive => {
+                    Some(ReactivitySource::Reactive)
+                }
+                VueApiClassification::Computed => Some(ReactivitySource::Computed),
+                VueApiClassification::Readonly | VueApiClassification::ShallowReadonly => {
+                    Some(ReactivitySource::Readonly)
+                }
+                VueApiClassification::ToRef | VueApiClassification::ToRefs => {
+                    Some(ReactivitySource::ToRef)
+                }
+                VueApiClassification::Inject => Some(ReactivitySource::Inject),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +286,7 @@ mod tests {
         AnalyzedEmitField, AnalyzedExposeField, AnalyzedPropField, AnalyzedSlotField,
         AnalyzedSlotFieldBinding, TypeResolutionSource,
     };
+    use verter_span::Span;
 
     fn make_snapshot(macros: Vec<AnalyzedMacro>) -> ScriptAnalysisSnapshot {
         let mut snapshot = ScriptAnalysisSnapshot::default();
@@ -394,5 +505,128 @@ mod tests {
 
         // Negative: completeness not yet resolved
         assert!(surface.completeness.is_none());
+    }
+
+    // ── Binding and reactivity tests ───────────────────────────────────────
+
+    fn make_binding(
+        name: &str,
+        kind: verter_analysis::types::AnalyzedBindingKind,
+        reactivity: ReactivityKind,
+    ) -> verter_analysis::types::AnalyzedBinding {
+        verter_analysis::types::AnalyzedBinding {
+            name: name.to_string(),
+            kind,
+            is_reactive: !matches!(reactivity, ReactivityKind::None | ReactivityKind::Mutable),
+            reactivity_kind: reactivity,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 10),
+            used_in_script: false,
+            used_in_style: false,
+        }
+    }
+
+    #[test]
+    fn extract_bindings_from_empty_analysis() {
+        let snapshot = make_snapshot(vec![]);
+        let bindings = extract_bindings(&snapshot);
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn extract_bindings_classifies_reactivity() {
+        use verter_analysis::types::AnalyzedBindingKind;
+
+        let mut snapshot = make_snapshot(vec![]);
+        snapshot.bindings = vec![
+            make_binding("count", AnalyzedBindingKind::Const, ReactivityKind::Ref),
+            make_binding(
+                "state",
+                AnalyzedBindingKind::Const,
+                ReactivityKind::Reactive,
+            ),
+            make_binding(
+                "doubled",
+                AnalyzedBindingKind::Const,
+                ReactivityKind::Computed,
+            ),
+            make_binding("name", AnalyzedBindingKind::Const, ReactivityKind::None),
+            make_binding("idx", AnalyzedBindingKind::Let, ReactivityKind::Mutable),
+            make_binding(
+                "result",
+                AnalyzedBindingKind::Const,
+                ReactivityKind::MaybeRef,
+            ),
+        ];
+
+        let bindings = extract_bindings(&snapshot);
+        assert_eq!(bindings.len(), 6);
+
+        // Positive: ref → Reactive with Ref source
+        assert_eq!(bindings[0].0.name, "count");
+        assert_eq!(bindings[0].1.status, ReactivityStatus::Reactive);
+        assert_eq!(bindings[0].1.source, Some(ReactivitySource::Ref));
+
+        // Positive: reactive → Reactive with Reactive source
+        assert_eq!(bindings[1].0.name, "state");
+        assert_eq!(bindings[1].1.status, ReactivityStatus::Reactive);
+        assert_eq!(bindings[1].1.source, Some(ReactivitySource::Reactive));
+
+        // Positive: computed → Reactive with Computed source
+        assert_eq!(bindings[2].1.status, ReactivityStatus::Reactive);
+        assert_eq!(bindings[2].1.source, Some(ReactivitySource::Computed));
+
+        // Positive: plain const → NonReactive
+        assert_eq!(bindings[3].1.status, ReactivityStatus::NonReactive);
+        assert!(bindings[3].1.source.is_none());
+
+        // Positive: let → NonReactive (mutable but not reactive)
+        assert_eq!(bindings[4].0.kind, BindingKind::Let);
+        assert_eq!(bindings[4].1.status, ReactivityStatus::NonReactive);
+
+        // Positive: composable → MaybeReactive
+        assert_eq!(bindings[5].1.status, ReactivityStatus::MaybeReactive);
+    }
+
+    #[test]
+    fn extract_bindings_tracks_usage_flags() {
+        use verter_analysis::types::AnalyzedBindingKind;
+
+        let mut snapshot = make_snapshot(vec![]);
+        let mut binding = make_binding("count", AnalyzedBindingKind::Const, ReactivityKind::Ref);
+        binding.used_in_script = true;
+        binding.used_in_style = true;
+        snapshot.bindings = vec![binding];
+
+        let bindings = extract_bindings(&snapshot);
+        let (decl, _) = &bindings[0];
+
+        // Positive: both usages tracked
+        assert_eq!(decl.usages.len(), 2);
+        assert_eq!(decl.usages[0].block, UsageBlock::Script);
+        assert_eq!(decl.usages[1].block, UsageBlock::Style);
+        assert_eq!(decl.usages[1].kind, UsageKind::StyleVBind);
+    }
+
+    #[test]
+    fn extract_bindings_enriches_source_from_initializer() {
+        use verter_analysis::types::{
+            AnalyzedBindingKind, BindingInitializer, VueApiClassification,
+        };
+
+        let mut snapshot = make_snapshot(vec![]);
+        let mut binding = make_binding("count", AnalyzedBindingKind::Const, ReactivityKind::None);
+        binding.initializer = Some(BindingInitializer::FunctionCall {
+            callee: "ref".to_string(),
+            callee_import_source: Some("vue".to_string()),
+            vue_api: Some(VueApiClassification::Ref),
+        });
+        snapshot.bindings = vec![binding];
+
+        let bindings = extract_bindings(&snapshot);
+
+        // Positive: source enriched from initializer even though ReactivityKind is None
+        assert_eq!(bindings[0].1.source, Some(ReactivitySource::Ref));
     }
 }
