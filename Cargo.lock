@@ -3778,8 +3778,11 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "serde",
+ "serde_json",
  "verter_analysis",
  "verter_ffi",
+ "verter_span",
 ]
 
 [[package]]

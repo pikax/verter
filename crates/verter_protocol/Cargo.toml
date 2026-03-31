@@ -11,6 +11,9 @@ publish = false
 
 [dependencies]
 prost = "0.14.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+verter_span = { path = "../verter_span" }
 verter_analysis = { path = "../verter_analysis" }
 verter_ffi = { path = "../verter_ffi" }
 
