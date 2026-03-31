@@ -299,6 +299,8 @@ pub struct VerterHost {
     /// Semantic query database: revision-gated caches for component surfaces,
     /// binding facts, and reactivity provenance.
     pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
+    /// Current query profile for execution policy decisions.
+    pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -354,6 +356,7 @@ impl VerterHost {
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
+            query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
     }
 
@@ -382,6 +385,7 @@ impl VerterHost {
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
+            query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
     }
 
@@ -410,6 +414,19 @@ impl VerterHost {
     }
 
     /// Current semantic revision marker based on session state.
+    /// Set the query profile for this session.
+    ///
+    /// Query profiles control prewarming, budgets, and allowed query families.
+    /// They do not change the semantic meaning of results — only execution policy.
+    pub fn set_query_profile(&self, profile: verter_semantic::profile::QueryProfile) {
+        *self.query_profile.lock() = profile;
+    }
+
+    /// Get the current query profile.
+    pub fn query_profile(&self) -> verter_semantic::profile::QueryProfile {
+        *self.query_profile.lock()
+    }
+
     fn semantic_revision(&self) -> verter_semantic::revision::RevisionMarker {
         verter_semantic::revision::RevisionMarker {
             workspace_revision: self
@@ -566,12 +583,41 @@ impl VerterHost {
             }
         };
 
+        // Extract boundary edges from template analysis
+        let boundary_edges = {
+            #[cfg(feature = "scheduler")]
+            let template = self.scheduler_script_analysis(canonical_id).and_then(|_| {
+                // Template analysis is in FileAnalysisSnapshot, not ScriptAnalysisSnapshot.
+                // For now, return empty — will be populated when template analysis
+                // is accessible through the scheduler.
+                None::<verter_analysis::TemplateAnalysisSnapshot>
+            });
+            #[cfg(not(feature = "scheduler"))]
+            let template: Option<verter_analysis::TemplateAnalysisSnapshot> = {
+                let files = self.files.read();
+                files
+                    .get(canonical_id)
+                    .and_then(|f| f.template.as_ref())
+                    .map(|t| t.as_ref().clone())
+            };
+            template
+                .map(|t| {
+                    verter_semantic::extract::extract_boundary_edges(
+                        canonical_id,
+                        &t,
+                        &import_graph,
+                    )
+                })
+                .unwrap_or_default()
+        };
+
         let snapshot = FileSemanticSnapshot {
             file_id: canonical_id.to_string(),
             revision,
             component_surface: surface_result.value,
             bindings: bindings_result.value.unwrap_or_default(),
             import_graph,
+            boundary_edges,
         };
 
         QueryResult::complete(snapshot, revision)

@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::facts::binding::BindingDeclaration;
+use crate::facts::boundary::ComponentInstanceEdge;
 use crate::facts::component::ComponentSurface;
 use crate::facts::reactivity::ReactivityFact;
 use crate::facts::symbol::FileImportGraph;
@@ -25,6 +26,8 @@ pub struct FileSemanticSnapshot {
     pub bindings: Vec<(BindingDeclaration, ReactivityFact)>,
     /// Import graph for cross-file resolution.
     pub import_graph: FileImportGraph,
+    /// Component-instance edges from this file's template.
+    pub boundary_edges: Vec<ComponentInstanceEdge>,
 }
 
 impl FileSemanticSnapshot {
@@ -36,6 +39,7 @@ impl FileSemanticSnapshot {
             component_surface: None,
             bindings: Vec::new(),
             import_graph: FileImportGraph::default(),
+            boundary_edges: Vec::new(),
         }
     }
 
@@ -77,6 +81,7 @@ mod tests {
                 ReactivityFact::non_reactive(),
             )],
             import_graph: FileImportGraph::default(),
+            boundary_edges: Vec::new(),
         };
 
         // Positive: found
