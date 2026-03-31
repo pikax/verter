@@ -9,11 +9,24 @@ authors.workspace = true
 description = "Semantic authority for Verter — revision-tracked query engine, component surface, binding analysis, reactivity provenance"
 publish = false
 
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
 [dependencies]
 verter_span = { path = "../verter_span" }
 verter_parser = { path = "../verter_parser" }
-verter_analysis = { path = "../verter_analysis" }
+verter_workspace = { path = "../verter_workspace" }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
-smallvec = "1.13"
 serde_json = { workspace = true }
+smallvec = "1.13"
+hotpath = { version = "0.13", optional = true }
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_span = { workspace = true }
+sha2 = { workspace = true }
+bitflags = "2"
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }

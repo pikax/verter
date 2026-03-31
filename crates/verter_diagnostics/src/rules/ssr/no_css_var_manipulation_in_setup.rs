@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::ScriptAnalysisSnapshot;
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 
 /// Warns about CSS variable manipulations (`setProperty`, `getPropertyValue`) on DOM
 /// style objects at setup scope. The DOM is not available during SSR.
@@ -46,7 +46,7 @@ impl LintRule for NoCssVarManipulationInSetup {
 mod tests {
     use super::*;
     use crate::test_support::{run_script_rule, run_script_rule_ssr};
-    use verter_analysis::types::{CssVarManipulation, CssVarManipulationKind};
+    use verter_semantic::analysis::types::{CssVarManipulation, CssVarManipulationKind};
     use verter_span::Span;
 
     fn manip(kind: CssVarManipulationKind) -> CssVarManipulation {

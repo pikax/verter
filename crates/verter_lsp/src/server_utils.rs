@@ -267,7 +267,9 @@ pub(crate) fn rewrite_non_vue_source_with_resolver(
     let mut replacements: Vec<(usize, usize, String)> = module_references
         .iter()
         .filter_map(|reference| {
-            if reference.analyzability != verter_analysis::ModuleReferenceAnalyzability::Exact {
+            if reference.analyzability
+                != verter_semantic::analysis::ModuleReferenceAnalyzability::Exact
+            {
                 return None;
             }
 
@@ -344,7 +346,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
     for reference in module_references {
         let kind = module_reference_request_kind(reference);
         match reference.analyzability {
-            verter_analysis::ModuleReferenceAnalyzability::Exact => {
+            verter_semantic::analysis::ModuleReferenceAnalyzability::Exact => {
                 if let Some(specifier) = &reference.literal_specifier {
                     if let Some(result) = resolver.resolve_with_reader(
                         reader,
@@ -362,7 +364,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
                     }
                 }
             }
-            verter_analysis::ModuleReferenceAnalyzability::FiniteSet => {
+            verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet => {
                 for specifier in &reference.finite_specifiers {
                     if let Some(result) = resolver.resolve_with_reader(
                         reader,
@@ -380,7 +382,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
                     }
                 }
             }
-            verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic => {}
+            verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic => {}
         }
     }
 
@@ -391,7 +393,7 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
     resolver: &crate::project_resolver::NativeProjectResolver,
     reader: &dyn verter_workspace::WorkspaceAccess,
     importer_id: &str,
-    module_references: &[verter_analysis::AnalyzedModuleReference],
+    module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
 ) -> Vec<crate::project_resolver::ResolveResult> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::new();
@@ -434,7 +436,7 @@ pub(crate) fn module_reference_request_kind(
 ) -> crate::project_resolver::ResolveRequestKind {
     if reference.is_type_only {
         crate::project_resolver::ResolveRequestKind::TypeImport
-    } else if reference.semantics == verter_analysis::ModuleReferenceSemantics::Require {
+    } else if reference.semantics == verter_semantic::analysis::ModuleReferenceSemantics::Require {
         crate::project_resolver::ResolveRequestKind::RequireCall
     } else {
         crate::project_resolver::ResolveRequestKind::EsmImport
@@ -442,11 +444,11 @@ pub(crate) fn module_reference_request_kind(
 }
 
 pub(super) fn analyzed_module_reference_request_kind(
-    reference: &verter_analysis::AnalyzedModuleReference,
+    reference: &verter_semantic::analysis::AnalyzedModuleReference,
 ) -> crate::project_resolver::ResolveRequestKind {
     if reference.is_type_only {
         crate::project_resolver::ResolveRequestKind::TypeImport
-    } else if reference.semantics == verter_analysis::ModuleReferenceSemantics::Require {
+    } else if reference.semantics == verter_semantic::analysis::ModuleReferenceSemantics::Require {
         crate::project_resolver::ResolveRequestKind::RequireCall
     } else {
         crate::project_resolver::ResolveRequestKind::EsmImport
@@ -736,13 +738,13 @@ pub(super) fn resolve_import_specifier_standalone(
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn collect_imported_vue_priority_ids(
-    analysis: &verter_analysis::ScriptAnalysisSnapshot,
+    analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
 ) -> Vec<String> {
     collect_imported_vue_priority_ids_from_imports(&analysis.imports)
 }
 
 pub(super) fn collect_imported_vue_priority_ids_from_imports(
-    imports: &[verter_analysis::AnalyzedImport],
+    imports: &[verter_semantic::analysis::AnalyzedImport],
 ) -> Vec<String> {
     collect_imported_vue_priority_ids_from_imports_with_fallback(
         imports,
@@ -752,7 +754,7 @@ pub(super) fn collect_imported_vue_priority_ids_from_imports(
 }
 
 pub(super) fn collect_imported_vue_priority_ids_from_imports_with_fallback<F>(
-    imports: &[verter_analysis::AnalyzedImport],
+    imports: &[verter_semantic::analysis::AnalyzedImport],
     parent_canonical_id: Option<&str>,
     mut resolve_import: F,
 ) -> Vec<String>
@@ -784,7 +786,7 @@ pub(super) fn collect_priority_vue_targets_from_module_references(
     snapshot: Option<&super::PublishedResolverSnapshot>,
     reader: &dyn verter_workspace::WorkspaceAccess,
     importer_id: &str,
-    module_references: &[verter_analysis::AnalyzedModuleReference],
+    module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
 ) -> Vec<String> {
     let Some(snapshot) = snapshot else {
         return Vec::new();

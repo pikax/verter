@@ -16,8 +16,8 @@
 
 use crate::provider::{ActionContext, ActionProvider};
 use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
-use verter_analysis::types::AnalyzedMacroKind;
 use verter_diagnostics::LintDiagnostic;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct ConvertToTypedProps;
 
@@ -101,13 +101,13 @@ mod tests {
     use crate::provider::ActionContext;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
-    use verter_analysis::build_script_analysis;
-    use verter_analysis::types::{
-        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, ScriptAnalysisSnapshot,
-        TypeResolutionSource,
-    };
     use verter_diagnostics::{
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
+    };
+    use verter_semantic::analysis::build_script_analysis;
+    use verter_semantic::analysis::types::{
+        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, ScriptAnalysisSnapshot,
+        TypeResolutionSource,
     };
     use verter_span::Span;
 

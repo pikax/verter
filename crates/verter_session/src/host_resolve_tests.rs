@@ -1168,7 +1168,7 @@ fn candidate_list_resolves_to_first_loaded() {
     let host = strict_host();
     // Configure workspace with @/ alias
     host.workspace().configure_resolver(vec![
-        verter_analysis::project_resolver::IdeProjectConfig {
+        verter_semantic::analysis::project_resolver::IdeProjectConfig {
             root: "/src".to_string(),
             workspace_root: "/src".to_string(),
             tsconfig_path: None,
@@ -1177,10 +1177,10 @@ fn candidate_list_resolves_to_first_loaded() {
                 find: "@/".to_string(),
                 replacement: "/src/".to_string(),
             }],
-            compiler_options: verter_analysis::project_resolver::IdeProjectCompilerOptions::default(
-            ),
+            compiler_options:
+                verter_semantic::analysis::project_resolver::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_analysis::project_resolver::ProjectMembership::MatchAll,
+            membership: verter_semantic::analysis::project_resolver::ProjectMembership::MatchAll,
         },
     ]);
     let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
@@ -3347,7 +3347,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
         ws.clone(),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -3444,7 +3444,7 @@ fn type_dependency_resolution_in_view_prefers_package_declaration_entrypoint_ove
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -3509,7 +3509,7 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
 
     let host = VerterHost::new(HostConfig::default(), ws.clone());
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -3643,7 +3643,7 @@ fn type_import_package_with_node_condition_still_prefers_types_entry() {
 
     let host = VerterHost::new(HostConfig::default(), ws);
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),

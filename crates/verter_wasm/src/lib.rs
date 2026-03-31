@@ -97,22 +97,22 @@ fn host_err(err: host::HostError) -> JsValue {
 
 fn ffi_module_reference_syntax_from_str(
     syntax: &str,
-) -> Result<verter_analysis::ModuleReferenceSyntax, JsValue> {
+) -> Result<verter_semantic::analysis::ModuleReferenceSyntax, JsValue> {
     match syntax {
-        "staticImport" => Ok(verter_analysis::ModuleReferenceSyntax::StaticImport),
-        "exportFrom" => Ok(verter_analysis::ModuleReferenceSyntax::ExportFrom),
-        "dynamicImport" => Ok(verter_analysis::ModuleReferenceSyntax::DynamicImport),
-        "requireCall" => Ok(verter_analysis::ModuleReferenceSyntax::RequireCall),
+        "staticImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::StaticImport),
+        "exportFrom" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom),
+        "dynamicImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport),
+        "requireCall" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::RequireCall),
         other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
     }
 }
 
 fn ffi_module_reference_semantics_from_str(
     semantics: &str,
-) -> Result<verter_analysis::ModuleReferenceSemantics, JsValue> {
+) -> Result<verter_semantic::analysis::ModuleReferenceSemantics, JsValue> {
     match semantics {
-        "import" => Ok(verter_analysis::ModuleReferenceSemantics::Import),
-        "require" => Ok(verter_analysis::ModuleReferenceSemantics::Require),
+        "import" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Require),
         other => Err(ffi_err(format!(
             "unknown module reference semantics: {other}"
         ))),
@@ -121,11 +121,13 @@ fn ffi_module_reference_semantics_from_str(
 
 fn ffi_module_reference_analyzability_from_str(
     analyzability: &str,
-) -> Result<verter_analysis::ModuleReferenceAnalyzability, JsValue> {
+) -> Result<verter_semantic::analysis::ModuleReferenceAnalyzability, JsValue> {
     match analyzability {
-        "exact" => Ok(verter_analysis::ModuleReferenceAnalyzability::Exact),
-        "finiteSet" => Ok(verter_analysis::ModuleReferenceAnalyzability::FiniteSet),
-        "unknownDynamic" => Ok(verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic),
+        "exact" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "unknownDynamic" => {
+            Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic)
+        }
         other => Err(ffi_err(format!(
             "unknown module reference analyzability: {other}"
         ))),
@@ -134,8 +136,8 @@ fn ffi_module_reference_analyzability_from_str(
 
 fn ffi_module_reference_to_analysis(
     input: FfiModuleReference,
-) -> Result<verter_analysis::AnalyzedModuleReference, JsValue> {
-    Ok(verter_analysis::AnalyzedModuleReference {
+) -> Result<verter_semantic::analysis::AnalyzedModuleReference, JsValue> {
+    Ok(verter_semantic::analysis::AnalyzedModuleReference {
         syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
         semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
         is_type_only: input.is_type_only,
@@ -459,7 +461,7 @@ impl WasmVerterHost {
             .map(ffi_module_reference_to_analysis)
             .collect::<Result<Vec<_>, _>>()?;
         let specifiers =
-            verter_analysis::project_resolver::collect_resolvable_module_reference_specifiers(
+            verter_semantic::analysis::project_resolver::collect_resolvable_module_reference_specifiers(
                 &module_references,
             );
         to_wasm_value(&specifiers)
@@ -486,7 +488,7 @@ impl WasmVerterHost {
             parse_wasm_input::<Vec<String>>(extensions)?
         };
         let resolved =
-            verter_analysis::project_resolver::resolve_known_module_reference_dependencies(
+            verter_semantic::analysis::project_resolver::resolve_known_module_reference_dependencies(
                 owner_id,
                 &module_references,
                 &known_ids,
@@ -666,14 +668,16 @@ impl WasmVerterHost {
 /// `dom_query_calls` from the snapshot (fixes Phase 2 zeroed-fields bug).
 fn build_script_snapshot(
     snapshot: &host::FileAnalysisSnapshot,
-) -> verter_analysis::types::ScriptAnalysisSnapshot {
-    verter_analysis::types::ScriptAnalysisSnapshot {
+) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
         module_references: snapshot.module_references.to_vec(),
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.to_vec(),
         macro_type_deps: snapshot.macro_type_deps.to_vec(),
-        flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(snapshot.script_flags),
+        flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+            snapshot.script_flags,
+        ),
         exported_functions: Vec::new(),
         vue_api_calls: snapshot.vue_api_calls.to_vec(),
         dom_query_calls: snapshot.dom_query_calls.to_vec(),
@@ -739,9 +743,11 @@ fn build_document_symbols_from_analysis(
 
         for binding in &snapshot.bindings {
             let kind = match binding.kind {
-                verter_analysis::AnalyzedBindingKind::Function
-                | verter_analysis::AnalyzedBindingKind::AsyncFunction => symbol_kind::FUNCTION,
-                verter_analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                verter_semantic::analysis::AnalyzedBindingKind::Function
+                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                    symbol_kind::FUNCTION
+                }
+                verter_semantic::analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
                 _ => symbol_kind::VARIABLE,
             };
             children.push(FfiDocumentSymbol {
@@ -887,7 +893,7 @@ fn build_selector_match_results(
             // Use pre-parsed structure if available, otherwise parse
             let parsed = match &selector.structure {
                 Some(s) => s.clone(),
-                None => match verter_analysis::style::parse_selector(&selector.text) {
+                None => match verter_semantic::analysis::style::parse_selector(&selector.text) {
                     Some(s) => s,
                     None => continue,
                 },
@@ -895,7 +901,7 @@ fn build_selector_match_results(
 
             let mut matches = Vec::new();
             for (idx, element) in template.elements.iter().enumerate() {
-                let result = verter_analysis::selector_match::match_selector(
+                let result = verter_semantic::analysis::selector_match::match_selector(
                     &parsed,
                     idx,
                     &template.elements,
@@ -905,13 +911,15 @@ fn build_selector_match_results(
                     span_start: byte_offset_to_utf16_safe(source, element.span.start),
                     span_end: byte_offset_to_utf16_safe(source, element.span.end),
                     result: match result {
-                        verter_analysis::selector_match::MatchResult::Matches => {
+                        verter_semantic::analysis::selector_match::MatchResult::Matches => {
                             "match".to_string()
                         }
-                        verter_analysis::selector_match::MatchResult::MaybeMatches => {
+                        verter_semantic::analysis::selector_match::MatchResult::MaybeMatches => {
                             "maybe".to_string()
                         }
-                        verter_analysis::selector_match::MatchResult::NoMatch => "no".to_string(),
+                        verter_semantic::analysis::selector_match::MatchResult::NoMatch => {
+                            "no".to_string()
+                        }
                     },
                 });
             }

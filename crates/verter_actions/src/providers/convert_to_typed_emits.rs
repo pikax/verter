@@ -13,8 +13,8 @@
 
 use crate::provider::{ActionContext, ActionProvider};
 use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
-use verter_analysis::types::AnalyzedMacroKind;
 use verter_diagnostics::LintDiagnostic;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct ConvertToTypedEmits;
 
@@ -76,11 +76,11 @@ impl ActionProvider for ConvertToTypedEmits {
 mod tests {
     use super::*;
     use crate::provider::ActionContext;
-    use verter_analysis::types::{
-        AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot,
-    };
     use verter_diagnostics::{
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
+    };
+    use verter_semantic::analysis::types::{
+        AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot,
     };
     use verter_span::Span;
 

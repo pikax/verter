@@ -112,8 +112,8 @@ mod tests {
 
     use crate::rules::FileContext;
 
-    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateComponentUsage};
-    use verter_analysis::{style, StyleBlockAnalysis};
+    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateComponentUsage};
+    use verter_semantic::analysis::{style, StyleBlockAnalysis};
     use verter_span::Span;
 
     fn build_style(css_content: &str, scoped: bool, content_offset: u32) -> StyleBlockAnalysis {

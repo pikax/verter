@@ -4,9 +4,9 @@ use crate::cross_file::CrossFileSnapshot;
 use crate::diagnostic::LintDiagnostic;
 use crate::rules::{FileContext, LintRule};
 use crate::visitor::LintVisitor;
-use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
-use verter_analysis::types::ScriptAnalysisSnapshot;
-use verter_analysis::StyleBlockAnalysis;
+use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_semantic::analysis::StyleBlockAnalysis;
 
 fn run_rule_with<R, F>(rule: R, visit: F) -> Vec<LintDiagnostic>
 where

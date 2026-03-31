@@ -8,7 +8,7 @@
 //! a const value AND no parent uses `v-bind` spread on the component.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_analysis::template::PropValueConstness;
+use verter_semantic::analysis::template::PropValueConstness;
 
 use crate::shared::read_lock;
 use crate::VerterHost;
@@ -81,7 +81,7 @@ impl VerterHost {
         #[cfg(feature = "scheduler")]
         let parent_templates: Vec<(
             String,
-            std::sync::Arc<verter_analysis::template::TemplateAnalysisSnapshot>,
+            std::sync::Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
         )> = {
             self.scheduler
                 .node_ids()
@@ -99,7 +99,7 @@ impl VerterHost {
         #[cfg(not(feature = "scheduler"))]
         let parent_templates: Vec<(
             String,
-            std::sync::Arc<verter_analysis::template::TemplateAnalysisSnapshot>,
+            std::sync::Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
         )> = {
             let files = read_lock(&self.files);
             files
@@ -638,7 +638,7 @@ import Child from '@/components/Child.vue'
 
         // Configure workspace resolver with alias (as LSP/unplugin would do)
         {
-            use verter_analysis::project_resolver::*;
+            use verter_semantic::analysis::project_resolver::*;
             host.workspace().configure_resolver(vec![IdeProjectConfig {
                 root: "/project".to_string(),
                 workspace_root: "/project".to_string(),

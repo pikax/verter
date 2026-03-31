@@ -10,7 +10,6 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
-use verter_analysis::type_expr::{ObjectMember, TypeExpr};
 use verter_resolver::query_artifact::{
     ArtifactId, ArtifactProfile as ResolverArtifactProfile, GeneratedQueryArtifact,
     QuerySpanMapping,
@@ -21,6 +20,7 @@ use verter_resolver::type_expansion::{
 };
 use verter_resolver::type_expansion_host::TypeExpansionSnapshot;
 use verter_resolver::type_text_parser;
+use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 use verter_session::component_meta_host::{
     ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
     ComponentMetaTraceCursor, ComponentMetaTypeExpander,
@@ -1418,10 +1418,11 @@ impl NapiMetaProject {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_analysis::project_resolver::IdeProjectConfig> = projects
-                .into_iter()
-                .map(crate::napi_project_config_to_ide)
-                .collect();
+            let configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig> =
+                projects
+                    .into_iter()
+                    .map(crate::napi_project_config_to_ide)
+                    .collect();
             self.inner.configure_projects(configs).map_err(meta_err)
         }))?
     }

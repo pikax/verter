@@ -5,7 +5,7 @@
 
 use crate::context::LintContext;
 use crate::diagnostic::Severity;
-use verter_analysis::template::{CommentDirective, CommentDirectiveKind};
+use verter_semantic::analysis::template::{CommentDirective, CommentDirectiveKind};
 
 /// Parse comment directives and configure the lint context's disabled ranges.
 ///

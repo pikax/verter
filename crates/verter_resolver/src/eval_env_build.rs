@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_analysis::type_eval::EvalEnv;
-use verter_analysis::type_expr::TypeExpr;
-use verter_analysis::AnalyzedMacro;
+use verter_semantic::analysis::type_eval::EvalEnv;
+use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_semantic::analysis::AnalyzedMacro;
 
 use crate::fallthrough::inject_prop_type_overrides;
 use crate::ImportedEvalInputs;
@@ -99,12 +99,12 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::BTreeSet;
     use std::sync::Arc;
-    use verter_analysis::type_eval::{
+    use verter_semantic::analysis::type_eval::{
         EvalEnv, TypeDeclInfo, TypeDeclKind, ValueDeclInfo, ValueDeclKind,
     };
-    use verter_analysis::type_expr::{PrimitiveName, TypeExpr};
-    use verter_analysis::types::AnalyzedExposeField;
-    use verter_analysis::{AnalyzedMacro, AnalyzedMacroKind};
+    use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+    use verter_semantic::analysis::types::AnalyzedExposeField;
+    use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
     use verter_span::Span;
 
     #[derive(Default)]

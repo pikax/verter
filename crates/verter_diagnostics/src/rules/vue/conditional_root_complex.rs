@@ -11,7 +11,7 @@ use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
 use rustc_hash::FxHashSet;
-use verter_analysis::types::AnalyzedMacroKind;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct ConditionalRootComplex;
 
@@ -194,11 +194,11 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_analysis::template::*;
-    use verter_analysis::types::{
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
     };
-    use verter_analysis::ScriptAnalysisSnapshot;
+    use verter_semantic::analysis::ScriptAnalysisSnapshot;
     use verter_span::Span;
 
     fn make_script_with_props(prop_names: &[&str]) -> ScriptAnalysisSnapshot {

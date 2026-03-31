@@ -3556,28 +3556,9 @@ dependencies = [
  "oxc_span",
  "serde",
  "serde_json",
- "verter_analysis",
  "verter_diagnostics",
+ "verter_semantic",
  "verter_span",
-]
-
-[[package]]
-name = "verter_analysis"
-version = "0.0.1-beta.1"
-dependencies = [
- "bitflags",
- "criterion",
- "hotpath",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_span",
- "rustc-hash 2.1.1",
- "serde",
- "serde_json",
- "sha2",
- "verter_span",
- "verter_workspace",
 ]
 
 [[package]]
@@ -3595,9 +3576,9 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tempfile",
- "verter_analysis",
  "verter_compiler",
  "verter_diagnostics",
+ "verter_semantic",
  "verter_session",
  "verter_span",
  "verter_workspace",
@@ -3644,7 +3625,7 @@ dependencies = [
  "rustc-hash 2.1.1",
  "serde",
  "serde_json",
- "verter_analysis",
+ "verter_semantic",
  "verter_span",
  "verter_workspace",
 ]
@@ -3655,9 +3636,9 @@ version = "0.0.1-beta.1"
 dependencies = [
  "serde",
  "verter_actions",
- "verter_analysis",
  "verter_diagnostics",
  "verter_resolver",
+ "verter_semantic",
  "verter_session",
  "verter_span",
 ]
@@ -3688,10 +3669,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "verter_actions",
- "verter_analysis",
  "verter_diagnostics",
  "verter_mcp",
  "verter_scheduler",
+ "verter_semantic",
  "verter_session",
  "verter_span",
  "verter_type_runtime",
@@ -3712,7 +3693,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "verter_actions",
- "verter_analysis",
  "verter_diagnostics",
  "verter_semantic",
  "verter_session",
@@ -3733,13 +3713,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "verter_actions",
- "verter_analysis",
  "verter_compiler",
  "verter_diagnostics",
  "verter_ffi",
  "verter_protocol",
  "verter_resolver",
  "verter_scheduler",
+ "verter_semantic",
  "verter_session",
  "verter_span",
  "verter_type_runtime",
@@ -3781,8 +3761,8 @@ dependencies = [
  "protoc-bin-vendored",
  "serde",
  "serde_json",
- "verter_analysis",
  "verter_ffi",
+ "verter_semantic",
  "verter_span",
 ]
 
@@ -3796,8 +3776,8 @@ dependencies = [
  "oxc_span",
  "parking_lot",
  "rustc-hash 2.1.1",
- "verter_analysis",
  "verter_compiler",
+ "verter_semantic",
  "verter_span",
  "verter_type_runtime",
  "verter_workspace",
@@ -3821,13 +3801,21 @@ dependencies = [
 name = "verter_semantic"
 version = "0.0.1-beta.1"
 dependencies = [
+ "bitflags",
+ "criterion",
+ "hotpath",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
  "rustc-hash 2.1.1",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
- "verter_analysis",
  "verter_parser",
  "verter_span",
+ "verter_workspace",
 ]
 
 [[package]]
@@ -3850,7 +3838,6 @@ dependencies = [
  "sourcemap",
  "thiserror 2.0.18",
  "tracing",
- "verter_analysis",
  "verter_compiler",
  "verter_resolver",
  "verter_scheduler",
@@ -3909,9 +3896,9 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "verter_actions",
- "verter_analysis",
  "verter_diagnostics",
  "verter_ffi",
+ "verter_semantic",
  "verter_session",
  "verter_span",
  "wasm-bindgen",

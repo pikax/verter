@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
 /// Warns about nondeterministic expressions in template interpolations
 /// (`Date.now()`, `Math.random()`, `new Date()`). These produce different
@@ -52,7 +52,7 @@ impl LintRule for NoNondeterministicInTemplate {
 mod tests {
     use super::*;
     use crate::test_support::{run_template_rule, run_template_rule_ssr};
-    use verter_analysis::template::{TemplateAnalysisSnapshot, UnresolvedBinding};
+    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, UnresolvedBinding};
     use verter_span::Span;
 
     fn unresolved(name: &str) -> UnresolvedBinding {

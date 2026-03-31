@@ -7,7 +7,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
 /// Default maximum allowed nesting depth.
 const DEFAULT_MAX_DEPTH: u16 = 10;
@@ -85,7 +85,7 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run_rule(

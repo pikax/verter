@@ -5,7 +5,7 @@
 //   @click="handler" → @click="(e: MouseEvent) => handler(e)"
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::template::TemplateEventHandler;
+use verter_semantic::analysis::template::TemplateEventHandler;
 use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
@@ -165,7 +165,7 @@ fn make_event_type_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_analysis::template::TemplateAnalysisSnapshot;
+    use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
     fn make_analysis(handlers: Vec<TemplateEventHandler>) -> FileAnalysisSnapshot {
         FileAnalysisSnapshot {

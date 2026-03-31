@@ -1,10 +1,12 @@
 use super::*;
-use verter_analysis::template::{AnalyzedEmitDefinition, DefinedSlot, TemplateAnalysisSnapshot};
-use verter_analysis::types::{
+use verter_semantic::analysis::template::{
+    AnalyzedEmitDefinition, DefinedSlot, TemplateAnalysisSnapshot,
+};
+use verter_semantic::analysis::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedMacro, AnalyzedMacroKind,
     ReactivityKind,
 };
-use verter_analysis::AnalyzedImport;
+use verter_semantic::analysis::AnalyzedImport;
 
 fn make_analysis_with_slots(
     slots: Vec<DefinedSlot>,

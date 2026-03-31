@@ -6,7 +6,7 @@
 //! preserving their stored SFC-absolute coordinate system.
 
 use sourcemap::SourceMap;
-use verter_analysis::style::CssAnalysis;
+use verter_semantic::analysis::style::CssAnalysis;
 
 /// Remap all spans in a `CssAnalysis` from compiled CSS byte offsets to
 /// original source byte offsets using a source map.
@@ -250,9 +250,9 @@ mod tests {
         );
 
         // Run CSS analysis on compiled CSS
-        let analysis = verter_analysis::build_css_style_analysis(
+        let analysis = verter_semantic::analysis::build_css_style_analysis(
             compiled,
-            verter_analysis::VueStyleInput::default(),
+            verter_semantic::analysis::VueStyleInput::default(),
             false,
             false,
             None,
@@ -321,9 +321,9 @@ mod tests {
             ],
         );
 
-        let analysis = verter_analysis::build_css_style_analysis(
+        let analysis = verter_semantic::analysis::build_css_style_analysis(
             compiled,
-            verter_analysis::VueStyleInput::default(),
+            verter_semantic::analysis::VueStyleInput::default(),
             false,
             false,
             None,
@@ -377,9 +377,9 @@ mod tests {
             ],
         );
 
-        let analysis = verter_analysis::build_css_style_analysis(
+        let analysis = verter_semantic::analysis::build_css_style_analysis(
             compiled,
-            verter_analysis::VueStyleInput::default(),
+            verter_semantic::analysis::VueStyleInput::default(),
             false,
             false,
             None,
@@ -428,9 +428,9 @@ mod tests {
             ],
         );
 
-        let analysis = verter_analysis::build_css_style_analysis(
+        let analysis = verter_semantic::analysis::build_css_style_analysis(
             content,
-            verter_analysis::VueStyleInput::default(),
+            verter_semantic::analysis::VueStyleInput::default(),
             false,
             false,
             None,
@@ -473,9 +473,9 @@ mod tests {
         let compiled = ".a { color: red; }\n";
         let original = ".a\n  color: red\n";
 
-        let analysis = verter_analysis::build_css_style_analysis(
+        let analysis = verter_semantic::analysis::build_css_style_analysis(
             compiled,
-            verter_analysis::VueStyleInput::default(),
+            verter_semantic::analysis::VueStyleInput::default(),
             false,
             false,
             None,

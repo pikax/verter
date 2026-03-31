@@ -10,12 +10,14 @@
 
 // @ai-generated
 
-use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, TemplateTextSegment};
-use verter_analysis::types::{
+use verter_diagnostics::LintDiagnostic;
+use verter_semantic::analysis::template::{
+    TemplateAnalysisSnapshot, TemplateElement, TemplateTextSegment,
+};
+use verter_semantic::analysis::types::{
     AnalyzedMacroKind, BindingInitializer, ReactivityKind, ScriptAnalysisSnapshot,
     VueApiClassification,
 };
-use verter_diagnostics::LintDiagnostic;
 use verter_span::Span;
 
 use crate::provider::{ActionContext, ActionProvider};
@@ -251,7 +253,7 @@ fn generate_name(el: &TemplateElement, source: &str) -> String {
 }
 
 /// Check if an `AnalyzedBinding` came from `defineProps` via its initializer.
-fn is_define_props_binding(binding: &verter_analysis::types::AnalyzedBinding) -> bool {
+fn is_define_props_binding(binding: &verter_semantic::analysis::types::AnalyzedBinding) -> bool {
     matches!(
         &binding.initializer,
         Some(BindingInitializer::FunctionCall {

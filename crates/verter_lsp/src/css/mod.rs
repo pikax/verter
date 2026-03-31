@@ -2,7 +2,7 @@
 // Completions, hover, selector matching, and Vue-specific CSS intelligence.
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::{match_selector, MatchResult};
+use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
@@ -204,13 +204,13 @@ pub fn css_hover(
         for pseudo in &style.special_pseudos {
             if offset >= pseudo.start as usize && offset <= pseudo.end as usize {
                 let desc = match pseudo.kind {
-                    verter_analysis::style::SpecialPseudoKind::Deep => {
+                    verter_semantic::analysis::style::SpecialPseudoKind::Deep => {
                         "**:deep()** — Targets child component elements, bypassing scoped CSS encapsulation."
                     }
-                    verter_analysis::style::SpecialPseudoKind::Global => {
+                    verter_semantic::analysis::style::SpecialPseudoKind::Global => {
                         "**:global()** — Makes this selector apply globally, ignoring scoped CSS."
                     }
-                    verter_analysis::style::SpecialPseudoKind::Slotted => {
+                    verter_semantic::analysis::style::SpecialPseudoKind::Slotted => {
                         "**:slotted()** — Targets slotted content from the parent component."
                     }
                 };
@@ -322,7 +322,10 @@ fn selector_hover(
 }
 
 /// Format a single element match for hover display.
-fn format_element_match(el: &verter_analysis::TemplateElement, line_index: &LineIndex) -> String {
+fn format_element_match(
+    el: &verter_semantic::analysis::TemplateElement,
+    line_index: &LineIndex,
+) -> String {
     let line = line_index
         .offset_to_position(el.span.start)
         .map(|p| p.line + 1)
@@ -342,7 +345,7 @@ fn format_element_match(el: &verter_analysis::TemplateElement, line_index: &Line
 
 /// Compute the LSP range for a selector's span.
 fn selector_range(
-    selector: &verter_analysis::style::AnalyzedSelector,
+    selector: &verter_semantic::analysis::style::AnalyzedSelector,
     line_index: &LineIndex,
 ) -> Option<Range> {
     let start = line_index.offset_to_position(selector.span.start)?;
@@ -394,7 +397,7 @@ static COMMON_CSS_PROPERTIES: &[&str] = &[
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::*;
+    use verter_semantic::analysis::*;
 
     #[test]
     fn test_css_completions_in_style() {
@@ -462,15 +465,18 @@ mod tests {
         }
     }
 
-    fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_analysis::StyleBlockAnalysis {
+    fn build_style(
+        source: &str,
+        blocks: &[SfcBlock],
+    ) -> verter_semantic::analysis::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];
         let scoped = style_block.attrs_raw.contains("scoped");
 
-        verter_analysis::style::build_css_style_analysis(
+        verter_semantic::analysis::style::build_css_style_analysis(
             css_content,
-            verter_analysis::style::VueStyleInput {
+            verter_semantic::analysis::style::VueStyleInput {
                 v_binds: vec![],
                 special_pseudos: vec![],
             },

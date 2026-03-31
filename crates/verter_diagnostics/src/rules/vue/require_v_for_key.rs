@@ -5,7 +5,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::{TemplateElement, VForDirective};
+use verter_semantic::analysis::template::{TemplateElement, VForDirective};
 
 /// Elements in iteration expect to have `v-bind:key` directives.
 pub struct RequireVForKey;
@@ -42,7 +42,7 @@ impl LintRule for RequireVForKey {
 mod tests {
     use super::*;
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     fn run_rule(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
         crate::test_support::run_template_rule(RequireVForKey, template)

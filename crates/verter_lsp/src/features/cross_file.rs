@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::types::{
+use verter_semantic::analysis::types::{
     AnalysisFlags, AnalyzedMacro, AnalyzedMacroKind, VueApiClassification,
 };
 use verter_session::FileAnalysisSnapshot;
@@ -149,7 +149,7 @@ impl ChildComponentContext {
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::template::{AnalyzedEmitDefinition, AnalyzedPropDefinition};
+    use verter_semantic::analysis::template::{AnalyzedEmitDefinition, AnalyzedPropDefinition};
 
     fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {
         let blocks = scan_sfc_blocks(source);
@@ -184,7 +184,7 @@ mod tests {
         let source =
             "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
-            imports: vec![verter_analysis::AnalyzedImport {
+            imports: vec![verter_semantic::analysis::AnalyzedImport {
                 source: "vue".into(),
                 is_type_only: false,
                 bindings: vec![],
@@ -255,7 +255,7 @@ mod tests {
     fn prop_names_returns_all_defined_props() {
         let analysis = FileAnalysisSnapshot {
             template: Some(
-                (verter_analysis::template::TemplateAnalysisSnapshot {
+                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
                     prop_definitions: vec![
                         AnalyzedPropDefinition {
                             name: "msg".into(),
@@ -298,7 +298,7 @@ mod tests {
     fn emit_names_returns_declared_emits() {
         let analysis = FileAnalysisSnapshot {
             template: Some(
-                (verter_analysis::template::TemplateAnalysisSnapshot {
+                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
                     emit_definitions: vec![
                         AnalyzedEmitDefinition {
                             event_name: "save".into(),
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn has_use_attrs_detects_call() {
         let analysis = FileAnalysisSnapshot {
-            vue_api_calls: (vec![verter_analysis::types::VueApiCallSite {
+            vue_api_calls: (vec![verter_semantic::analysis::types::VueApiCallSite {
                 api: VueApiClassification::UseAttrs,
                 span: verter_span::Span::new(30, 42),
                 arg_value: None,
@@ -364,7 +364,7 @@ mod tests {
         let source =
             "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
-            imports: vec![verter_analysis::AnalyzedImport {
+            imports: vec![verter_semantic::analysis::AnalyzedImport {
                 source: "vue".into(),
                 is_type_only: false,
                 bindings: vec![],

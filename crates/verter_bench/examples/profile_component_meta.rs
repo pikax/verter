@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use verter_analysis::AnalyzedMacroKind;
+use verter_semantic::analysis::AnalyzedMacroKind;
 use verter_session::{FileAnalysisSnapshot, HostConfig, VerterHost};
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
@@ -427,7 +427,7 @@ fn make_host(project_root: &Path) -> io::Result<VerterHost> {
         Arc::new(ws),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             project_root_id.clone(),
             project_root_id,
             Some(tsconfig_id),
@@ -497,7 +497,7 @@ fn collect_snapshot_counts(snapshot: &FileAnalysisSnapshot) -> SnapshotCounts {
 }
 
 fn collect_evaluated_counts(
-    evaluated: &verter_analysis::type_expand::ExpandedComponentTypes,
+    evaluated: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
 ) -> EvaluatedCounts {
     let mut prop_names = BTreeSet::new();
     for field in &evaluated.props {

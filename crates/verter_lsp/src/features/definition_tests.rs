@@ -1,7 +1,7 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::types::ImportBindingKind;
-use verter_analysis::*;
+use verter_semantic::analysis::types::ImportBindingKind;
+use verter_semantic::analysis::*;
 
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
@@ -486,7 +486,7 @@ fn test_go_to_component_definition_from_template() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -603,8 +603,8 @@ fn test_css_nav_template_class_to_style() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     // Find the offsets for the style block content
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -705,8 +705,8 @@ fn test_css_nav_multi_class_attr() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -803,8 +803,8 @@ fn test_css_nav_template_id_to_style() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -891,8 +891,8 @@ fn test_css_nav_dynamic_class_skipped() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (scs, _) = style_block.content_range();
@@ -980,8 +980,8 @@ fn test_css_nav_style_to_template() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -1331,9 +1331,9 @@ fn test_path_alias_resolution_on_import_string() {
 
 #[test]
 fn test_dom_query_selector_navigates_to_element() {
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
 
     let source = "<template>\n  <button class=\"btn\">Click</button>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n";
     let blocks = scan_sfc_blocks(source);
@@ -1439,9 +1439,9 @@ fn test_dom_query_selector_navigates_to_element() {
 
 #[test]
 fn test_dom_query_selector_no_match() {
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
 
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.missing')\n</script>\n";
     let blocks = scan_sfc_blocks(source);
@@ -1519,9 +1519,9 @@ fn test_dom_query_selector_no_match() {
 
 #[test]
 fn test_dom_query_selector_falls_back_to_css() {
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
 
     // Template has no .btn element, but style has .btn rule
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n\n<style>\n.btn { color: red; }\n</style>\n";
@@ -1631,7 +1631,7 @@ fn test_path_alias_resolution_on_component_tag() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -1818,7 +1818,7 @@ fn test_go_to_definition_event_handler_click() {
                     content_end: 0,
                     ..Default::default()
                 }],
-                event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                event_handlers: vec![verter_semantic::analysis::template::TemplateEventHandler {
                     event_name: "click".into(),
                     handler_binding: Some("handleClick".into()),
                     is_inline: false,
@@ -1935,7 +1935,7 @@ fn test_go_to_definition_inline_event_no_binding() {
                     content_end: 0,
                     ..Default::default()
                 }],
-                event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                event_handlers: vec![verter_semantic::analysis::template::TemplateEventHandler {
                     event_name: "click".into(),
                     handler_binding: None, // inline expression, no binding
                     is_inline: true,
@@ -1972,7 +1972,7 @@ fn test_go_to_definition_inline_event_no_binding() {
 
 #[test]
 fn test_go_to_definition_component_event_name_defers_to_server() {
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let source = "<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n\n<script setup>\nfunction handleCustom() {}\n</script>\n";
     let blocks = scan_sfc_blocks(source);
@@ -2604,7 +2604,7 @@ fn test_component_tag_default_fallback() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {

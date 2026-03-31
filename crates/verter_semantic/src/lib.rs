@@ -17,6 +17,7 @@
 //! - It does not own a parser or lowering pipeline
 //! - `verter_session` orchestrates materialization and scheduling
 
+pub mod analysis;
 pub mod analyzers;
 pub mod db;
 pub mod extract;

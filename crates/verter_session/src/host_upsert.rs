@@ -515,7 +515,7 @@ impl VerterHost {
                     external_requests: Vec::new(),
                     src_blocks: Vec::new(),
                     parse_diagnostics: DiagnosticsSnapshot::default(),
-                    script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+                    script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
                     export_signatures: Vec::new(),
                     style_analyses: Arc::new(Vec::new()),
                     template_analysis: None,
@@ -679,11 +679,12 @@ impl VerterHost {
                     canonical_id: canonical.clone(),
                 })?;
             let analysis_snap = self.scheduler.try_get_analysis(&canonical);
-            let raw_style_analyses: Arc<Vec<verter_analysis::StyleBlockAnalysis>> = analysis_snap
-                .as_ref()
-                .and_then(|a| a.downcast_data::<HostAnalysisData>())
-                .map(|ad| Arc::clone(&ad.style_analyses))
-                .unwrap_or_default();
+            let raw_style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> =
+                analysis_snap
+                    .as_ref()
+                    .and_then(|a| a.downcast_data::<HostAnalysisData>())
+                    .map(|ad| Arc::clone(&ad.style_analyses))
+                    .unwrap_or_default();
 
             // Check previous hash
             let previous_hash = self
@@ -701,7 +702,7 @@ impl VerterHost {
             let meta = &hd.parse.meta;
 
             // Re-analyze compiled CSS and remap spans
-            let mut analyses_vec: Vec<Option<verter_analysis::StyleBlockAnalysis>> =
+            let mut analyses_vec: Vec<Option<verter_semantic::analysis::StyleBlockAnalysis>> =
                 vec![None; raw_style_analyses.len()];
             let mut lang_overrides_vec: Vec<Option<String>> = vec![None; meta.style_langs.len()];
 
@@ -710,9 +711,9 @@ impl VerterHost {
                     let existing = &raw_style_analyses[idx];
                     let content_offset = existing.content_offset;
 
-                    let mut new_analysis = verter_analysis::build_css_style_analysis(
+                    let mut new_analysis = verter_semantic::analysis::build_css_style_analysis(
                         &ov.code,
-                        verter_analysis::VueStyleInput::default(),
+                        verter_semantic::analysis::VueStyleInput::default(),
                         existing.scoped,
                         existing.is_module,
                         existing.module_name.as_deref(),
@@ -846,14 +847,15 @@ impl VerterHost {
                 .collect();
 
             let source = entry.source.as_ref();
-            let mut style_updates: Vec<(usize, verter_analysis::StyleBlockAnalysis)> = Vec::new();
+            let mut style_updates: Vec<(usize, verter_semantic::analysis::StyleBlockAnalysis)> =
+                Vec::new();
             for (&idx, ov) in &by_index {
                 if idx < entry.style_analyses.len() {
                     let existing = &entry.style_analyses[idx];
                     let content_offset = existing.content_offset;
-                    let mut new_analysis = verter_analysis::build_css_style_analysis(
+                    let mut new_analysis = verter_semantic::analysis::build_css_style_analysis(
                         &ov.code,
-                        verter_analysis::VueStyleInput::default(),
+                        verter_semantic::analysis::VueStyleInput::default(),
                         existing.scoped,
                         existing.is_module,
                         existing.module_name.as_deref(),

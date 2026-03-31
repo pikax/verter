@@ -72,7 +72,7 @@ pub fn build_folding_ranges(
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
+    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 
     #[test]
     fn test_basic_folding() {

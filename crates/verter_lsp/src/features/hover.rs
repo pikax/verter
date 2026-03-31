@@ -51,7 +51,7 @@ pub struct ComponentEventHoverTarget {
 pub struct ComponentUsagePropInfo {
     pub name: String,
     pub is_bound: bool,
-    pub constness: verter_analysis::template::PropValueConstness,
+    pub constness: verter_semantic::analysis::template::PropValueConstness,
 }
 
 impl From<Hover> for VerterHoverResult {
@@ -319,14 +319,14 @@ pub fn build_child_component_hover(
         lines.push("**Usage:**".to_string());
         for prop in usage_props {
             let constness_label = match prop.constness {
-                verter_analysis::template::PropValueConstness::Const => "const",
-                verter_analysis::template::PropValueConstness::Dynamic => "dynamic",
-                verter_analysis::template::PropValueConstness::Unknown => "unknown",
+                verter_semantic::analysis::template::PropValueConstness::Const => "const",
+                verter_semantic::analysis::template::PropValueConstness::Dynamic => "dynamic",
+                verter_semantic::analysis::template::PropValueConstness::Unknown => "unknown",
             };
             let icon = match prop.constness {
-                verter_analysis::template::PropValueConstness::Const => "\u{2713}",
-                verter_analysis::template::PropValueConstness::Dynamic => "\u{2197}",
-                verter_analysis::template::PropValueConstness::Unknown => "?",
+                verter_semantic::analysis::template::PropValueConstness::Const => "\u{2713}",
+                verter_semantic::analysis::template::PropValueConstness::Dynamic => "\u{2197}",
+                verter_semantic::analysis::template::PropValueConstness::Unknown => "?",
             };
             let bound = if prop.is_bound { ":" } else { "" };
             lines.push(format!(
@@ -663,15 +663,22 @@ fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
     })?;
 
     // Collect matching selectors from all style blocks
-    let mut matches: Vec<(&str, (u32, u32, u32), verter_analysis::MatchResult)> = Vec::new();
+    let mut matches: Vec<(
+        &str,
+        (u32, u32, u32),
+        verter_semantic::analysis::MatchResult,
+    )> = Vec::new();
 
     for style in analysis.styles.iter() {
         if let Some(css) = &style.css {
             for sel in &css.selectors {
                 if let Some(ref structure) = sel.structure {
-                    let result =
-                        verter_analysis::match_selector(structure, el_idx, &template.elements);
-                    if !matches!(result, verter_analysis::MatchResult::NoMatch) {
+                    let result = verter_semantic::analysis::match_selector(
+                        structure,
+                        el_idx,
+                        &template.elements,
+                    );
+                    if !matches!(result, verter_semantic::analysis::MatchResult::NoMatch) {
                         matches.push((&sel.text, sel.specificity, result));
                     }
                 }
@@ -706,9 +713,9 @@ fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
 
     for (text, spec, result) in &matches {
         let certainty = match result {
-            verter_analysis::MatchResult::Matches => "",
-            verter_analysis::MatchResult::MaybeMatches => " *(maybe)*",
-            verter_analysis::MatchResult::NoMatch => unreachable!(),
+            verter_semantic::analysis::MatchResult::Matches => "",
+            verter_semantic::analysis::MatchResult::MaybeMatches => " *(maybe)*",
+            verter_semantic::analysis::MatchResult::NoMatch => unreachable!(),
         };
         lines.push(format!(
             "- `{}` — specificity `({}, {}, {})`{certainty}",
@@ -765,14 +772,14 @@ fn component_prop_constness_hover(
 
     for prop in &comp.props {
         let constness_label = match prop.constness {
-            verter_analysis::template::PropValueConstness::Const => "const",
-            verter_analysis::template::PropValueConstness::Dynamic => "dynamic",
-            verter_analysis::template::PropValueConstness::Unknown => "unknown",
+            verter_semantic::analysis::template::PropValueConstness::Const => "const",
+            verter_semantic::analysis::template::PropValueConstness::Dynamic => "dynamic",
+            verter_semantic::analysis::template::PropValueConstness::Unknown => "unknown",
         };
         let icon = match prop.constness {
-            verter_analysis::template::PropValueConstness::Const => "\u{2713}", // ✓
-            verter_analysis::template::PropValueConstness::Dynamic => "\u{2197}", // ↗
-            verter_analysis::template::PropValueConstness::Unknown => "?",
+            verter_semantic::analysis::template::PropValueConstness::Const => "\u{2713}", // ✓
+            verter_semantic::analysis::template::PropValueConstness::Dynamic => "\u{2197}", // ↗
+            verter_semantic::analysis::template::PropValueConstness::Unknown => "?",
         };
         let bound = if prop.is_bound { ":" } else { "" };
         lines.push(format!(
@@ -793,7 +800,7 @@ fn component_prop_constness_hover(
 fn component_tag_hover_target(
     offset: u32,
     source: &str,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<ComponentTagHoverTarget> {
     let comp = find_component_usage_at_tag_offset(offset, source, template)?;
     let import_source = comp.import_source.clone()?;
@@ -816,7 +823,7 @@ fn component_tag_hover_target(
 
 fn component_event_hover_target(
     offset: u32,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<ComponentEventHoverTarget> {
     for el in &template.elements {
         if !el.is_component {
@@ -853,8 +860,8 @@ fn component_event_hover_target(
 fn find_component_usage_at_tag_offset<'a>(
     offset: u32,
     source: &str,
-    template: &'a verter_analysis::template::TemplateAnalysisSnapshot,
-) -> Option<&'a verter_analysis::template::TemplateComponentUsage> {
+    template: &'a verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+) -> Option<&'a verter_semantic::analysis::template::TemplateComponentUsage> {
     template.components.iter().find(|component| {
         let tag_start = component.span.start + 1;
         let tag_end = source
@@ -872,13 +879,13 @@ fn find_component_usage_at_tag_offset<'a>(
 /// Check if the offset is on a Vue API call site name, and if so return a hover
 /// with Vue API context (category, sync requirement, description).
 /// Client-only lifecycle hooks that never fire during SSR.
-const CLIENT_ONLY_HOOKS: &[verter_analysis::VueApiClassification] = &[
-    verter_analysis::VueApiClassification::OnMounted,
-    verter_analysis::VueApiClassification::OnUpdated,
-    verter_analysis::VueApiClassification::OnActivated,
-    verter_analysis::VueApiClassification::OnDeactivated,
-    verter_analysis::VueApiClassification::OnBeforeUpdate,
-    verter_analysis::VueApiClassification::OnBeforeMount,
+const CLIENT_ONLY_HOOKS: &[verter_semantic::analysis::VueApiClassification] = &[
+    verter_semantic::analysis::VueApiClassification::OnMounted,
+    verter_semantic::analysis::VueApiClassification::OnUpdated,
+    verter_semantic::analysis::VueApiClassification::OnActivated,
+    verter_semantic::analysis::VueApiClassification::OnDeactivated,
+    verter_semantic::analysis::VueApiClassification::OnBeforeUpdate,
+    verter_semantic::analysis::VueApiClassification::OnBeforeMount,
 ];
 
 fn vue_api_hover_at_offset(
@@ -905,23 +912,23 @@ fn vue_api_hover_at_offset(
         "Watcher"
     } else if matches!(
         api,
-        verter_analysis::VueApiClassification::Provide
-            | verter_analysis::VueApiClassification::Inject
+        verter_semantic::analysis::VueApiClassification::Provide
+            | verter_semantic::analysis::VueApiClassification::Inject
     ) {
         "Dependency Injection"
     } else if matches!(
         api,
-        verter_analysis::VueApiClassification::Ref
-            | verter_analysis::VueApiClassification::ShallowRef
-            | verter_analysis::VueApiClassification::Reactive
-            | verter_analysis::VueApiClassification::ShallowReactive
-            | verter_analysis::VueApiClassification::Computed
-            | verter_analysis::VueApiClassification::ToRef
-            | verter_analysis::VueApiClassification::ToRefs
-            | verter_analysis::VueApiClassification::Readonly
-            | verter_analysis::VueApiClassification::ShallowReadonly
-            | verter_analysis::VueApiClassification::CustomRef
-            | verter_analysis::VueApiClassification::TriggerRef
+        verter_semantic::analysis::VueApiClassification::Ref
+            | verter_semantic::analysis::VueApiClassification::ShallowRef
+            | verter_semantic::analysis::VueApiClassification::Reactive
+            | verter_semantic::analysis::VueApiClassification::ShallowReactive
+            | verter_semantic::analysis::VueApiClassification::Computed
+            | verter_semantic::analysis::VueApiClassification::ToRef
+            | verter_semantic::analysis::VueApiClassification::ToRefs
+            | verter_semantic::analysis::VueApiClassification::Readonly
+            | verter_semantic::analysis::VueApiClassification::ShallowReadonly
+            | verter_semantic::analysis::VueApiClassification::CustomRef
+            | verter_semantic::analysis::VueApiClassification::TriggerRef
     ) {
         "Reactivity Primitive"
     } else {
@@ -944,7 +951,12 @@ fn vue_api_hover_at_offset(
     }
 
     // SSR note for useTemplateRef
-    if ssr_context && matches!(api, verter_analysis::VueApiClassification::UseTemplateRef) {
+    if ssr_context
+        && matches!(
+            api,
+            verter_semantic::analysis::VueApiClassification::UseTemplateRef
+        )
+    {
         lines.push(
             "**⚠ SSR Warning:** Template refs are `null` during SSR. \
              Access `.value` inside `onMounted()` or guard with `import.meta.client`."
@@ -989,14 +1001,14 @@ fn hover_for_word(word: &str, analysis: &FileAnalysisSnapshot) -> Option<VerterH
 }
 
 /// Map a binding's reactivity kind to a label for the hover kind prefix.
-fn reactivity_kind_label(binding: &verter_analysis::AnalyzedBinding) -> Option<String> {
+fn reactivity_kind_label(binding: &verter_semantic::analysis::AnalyzedBinding) -> Option<String> {
     match binding.reactivity_kind {
-        verter_analysis::ReactivityKind::Ref => Some("ref".to_string()),
-        verter_analysis::ReactivityKind::Computed => Some("computed".to_string()),
-        verter_analysis::ReactivityKind::Reactive => Some("reactive".to_string()),
-        verter_analysis::ReactivityKind::MaybeRef => Some("maybe ref".to_string()),
-        verter_analysis::ReactivityKind::Mutable => Some("mutable".to_string()),
-        verter_analysis::ReactivityKind::None => {
+        verter_semantic::analysis::ReactivityKind::Ref => Some("ref".to_string()),
+        verter_semantic::analysis::ReactivityKind::Computed => Some("computed".to_string()),
+        verter_semantic::analysis::ReactivityKind::Reactive => Some("reactive".to_string()),
+        verter_semantic::analysis::ReactivityKind::MaybeRef => Some("maybe ref".to_string()),
+        verter_semantic::analysis::ReactivityKind::Mutable => Some("mutable".to_string()),
+        verter_semantic::analysis::ReactivityKind::None => {
             if binding.is_reactive {
                 Some("reactive".to_string())
             } else {
@@ -1006,16 +1018,16 @@ fn reactivity_kind_label(binding: &verter_analysis::AnalyzedBinding) -> Option<S
     }
 }
 
-fn format_binding_hover(binding: &verter_analysis::AnalyzedBinding) -> Hover {
+fn format_binding_hover(binding: &verter_semantic::analysis::AnalyzedBinding) -> Hover {
     let mut lines = Vec::new();
 
     let kind_str = match binding.kind {
-        verter_analysis::AnalyzedBindingKind::Const => "const",
-        verter_analysis::AnalyzedBindingKind::Let => "let",
-        verter_analysis::AnalyzedBindingKind::Var => "var",
-        verter_analysis::AnalyzedBindingKind::Function => "function",
-        verter_analysis::AnalyzedBindingKind::AsyncFunction => "async function",
-        verter_analysis::AnalyzedBindingKind::Class => "class",
+        verter_semantic::analysis::AnalyzedBindingKind::Const => "const",
+        verter_semantic::analysis::AnalyzedBindingKind::Let => "let",
+        verter_semantic::analysis::AnalyzedBindingKind::Var => "var",
+        verter_semantic::analysis::AnalyzedBindingKind::Function => "function",
+        verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => "async function",
+        verter_semantic::analysis::AnalyzedBindingKind::Class => "class",
     };
 
     // Show type annotation if available
@@ -1032,29 +1044,31 @@ fn format_binding_hover(binding: &verter_analysis::AnalyzedBinding) -> Hover {
 
     // Show granular reactivity kind
     match binding.reactivity_kind {
-        verter_analysis::ReactivityKind::None => {
+        verter_semantic::analysis::ReactivityKind::None => {
             if binding.is_reactive {
                 lines.push("*(reactive)*".to_string());
             }
         }
-        verter_analysis::ReactivityKind::Ref => lines.push("*(ref — needs `.value`)*".to_string()),
-        verter_analysis::ReactivityKind::Computed => {
+        verter_semantic::analysis::ReactivityKind::Ref => {
+            lines.push("*(ref — needs `.value`)*".to_string())
+        }
+        verter_semantic::analysis::ReactivityKind::Computed => {
             lines.push("*(computed — needs `.value`, read-only)*".to_string());
         }
-        verter_analysis::ReactivityKind::Reactive => {
+        verter_semantic::analysis::ReactivityKind::Reactive => {
             lines.push("*(reactive — direct property access)*".to_string());
         }
-        verter_analysis::ReactivityKind::MaybeRef => {
+        verter_semantic::analysis::ReactivityKind::MaybeRef => {
             lines.push("*(maybe ref — may need `.value`)*".to_string());
         }
-        verter_analysis::ReactivityKind::Mutable => {
+        verter_semantic::analysis::ReactivityKind::Mutable => {
             lines.push("*(mutable — reassignable)*".to_string());
         }
     }
 
     if let Some(ref init) = binding.initializer {
         match init {
-            verter_analysis::BindingInitializer::FunctionCall {
+            verter_semantic::analysis::BindingInitializer::FunctionCall {
                 callee,
                 callee_import_source,
                 ..
@@ -1065,13 +1079,13 @@ fn format_binding_hover(binding: &verter_analysis::AnalyzedBinding) -> Hover {
                     .unwrap_or_default();
                 lines.push(format!("Initialized via `{callee}()`{source_info}"));
             }
-            verter_analysis::BindingInitializer::Literal { kind } => {
+            verter_semantic::analysis::BindingInitializer::Literal { kind } => {
                 lines.push(format!("Literal: {kind:?}"));
             }
-            verter_analysis::BindingInitializer::Reference { name } => {
+            verter_semantic::analysis::BindingInitializer::Reference { name } => {
                 lines.push(format!("References `{name}`"));
             }
-            verter_analysis::BindingInitializer::Other => {}
+            verter_semantic::analysis::BindingInitializer::Other => {}
         }
     }
 
@@ -1084,7 +1098,10 @@ fn format_binding_hover(binding: &verter_analysis::AnalyzedBinding) -> Hover {
     }
 }
 
-fn format_import_hover(binding: &verter_analysis::AnalyzedImportBinding, source: &str) -> Hover {
+fn format_import_hover(
+    binding: &verter_semantic::analysis::AnalyzedImportBinding,
+    source: &str,
+) -> Hover {
     let type_prefix = if binding.is_type_only { "type " } else { "" };
     let mut lines = vec![format!(
         "```typescript\nimport {type_prefix}{{ {} }} from '{}'\n```",
@@ -1104,15 +1121,15 @@ fn format_import_hover(binding: &verter_analysis::AnalyzedImportBinding, source:
     }
 }
 
-fn format_macro_hover(mac: &verter_analysis::AnalyzedMacro) -> Hover {
+fn format_macro_hover(mac: &verter_semantic::analysis::AnalyzedMacro) -> Hover {
     let macro_name = match mac.kind {
-        verter_analysis::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_analysis::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
-        verter_analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
-        verter_analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
     };
 
     let mut lines = Vec::new();

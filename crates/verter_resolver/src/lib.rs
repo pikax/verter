@@ -36,7 +36,7 @@ pub mod type_expansion_tsserver;
 pub mod type_expansion_verter;
 pub mod type_text_parser;
 
-pub type ResolverHash16 = verter_analysis::Hash16;
+pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub use barrel_resolution::{
     resolve_type_through_barrel, BarrelResolutionResolver, BarrelResolutionState,
 };

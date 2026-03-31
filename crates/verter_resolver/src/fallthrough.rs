@@ -1,15 +1,15 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::hash::{Hash, Hasher};
-use verter_analysis::component_meta::{
+use verter_semantic::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedEventKind, AcceptedPropAnalysis, AcceptedPropKind,
     AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
     FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry, FallthroughSurface,
     InheritedSource, MemberAvailability, MemberProvenance, PartialBranchReason, ResolvedRootStep,
     RootReachability, RootTargetRef, UnresolvedBranchReason,
 };
-use verter_analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
-use verter_analysis::type_expr::TypeExpr;
-use verter_analysis::types::AnalyzedImport;
+use verter_semantic::analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
+use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_semantic::analysis::types::AnalyzedImport;
 
 use crate::{FactVersionRef, FallthroughNodeKey, FallthroughNodeKind};
 
@@ -583,7 +583,9 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
     let declared_listener_aliases: FxHashSet<String> = base_meta
         .props
         .iter()
-        .filter_map(|prop| verter_analysis::html_intrinsics::on_prop_to_event_name(&prop.name))
+        .filter_map(|prop| {
+            verter_semantic::analysis::html_intrinsics::on_prop_to_event_name(&prop.name)
+        })
         .collect();
 
     let mut accepted_props: Vec<AcceptedPropAnalysis> = base_meta
@@ -852,14 +854,14 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
 }
 
 pub fn inject_prop_type_overrides(
-    env: &mut verter_analysis::type_eval::EvalEnv,
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
     overrides: &FxHashMap<String, TypeExpr>,
 ) {
     for (name, ty) in overrides {
-        env.add_value(verter_analysis::type_eval::ValueDeclInfo {
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: name.clone(),
             declaration_id: 0,
-            kind: verter_analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: Some(ty.clone()),
             function_signature: None,
             object_shape: None,
@@ -868,8 +870,8 @@ pub fn inject_prop_type_overrides(
 }
 
 pub fn resolve_usage_prop_type(
-    prop: &verter_analysis::template::TemplatePropUsage,
-    eval_env: &mut Option<verter_analysis::type_eval::EvalEnv>,
+    prop: &verter_semantic::analysis::template::TemplatePropUsage,
+    eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
 ) -> Option<TypeExpr> {
     if prop.from_spread {
         return None;
@@ -884,14 +886,15 @@ pub fn resolve_usage_prop_type(
 
     if let Some(expression) = &prop.expression {
         if let Some(env) = eval_env.as_mut() {
-            if let Some(ty) =
-                verter_analysis::type_eval_build::evaluate_value_expression(expression, env)
-            {
+            if let Some(ty) = verter_semantic::analysis::type_eval_build::evaluate_value_expression(
+                expression, env,
+            ) {
                 return Some(ty);
             }
         }
 
-        if let Some(ty) = verter_analysis::type_eval_build::parse_value_expression_type(expression)
+        if let Some(ty) =
+            verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)
         {
             return Some(ty);
         }
@@ -899,14 +902,15 @@ pub fn resolve_usage_prop_type(
 
     if prop.is_shorthand {
         if let Some(env) = eval_env.as_mut() {
-            if let Some(ty) =
-                verter_analysis::type_eval_build::evaluate_value_expression(&prop.name, env)
-            {
+            if let Some(ty) = verter_semantic::analysis::type_eval_build::evaluate_value_expression(
+                &prop.name, env,
+            ) {
                 return Some(ty);
             }
         }
 
-        if let Some(ty) = verter_analysis::type_eval_build::parse_value_expression_type(&prop.name)
+        if let Some(ty) =
+            verter_semantic::analysis::type_eval_build::parse_value_expression_type(&prop.name)
         {
             return Some(ty);
         }
@@ -969,7 +973,7 @@ pub fn collect_dynamic_root_candidates_from_type(
     ty: &TypeExpr,
     imports: &[AnalyzedImport],
 ) -> Vec<DynamicRootCandidate> {
-    use verter_analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
 
     match ty {
         TypeExpr::Literal(LiteralValue::String(tag)) => {
@@ -1176,7 +1180,8 @@ fn normalize_public_spread_key(
     if key == "class" || key == "style" {
         return;
     }
-    if let Some(event_name) = verter_analysis::html_intrinsics::on_prop_to_event_name(key) {
+    if let Some(event_name) = verter_semantic::analysis::html_intrinsics::on_prop_to_event_name(key)
+    {
         listeners.insert(event_name.to_string());
     } else {
         attrs.insert(key.to_string());
@@ -1184,7 +1189,7 @@ fn normalize_public_spread_key(
 }
 
 fn known_spread_keys_from_object(
-    object: &verter_analysis::type_expr::ObjectExpr,
+    object: &verter_semantic::analysis::type_expr::ObjectExpr,
 ) -> KnownSpreadKeys {
     let mut result = KnownSpreadKeys {
         exact: true,
@@ -1193,15 +1198,15 @@ fn known_spread_keys_from_object(
 
     for member in &object.properties {
         match member {
-            verter_analysis::type_expr::ObjectMember::Property(prop) => {
+            verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => {
                 normalize_public_spread_key(&prop.name, &mut result.attrs, &mut result.listeners)
             }
-            verter_analysis::type_expr::ObjectMember::Method(method) => {
+            verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
                 normalize_public_spread_key(&method.name, &mut result.attrs, &mut result.listeners)
             }
-            verter_analysis::type_expr::ObjectMember::IndexSignature(_)
-            | verter_analysis::type_expr::ObjectMember::CallSignature(_)
-            | verter_analysis::type_expr::ObjectMember::ConstructSignature(_) => {
+            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(_)
+            | verter_semantic::analysis::type_expr::ObjectMember::CallSignature(_)
+            | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(_) => {
                 result.exact = false;
             }
         }
@@ -1236,18 +1241,20 @@ mod tests {
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
-    use verter_analysis::component_meta::{
+    use verter_semantic::analysis::component_meta::{
         AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedPropKind, AcceptedSurfaceCompleteness,
         BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings, FallthroughBranch,
         FallthroughSurface, InheritedSource, MemberAvailability, MemberProvenance,
         ResolvedRootStep, RootBranch, RootReachability, RootTargetRef,
     };
-    use verter_analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
-    use verter_analysis::template::{PropValueConstness, TemplatePropUsage};
-    use verter_analysis::type_expr::{
+    use verter_semantic::analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
+    use verter_semantic::analysis::template::{PropValueConstness, TemplatePropUsage};
+    use verter_semantic::analysis::type_expr::{
         ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, ValueRef,
     };
-    use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+    use verter_semantic::analysis::types::{
+        AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+    };
     use verter_span::Span;
 
     #[derive(Clone)]
@@ -1385,7 +1392,7 @@ mod tests {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
             options_api: false,
             file_path: "/App.vue".to_string(),
@@ -1533,7 +1540,7 @@ mod tests {
             FallthroughBranch {
                 branch_key: "0".to_string(),
                 condition_text: None,
-                props: vec![verter_analysis::component_meta::FallthroughPropEntry {
+                props: vec![verter_semantic::analysis::component_meta::FallthroughPropEntry {
                     name: "id".to_string(),
                     type_expr: TypeExpr::primitive(PrimitiveName::String),
                     raw_type: Some("string".to_string()),
@@ -1553,7 +1560,7 @@ mod tests {
                 root_chain: vec![],
                 status: BranchStatus::Unresolved {
                     reason:
-                        verter_analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
+                        verter_semantic::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
                 },
             },
         ];
@@ -1643,7 +1650,7 @@ mod tests {
 
     #[test]
     fn inject_prop_type_overrides_adds_value_bindings() {
-        let mut env = verter_analysis::type_eval::EvalEnv::new();
+        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
         let mut overrides = FxHashMap::default();
         overrides.insert(
             "size".to_string(),
@@ -1717,7 +1724,7 @@ mod tests {
                 }],
                 accepted_events: vec![],
                 fallthrough_surface: FallthroughSurface::None {
-                    reason: verter_analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
+                    reason: verter_semantic::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
                 },
                 fact_versions: vec![crate::FactVersionRef::FileWholeHash {
                     canonical_id: "/Child.vue".to_string(),

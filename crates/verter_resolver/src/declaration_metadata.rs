@@ -1,5 +1,5 @@
 use rustc_hash::FxHashSet;
-use verter_analysis::type_eval::DeclarationId;
+use verter_semantic::analysis::type_eval::DeclarationId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedExportTarget {

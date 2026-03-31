@@ -10,8 +10,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use verter_analysis::project_index::ProjectIndex;
-use verter_analysis::template::{TemplateComponentUsage, TemplatePropUsage};
+use verter_semantic::analysis::project_index::ProjectIndex;
+use verter_semantic::analysis::template::{TemplateComponentUsage, TemplatePropUsage};
 
 /// Pre-computed cross-file analysis data for lint rules.
 #[derive(Debug, Default)]
@@ -371,7 +371,7 @@ pub fn find_unknown_models(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_analysis::file_usage::{
+    use verter_semantic::analysis::file_usage::{
         FileUsageFlags, FileUsageInfoOwned, InjectUsageOwned, ProvideUsageOwned,
     };
 
@@ -467,7 +467,7 @@ mod tests {
 
     // ── Component cross-file analysis tests ─────────────────────────
 
-    use verter_analysis::template::{
+    use verter_semantic::analysis::template::{
         PropValueConstness, TemplateComponentUsage, TemplateComponentVModel, TemplatePropUsage,
     };
 

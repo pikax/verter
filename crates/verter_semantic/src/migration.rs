@@ -1,12 +1,12 @@
-//! Migration notes for WS9: verter_analysis → verter_semantic.
+//! Migration notes for WS9: verter_semantic::analysis → verter_semantic.
 //!
-//! This module documents which `verter_analysis` types are consumed by
+//! This module documents which `verter_semantic::analysis` types are consumed by
 //! `verter_semantic` through the extraction layer, and where they will
-//! land when `verter_analysis` is deleted in WS9.
+//! land when `verter_semantic::analysis` is deleted in WS9.
 //!
 //! ## Types consumed by extraction (extract.rs)
 //!
-//! | verter_analysis type           | Destination          | Status     |
+//! | verter_semantic::analysis type           | Destination          | Status     |
 //! |-------------------------------|----------------------|------------|
 //! | `ScriptAnalysisSnapshot`       | verter_semantic input | Consumed via extract |
 //! | `AnalyzedMacro`                | verter_semantic input | Consumed via extract |
@@ -29,7 +29,7 @@
 //!
 //! ## WS9 plan
 //!
-//! When `verter_analysis` is deleted:
+//! When `verter_semantic::analysis` is deleted:
 //! 1. Script/template analysis types become inputs owned by verter_parser or
 //!    verter_compiler (whichever owns the analysis pass)
 //! 2. The extract layer continues to bridge those inputs → semantic facts

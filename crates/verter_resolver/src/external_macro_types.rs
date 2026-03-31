@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
-use verter_analysis::{AnalyzedImport, MacroTypeDep};
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_semantic::analysis::{AnalyzedImport, MacroTypeDep};
 use verter_span::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,8 +99,8 @@ mod tests {
         collect_external_macro_types, ExternalMacroTypeCollectorHost, ExternalMacroTypeDiagnostic,
     };
     use std::collections::{BTreeMap, BTreeSet};
-    use verter_analysis::{AnalyzedImport, MacroTypeDep};
     use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
+    use verter_semantic::analysis::{AnalyzedImport, MacroTypeDep};
     use verter_span::Span;
 
     #[derive(Default)]
@@ -164,14 +164,14 @@ mod tests {
                 macro_index: 0,
                 import_source: "./types".to_string(),
                 type_name: "Props".to_string(),
-                macro_kind: verter_analysis::types::AnalyzedMacroKind::DefineProps,
+                macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
                 macro_span: Span::new(1, 10),
             },
             MacroTypeDep {
                 macro_index: 1,
                 import_source: "./bad".to_string(),
                 type_name: "Bad".to_string(),
-                macro_kind: verter_analysis::types::AnalyzedMacroKind::DefineProps,
+                macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
                 macro_span: Span::new(11, 20),
             },
         ];

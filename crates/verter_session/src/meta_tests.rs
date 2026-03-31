@@ -3,9 +3,9 @@ use crate::types::HostConfig;
 use crate::VerterHost;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use verter_analysis::type_expand::ExpandedComponentTypes;
-use verter_analysis::type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 use verter_resolver::{ResolverStore, StoreView};
+use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 
 fn make_project() -> Arc<MetaProject> {
     make_project_with_config(HostConfig {
@@ -47,7 +47,7 @@ fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
     snapshot
         .macros
         .iter()
-        .filter(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .flat_map(|m| m.prop_fields.iter())
         .map(|f| f.name.clone())
         .collect()
@@ -1374,7 +1374,7 @@ defineProps<Props>()
     let define_props = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .expect("defineProps macro should exist");
 
     let names: Vec<&str> = define_props
@@ -1422,7 +1422,7 @@ defineProps<Props>()
     let define_props = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .expect("defineProps macro should exist");
 
     let names: Vec<&str> = define_props
@@ -1906,7 +1906,7 @@ defineProps<{
     assert_eq!(analysis.imports[0].bindings.len(), 1);
     assert_eq!(
         analysis.imports[0].bindings[0].kind,
-        verter_analysis::types::ImportBindingKind::Default
+        verter_semantic::analysis::types::ImportBindingKind::Default
     );
     assert_eq!(
         analysis.imports[0].bindings[0].imported_name.as_deref(),
@@ -4406,7 +4406,7 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -4449,7 +4449,7 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
     assert!(
         !define_props.result.diagnostics.iter().any(|diagnostic| {
             diagnostic.reason
-                == verter_analysis::type_expand::ExpansionStopReason::UnresolvedReference
+                == verter_semantic::analysis::type_expand::ExpansionStopReason::UnresolvedReference
                 && diagnostic.context.contains("VueButtonHTMLAttributes")
         }),
         "workspace evaluate_types should not leave VueButtonHTMLAttributes unresolved, got {:?}",
@@ -4823,7 +4823,7 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -4969,7 +4969,7 @@ defineProps<Props>()
     );
     assert!(
         !define_props.result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.reason == verter_analysis::type_expand::ExpansionStopReason::UnresolvedReference
+            diagnostic.reason == verter_semantic::analysis::type_expand::ExpansionStopReason::UnresolvedReference
                 && diagnostic.context.contains("VueButtonHTMLAttributes")
         }),
         "transitive imported Pick dependencies should not leave VueButtonHTMLAttributes unresolved, got {:?}",
@@ -5120,7 +5120,7 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
     );
     assert!(
         !define_props.result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.reason == verter_analysis::type_expand::ExpansionStopReason::UnresolvedReference
+            diagnostic.reason == verter_semantic::analysis::type_expand::ExpansionStopReason::UnresolvedReference
                 && diagnostic.context.contains("VueButtonHTMLAttributes")
         }),
         "dual-script vue wrapper evaluation should not leave VueButtonHTMLAttributes unresolved, got {:?}",
@@ -5753,7 +5753,7 @@ defineProps<Props>()
         before
             .macros
             .iter()
-            .any(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps),
+            .any(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps),
         "should have defineProps macro before removal"
     );
 
@@ -6296,7 +6296,7 @@ fn get_component_meta_prefers_declaration_entrypoints_for_package_type_imports()
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -6366,7 +6366,7 @@ fn evaluate_types_prefers_declaration_entrypoints_for_package_type_imports() {
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -6554,7 +6554,7 @@ export type Lt = string | St | vt
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -6692,7 +6692,7 @@ export { RouteLocationRaw as Lt, St, vt }
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -6789,7 +6789,7 @@ export type PublicNode = InternalNode | {
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -8229,7 +8229,7 @@ onMounted(() => {
             member.name == "$slots"
                 && matches!(
                     member.kind,
-                    verter_analysis::component_meta::PublicInstanceMemberKind::SlotContainer
+                    verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer
                 )
         }),
         "$slots should be tagged as a public-instance slot container"
@@ -8248,7 +8248,7 @@ onMounted(() => {
     assert!(
         meta.vue_api_calls.iter().any(|call| matches!(
             call.api,
-            verter_analysis::types::VueApiClassification::OnMounted
+            verter_semantic::analysis::types::VueApiClassification::OnMounted
         )),
         "Vue API calls should be preserved"
     );
@@ -8513,7 +8513,7 @@ fn resolved_type_cache_is_reused_for_workspace_only_package_dependencies() {
     let project = MetaProject::new(host);
     project
         .configure_projects(vec![
-            verter_analysis::project_resolver::IdeProjectConfig::new(
+            verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/tsconfig.json".to_string()),
@@ -10177,7 +10177,7 @@ defineProps<ButtonProps>()
 // Phase 3: Fallthrough inheritance resolver
 // ===========================================================================
 
-use verter_analysis::component_meta::{
+use verter_semantic::analysis::component_meta::{
     AcceptedEventKind, AcceptedPropKind, AcceptedSurfaceCompleteness, BranchStatus,
     FallthroughSurface, MemberAvailability, MemberProvenance, PartialBranchReason,
     ResolvedRootStep, UnresolvedBranchReason,
@@ -10187,7 +10187,7 @@ use verter_analysis::component_meta::{
 fn get_meta(
     project: &Arc<MetaProject>,
     canonical_id: &str,
-) -> verter_analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let session = project.open_session().unwrap();
     session
         .get_component_meta(canonical_id)
@@ -10756,7 +10756,7 @@ export interface NativeElements {
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -10860,7 +10860,7 @@ export interface ProjectClickEvent {
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -11948,7 +11948,7 @@ fn root_spread_with_cross_file_type_still_resolves_after_eval_caching() {
     // Regression test for Fix 3: when cached eval inputs are threaded through
     // to fallthrough resolution, root v-bind="importedObj" must still resolve
     // the spread keys correctly and not degrade to UnknownSpread.
-    use verter_analysis::component_meta::AcceptedSurfaceCompleteness;
+    use verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness;
 
     let project = make_project();
     project
@@ -12440,21 +12440,23 @@ defineProps<FinalType>()
 
 #[test]
 fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
-    let types = ExpandedComponentTypes {
-        props: vec![verter_analysis::type_expand::ExpandedField {
-            name: "label".to_string(),
-            r#type: TypeExpr::Primitive(PrimitiveName::String),
-            raw_type: None,
-            optional: false,
-            completeness: verter_analysis::type_expand::ExpansionCompleteness::Partial,
-            diagnostics: vec![verter_analysis::type_expand::ExpansionDiagnostic {
-                reason: verter_analysis::type_expand::ExpansionStopReason::BudgetExceeded,
+    let types =
+        ExpandedComponentTypes {
+            props: vec![verter_semantic::analysis::type_expand::ExpandedField {
+                name: "label".to_string(),
+                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                raw_type: None,
+                optional: false,
+                completeness:
+                    verter_semantic::analysis::type_expand::ExpansionCompleteness::Partial,
+                diagnostics: vec![verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+                reason: verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
                 context: "symbolic work limit reached".to_string(),
                 property_name: None,
             }],
-        }],
-        ..ExpandedComponentTypes::default()
-    };
+            }],
+            ..ExpandedComponentTypes::default()
+        };
 
     assert!(
         component_meta_expansion_budget_exceeded(&types),
@@ -12464,8 +12466,8 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
 
 #[test]
 fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
-    let analysis = verter_analysis::component_meta::ComponentMetaAnalysis {
-        props: vec![verter_analysis::component_meta::PropAnalysis {
+    let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+        props: vec![verter_semantic::analysis::component_meta::PropAnalysis {
             name: "label".to_string(),
             type_expr: TypeExpr::Primitive(PrimitiveName::String),
             type_expansion: None,
@@ -12489,16 +12491,17 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
         bindings: Vec::new(),
         vue_api_calls: Vec::new(),
         styles: Vec::new(),
-        flags: verter_analysis::component_meta::ComponentMetaFlags::default(),
-        root_reachability: verter_analysis::component_meta::RootReachability::NoFallthrough {
-            reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
-        },
+        flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
+        root_reachability:
+            verter_semantic::analysis::component_meta::RootReachability::NoFallthrough {
+                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness:
-            verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
-        fallthrough_surface: verter_analysis::component_meta::FallthroughSurface::None {
-            reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
+            reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
         },
         options_api: false,
         file_path: "/src/App.vue".to_string(),

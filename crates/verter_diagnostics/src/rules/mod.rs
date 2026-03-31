@@ -19,12 +19,12 @@ pub mod vue;
 use crate::context::LintContext;
 use crate::cross_file::CrossFileSnapshot;
 use crate::diagnostic::Severity;
-use verter_analysis::template::{
+use verter_semantic::analysis::template::{
     TemplateAnalysisSnapshot, TemplateBindingOccurrence, TemplateDirective, TemplateElement,
     VForDirective,
 };
-use verter_analysis::types::ScriptAnalysisSnapshot;
-use verter_analysis::StyleBlockAnalysis;
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_semantic::analysis::StyleBlockAnalysis;
 
 /// File-level context passed to `check_file`.
 ///

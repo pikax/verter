@@ -56,6 +56,6 @@ pub struct ImportedEvalOverflow {
 
 #[derive(Debug, Clone)]
 pub struct ComputedEvaluatedTypes {
-    pub evaluated_types: Option<verter_analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     pub discovered_dependencies: BTreeSet<String>,
 }

@@ -579,10 +579,10 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::BTreeSet;
-    use verter_analysis::hash_16;
     use verter_compiler::utils::oxc::vue::resolve_type::{
         AnalyzedExternalTypeSource, ResolvedElements,
     };
+    use verter_semantic::analysis::hash_16;
     use verter_workspace::ResolveRequestKind;
 
     #[derive(Default)]

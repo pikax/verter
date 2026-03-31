@@ -16,7 +16,7 @@
 //!
 //! - **`verter_workspace`** — sole authority for file access and import resolution
 //! - **`verter_compiler`** — SFC tokenizer, parser, and template/script/style codegen
-//! - **`verter_analysis`** — static analysis (imports, bindings, macros, style analysis)
+//! - **`verter_semantic::analysis`** — static analysis (imports, bindings, macros, style analysis)
 //!
 //! ## Key types
 //!
@@ -200,13 +200,13 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub resolved_canonical_id: String,
     pub raw_source: Arc<str>,
     pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    pub script_analysis: Option<Arc<verter_analysis::ScriptAnalysisSnapshot>>,
-    pub export_signatures: Option<Arc<Vec<verter_analysis::ExportSignature>>>,
+    pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
     pub external_type_analysis:
         Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
     pub eval_source: Option<Arc<str>>,
-    pub env: Option<Arc<verter_analysis::type_eval::EvalEnv>>,
+    pub env: Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
     pub required_owner_import_names: Option<Arc<rustc_hash::FxHashSet<String>>>,
     pub exported_required_import_names:
         rustc_hash::FxHashMap<String, Arc<rustc_hash::FxHashSet<String>>>,
@@ -286,7 +286,7 @@ pub struct VerterHost {
     /// Stored pre-evaluation and cloned per query to avoid reparsing the same
     /// script/declaration sources across component-meta requests.
     pub(crate) eval_env_cache: parking_lot::Mutex<
-        rustc_hash::FxHashMap<String, (Hash16, Arc<verter_analysis::type_eval::EvalEnv>)>,
+        rustc_hash::FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
     >,
     /// Cached finalized raw analysis snapshots for disk-backed fallback files.
     /// Cleared whenever the host store-view epoch advances.
@@ -469,7 +469,7 @@ impl VerterHost {
         #[cfg(feature = "scheduler")]
         let analysis = self.scheduler_script_analysis(canonical_id);
         #[cfg(not(feature = "scheduler"))]
-        let analysis: Option<verter_analysis::ScriptAnalysisSnapshot> = {
+        let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
             let files = self.files.read();
             files
                 .get(canonical_id)
@@ -518,7 +518,7 @@ impl VerterHost {
         #[cfg(feature = "scheduler")]
         let analysis = self.scheduler_script_analysis(canonical_id);
         #[cfg(not(feature = "scheduler"))]
-        let analysis: Option<verter_analysis::ScriptAnalysisSnapshot> = {
+        let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
             let files = self.files.read();
             files
                 .get(canonical_id)
@@ -564,7 +564,9 @@ impl VerterHost {
                 #[cfg(feature = "scheduler")]
                 let analysis = self.scheduler_script_analysis(canonical_id);
                 #[cfg(not(feature = "scheduler"))]
-                let analysis: Option<verter_analysis::ScriptAnalysisSnapshot> = {
+                let analysis: Option<
+                    verter_semantic::analysis::ScriptAnalysisSnapshot,
+                > = {
                     let files = self.files.read();
                     files
                         .get(canonical_id)
@@ -590,10 +592,10 @@ impl VerterHost {
                 // Template analysis is in FileAnalysisSnapshot, not ScriptAnalysisSnapshot.
                 // For now, return empty — will be populated when template analysis
                 // is accessible through the scheduler.
-                None::<verter_analysis::TemplateAnalysisSnapshot>
+                None::<verter_semantic::analysis::TemplateAnalysisSnapshot>
             });
             #[cfg(not(feature = "scheduler"))]
-            let template: Option<verter_analysis::TemplateAnalysisSnapshot> = {
+            let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = {
                 let files = self.files.read();
                 files
                     .get(canonical_id)
@@ -924,7 +926,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         profile: Option<u64>,
-    ) -> Option<Vec<verter_analysis::StyleBlockAnalysis>> {
+    ) -> Option<Vec<verter_semantic::analysis::StyleBlockAnalysis>> {
         use crate::host_executor::HostAnalysisData;
 
         let analysis_snap = self.scheduler.try_get_analysis(canonical_id)?;
@@ -1029,8 +1031,8 @@ impl VerterHost {
     pub(crate) fn intrinsic_members_for_tag(
         &self,
         tag: &str,
-    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
-        verter_analysis::html_intrinsics::owned_intrinsic_members_for_tag(tag)
+    ) -> Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember> {
+        verter_semantic::analysis::html_intrinsics::owned_intrinsic_members_for_tag(tag)
     }
 
     /// Release all cached data (files, aliases, dependency graph).
@@ -1100,7 +1102,7 @@ impl VerterHost {
     /// Pass an empty slice to clear the resolver.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
+        projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
         #[cfg(feature = "scheduler")]
@@ -1201,7 +1203,7 @@ impl VerterHost {
     pub fn scheduler_export_signatures(
         &self,
         canonical_id: &str,
-    ) -> Option<Vec<verter_analysis::ExportSignature>> {
+    ) -> Option<Vec<verter_semantic::analysis::ExportSignature>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(data.export_signatures.clone())
@@ -1212,7 +1214,7 @@ impl VerterHost {
     pub fn scheduler_script_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_analysis::ScriptAnalysisSnapshot> {
+    ) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(data.script_analysis.clone())
@@ -1256,7 +1258,7 @@ impl VerterHost {
     pub fn scheduler_style_analyses(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<Vec<verter_analysis::StyleBlockAnalysis>>> {
+    ) -> Option<Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(Arc::clone(&data.style_analyses))
@@ -1448,8 +1450,8 @@ impl VerterHost {
     pub(crate) fn smart_invalidate_dependents(
         &self,
         dependency_id: &str,
-        old_export_signatures: &[verter_analysis::ExportSignature],
-        new_export_signatures: &[verter_analysis::ExportSignature],
+        old_export_signatures: &[verter_semantic::analysis::ExportSignature],
+        new_export_signatures: &[verter_semantic::analysis::ExportSignature],
     ) {
         // Native path: read reverse deps from workspace (authoritative source),
         // then merge with the legacy reverse_dependencies map for backward

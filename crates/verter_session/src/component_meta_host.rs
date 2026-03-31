@@ -11,16 +11,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_analysis::component_meta::{
-    AcceptedSurfaceCompleteness, ComponentMetaAnalysis, FallthroughSurface, RootReachability,
-};
-use verter_analysis::type_expand::{
-    ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape,
-    ExpandedMacroProps, ExpandedObjectShape, ExpandedParameter, ExpandedProperty,
-    ExpansionCompleteness as AnalysisExpansionCompleteness, ExpansionDiagnostic,
-    ExpansionResult as AnalysisExpansionResult, ExpansionStopReason,
-};
-use verter_analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 use verter_resolver::type_expansion::{
     ExpansionCompleteness, TypeExpansionBackend, TypeExpansionError, TypeExpansionRequest,
     TypeExpansionResult,
@@ -33,6 +23,16 @@ use verter_resolver::{
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry,
 };
+use verter_semantic::analysis::component_meta::{
+    AcceptedSurfaceCompleteness, ComponentMetaAnalysis, FallthroughSurface, RootReachability,
+};
+use verter_semantic::analysis::type_expand::{
+    ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape,
+    ExpandedMacroProps, ExpandedObjectShape, ExpandedParameter, ExpandedProperty,
+    ExpansionCompleteness as AnalysisExpansionCompleteness, ExpansionDiagnostic,
+    ExpansionResult as AnalysisExpansionResult, ExpansionStopReason,
+};
+use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
 use crate::host_manage::{component_meta_trace_event, component_meta_trace_scope};
 use crate::VerterHost;
@@ -262,7 +262,7 @@ impl ComponentMetaHost {
     /// Configure project-scoped path aliases.
     pub fn configure_projects(
         &self,
-        configs: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
+        configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) -> Result<(), ComponentMetaHostError> {
         self.check_alive()?;
         self.inner
@@ -367,7 +367,7 @@ impl ComponentMetaSession {
         &self,
         canonical_or_alias: &str,
     ) -> Result<
-        Option<verter_analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
         self.get_component_meta_with_fallthrough(canonical_or_alias, true)
@@ -380,7 +380,7 @@ impl ComponentMetaSession {
         canonical_or_alias: &str,
     ) -> Result<
         Option<(
-            verter_analysis::component_meta::ComponentMetaAnalysis,
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         ComponentMetaHostError,
@@ -472,7 +472,7 @@ impl ComponentMetaSession {
         &self,
         canonical_or_alias: &str,
     ) -> Result<
-        Option<verter_analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
         self.get_component_meta_with_fallthrough(canonical_or_alias, false)
@@ -483,7 +483,7 @@ impl ComponentMetaSession {
         canonical_or_alias: &str,
         include_fallthrough: bool,
     ) -> Result<
-        Option<verter_analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
         let _trace = component_meta_trace_scope!(
@@ -712,7 +712,7 @@ impl verter_resolver::type_expansion_verter::VerterComponentMetaProvider for Com
     fn get_component_meta(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
         self.host().get_component_meta(canonical_id)
     }
 }
@@ -932,7 +932,7 @@ fn build_external_component_types(
 
         if matches!(
             mac.kind,
-            verter_analysis::types::AnalyzedMacroKind::DefineSlots
+            verter_semantic::analysis::types::AnalyzedMacroKind::DefineSlots
         ) {
             collect_external_slot_binding_fields(
                 &mut output,
@@ -1048,13 +1048,13 @@ fn external_expansion_error(error: TypeExpansionError) -> ComponentMetaHostError
 fn apply_type_expansion_result(
     output: &mut ExpandedComponentTypes,
     macro_index: usize,
-    mac: &verter_analysis::types::AnalyzedMacro,
+    mac: &verter_semantic::analysis::types::AnalyzedMacro,
     resolved_macro: Option<&crate::meta_resolve::ResolvedMacroMeta>,
     expansion: TypeExpansionResult,
 ) {
     match mac.kind {
-        verter_analysis::types::AnalyzedMacroKind::DefineProps
-        | verter_analysis::types::AnalyzedMacroKind::WithDefaults => {
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps
+        | verter_semantic::analysis::types::AnalyzedMacroKind::WithDefaults => {
             for member in &expansion.members {
                 output.props.push(ExpandedField {
                     name: member.name.clone(),
@@ -1074,7 +1074,7 @@ fn apply_type_expansion_result(
                 result: expansion_result_to_object_shape(expansion),
             });
         }
-        verter_analysis::types::AnalyzedMacroKind::DefineEmits => {
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineEmits => {
             let emit_fields = merged_emit_fields(mac, resolved_macro);
             if emit_fields.is_empty() {
                 output.define_emits.push(ExpandedMacroObjectShape {
@@ -1129,13 +1129,13 @@ fn apply_type_expansion_result(
                 },
             });
         }
-        verter_analysis::types::AnalyzedMacroKind::DefineSlots => {
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineSlots => {
             output.define_slots.push(ExpandedMacroObjectShape {
                 macro_index,
                 result: expansion_result_to_object_shape(expansion),
             });
         }
-        verter_analysis::types::AnalyzedMacroKind::DefineModel => {
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineModel => {
             let field_name = mac
                 .model_name
                 .clone()
@@ -1160,7 +1160,7 @@ fn apply_type_expansion_result(
             output.emits.push(ExpandedField {
                 name: format!("update:{field_name}"),
                 r#type: TypeExpr::Tuple {
-                    elements: Arc::from(vec![verter_analysis::type_expr::TupleElement {
+                    elements: Arc::from(vec![verter_semantic::analysis::type_expr::TupleElement {
                         label: Some("value".to_string()),
                         ty: field.r#type,
                         optional: false,
@@ -1179,9 +1179,9 @@ fn apply_type_expansion_result(
 }
 
 fn merged_emit_fields(
-    mac: &verter_analysis::types::AnalyzedMacro,
+    mac: &verter_semantic::analysis::types::AnalyzedMacro,
     resolved_macro: Option<&crate::meta_resolve::ResolvedMacroMeta>,
-) -> Vec<verter_analysis::types::AnalyzedEmitField> {
+) -> Vec<verter_semantic::analysis::types::AnalyzedEmitField> {
     let mut fields = mac.emit_fields.clone();
     let mut seen: std::collections::HashSet<String> =
         fields.iter().map(|field| field.name.clone()).collect();
@@ -1196,7 +1196,7 @@ fn merged_emit_fields(
 }
 
 fn expanded_emit_field_from_source(
-    field: &verter_analysis::types::AnalyzedEmitField,
+    field: &verter_semantic::analysis::types::AnalyzedEmitField,
     member: Option<&verter_resolver::type_expansion::ExpandedMember>,
     completeness: AnalysisExpansionCompleteness,
     diagnostics: &[ExpansionDiagnostic],
@@ -1320,7 +1320,7 @@ fn expanded_object_shape_from_type_expansion(
                     }),
                     ObjectMember::IndexSignature(sig) => {
                         shape.index_signatures.push(
-                            verter_analysis::type_expand::ExpandedIndexSignature {
+                            verter_semantic::analysis::type_expand::ExpandedIndexSignature {
                                 key_type: sig.key_type.clone(),
                                 value_type: sig.value_type.clone(),
                                 readonly: sig.readonly,
@@ -1411,18 +1411,18 @@ fn synthetic_expansion_canonical_id(canonical_id: &str, session_id: u64) -> Stri
 
 fn macro_type_argument_span(
     source: &str,
-    mac: &verter_analysis::types::AnalyzedMacro,
+    mac: &verter_semantic::analysis::types::AnalyzedMacro,
 ) -> Option<verter_span::Span> {
     let start = mac.span.start as usize;
     let end = mac.span.end as usize;
     let span_text = source.get(start..end)?;
 
     let macro_name = match mac.kind {
-        verter_analysis::types::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_analysis::types::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_analysis::types::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_analysis::types::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_analysis::types::AnalyzedMacroKind::WithDefaults => "defineProps",
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_semantic::analysis::types::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_semantic::analysis::types::AnalyzedMacroKind::WithDefaults => "defineProps",
         _ => return None,
     };
 
@@ -1531,13 +1531,13 @@ fn extract_component_meta_from_resolved_with_evaluated(
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);
-    let input = verter_analysis::component_meta::ComponentMetaInput {
+    let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
         macros: &resolved.snapshot.macros,
         bindings: &resolved.snapshot.bindings,
         imports: &resolved.snapshot.imports,
         template: resolved.snapshot.template.as_deref(),
         options_api: resolved.snapshot.options_api.as_ref(),
-        analysis_flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(
+        analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
             resolved.snapshot.script_flags,
         ),
         styles: &resolved.snapshot.styles,
@@ -1549,7 +1549,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
         file_path: canonical_id,
     };
 
-    let mut meta = verter_analysis::component_meta::extract_component_meta(input);
+    let mut meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
     if include_fallthrough {
         let mut visiting = rustc_hash::FxHashSet::default();
         if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
@@ -1566,10 +1566,10 @@ fn extract_component_meta_from_resolved_with_evaluated(
         } else {
             meta.accepted_surface_completeness = AcceptedSurfaceCompleteness::LowerBound;
             meta.root_reachability = RootReachability::NoFallthrough {
-                reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
             };
             meta.fallthrough_surface = FallthroughSurface::None {
-                reason: verter_analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
             };
         }
     }
@@ -1631,19 +1631,23 @@ mod tests {
                 slot_binding_requests: parking_lot::Mutex::new(Vec::new()),
                 trace_cursors: parking_lot::Mutex::new(Vec::new()),
                 result: TypeExpansionResult {
-                    type_expr: TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
-                        properties: members
-                            .iter()
-                            .map(|(name, ty, optional)| {
-                                ObjectMember::Property(verter_analysis::type_expr::ObjectProperty {
-                                    name: (*name).to_string(),
-                                    ty: ty.clone(),
-                                    optional: *optional,
-                                    readonly: false,
+                    type_expr: TypeExpr::Object(Arc::new(
+                        verter_semantic::analysis::type_expr::ObjectExpr {
+                            properties: members
+                                .iter()
+                                .map(|(name, ty, optional)| {
+                                    ObjectMember::Property(
+                                        verter_semantic::analysis::type_expr::ObjectProperty {
+                                            name: (*name).to_string(),
+                                            ty: ty.clone(),
+                                            optional: *optional,
+                                            readonly: false,
+                                        },
+                                    )
                                 })
-                            })
-                            .collect(),
-                    })),
+                                .collect(),
+                        },
+                    )),
                     members: members
                         .into_iter()
                         .map(|(name, type_expr, optional)| {
@@ -1668,19 +1672,23 @@ mod tests {
             members: Vec<(&str, TypeExpr, bool)>,
         ) -> Self {
             let result = TypeExpansionResult {
-                type_expr: TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
-                    properties: members
-                        .iter()
-                        .map(|(name, ty, optional)| {
-                            ObjectMember::Property(verter_analysis::type_expr::ObjectProperty {
-                                name: (*name).to_string(),
-                                ty: ty.clone(),
-                                optional: *optional,
-                                readonly: false,
+                type_expr: TypeExpr::Object(Arc::new(
+                    verter_semantic::analysis::type_expr::ObjectExpr {
+                        properties: members
+                            .iter()
+                            .map(|(name, ty, optional)| {
+                                ObjectMember::Property(
+                                    verter_semantic::analysis::type_expr::ObjectProperty {
+                                        name: (*name).to_string(),
+                                        ty: ty.clone(),
+                                        optional: *optional,
+                                        readonly: false,
+                                    },
+                                )
                             })
-                        })
-                        .collect(),
-                })),
+                            .collect(),
+                    },
+                )),
                 members: members
                     .into_iter()
                     .map(|(name, type_expr, optional)| {
@@ -1876,7 +1884,7 @@ mod tests {
         assert!(
             !matches!(
                 declared.fallthrough_surface,
-                verter_analysis::component_meta::FallthroughSurface::Branches { .. }
+                verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
             ),
             "declared-only metadata should skip fallthrough branches, got {:?}",
             declared.fallthrough_surface
@@ -2038,13 +2046,15 @@ defineSlots<{
         let host = ComponentMetaHost::new_standalone(config);
         let fake = Arc::new(FakeTypeExpander::object_with_members(vec![(
             "update:modelValue",
-            TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
+            TypeExpr::Object(Arc::new(verter_semantic::analysis::type_expr::ObjectExpr {
                 properties: vec![ObjectMember::Property(
-                    verter_analysis::type_expr::ObjectProperty {
+                    verter_semantic::analysis::type_expr::ObjectProperty {
                         name: "$props".to_string(),
-                        ty: TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
-                            properties: Vec::new(),
-                        })),
+                        ty: TypeExpr::Object(Arc::new(
+                            verter_semantic::analysis::type_expr::ObjectExpr {
+                                properties: Vec::new(),
+                            },
+                        )),
                         optional: false,
                         readonly: false,
                     },
@@ -2547,8 +2557,8 @@ const props = withDefaults(defineProps<Record<string, Array<Foo<Bar>>>>(), {
         let end = source.find("})").unwrap() as u32 + 2;
         let span = macro_type_argument_span(
             source,
-            &verter_analysis::types::AnalyzedMacro {
-                kind: verter_analysis::types::AnalyzedMacroKind::WithDefaults,
+            &verter_semantic::analysis::types::AnalyzedMacro {
+                kind: verter_semantic::analysis::types::AnalyzedMacroKind::WithDefaults,
                 is_type_based: true,
                 type_references: vec!["Record".to_string()],
                 binding_name: Some("props".to_string()),
@@ -2611,7 +2621,7 @@ import Link from './Link.vue'
         assert!(
             matches!(
                 meta.fallthrough_surface,
-                verter_analysis::component_meta::FallthroughSurface::Branches { .. }
+                verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
             ),
             "captured store views should keep child fallthrough resolution pinned to the resolved snapshot",
         );

@@ -1,7 +1,7 @@
 //! Raw template data extracted during compilation.
 //!
-//! These are core-native types with no dependency on `verter_analysis`.
-//! `verter_session` converts them into `verter_analysis::TemplateAnalysisSnapshot`.
+//! These are core-native types with no dependency on `verter_semantic::analysis`.
+//! `verter_session` converts them into `verter_semantic::analysis::TemplateAnalysisSnapshot`.
 
 use crate::ast::types::{AstNodeKind, ElementNode, TemplateAst};
 use crate::common::Span;
@@ -11,7 +11,7 @@ use crate::types::NodeId;
 use rustc_hash::FxHashMap;
 
 /// Raw template data extracted during compilation.
-/// `verter_session` converts this to `verter_analysis::TemplateAnalysisSnapshot`.
+/// `verter_session` converts this to `verter_semantic::analysis::TemplateAnalysisSnapshot`.
 #[derive(Debug, Default)]
 pub struct RawTemplateData {
     pub components: Vec<RawComponentUsage>,

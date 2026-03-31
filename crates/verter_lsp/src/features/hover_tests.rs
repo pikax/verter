@@ -1,8 +1,8 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::types::ImportBindingKind;
-use verter_analysis::types::VueApiCallSite;
-use verter_analysis::*;
+use verter_semantic::analysis::types::ImportBindingKind;
+use verter_semantic::analysis::types::VueApiCallSite;
+use verter_semantic::analysis::*;
 
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
@@ -316,16 +316,16 @@ fn test_hover_on_component_shows_prop_constness() {
     let analysis = FileAnalysisSnapshot {
         template: Some(
             (TemplateAnalysisSnapshot {
-                components: vec![verter_analysis::template::TemplateComponentUsage {
+                components: vec![verter_semantic::analysis::template::TemplateComponentUsage {
                     name: "MyButton".into(),
                     import_source: Some("./MyButton.vue".into()),
                     is_dynamic: false,
                     props: vec![
-                        verter_analysis::template::TemplatePropUsage {
+                        verter_semantic::analysis::template::TemplatePropUsage {
                             name: "title".into(),
                             is_bound: true,
                             expression: None,
-                            constness: verter_analysis::template::PropValueConstness::Dynamic,
+                            constness: verter_semantic::analysis::template::PropValueConstness::Dynamic,
                             referenced_bindings: vec!["msg".into()],
                             from_spread: false,
                             span: verter_span::Span::new(
@@ -335,11 +335,11 @@ fn test_hover_on_component_shows_prop_constness() {
                             name_span: verter_span::Span::new(0, 0),
                             is_shorthand: false,
                         },
-                        verter_analysis::template::TemplatePropUsage {
+                        verter_semantic::analysis::template::TemplatePropUsage {
                             name: "disabled".into(),
                             is_bound: false,
                             expression: None,
-                            constness: verter_analysis::template::PropValueConstness::Const,
+                            constness: verter_semantic::analysis::template::PropValueConstness::Const,
                             referenced_bindings: vec![],
                             from_spread: false,
                             span: verter_span::Span::new(
@@ -402,19 +402,21 @@ fn test_hover_on_component_with_no_props() {
     let analysis = FileAnalysisSnapshot {
         template: Some(
             (TemplateAnalysisSnapshot {
-                components: vec![verter_analysis::template::TemplateComponentUsage {
-                    name: "Popup".into(),
-                    import_source: Some("./Popup.vue".into()),
-                    is_dynamic: false,
-                    props: vec![], // No props
-                    has_spread: false,
-                    slots_used: vec![],
-                    static_classes: vec![],
-                    has_dynamic_class: false,
-                    dynamic_classes: vec![],
-                    v_models: vec![],
-                    span: verter_span::Span::new(comp_offset as u32, (comp_offset + 10) as u32),
-                }],
+                components: vec![
+                    verter_semantic::analysis::template::TemplateComponentUsage {
+                        name: "Popup".into(),
+                        import_source: Some("./Popup.vue".into()),
+                        is_dynamic: false,
+                        props: vec![], // No props
+                        has_spread: false,
+                        slots_used: vec![],
+                        static_classes: vec![],
+                        has_dynamic_class: false,
+                        dynamic_classes: vec![],
+                        v_models: vec![],
+                        span: verter_span::Span::new(comp_offset as u32, (comp_offset + 10) as u32),
+                    },
+                ],
                 elements: vec![],
                 ..Default::default()
             })
@@ -459,9 +461,9 @@ fn test_hover_on_element_shows_css_rules() {
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
 
-    let style = verter_analysis::style::build_css_style_analysis(
+    let style = verter_semantic::analysis::style::build_css_style_analysis(
         css_content,
-        verter_analysis::style::VueStyleInput {
+        verter_semantic::analysis::style::VueStyleInput {
             v_binds: vec![],
             special_pseudos: vec![],
         },
@@ -732,29 +734,35 @@ fn test_hover_on_component_attr_does_not_show_constness() {
     let analysis = FileAnalysisSnapshot {
         template: Some(
             (TemplateAnalysisSnapshot {
-                components: vec![verter_analysis::template::TemplateComponentUsage {
-                    name: "Popup".into(),
-                    import_source: Some("./Popup.vue".into()),
-                    is_dynamic: false,
-                    props: vec![verter_analysis::template::TemplatePropUsage {
-                        name: "icon".into(),
-                        is_bound: true,
-                        expression: None,
-                        constness: verter_analysis::template::PropValueConstness::Dynamic,
-                        referenced_bindings: vec!["x".into()],
-                        from_spread: false,
-                        span: verter_span::Span::new(icon_offset as u32, (icon_offset + 10) as u32),
-                        name_span: verter_span::Span::new(0, 0),
-                        is_shorthand: false,
-                    }],
-                    has_spread: false,
-                    slots_used: vec![],
-                    static_classes: vec![],
-                    has_dynamic_class: false,
-                    dynamic_classes: vec![],
-                    v_models: vec![],
-                    span: verter_span::Span::new(comp_offset as u32, (comp_offset + 30) as u32),
-                }],
+                components: vec![
+                    verter_semantic::analysis::template::TemplateComponentUsage {
+                        name: "Popup".into(),
+                        import_source: Some("./Popup.vue".into()),
+                        is_dynamic: false,
+                        props: vec![verter_semantic::analysis::template::TemplatePropUsage {
+                            name: "icon".into(),
+                            is_bound: true,
+                            expression: None,
+                            constness:
+                                verter_semantic::analysis::template::PropValueConstness::Dynamic,
+                            referenced_bindings: vec!["x".into()],
+                            from_spread: false,
+                            span: verter_span::Span::new(
+                                icon_offset as u32,
+                                (icon_offset + 10) as u32,
+                            ),
+                            name_span: verter_span::Span::new(0, 0),
+                            is_shorthand: false,
+                        }],
+                        has_spread: false,
+                        slots_used: vec![],
+                        static_classes: vec![],
+                        has_dynamic_class: false,
+                        dynamic_classes: vec![],
+                        v_models: vec![],
+                        span: verter_span::Span::new(comp_offset as u32, (comp_offset + 30) as u32),
+                    },
+                ],
                 elements: vec![],
                 ..Default::default()
             })
@@ -793,9 +801,9 @@ fn test_hover_on_div_class_attr_does_not_show_css() {
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
 
-    let style = verter_analysis::style::build_css_style_analysis(
+    let style = verter_semantic::analysis::style::build_css_style_analysis(
         css_content,
-        verter_analysis::style::VueStyleInput {
+        verter_semantic::analysis::style::VueStyleInput {
             v_binds: vec![],
             special_pseudos: vec![],
         },

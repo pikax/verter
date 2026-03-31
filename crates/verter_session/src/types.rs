@@ -58,7 +58,7 @@ pub enum CompileErrorPolicy {
 
 /// Controls how much static analysis is performed during upsert().
 ///
-/// **Deprecated**: Prefer [`AnalysisScope`](verter_analysis::AnalysisScope) bitflags
+/// **Deprecated**: Prefer [`AnalysisScope`](verter_semantic::analysis::AnalysisScope) bitflags
 /// for fine-grained control. This enum is retained for FFI backwards compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisLevel {
@@ -77,11 +77,11 @@ pub enum AnalysisLevel {
 
 impl AnalysisLevel {
     /// Convert this legacy level to the equivalent [`AnalysisScope`] flags.
-    pub fn to_scope(self) -> verter_analysis::AnalysisScope {
+    pub fn to_scope(self) -> verter_semantic::analysis::AnalysisScope {
         match self {
-            Self::Full => verter_analysis::AnalysisScope::LSP,
-            Self::Essential => verter_analysis::AnalysisScope::ESSENTIAL,
-            Self::None => verter_analysis::AnalysisScope::NONE,
+            Self::Full => verter_semantic::analysis::AnalysisScope::LSP,
+            Self::Essential => verter_semantic::analysis::AnalysisScope::ESSENTIAL,
+            Self::None => verter_semantic::analysis::AnalysisScope::NONE,
         }
     }
 }
@@ -121,14 +121,14 @@ pub struct HostConfig {
     /// falls back to `analysis_level.to_scope()`.
     ///
     /// Use preset constants for common configurations:
-    /// - [`AnalysisScope::BUILD`](verter_analysis::AnalysisScope::BUILD) — minimal for compilation
-    /// - [`AnalysisScope::LSP`](verter_analysis::AnalysisScope::LSP) — full for IDE features
-    /// - [`AnalysisScope::LINTER`](verter_analysis::AnalysisScope::LINTER) — for lint rules
+    /// - [`AnalysisScope::BUILD`](verter_semantic::analysis::AnalysisScope::BUILD) — minimal for compilation
+    /// - [`AnalysisScope::LSP`](verter_semantic::analysis::AnalysisScope::LSP) — full for IDE features
+    /// - [`AnalysisScope::LINTER`](verter_semantic::analysis::AnalysisScope::LINTER) — for lint rules
     ///
     /// **Migration**: Prefer [`QueryProfile`](verter_semantic::profile::QueryProfile) via
     /// [`from_query_profile()`](Self::from_query_profile) which sets both this and the
     /// session-level query profile automatically.
-    pub analysis_scope: Option<verter_analysis::AnalysisScope>,
+    pub analysis_scope: Option<verter_semantic::analysis::AnalysisScope>,
     /// Enable shared Rust-side generic root propagation for fallthrough resolution.
     ///
     /// When enabled, the host may specialize child root targets from
@@ -145,7 +145,7 @@ impl HostConfig {
     /// This is the preferred migration path from AnalysisScope to QueryProfile.
     pub fn from_query_profile(profile: verter_semantic::profile::QueryProfile) -> Self {
         let scope_bits = profile.recommended_analysis_scope_bits();
-        let scope = verter_analysis::AnalysisScope::from_bits_truncate(scope_bits);
+        let scope = verter_semantic::analysis::AnalysisScope::from_bits_truncate(scope_bits);
         Self {
             analysis_scope: Some(scope),
             ..Default::default()
@@ -184,7 +184,7 @@ impl Default for HostConfig {
 impl HostConfig {
     /// Returns the effective analysis scope, preferring `analysis_scope`
     /// over the legacy `analysis_level` field.
-    pub fn effective_scope(&self) -> verter_analysis::AnalysisScope {
+    pub fn effective_scope(&self) -> verter_semantic::analysis::AnalysisScope {
         self.analysis_scope
             .unwrap_or_else(|| self.analysis_level.to_scope())
     }
@@ -380,9 +380,9 @@ pub struct ScriptImportInfo {
 #[derive(Debug, Clone)]
 pub struct ScriptModuleReference {
     /// Syntax form that introduced the reference.
-    pub syntax: verter_analysis::ModuleReferenceSyntax,
+    pub syntax: verter_semantic::analysis::ModuleReferenceSyntax,
     /// Import vs require semantics.
-    pub semantics: verter_analysis::ModuleReferenceSemantics,
+    pub semantics: verter_semantic::analysis::ModuleReferenceSemantics,
     /// Whether the site is declaration-level type-only.
     pub is_type_only: bool,
     /// Raw source text for the specifier expression.
@@ -394,7 +394,7 @@ pub struct ScriptModuleReference {
     /// Static prefix for dynamic expressions, if any.
     pub static_prefix: Option<String>,
     /// Static analyzability classification.
-    pub analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    pub analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
     /// Span of the containing statement or call expression.
     pub span: verter_span::Span,
     /// Span of the specifier expression.
@@ -443,7 +443,7 @@ pub struct HostUpdateResult {
     pub preprocessor_requests: Vec<PreprocessorRequest>,
     /// Export signatures extracted from the file's script block.
     /// For `.ts`/`.js` files these include re-export metadata for barrel file resolution.
-    pub export_signatures: Vec<verter_analysis::ExportSignature>,
+    pub export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
     /// Time spent in the parse phase (ms).
     pub parse_duration_ms: f64,
 }
@@ -492,53 +492,54 @@ impl HostUpdateResult {
 pub struct FileAnalysisSnapshot {
     /// Import statements found in script blocks.
     /// Owned because `resolve_snapshot_imports` mutates `resolved_canonical_id`.
-    pub imports: Vec<verter_analysis::AnalyzedImport>,
+    pub imports: Vec<verter_semantic::analysis::AnalyzedImport>,
     /// Module reference sites found in script blocks.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub module_references: Arc<Vec<verter_analysis::AnalyzedModuleReference>>,
+    pub module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
     /// Variable/function bindings declared in script blocks.
     /// Owned because `enrich_destructured_bindings` mutates `reactivity_kind`.
-    pub bindings: Vec<verter_analysis::AnalyzedBinding>,
+    pub bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
     /// Vue compiler macros used (defineProps, defineEmits, etc.).
-    pub macros: Arc<Vec<verter_analysis::AnalyzedMacro>>,
+    pub macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
     /// Type dependencies from macros that reference external files.
-    pub macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
-    /// Bitflags representing script characteristics (see `verter_analysis::ScriptFlags`).
+    pub macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
+    /// Bitflags representing script characteristics (see `verter_semantic::analysis::ScriptFlags`).
     pub script_flags: u32,
     /// Per-style-block analysis (scoped, modules, v-bind usage).
-    pub styles: Arc<Vec<verter_analysis::StyleBlockAnalysis>>,
+    pub styles: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
     /// Template analysis (components, bindings, slots, refs, events).
     /// Present after compilation when template analysis scope flags are active.
-    pub template: Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>>,
+    pub template: Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
     /// Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub vue_api_calls: Arc<Vec<verter_analysis::types::VueApiCallSite>>,
+    pub vue_api_calls: Arc<Vec<verter_semantic::analysis::types::VueApiCallSite>>,
     /// DOM query call sites (querySelector, getElementById, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub dom_query_calls: Arc<Vec<verter_analysis::types::DomQueryCallSite>>,
+    pub dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
 
     /// CSS variable manipulations via DOM style APIs.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub css_var_manipulations: Arc<Vec<verter_analysis::types::CssVarManipulation>>,
+    pub css_var_manipulations: Arc<Vec<verter_semantic::analysis::types::CssVarManipulation>>,
 
     /// Script-side binding usage occurrences with exact spans.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub script_binding_occurrences: Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
+    pub script_binding_occurrences:
+        Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
 
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub export_signatures: Arc<Vec<verter_analysis::ExportSignature>>,
+    pub export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,
 
     /// Options API analysis (`export default { ... }` or `export default defineComponent({ ... })`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options_api: Option<verter_analysis::AnalyzedOptionsApi>,
+    pub options_api: Option<verter_semantic::analysis::AnalyzedOptionsApi>,
 
     /// Store usage sites (Pinia, Vuex, convention-based composables).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub store_usages: Arc<Vec<verter_analysis::types::StoreUsage>>,
+    pub store_usages: Arc<Vec<verter_semantic::analysis::types::StoreUsage>>,
     /// Store definitions (defineStore, createStore, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub store_definitions: Arc<Vec<verter_analysis::types::StoreDefinition>>,
+    pub store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
 
     /// Whether the script block uses TypeScript (`lang="ts"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -551,7 +552,7 @@ pub struct CompileBlockersSnapshot {
     /// External `src="..."` blocks referenced by the SFC.
     pub external_source_requests: Vec<ExternalSourceRequest>,
     /// Macro type dependencies referenced from the SFC script.
-    pub macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
+    pub macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
 }
 
 /// A fully resolved export after following re-export chains.
@@ -890,9 +891,9 @@ pub(crate) struct ParseSnapshot {
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
-    pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
-    pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
-    pub(crate) style_analyses: Vec<verter_analysis::StyleBlockAnalysis>,
+    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
+    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub(crate) style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
 }
@@ -993,7 +994,8 @@ pub(crate) struct CompileSlot {
     /// Stored per-slot for future per-profile access; the latest is also
     /// copied to `FileEntry::template_analysis` for the public API.
     #[allow(dead_code)]
-    pub(crate) template_analysis: Option<verter_analysis::template::TemplateAnalysisSnapshot>,
+    pub(crate) template_analysis:
+        Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,
@@ -1009,16 +1011,16 @@ pub(crate) struct CompileInput {
     /// Content overrides for preprocessed template/script blocks.
     pub(crate) content_override_layer: Option<ContentOverrideLayer>,
     /// Macro type dependencies for cross-file type resolution.
-    pub(crate) macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
+    pub(crate) macro_type_deps: Vec<verter_semantic::analysis::MacroTypeDep>,
     /// Import declarations from the SFC script analysis.
     /// Used to attach precise spans to unresolved compile blockers.
-    pub(crate) script_imports: Vec<verter_analysis::AnalyzedImport>,
+    pub(crate) script_imports: Vec<verter_semantic::analysis::AnalyzedImport>,
     /// Macro calls from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
-    pub(crate) script_macros: Vec<verter_analysis::AnalyzedMacro>,
+    pub(crate) script_macros: Vec<verter_semantic::analysis::AnalyzedMacro>,
     /// Local/exported bindings from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
-    pub(crate) script_bindings: Vec<verter_analysis::AnalyzedBinding>,
+    pub(crate) script_bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
     pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     /// Binding names referenced in style `v-bind()` expressions.
@@ -1035,22 +1037,23 @@ pub(crate) struct CompileInput {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScriptAnalysisArcs {
-    pub(crate) module_references: Arc<Vec<verter_analysis::AnalyzedModuleReference>>,
-    pub(crate) macros: Arc<Vec<verter_analysis::AnalyzedMacro>>,
-    pub(crate) macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
-    pub(crate) vue_api_calls: Arc<Vec<verter_analysis::types::VueApiCallSite>>,
-    pub(crate) dom_query_calls: Arc<Vec<verter_analysis::types::DomQueryCallSite>>,
-    pub(crate) css_var_manipulations: Arc<Vec<verter_analysis::types::CssVarManipulation>>,
+    pub(crate) module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
+    pub(crate) macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
+    pub(crate) macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
+    pub(crate) vue_api_calls: Arc<Vec<verter_semantic::analysis::types::VueApiCallSite>>,
+    pub(crate) dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
+    pub(crate) css_var_manipulations:
+        Arc<Vec<verter_semantic::analysis::types::CssVarManipulation>>,
     pub(crate) script_binding_occurrences:
-        Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
-    pub(crate) store_usages: Arc<Vec<verter_analysis::types::StoreUsage>>,
-    pub(crate) store_definitions: Arc<Vec<verter_analysis::types::StoreDefinition>>,
+        Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
+    pub(crate) store_usages: Arc<Vec<verter_semantic::analysis::types::StoreUsage>>,
+    pub(crate) store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
 }
 
 #[cfg(not(feature = "scheduler"))]
 impl ScriptAnalysisArcs {
     /// Build Arc-wrapped caches from a script analysis snapshot.
-    pub(crate) fn from_analysis(sa: &verter_analysis::ScriptAnalysisSnapshot) -> Self {
+    pub(crate) fn from_analysis(sa: &verter_semantic::analysis::ScriptAnalysisSnapshot) -> Self {
         Self {
             module_references: Arc::new(sa.module_references.clone()),
             macros: Arc::new(sa.macros.clone()),
@@ -1165,12 +1168,13 @@ pub(crate) struct FileEntry {
 
     // ── Analysis snapshots ────────────────────────────────────────────
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
-    pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
-    pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
-    pub(crate) style_analyses: Arc<Vec<verter_analysis::StyleBlockAnalysis>>,
+    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
+    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
     /// Template analysis from the most recent compilation. Populated when
     /// the analysis scope includes template flags and the file has a template.
-    pub(crate) template_analysis: Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>>,
+    pub(crate) template_analysis:
+        Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
     /// Cached Arc-wrapped script analysis fields for cheap snapshot cloning.
     /// Built once during upsert, shared across all `get_analysis()` calls.
     pub(crate) arc_script_cache: ScriptAnalysisArcs,
@@ -1277,7 +1281,7 @@ pub(crate) struct CompileCacheEntry {
     /// an external <template src>/<script src> dep only triggers smart_invalidate_dependents
     /// (which clears compile_slots), not raw_template_analysis.
     pub(crate) raw_template_analysis:
-        Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>>,
+        Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
 
     // ── DependencyState: resolution metadata + invalidation hashes ──
     pub(crate) dependency_resolutions: FxHashMap<String, DependencyResolution>,
@@ -1324,7 +1328,7 @@ pub(crate) struct CompileCacheEntry {
 pub(crate) struct EffectiveFileState {
     pub(crate) source: std::sync::Arc<str>,
     pub(crate) meta: FileMeta,
-    pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
+    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
     pub(crate) cached_parse: Option<std::sync::Arc<verter_compiler::parser::types::ParsedSfc>>,
     pub(crate) whole_hash: Hash16,
 }
@@ -1353,7 +1357,7 @@ pub(crate) struct ContentOverrideWithParse {
 pub(crate) struct StyleOverrideWithAnalysis {
     pub(crate) layer: StyleOverrideLayer,
     /// Per-index: Some(remapped CSS analysis) for overridden blocks, None for raw.
-    pub(crate) analyses: Vec<Option<verter_analysis::StyleBlockAnalysis>>,
+    pub(crate) analyses: Vec<Option<verter_semantic::analysis::StyleBlockAnalysis>>,
     /// Per-index: Some("css") for overridden blocks, None for raw.
     pub(crate) lang_overrides: Vec<Option<String>>,
     pub(crate) hash: u64,
@@ -1859,13 +1863,14 @@ impl MetaProvenance {
 #[derive(Debug, Clone)]
 pub struct FallthroughResolution {
     /// Accepted props: declared props + inherited attrs.
-    pub accepted_props: Vec<verter_analysis::component_meta::AcceptedPropAnalysis>,
+    pub accepted_props: Vec<verter_semantic::analysis::component_meta::AcceptedPropAnalysis>,
     /// Accepted events: declared emits + inherited listeners.
-    pub accepted_events: Vec<verter_analysis::component_meta::AcceptedEventAnalysis>,
+    pub accepted_events: Vec<verter_semantic::analysis::component_meta::AcceptedEventAnalysis>,
     /// Whether the accepted surface is exact or a lower bound.
-    pub accepted_surface_completeness: verter_analysis::component_meta::AcceptedSurfaceCompleteness,
+    pub accepted_surface_completeness:
+        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness,
     /// Branch-structured inherited surface.
-    pub fallthrough_surface: verter_analysis::component_meta::FallthroughSurface,
+    pub fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface,
     /// Semantic fact versions consumed while producing this resolution.
     pub fact_versions: Vec<verter_resolver::FactVersionRef>,
 }

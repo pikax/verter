@@ -1,5 +1,5 @@
 use rustc_hash::FxHashSet;
-use verter_analysis::ExportSignature;
+use verter_semantic::analysis::ExportSignature;
 use verter_span::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,7 +412,7 @@ mod tests {
     };
     use rustc_hash::FxHashMap;
     use std::cell::RefCell;
-    use verter_analysis::{ExportSignature, Hash16};
+    use verter_semantic::analysis::{ExportSignature, Hash16};
     use verter_span::Span;
 
     #[derive(Default)]

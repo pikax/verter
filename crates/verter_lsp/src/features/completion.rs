@@ -918,12 +918,12 @@ fn template_completions(
 
         // Add reactivity indicator
         let reactivity_tag = match binding.reactivity_kind {
-            verter_analysis::ReactivityKind::Ref => Some("ref"),
-            verter_analysis::ReactivityKind::Computed => Some("computed"),
-            verter_analysis::ReactivityKind::Reactive => Some("reactive"),
-            verter_analysis::ReactivityKind::MaybeRef => Some("maybe-ref"),
-            verter_analysis::ReactivityKind::Mutable => Some("mutable"),
-            verter_analysis::ReactivityKind::None => {
+            verter_semantic::analysis::ReactivityKind::Ref => Some("ref"),
+            verter_semantic::analysis::ReactivityKind::Computed => Some("computed"),
+            verter_semantic::analysis::ReactivityKind::Reactive => Some("reactive"),
+            verter_semantic::analysis::ReactivityKind::MaybeRef => Some("maybe-ref"),
+            verter_semantic::analysis::ReactivityKind::Mutable => Some("mutable"),
+            verter_semantic::analysis::ReactivityKind::None => {
                 if binding.is_reactive {
                     Some("reactive")
                 } else {
@@ -1055,26 +1055,29 @@ fn extract_vfor_variable_names(pattern: &str) -> Vec<&str> {
     }
 }
 
-fn binding_completion_kind(kind: &verter_analysis::AnalyzedBindingKind) -> CompletionItemKind {
+fn binding_completion_kind(
+    kind: &verter_semantic::analysis::AnalyzedBindingKind,
+) -> CompletionItemKind {
     match kind {
-        verter_analysis::AnalyzedBindingKind::Const => CompletionItemKind::VARIABLE,
-        verter_analysis::AnalyzedBindingKind::Let | verter_analysis::AnalyzedBindingKind::Var => {
-            CompletionItemKind::VARIABLE
+        verter_semantic::analysis::AnalyzedBindingKind::Const => CompletionItemKind::VARIABLE,
+        verter_semantic::analysis::AnalyzedBindingKind::Let
+        | verter_semantic::analysis::AnalyzedBindingKind::Var => CompletionItemKind::VARIABLE,
+        verter_semantic::analysis::AnalyzedBindingKind::Function
+        | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+            CompletionItemKind::FUNCTION
         }
-        verter_analysis::AnalyzedBindingKind::Function
-        | verter_analysis::AnalyzedBindingKind::AsyncFunction => CompletionItemKind::FUNCTION,
-        verter_analysis::AnalyzedBindingKind::Class => CompletionItemKind::CLASS,
+        verter_semantic::analysis::AnalyzedBindingKind::Class => CompletionItemKind::CLASS,
     }
 }
 
-fn binding_detail(binding: &verter_analysis::AnalyzedBinding) -> String {
+fn binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) -> String {
     let kind = match binding.kind {
-        verter_analysis::AnalyzedBindingKind::Const => "const",
-        verter_analysis::AnalyzedBindingKind::Let => "let",
-        verter_analysis::AnalyzedBindingKind::Var => "var",
-        verter_analysis::AnalyzedBindingKind::Function => "function",
-        verter_analysis::AnalyzedBindingKind::AsyncFunction => "async function",
-        verter_analysis::AnalyzedBindingKind::Class => "class",
+        verter_semantic::analysis::AnalyzedBindingKind::Const => "const",
+        verter_semantic::analysis::AnalyzedBindingKind::Let => "let",
+        verter_semantic::analysis::AnalyzedBindingKind::Var => "var",
+        verter_semantic::analysis::AnalyzedBindingKind::Function => "function",
+        verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => "async function",
+        verter_semantic::analysis::AnalyzedBindingKind::Class => "class",
     };
     kind.to_string()
 }
@@ -1278,7 +1281,7 @@ fn component_prop_completions(
     } else {
         // Fall back to macro prop_fields
         for m in child_analysis.macros.iter() {
-            if m.kind == verter_analysis::AnalyzedMacroKind::DefineProps {
+            if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps {
                 for field in &m.prop_fields {
                     let label = to_kebab_case(&field.name);
                     if used_props.contains(field.name.as_str())
@@ -1323,7 +1326,7 @@ fn component_prop_completions(
     } else {
         // Fall back to macro emit_fields
         for m in child_analysis.macros.iter() {
-            if m.kind == verter_analysis::AnalyzedMacroKind::DefineEmits {
+            if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits {
                 for field in &m.emit_fields {
                     let label = format!("@{}", to_kebab_case(&field.name));
                     let insert_text = Some(format!("@{}=\"$1\"", to_kebab_case(&field.name)));
@@ -1356,7 +1359,7 @@ fn component_prop_completions(
 fn find_component_at_cursor(
     offset: usize,
     source: &str,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<String> {
     let bytes = source.as_bytes();
 
@@ -1475,15 +1478,15 @@ fn is_internal_dunder(label: &str) -> bool {
     )
 }
 
-fn macro_kind_label(kind: &verter_analysis::AnalyzedMacroKind) -> &'static str {
+fn macro_kind_label(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {
     match kind {
-        verter_analysis::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_analysis::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
-        verter_analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
-        verter_analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
     }
 }
 

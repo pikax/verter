@@ -25,7 +25,7 @@ fn prop_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
     state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .flat_map(|m| m.props.iter())
         .map(|p| p.name.clone())
         .collect()
@@ -35,7 +35,7 @@ fn emit_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
     state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineEmits)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
         .flat_map(|m| m.emits.iter())
         .map(|e| e.name.clone())
         .collect()
@@ -45,7 +45,7 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
     state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
         .flat_map(|m| m.slots.iter())
         .map(|s| s.name.clone())
         .collect()
@@ -54,7 +54,7 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
 fn resolved_imported_alias_body(
     host: &VerterHost,
     alias: &verter_resolver::ImportedTypeAlias,
-) -> verter_analysis::type_expr::TypeExpr {
+) -> verter_semantic::analysis::type_expr::TypeExpr {
     let view = host.resolver_store_view();
     host.resolve_shallow_symbol_dependency_alias_in_view(
         alias.merge_root_canonical.as_str(),
@@ -127,7 +127,7 @@ defineProps<{ bar: number }>()
         .snapshot
         .macros
         .iter()
-        .filter(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .flat_map(|m| m.prop_fields.iter())
         .map(|prop| prop.name.clone())
         .collect();
@@ -179,7 +179,7 @@ export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAu
         Arc::new(ws),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/project".to_string(),
             "/project".to_string(),
             Some("/project/tsconfig.json".to_string()),
@@ -274,7 +274,7 @@ export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAu
         Arc::new(ws),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/project".to_string(),
             "/project".to_string(),
             Some("/project/tsconfig.json".to_string()),
@@ -1043,7 +1043,7 @@ defineProps<Props>()
     let dp = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .expect("should have DefineProps macro");
     assert!(
         dp.prop_fields.is_empty(),
@@ -1084,13 +1084,13 @@ defineProps<Props>()
     let single_dp = single
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .unwrap();
     let batch_dp = batch[0]
         .1
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .unwrap();
 
     assert_eq!(
@@ -1759,7 +1759,7 @@ export interface Props { a: string }
     .expect("typed JSDoc payload should resolve through cached imported lookup");
 
     assert!(
-        matches!(resolved, verter_analysis::type_expr::TypeExpr::Object(_)),
+        matches!(resolved, verter_semantic::analysis::type_expr::TypeExpr::Object(_)),
         "typed JSDoc should resolve the imported symbol through the cached eval env, got {resolved:?}",
     );
     assert!(
@@ -3545,7 +3545,7 @@ const emitB = defineEmits<Events>()
     let emit_macros: Vec<_> = state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineEmits)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
         .collect();
 
     assert_eq!(
@@ -3648,7 +3648,7 @@ fn package_declaration_entrypoints_materialize_imported_props() {
         Arc::new(ws),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/project".to_string(),
             "/project".to_string(),
             Some("/project/tsconfig.json".to_string()),
@@ -3710,7 +3710,7 @@ fn package_declaration_entrypoints_materialize_alias_reexports() {
         Arc::new(ws),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/project".to_string(),
             "/project".to_string(),
             Some("/project/tsconfig.json".to_string()),

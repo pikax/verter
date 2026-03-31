@@ -122,7 +122,7 @@ pub struct ProjectResolver {
 /// Backward-compatible type alias for [`ProjectResolver`].
 ///
 /// Kept for downstream crates that reference the original name from
-/// the verter_analysis era.
+/// the verter_semantic::analysis era.
 pub type NativeProjectResolver = ProjectResolver;
 
 impl ProjectResolver {
@@ -1621,7 +1621,7 @@ pub fn is_absolute_specifier(specifier: &str) -> bool {
         || specifier.as_bytes().get(1) == Some(&b':')
 }
 
-// ── Known-file helpers (used by verter_analysis for module reference resolution) ──
+// ── Known-file helpers (used by verter_semantic::analysis for module reference resolution) ──
 
 pub fn build_known_file_index(known_ids: &[String]) -> HashMap<String, String> {
     let mut index = HashMap::new();

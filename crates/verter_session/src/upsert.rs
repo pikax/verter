@@ -125,11 +125,11 @@ fn compute_upsert_changes_core(
 pub(crate) struct UpsertResultData {
     pub(crate) new_meta: FileMeta,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
-    pub(crate) imports: Vec<verter_analysis::AnalyzedImport>,
-    pub(crate) module_references: Vec<verter_analysis::AnalyzedModuleReference>,
+    pub(crate) imports: Vec<verter_semantic::analysis::AnalyzedImport>,
+    pub(crate) module_references: Vec<verter_semantic::analysis::AnalyzedModuleReference>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
-    pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
+    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
 }
 
 /// Render bundler and LSP IDs for a list of virtual nodes.
@@ -229,8 +229,8 @@ pub(crate) fn build_upsert_result(
 /// Compute which export names changed between old and new export signatures.
 /// Returns the set of export names whose declaration hashes differ.
 pub(crate) fn compute_changed_exports(
-    old: &[verter_analysis::ExportSignature],
-    new: &[verter_analysis::ExportSignature],
+    old: &[verter_semantic::analysis::ExportSignature],
+    new: &[verter_semantic::analysis::ExportSignature],
 ) -> BTreeSet<String> {
     if old.is_empty() && new.is_empty() {
         return BTreeSet::new();

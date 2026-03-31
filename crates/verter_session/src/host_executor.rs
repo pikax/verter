@@ -52,22 +52,23 @@ impl SnapshotData for HostSourceData {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields read in Phase 2A get_analysis migration
 pub struct AnalysisArcs {
-    pub(crate) module_references: Arc<Vec<verter_analysis::AnalyzedModuleReference>>,
-    pub(crate) macros: Arc<Vec<verter_analysis::AnalyzedMacro>>,
-    pub(crate) macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
-    pub(crate) vue_api_calls: Arc<Vec<verter_analysis::types::VueApiCallSite>>,
-    pub(crate) dom_query_calls: Arc<Vec<verter_analysis::types::DomQueryCallSite>>,
-    pub(crate) css_var_manipulations: Arc<Vec<verter_analysis::types::CssVarManipulation>>,
+    pub(crate) module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
+    pub(crate) macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
+    pub(crate) macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
+    pub(crate) vue_api_calls: Arc<Vec<verter_semantic::analysis::types::VueApiCallSite>>,
+    pub(crate) dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
+    pub(crate) css_var_manipulations:
+        Arc<Vec<verter_semantic::analysis::types::CssVarManipulation>>,
     pub(crate) script_binding_occurrences:
-        Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
-    pub(crate) store_usages: Arc<Vec<verter_analysis::types::StoreUsage>>,
-    pub(crate) store_definitions: Arc<Vec<verter_analysis::types::StoreDefinition>>,
+        Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
+    pub(crate) store_usages: Arc<Vec<verter_semantic::analysis::types::StoreUsage>>,
+    pub(crate) store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
 }
 
 #[cfg(feature = "scheduler")]
 impl AnalysisArcs {
     /// Build Arc-wrapped caches from a script analysis snapshot.
-    pub(crate) fn from_analysis(sa: &verter_analysis::ScriptAnalysisSnapshot) -> Self {
+    pub(crate) fn from_analysis(sa: &verter_semantic::analysis::ScriptAnalysisSnapshot) -> Self {
         Self {
             module_references: Arc::new(sa.module_references.clone()),
             macros: Arc::new(sa.macros.clone()),
@@ -90,9 +91,9 @@ impl AnalysisArcs {
 #[derive(Debug)]
 #[allow(dead_code)] // arcs field read in Phase 2A get_analysis migration
 pub struct HostAnalysisData {
-    pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
-    pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
-    pub(crate) style_analyses: Arc<Vec<verter_analysis::StyleBlockAnalysis>>,
+    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
+    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
     pub(crate) arcs: AnalysisArcs,
 }
 

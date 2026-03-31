@@ -29,9 +29,11 @@ pub fn prepare_call_hierarchy(
             let start = line_index.offset_to_position(binding.span.start)?;
             let end = line_index.offset_to_position(binding.span.end)?;
             let kind = match &binding.kind {
-                verter_analysis::AnalyzedBindingKind::Function
-                | verter_analysis::AnalyzedBindingKind::AsyncFunction => SymbolKind::FUNCTION,
-                verter_analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
+                verter_semantic::analysis::AnalyzedBindingKind::Function
+                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                    SymbolKind::FUNCTION
+                }
+                verter_semantic::analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
                 _ => SymbolKind::VARIABLE,
             };
 
@@ -218,7 +220,7 @@ pub fn outgoing_calls(
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::*;
+    use verter_semantic::analysis::*;
 
     #[test]
     fn test_prepare_on_binding() {

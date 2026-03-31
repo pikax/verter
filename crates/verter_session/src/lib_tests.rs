@@ -16,7 +16,7 @@ use super::upsert::{
     UpsertResultData,
 };
 use super::*;
-use verter_analysis::AnalysisScope;
+use verter_semantic::analysis::AnalysisScope;
 use verter_workspace::WorkspaceAccess;
 
 fn profile_dev() -> CompileProfile {
@@ -103,7 +103,7 @@ fn file_entry_from_snapshot(canonical_id: &str, src: &str, snap: &ParseSnapshot)
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
         export_signatures: Vec::new(),
         style_analyses: Arc::new(Vec::new()),
         template_analysis: None,
@@ -149,7 +149,7 @@ fn analysis_level_essential_runs_script_not_style() {
             !hd.parse.script_analysis.imports.is_empty(),
             "script analysis should be populated at AnalysisLevel::Essential"
         );
-        let empty_styles: Vec<verter_analysis::StyleBlockAnalysis> = Vec::new();
+        let empty_styles: Vec<verter_semantic::analysis::StyleBlockAnalysis> = Vec::new();
         let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
         let style_analyses = analysis_snap
             .as_ref()
@@ -200,7 +200,7 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
             hd.parse.script_analysis.imports.is_empty(),
             "script analysis should not be populated at AnalysisLevel::None"
         );
-        let empty_styles: Vec<verter_analysis::StyleBlockAnalysis> = Vec::new();
+        let empty_styles: Vec<verter_semantic::analysis::StyleBlockAnalysis> = Vec::new();
         let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
         let style_analyses = analysis_snap
             .as_ref()
@@ -332,7 +332,7 @@ fn canonicalize_id_handles_edge_cases() {
 #[test]
 fn compute_changed_exports_added() {
     let old = vec![];
-    let new = vec![verter_analysis::ExportSignature {
+    let new = vec![verter_semantic::analysis::ExportSignature {
         name: "MyType".to_string(),
         declaration_hash: [1; 16],
         is_type: true,
@@ -355,7 +355,7 @@ fn compute_changed_exports_both_empty() {
 /// @ai-generated - compute_changed_exports: hash changed detected
 #[test]
 fn compute_changed_exports_hash_changed() {
-    let old = vec![verter_analysis::ExportSignature {
+    let old = vec![verter_semantic::analysis::ExportSignature {
         name: "MyType".to_string(),
         declaration_hash: [1; 16],
         is_type: true,
@@ -364,7 +364,7 @@ fn compute_changed_exports_hash_changed() {
         reexport_local: None,
         local_span: None,
     }];
-    let new = vec![verter_analysis::ExportSignature {
+    let new = vec![verter_semantic::analysis::ExportSignature {
         name: "MyType".to_string(),
         declaration_hash: [2; 16],
         is_type: true,
@@ -381,7 +381,7 @@ fn compute_changed_exports_hash_changed() {
 #[test]
 fn compute_changed_exports_mixed() {
     let old = vec![
-        verter_analysis::ExportSignature {
+        verter_semantic::analysis::ExportSignature {
             name: "Kept".to_string(),
             declaration_hash: [1; 16],
             is_type: true,
@@ -390,7 +390,7 @@ fn compute_changed_exports_mixed() {
             reexport_local: None,
             local_span: None,
         },
-        verter_analysis::ExportSignature {
+        verter_semantic::analysis::ExportSignature {
             name: "Changed".to_string(),
             declaration_hash: [2; 16],
             is_type: true,
@@ -399,7 +399,7 @@ fn compute_changed_exports_mixed() {
             reexport_local: None,
             local_span: None,
         },
-        verter_analysis::ExportSignature {
+        verter_semantic::analysis::ExportSignature {
             name: "Removed".to_string(),
             declaration_hash: [3; 16],
             is_type: true,
@@ -410,7 +410,7 @@ fn compute_changed_exports_mixed() {
         },
     ];
     let new = vec![
-        verter_analysis::ExportSignature {
+        verter_semantic::analysis::ExportSignature {
             name: "Kept".to_string(),
             declaration_hash: [1; 16],
             is_type: true,
@@ -419,7 +419,7 @@ fn compute_changed_exports_mixed() {
             reexport_local: None,
             local_span: None,
         },
-        verter_analysis::ExportSignature {
+        verter_semantic::analysis::ExportSignature {
             name: "Changed".to_string(),
             declaration_hash: [9; 16],
             is_type: true,
@@ -428,7 +428,7 @@ fn compute_changed_exports_mixed() {
             reexport_local: None,
             local_span: None,
         },
-        verter_analysis::ExportSignature {
+        verter_semantic::analysis::ExportSignature {
             name: "Added".to_string(),
             declaration_hash: [4; 16],
             is_type: true,
@@ -449,7 +449,7 @@ fn compute_changed_exports_mixed() {
 /// @ai-generated - compute_changed_exports: removed export detected
 #[test]
 fn compute_changed_exports_removed() {
-    let old = vec![verter_analysis::ExportSignature {
+    let old = vec![verter_semantic::analysis::ExportSignature {
         name: "MyType".to_string(),
         declaration_hash: [1; 16],
         is_type: true,
@@ -466,7 +466,7 @@ fn compute_changed_exports_removed() {
 /// @ai-generated - compute_changed_exports: unchanged export not in set
 #[test]
 fn compute_changed_exports_unchanged() {
-    let old = vec![verter_analysis::ExportSignature {
+    let old = vec![verter_semantic::analysis::ExportSignature {
         name: "MyType".to_string(),
         declaration_hash: [1; 16],
         is_type: true,
@@ -475,7 +475,7 @@ fn compute_changed_exports_unchanged() {
         reexport_local: None,
         local_span: None,
     }];
-    let new = vec![verter_analysis::ExportSignature {
+    let new = vec![verter_semantic::analysis::ExportSignature {
         name: "MyType".to_string(),
         declaration_hash: [1; 16],
         is_type: true,
@@ -755,7 +755,7 @@ fn import_resolves_to_dep_non_relative_in_deps() {
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
         export_signatures: Vec::new(),
         style_analyses: Arc::new(Vec::new()),
         template_analysis: None,
@@ -803,7 +803,7 @@ fn import_resolves_to_dep_non_relative_not_in_deps() {
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
         export_signatures: Vec::new(),
         style_analyses: Arc::new(Vec::new()),
         template_analysis: None,
@@ -845,7 +845,7 @@ fn import_resolves_to_dep_relative_exact() {
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
         export_signatures: Vec::new(),
         style_analyses: Arc::new(Vec::new()),
         template_analysis: None,
@@ -891,7 +891,7 @@ fn import_resolves_to_dep_relative_extension_strip() {
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
         export_signatures: Vec::new(),
         style_analyses: Arc::new(Vec::new()),
         template_analysis: None,
@@ -942,7 +942,7 @@ fn should_invalidate_dependent_promotes_workspace_resolution_into_cache() {
         dependencies: BTreeSet::default(),
         script_lang: Some("ts".to_string()),
         macro_type_deps: Vec::new(),
-        imports: vec![verter_analysis::AnalyzedImport {
+        imports: vec![verter_semantic::analysis::AnalyzedImport {
             source: "@/dep".to_string(),
             is_type_only: false,
             bindings: Vec::new(),
@@ -2605,8 +2605,8 @@ fn close_allows_reuse() {
 fn make_project_config(
     root: &str,
     paths: Vec<(&str, Vec<&str>)>,
-) -> verter_analysis::project_resolver::IdeProjectConfig {
-    let mut config = verter_analysis::project_resolver::IdeProjectConfig::new(
+) -> verter_semantic::analysis::project_resolver::IdeProjectConfig {
+    let mut config = verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
         root.to_string(),
         root.to_string(),
         None,
@@ -3134,7 +3134,7 @@ fn set_workspace_swaps_resolution_source() {
 
 #[test]
 fn configure_projects_syncs_to_workspace() {
-    use verter_analysis::project_resolver::IdeProjectConfig;
+    use verter_semantic::analysis::project_resolver::IdeProjectConfig;
 
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -3628,7 +3628,7 @@ const count = ref(0)
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn same_semantic_hash_different_whole_hash_is_handled_by_upsert_fast_path() {
-        use verter_analysis::AnalysisScope;
+        use verter_semantic::analysis::AnalysisScope;
 
         // When two sources have the same semantic hash but different whole hash
         // (e.g., inter-block whitespace changes), the host's upsert fast-path
@@ -3820,10 +3820,10 @@ mod phase1_structural_tests {
     #[test]
     fn test_analysis_arcs_from_analysis() {
         // Build a ScriptAnalysisSnapshot with some data
-        let sa = verter_analysis::ScriptAnalysisSnapshot {
-            module_references: vec![verter_analysis::AnalyzedModuleReference {
-                syntax: verter_analysis::types::ModuleReferenceSyntax::StaticImport,
-                semantics: verter_analysis::types::ModuleReferenceSemantics::Import,
+        let sa = verter_semantic::analysis::ScriptAnalysisSnapshot {
+            module_references: vec![verter_semantic::analysis::AnalyzedModuleReference {
+                syntax: verter_semantic::analysis::types::ModuleReferenceSyntax::StaticImport,
+                semantics: verter_semantic::analysis::types::ModuleReferenceSemantics::Import,
                 is_type_only: false,
                 span: verter_span::Span::new(0, 30),
                 expr_span: verter_span::Span::new(20, 25),
@@ -3831,7 +3831,8 @@ mod phase1_structural_tests {
                 literal_specifier: Some("vue".to_string()),
                 finite_specifiers: vec![],
                 static_prefix: None,
-                analyzability: verter_analysis::types::ModuleReferenceAnalyzability::Exact,
+                analyzability:
+                    verter_semantic::analysis::types::ModuleReferenceAnalyzability::Exact,
             }],
             ..Default::default()
         };

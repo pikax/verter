@@ -10,7 +10,8 @@ use verter_workspace::ResolveRequestKind;
 #[derive(Debug, Clone, Default)]
 pub struct ExternalTypeBodyCache {
     resolved: FxHashMap<(String, String), Option<ResolvedElements>>,
-    source_analysis: FxHashMap<(String, verter_analysis::Hash16), AnalyzedExternalTypeSource>,
+    source_analysis:
+        FxHashMap<(String, verter_semantic::analysis::Hash16), AnalyzedExternalTypeSource>,
     barrel_states: FxHashMap<String, crate::BarrelResolutionState>,
 }
 
@@ -42,7 +43,7 @@ impl ExternalTypeBodyCache {
     ) -> (&AnalyzedExternalTypeSource, bool) {
         let key = (
             dep_canonical.to_string(),
-            verter_analysis::hash_16(effective_source.as_bytes()),
+            verter_semantic::analysis::hash_16(effective_source.as_bytes()),
         );
         let mut inserted = false;
         let analysis = self.source_analysis.entry(key).or_insert_with(|| {
@@ -61,7 +62,7 @@ impl ExternalTypeBodyCache {
     ) -> bool {
         let key = (
             dep_canonical.to_string(),
-            verter_analysis::hash_16(effective_source.as_bytes()),
+            verter_semantic::analysis::hash_16(effective_source.as_bytes()),
         );
         match self.source_analysis.entry(key) {
             std::collections::hash_map::Entry::Occupied(_) => false,

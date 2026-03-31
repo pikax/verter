@@ -3,10 +3,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_analysis::component_meta::ResolvedTypeAnalysis;
-use verter_analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
-use verter_analysis::types::{AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep};
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
+use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+use verter_semantic::analysis::types::{
+    AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
+};
 
 use crate::{
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
@@ -18,7 +20,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct ComponentMetaEvalOutputs<I> {
-    pub evaluated_types: Option<verter_analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     pub cached_eval_inputs: Option<Arc<I>>,
     pub tracked_dependencies: BTreeSet<String>,
 }
@@ -47,9 +49,9 @@ pub struct ResolvedMacroMeta {
     pub import_source: String,
     pub declaration: ResolvedTypeDeclaration,
     pub native_props: Vec<ResolvedNativeProp>,
-    pub props: Vec<verter_analysis::AnalyzedPropField>,
-    pub emits: Vec<verter_analysis::AnalyzedEmitField>,
-    pub slots: Vec<verter_analysis::AnalyzedSlotField>,
+    pub props: Vec<verter_semantic::analysis::AnalyzedPropField>,
+    pub emits: Vec<verter_semantic::analysis::AnalyzedEmitField>,
+    pub slots: Vec<verter_semantic::analysis::AnalyzedSlotField>,
     pub jsdoc: Option<ResolvedJsdocBlock>,
 }
 
@@ -65,7 +67,7 @@ pub struct ResolvedJsdocTag {
     pub text: Option<String>,
     pub raw_type: Option<String>,
     pub subject_name: Option<String>,
-    pub resolved_type: Option<verter_analysis::type_expr::TypeExpr>,
+    pub resolved_type: Option<verter_semantic::analysis::type_expr::TypeExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +75,7 @@ pub struct ResolvedComponentMetaParts<I> {
     pub resolved_macros: Vec<ResolvedMacroMeta>,
     pub resolved_type_registry: Vec<ResolvedTypeAnalysis>,
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
-    pub evaluated_types: Option<verter_analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     pub cached_eval_inputs: Option<Arc<I>>,
     pub fact_versions: Vec<FactVersionRef>,
 }
@@ -81,7 +83,7 @@ pub struct ResolvedComponentMetaParts<I> {
 pub fn component_meta_resolved_macros(
     snapshot_macros: &[AnalyzedMacro],
     resolved_macros: &[ResolvedMacroMeta],
-) -> Vec<verter_analysis::component_meta::ResolvedMacroInput> {
+) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
     resolved_macros
         .iter()
         .filter(|resolved| {
@@ -90,7 +92,7 @@ pub fn component_meta_resolved_macros(
                 .is_none_or(|mac| !raw_macro_surface_is_authoritative(mac))
         })
         .map(
-            |resolved| verter_analysis::component_meta::ResolvedMacroInput {
+            |resolved| verter_semantic::analysis::component_meta::ResolvedMacroInput {
                 macro_index: resolved.macro_index,
                 props: resolved.props.clone(),
                 emits: resolved.emits.clone(),
@@ -101,8 +103,8 @@ pub fn component_meta_resolved_macros(
 }
 
 pub fn component_meta_type_registry(
-    resolved_type_registry: &[verter_analysis::component_meta::ResolvedTypeAnalysis],
-) -> Vec<verter_analysis::component_meta::ResolvedTypeAnalysis> {
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+) -> Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis> {
     let mut seen = FxHashSet::default();
     let mut registry = Vec::new();
 
@@ -385,7 +387,7 @@ where
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: resolved.name.clone(),
                         type_expr: resolved.type_expr.clone().unwrap_or_else(|| {
-                            verter_analysis::type_expr_lower::parse_type_annotation(
+                            verter_semantic::analysis::type_expr_lower::parse_type_annotation(
                                 &resolved.expanded,
                             )
                         }),
@@ -421,8 +423,8 @@ where
 mod tests {
     use super::*;
     use crate::declaration_metadata::ResolvedExportTarget;
-    use verter_analysis::type_eval::DeclarationId;
-    use verter_analysis::types::{
+    use verter_semantic::analysis::type_eval::DeclarationId;
+    use verter_semantic::analysis::types::{
         AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, ResolvedLocalType,
     };
     use verter_span::Span;
@@ -431,7 +433,7 @@ mod tests {
     struct TestSnapshot {
         imports: Vec<AnalyzedImport>,
         macros: Vec<AnalyzedMacro>,
-        macro_type_deps: Vec<verter_analysis::types::MacroTypeDep>,
+        macro_type_deps: Vec<verter_semantic::analysis::types::MacroTypeDep>,
     }
 
     struct TestHost {
@@ -492,7 +494,7 @@ mod tests {
         fn snapshot_macro_type_deps<'a>(
             &self,
             snapshot: &'a Self::Snapshot,
-        ) -> &'a [verter_analysis::types::MacroTypeDep] {
+        ) -> &'a [verter_semantic::analysis::types::MacroTypeDep] {
             &snapshot.macro_type_deps
         }
 
@@ -665,7 +667,7 @@ defineSlots<CalendarSlots>()
 
 pub fn resolved_elements_to_type_expr_via_type_text(
     resolved: &ResolvedElements,
-) -> verter_analysis::type_expr::TypeExpr {
+) -> verter_semantic::analysis::type_expr::TypeExpr {
     let properties = resolved
         .props
         .iter()
@@ -673,7 +675,7 @@ pub fn resolved_elements_to_type_expr_via_type_text(
             let ty = prop
                 .type_text
                 .as_deref()
-                .map(verter_analysis::type_expr_lower::parse_type_annotation)
+                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
                 .unwrap_or(TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
@@ -718,7 +720,7 @@ fn macro_dep_exported_type_name<'a>(
 
             if matches!(
                 binding.kind,
-                verter_analysis::types::ImportBindingKind::Namespace
+                verter_semantic::analysis::types::ImportBindingKind::Namespace
             ) {
                 let prefix = format!("{}.", binding.name);
                 if let Some(member_name) = dep.type_name.strip_prefix(&prefix) {

@@ -1,11 +1,11 @@
 use oxc_allocator::Allocator;
-use verter_analysis::jsdoc::extract_jsdoc_near_offset;
-use verter_analysis::types::{
-    AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
-    AnalyzedSlotFieldBinding, JsdocTag,
-};
 use verter_compiler::utils::oxc::vue::resolve_type::{
     resolve_external_type, ResolvedElements, ResolvedEmitSignature, ResolvedMemberVisibility,
+};
+use verter_semantic::analysis::jsdoc::extract_jsdoc_near_offset;
+use verter_semantic::analysis::types::{
+    AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
+    AnalyzedSlotFieldBinding, JsdocTag,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +52,7 @@ pub fn project_macro_surfaces(
                         type_annotation: raw_prop_type_text(source, prop),
                         description,
                         tags,
-                        resolution_source: verter_analysis::TypeResolutionSource::Rust,
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                         resolution_error: None,
                     }
                 })
@@ -580,8 +580,8 @@ fn member_jsdoc(source: Option<&str>, span: verter_span::Span) -> (Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_analysis::TypeResolutionSource;
     use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedEmit, ResolvedProp};
+    use verter_semantic::analysis::TypeResolutionSource;
 
     fn prop(
         name: &str,

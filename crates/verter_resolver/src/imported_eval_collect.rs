@@ -4,9 +4,9 @@ use crate::{
 };
 use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use verter_analysis::type_eval::EvalEnv;
-use verter_analysis::types::ImportBindingKind;
-use verter_analysis::{AnalyzedBinding, AnalyzedImport, AnalyzedMacro, MacroTypeDep};
+use verter_semantic::analysis::type_eval::EvalEnv;
+use verter_semantic::analysis::types::ImportBindingKind;
+use verter_semantic::analysis::{AnalyzedBinding, AnalyzedImport, AnalyzedMacro, MacroTypeDep};
 
 #[derive(Debug)]
 pub struct ImportedEvalTraversalBudget {
@@ -670,9 +670,11 @@ mod tests {
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
-    use verter_analysis::type_eval::EvalEnv;
-    use verter_analysis::types::ImportBindingKind;
-    use verter_analysis::{AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, MacroTypeDep};
+    use verter_semantic::analysis::type_eval::EvalEnv;
+    use verter_semantic::analysis::types::ImportBindingKind;
+    use verter_semantic::analysis::{
+        AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, MacroTypeDep,
+    };
     use verter_span::Span;
 
     #[test]
@@ -764,7 +766,7 @@ mod tests {
             &self,
             _canonical_source: &str,
             _resolved_name: &str,
-        ) -> Option<verter_analysis::type_eval::DeclarationId> {
+        ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
             None
         }
 
@@ -1514,7 +1516,7 @@ mod tests {
             macro_type_deps: &[MacroTypeDep {
                 type_name: "ButtonProps".to_string(),
                 import_source: "./types".to_string(),
-                macro_kind: verter_analysis::AnalyzedMacroKind::DefineProps,
+                macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
                 macro_index: 0,
                 macro_span: Span::default(),
             }],

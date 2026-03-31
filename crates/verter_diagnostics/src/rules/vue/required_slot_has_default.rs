@@ -32,7 +32,7 @@ use std::collections::HashSet;
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_analysis::types::AnalyzedMacroKind;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct RequiredSlotHasDefault;
 
@@ -104,9 +104,9 @@ impl LintRule for RequiredSlotHasDefault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_analysis::template::{DefinedSlot, TemplateAnalysisSnapshot};
-    use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
-    use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedSlotField};
+    use verter_semantic::analysis::template::{DefinedSlot, TemplateAnalysisSnapshot};
+    use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+    use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedSlotField};
     use verter_span::Span;
 
     fn run(file: &FileContext<'_>) -> Vec<crate::diagnostic::LintDiagnostic> {

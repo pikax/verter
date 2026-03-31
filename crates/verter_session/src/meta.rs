@@ -39,24 +39,25 @@ pub enum MetaError {
 }
 
 fn component_meta_expansion_budget_exceeded(
-    types: &verter_analysis::type_expand::ExpandedComponentTypes,
+    types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
 ) -> bool {
-    use verter_analysis::type_expand::ExpansionStopReason;
+    use verter_semantic::analysis::type_expand::ExpansionStopReason;
 
-    let field_has_budget = |field: &verter_analysis::type_expand::ExpandedField| {
+    let field_has_budget = |field: &verter_semantic::analysis::type_expand::ExpandedField| {
         field
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
     };
-    let macro_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroObjectShape| {
-        shape
-            .result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
-    };
-    let props_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroProps| {
+    let macro_has_budget =
+        |shape: &verter_semantic::analysis::type_expand::ExpandedMacroObjectShape| {
+            shape
+                .result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+        };
+    let props_has_budget = |shape: &verter_semantic::analysis::type_expand::ExpandedMacroProps| {
         shape
             .result
             .diagnostics
@@ -74,7 +75,7 @@ fn component_meta_expansion_budget_exceeded(
 }
 
 fn component_meta_symbolic_budget_is_fatal(
-    analysis: Option<&verter_analysis::component_meta::ComponentMetaAnalysis>,
+    analysis: Option<&verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
 ) -> bool {
     let Some(analysis) = analysis else {
         return true;
@@ -89,7 +90,7 @@ fn component_meta_symbolic_budget_is_fatal(
 
 fn component_meta_resolution_budget_error(
     canonical_or_alias: &str,
-    analysis: Option<&verter_analysis::component_meta::ComponentMetaAnalysis>,
+    analysis: Option<&verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> Option<MetaError> {
     if let Some(message) = resolved
@@ -297,7 +298,7 @@ impl MetaProject {
     /// Configure project-scoped path alias resolution.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_analysis::project_resolver::IdeProjectConfig>,
+        projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
         let _gate = self.enter_base_context()?;
@@ -612,7 +613,8 @@ impl MetaSession {
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_analysis::type_expand::ExpandedComponentTypes>, MetaError> {
+    ) -> Result<Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>, MetaError>
+    {
         self.check_alive()?;
         self.with_overlay_context(|host| host.evaluate_types(canonical_or_alias))
     }
@@ -644,7 +646,8 @@ impl MetaSession {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_analysis::component_meta::ComponentMetaAnalysis>, MetaError> {
+    ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
+    {
         self.check_alive()?;
         let resolved = self.with_overlay_context(|host| {
             host.get_component_meta_with_resolution(canonical_or_alias)
@@ -674,7 +677,8 @@ impl MetaSession {
     pub fn get_declared_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_analysis::component_meta::ComponentMetaAnalysis>, MetaError> {
+    ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
+    {
         self.check_alive()?;
         self.with_overlay_context_view(|host, store_view| {
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
@@ -714,7 +718,7 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<
         Option<(
-            verter_analysis::component_meta::ComponentMetaAnalysis,
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         MetaError,

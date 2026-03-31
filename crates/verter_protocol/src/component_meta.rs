@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use prost::Message;
-use verter_analysis::type_expr::{
-    empty_type_args, ObjectExpr, ObjectMember as TypeObjectMember, ObjectProperty, PrimitiveName,
-    TypeExpr,
-};
 use verter_ffi::graph::{
     GraphBuilder, GraphFunctionParam, GraphNode, GraphObjectMember, GraphTupleElement,
 };
 use verter_ffi::types::*;
+use verter_semantic::analysis::type_expr::{
+    empty_type_args, ObjectExpr, ObjectMember as TypeObjectMember, ObjectProperty, PrimitiveName,
+    TypeExpr,
+};
 
 use crate::verter::v1::{
     self as proto, type_node, AcceptedEventMeta, AcceptedPropMeta, ArrayNode, BindingMeta,

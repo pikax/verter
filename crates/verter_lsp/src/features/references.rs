@@ -249,7 +249,7 @@ pub(crate) fn collect_css_ref_spans(
                                         let val_abs_start =
                                             attr.span.start as usize + val_start_in_attr;
                                         let rich =
-                                            verter_analysis::extract_dynamic_class_names_rich(
+                                            verter_semantic::analysis::extract_dynamic_class_names_rich(
                                                 value,
                                             );
                                         for dcn in &rich {
@@ -368,7 +368,7 @@ pub(crate) fn collect_css_ref_spans(
 pub(crate) fn find_css_target_in_template_refs(
     offset: usize,
     source: &str,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<CssRefTarget> {
     for element in &template.elements {
         for attr in &element.attributes {
@@ -392,7 +392,8 @@ pub(crate) fn find_css_target_in_template_refs(
                         let cursor_in_expr = offset.checked_sub(val_abs_start)?;
 
                         if attr.name == "class" {
-                            let rich = verter_analysis::extract_dynamic_class_names_rich(value);
+                            let rich =
+                                verter_semantic::analysis::extract_dynamic_class_names_rich(value);
                             for dcn in &rich {
                                 if dcn.is_partial {
                                     continue;
@@ -519,7 +520,7 @@ use crate::utils::{find_all_word_occurrences, word_at_offset};
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::*;
+    use verter_semantic::analysis::*;
 
     fn make_analysis(
         bindings: Vec<AnalyzedBinding>,
@@ -726,14 +727,17 @@ mod tests {
         }
     }
 
-    fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_analysis::StyleBlockAnalysis {
+    fn build_style(
+        source: &str,
+        blocks: &[SfcBlock],
+    ) -> verter_semantic::analysis::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];
         let scoped = style_block.attrs_raw.contains("scoped");
-        verter_analysis::style::build_css_style_analysis(
+        verter_semantic::analysis::style::build_css_style_analysis(
             css_content,
-            verter_analysis::style::VueStyleInput {
+            verter_semantic::analysis::style::VueStyleInput {
                 v_binds: vec![],
                 special_pseudos: vec![],
             },

@@ -1966,7 +1966,7 @@ const count = ref(0)
     assert!(count_binding.is_reactive);
     assert_eq!(
         count_binding.kind,
-        verter_analysis::AnalyzedBindingKind::Const
+        verter_semantic::analysis::AnalyzedBindingKind::Const
     );
 }
 
@@ -1994,7 +1994,7 @@ defineProps<{ msg: string }>()
     let props_macro = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .expect("should have defineProps macro");
     assert!(props_macro.is_type_based);
 }
@@ -2022,9 +2022,9 @@ const count = ref(0)
     let analysis = host
         .get_analysis("Test.vue")
         .expect("analysis should exist");
-    let flags = verter_analysis::AnalysisFlags::from_bits_truncate(analysis.script_flags);
-    assert!(flags.contains(verter_analysis::AnalysisFlags::HAS_DEFINE_PROPS));
-    assert!(flags.contains(verter_analysis::AnalysisFlags::HAS_REACTIVE_STATE));
+    let flags = verter_semantic::analysis::AnalysisFlags::from_bits_truncate(analysis.script_flags);
+    assert!(flags.contains(verter_semantic::analysis::AnalysisFlags::HAS_DEFINE_PROPS));
+    assert!(flags.contains(verter_semantic::analysis::AnalysisFlags::HAS_REACTIVE_STATE));
 }
 
 /// @ai-generated - get_analysis returns style analysis
@@ -2776,7 +2776,7 @@ const count = 42
 /// @ai-generated - Template analysis not populated when scope excludes template flags
 #[test]
 fn template_analysis_none_when_scope_excludes_template() {
-    use verter_analysis::AnalysisScope;
+    use verter_semantic::analysis::AnalysisScope;
 
     // BUILD scope does NOT include template flags
     let host = VerterHost::new_standalone(HostConfig {

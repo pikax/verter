@@ -95,7 +95,7 @@ impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCo
     fn resolve_external_macro_type(
         &self,
         owner_canonical: &str,
-        dep: &verter_analysis::MacroTypeDep,
+        dep: &verter_semantic::analysis::MacroTypeDep,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
@@ -122,7 +122,7 @@ impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCo
     fn map_external_macro_type_error(
         &self,
         owner_canonical: &str,
-        dep: &verter_analysis::MacroTypeDep,
+        dep: &verter_semantic::analysis::MacroTypeDep,
         import_span: Option<verter_span::Span>,
         error: &Self::Error,
     ) -> verter_resolver::ExternalMacroTypeDiagnostic {
@@ -2189,7 +2189,7 @@ impl VerterHost {
 
     /// Build a `FileExportRegistry` from export signatures.
     fn build_export_registry(
-        sigs: &[verter_analysis::ExportSignature],
+        sigs: &[verter_semantic::analysis::ExportSignature],
         source_hash: Hash16,
     ) -> crate::types::FileExportRegistry {
         let mut named = rustc_hash::FxHashMap::default();
@@ -2475,8 +2475,8 @@ impl VerterHost {
     fn collect_external_types_from_loaded_files(
         &self,
         owner_canonical: &str,
-        macro_type_deps: &[verter_analysis::MacroTypeDep],
-        script_imports: &[verter_analysis::AnalyzedImport],
+        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
+        script_imports: &[verter_semantic::analysis::AnalyzedImport],
         profile_hash: Option<u64>,
     ) -> (
         Option<ResolvedExternalTypes>,
@@ -2891,11 +2891,12 @@ impl VerterHost {
 
                 // Style v-bind vars from raw analysis (override-independent)
                 let analysis_snap = self.scheduler.try_get_analysis(&canonical_id);
-                let style_analyses: Arc<Vec<verter_analysis::StyleBlockAnalysis>> = analysis_snap
-                    .as_ref()
-                    .and_then(|a| a.downcast_data::<HostAnalysisData>())
-                    .map(|ad| Arc::clone(&ad.style_analyses))
-                    .unwrap_or_default();
+                let style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> =
+                    analysis_snap
+                        .as_ref()
+                        .and_then(|a| a.downcast_data::<HostAnalysisData>())
+                        .map(|ad| Arc::clone(&ad.style_analyses))
+                        .unwrap_or_default();
 
                 drop(cc_ref);
 
@@ -3460,7 +3461,7 @@ impl VerterHost {
             FxHashMap<VirtualNodeKind, CachedVirtualFile>,
             DiagnosticsSnapshot,
             Option<CachedTsx>,
-            Option<verter_analysis::template::TemplateAnalysisSnapshot>,
+            Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
         ),
         DiagnosticsSnapshot,
     > {
@@ -3760,9 +3761,9 @@ impl VerterHost {
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn template_converter_inputs(
-    imports: &[verter_analysis::AnalyzedImport],
-    macros: &[verter_analysis::AnalyzedMacro],
-    bindings: &[verter_analysis::AnalyzedBinding],
+    imports: &[verter_semantic::analysis::AnalyzedImport],
+    macros: &[verter_semantic::analysis::AnalyzedMacro],
+    bindings: &[verter_semantic::analysis::AnalyzedBinding],
 ) -> (
     Vec<(String, String)>,
     Vec<(String, Vec<String>)>,
@@ -3780,11 +3781,11 @@ pub(crate) fn template_converter_inputs(
     let mut unions = Vec::new();
     let define_props = macros
         .iter()
-        .find(|mac| mac.kind == verter_analysis::AnalyzedMacroKind::DefineProps);
+        .find(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps);
     if let Some(dp) = define_props {
         for field in &dp.prop_fields {
             if let Some(type_ann) = &field.type_annotation {
-                let classes = verter_analysis::parse_string_literal_union(type_ann);
+                let classes = verter_semantic::analysis::parse_string_literal_union(type_ann);
                 if !classes.is_empty() {
                     unions.push((field.name.clone(), classes));
                 }
@@ -3795,8 +3796,8 @@ pub(crate) fn template_converter_inputs(
     for binding in bindings {
         if let Some(type_ann) = &binding.type_annotation {
             let effective_type =
-                verter_analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
-            let classes = verter_analysis::parse_string_literal_union(effective_type);
+                verter_semantic::analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
+            let classes = verter_semantic::analysis::parse_string_literal_union(effective_type);
             if !classes.is_empty() {
                 unions.push((binding.name.clone(), classes));
             }

@@ -26,7 +26,7 @@ impl LintRule for PreferUseTemplateRef {
     }
 
     fn check_file(&self, file: &FileContext<'_>, ctx: &mut LintContext) {
-        use verter_analysis::types::VueApiClassification;
+        use verter_semantic::analysis::types::VueApiClassification;
 
         let Some(template) = file.template else {
             return;
@@ -77,8 +77,8 @@ mod tests {
     use crate::config::LintConfig;
     use crate::rules::FileContext;
     use crate::visitor::LintVisitor;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule_with_file(

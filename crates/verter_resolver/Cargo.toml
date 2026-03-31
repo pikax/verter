@@ -16,7 +16,7 @@ oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 parking_lot = "0.12"
 rustc-hash = { workspace = true }
-verter_analysis = { path = "../verter_analysis" }
+verter_semantic = { path = "../verter_semantic" }
 verter_compiler = { path = "../verter_compiler" }
 verter_span = { path = "../verter_span" }
 verter_type_runtime = { path = "../verter_type_runtime", optional = true }

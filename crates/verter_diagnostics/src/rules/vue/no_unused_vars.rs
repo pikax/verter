@@ -7,7 +7,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
 pub struct NoUnusedVars;
 
@@ -168,7 +168,10 @@ fn is_var_used_in_subtree(
 
         // Check text interpolation children
         for seg in &el.text_children {
-            if let verter_analysis::template::TemplateTextSegment::Interpolation { .. } = seg {
+            if let verter_semantic::analysis::template::TemplateTextSegment::Interpolation {
+                ..
+            } = seg
+            {
                 // We don't have the expression text in the interpolation segment,
                 // but interpolation bindings would appear in binding_occurrences
                 // (checked in the main loop via used_names)
@@ -273,7 +276,7 @@ fn extract_slot_vars(expr: &str) -> Vec<&str> {
 mod tests {
     use super::*;
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

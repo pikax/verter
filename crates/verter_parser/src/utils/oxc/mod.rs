@@ -14,7 +14,7 @@
 //!     it is called during compilation, not just static analysis.
 //!
 //! If the `vue::script` submodule grows further, consider extracting it into a
-//! dedicated `verter_analysis` crate.
+//! dedicated `verter_semantic::analysis` crate.
 
 pub mod bindings;
 pub mod vue;

@@ -1,54 +1,54 @@
-//! Input type re-exports from `verter_analysis`.
+//! Input type re-exports from the analysis module.
 //!
 //! These re-exports allow consumers to import analysis input types from
-//! `verter_semantic::input` instead of `verter_analysis` directly.
-//! When `verter_analysis` is deleted in WS9, these types will be moved
+//! `verter_semantic::input` instead of the analysis module directly.
+//! The analysis module is now owned by verter_semantic, these types will be moved
 //! here natively.
 
 // Script analysis input
-pub use verter_analysis::ScriptAnalysisSnapshot;
+pub use crate::analysis::ScriptAnalysisSnapshot;
 
 // Template analysis input
-pub use verter_analysis::TemplateAnalysisSnapshot;
+pub use crate::analysis::TemplateAnalysisSnapshot;
 
 // Macro types
-pub use verter_analysis::types::AnalyzedMacro;
-pub use verter_analysis::types::AnalyzedMacroKind;
+pub use crate::analysis::types::AnalyzedMacro;
+pub use crate::analysis::types::AnalyzedMacroKind;
 
 // Binding types
-pub use verter_analysis::types::AnalyzedBinding;
-pub use verter_analysis::types::AnalyzedBindingKind;
-pub use verter_analysis::types::ReactivityKind;
+pub use crate::analysis::types::AnalyzedBinding;
+pub use crate::analysis::types::AnalyzedBindingKind;
+pub use crate::analysis::types::ReactivityKind;
 
 // Import types
-pub use verter_analysis::types::AnalyzedImport;
-pub use verter_analysis::types::AnalyzedImportBinding;
-pub use verter_analysis::types::ImportBindingKind;
+pub use crate::analysis::types::AnalyzedImport;
+pub use crate::analysis::types::AnalyzedImportBinding;
+pub use crate::analysis::types::ImportBindingKind;
 
 // Binding initializer
-pub use verter_analysis::types::BindingInitializer;
+pub use crate::analysis::types::BindingInitializer;
 
 // Vue API classification
-pub use verter_analysis::VueApiClassification;
+pub use crate::analysis::VueApiClassification;
 
 // Analysis scope (transitional — will be replaced by QueryProfile)
-pub use verter_analysis::AnalysisScope;
+pub use crate::analysis::AnalysisScope;
 
 // Template component usage
-pub use verter_analysis::TemplateComponentUsage;
-pub use verter_analysis::TemplatePropUsage;
+pub use crate::analysis::TemplateComponentUsage;
+pub use crate::analysis::TemplatePropUsage;
 
 // Prop constness
-pub use verter_analysis::template::PropValueConstness;
+pub use crate::analysis::template::PropValueConstness;
 
 // Prop/emit/slot field types (used in tests)
-pub use verter_analysis::types::AnalyzedDefaultValue;
-pub use verter_analysis::types::AnalyzedEmitField;
-pub use verter_analysis::types::AnalyzedExposeField;
-pub use verter_analysis::types::AnalyzedPropField;
-pub use verter_analysis::types::AnalyzedSlotField;
-pub use verter_analysis::types::AnalyzedSlotFieldBinding;
-pub use verter_analysis::types::TypeResolutionSource;
+pub use crate::analysis::types::AnalyzedDefaultValue;
+pub use crate::analysis::types::AnalyzedEmitField;
+pub use crate::analysis::types::AnalyzedExposeField;
+pub use crate::analysis::types::AnalyzedPropField;
+pub use crate::analysis::types::AnalyzedSlotField;
+pub use crate::analysis::types::AnalyzedSlotFieldBinding;
+pub use crate::analysis::types::TypeResolutionSource;
 
 // Template component usage
-pub use verter_analysis::template::TemplateComponentVModel;
+pub use crate::analysis::template::TemplateComponentVModel;

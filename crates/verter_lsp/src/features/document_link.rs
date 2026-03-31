@@ -171,8 +171,8 @@ fn canonical_id_to_uri(canonical_id: &str) -> Uri {
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::types::ImportBindingKind;
-    use verter_analysis::*;
+    use verter_semantic::analysis::types::ImportBindingKind;
+    use verter_semantic::analysis::*;
 
     #[test]
     fn test_import_source_span() {

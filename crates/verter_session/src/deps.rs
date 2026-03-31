@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 #[cfg(not(feature = "scheduler"))]
 use std::sync::Arc;
 
-use verter_analysis::project_resolver::{ResolvePhase, ResolveRequestKind};
+use verter_semantic::analysis::project_resolver::{ResolvePhase, ResolveRequestKind};
 
 use crate::id;
 #[cfg(not(feature = "scheduler"))]
@@ -60,8 +60,8 @@ pub(crate) struct DependentView {
     pub(crate) dependency_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
     pub(crate) dependencies: BTreeSet<String>,
     pub(crate) script_lang: Option<String>,
-    pub(crate) macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
-    pub(crate) imports: Vec<verter_analysis::AnalyzedImport>,
+    pub(crate) macro_type_deps: Vec<verter_semantic::analysis::MacroTypeDep>,
+    pub(crate) imports: Vec<verter_semantic::analysis::AnalyzedImport>,
     pub(crate) resolved_type_hashes: rustc_hash::FxHashMap<(String, String), Hash16>,
 }
 
@@ -401,8 +401,8 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
     workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
     config: &HostConfig,
     dependency_id: &str,
-    old_export_signatures: &[verter_analysis::ExportSignature],
-    new_export_signatures: &[verter_analysis::ExportSignature],
+    old_export_signatures: &[verter_semantic::analysis::ExportSignature],
+    new_export_signatures: &[verter_semantic::analysis::ExportSignature],
 ) {
     if owners.is_empty() {
         return;
@@ -441,8 +441,8 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
     workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
     config: &HostConfig,
     dependency_id: &str,
-    old_export_signatures: &[verter_analysis::ExportSignature],
-    new_export_signatures: &[verter_analysis::ExportSignature],
+    old_export_signatures: &[verter_semantic::analysis::ExportSignature],
+    new_export_signatures: &[verter_semantic::analysis::ExportSignature],
 ) {
     if owners.is_empty() {
         return;
@@ -537,8 +537,8 @@ pub(crate) fn smart_invalidate_dependents(
     workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
     config: &HostConfig,
     dependency_id: &str,
-    old_export_signatures: &[verter_analysis::ExportSignature],
-    new_export_signatures: &[verter_analysis::ExportSignature],
+    old_export_signatures: &[verter_semantic::analysis::ExportSignature],
+    new_export_signatures: &[verter_semantic::analysis::ExportSignature],
 ) {
     let resolve_extensions = &config.resolve_extensions;
 

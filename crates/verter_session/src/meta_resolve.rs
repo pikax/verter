@@ -29,11 +29,11 @@ use crate::VerterHost;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
-use verter_analysis::type_eval::EvalLookup;
 use verter_resolver::{
     run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost,
     ImportedEvalLookup, RequestSource, SingleflightRole,
 };
+use verter_semantic::analysis::type_eval::EvalLookup;
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
@@ -57,7 +57,7 @@ pub struct CapturedComponentMetaInputs {
     whole_hash: Hash16,
     snapshot: FileAnalysisSnapshot,
     owner_eval_source: Option<String>,
-    owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+    owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
     dep_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
 }
 
@@ -213,11 +213,12 @@ pub struct ResolvedComponentMetaState {
     /// Resolved macro metadata from cross-file traversal.
     pub resolved_macros: Vec<ResolvedMacroMeta>,
     /// Resolved type registry entries (populated in `Expanded` mode).
-    pub resolved_type_registry: Vec<verter_analysis::component_meta::ResolvedTypeAnalysis>,
+    pub resolved_type_registry:
+        Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
     /// Native declaration metadata for each resolved type-registry entry.
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
     /// Expanded types (populated in `Expanded` mode only).
-    pub evaluated_types: Option<verter_analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     /// Cached imported eval inputs from `resolve_component_meta(Expanded)`.
     /// Threaded through to `build_fallthrough_eval_env_with_inputs` to avoid
     /// a redundant second `imported_eval_inputs()` call in the fallthrough path.
@@ -227,20 +228,20 @@ pub struct ResolvedComponentMetaState {
 }
 
 fn collect_expanded_slot_binding_param_types<'a>(
-    ty: &'a verter_analysis::type_expr::TypeExpr,
-    out: &mut Vec<&'a verter_analysis::type_expr::TypeExpr>,
+    ty: &'a verter_semantic::analysis::type_expr::TypeExpr,
+    out: &mut Vec<&'a verter_semantic::analysis::type_expr::TypeExpr>,
 ) {
     match ty {
-        verter_analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+        verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
             collect_expanded_slot_binding_param_types(inner, out);
         }
-        verter_analysis::type_expr::TypeExpr::Intersection(types)
-        | verter_analysis::type_expr::TypeExpr::Union(types) => {
+        verter_semantic::analysis::type_expr::TypeExpr::Intersection(types)
+        | verter_semantic::analysis::type_expr::TypeExpr::Union(types) => {
             for inner in types.iter() {
                 collect_expanded_slot_binding_param_types(inner, out);
             }
         }
-        verter_analysis::type_expr::TypeExpr::Function(func) => {
+        verter_semantic::analysis::type_expr::TypeExpr::Function(func) => {
             if let Some(first) = func.parameters.first() {
                 out.push(&first.ty);
             }
@@ -250,23 +251,24 @@ fn collect_expanded_slot_binding_param_types<'a>(
 }
 
 fn collect_expanded_slot_bindings_from_object_type(
-    ty: &verter_analysis::type_expr::TypeExpr,
+    ty: &verter_semantic::analysis::type_expr::TypeExpr,
     seen: &mut rustc_hash::FxHashSet<String>,
-    out: &mut Vec<(String, verter_analysis::type_expr::TypeExpr, bool)>,
+    out: &mut Vec<(String, verter_semantic::analysis::type_expr::TypeExpr, bool)>,
 ) {
     match ty {
-        verter_analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+        verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
             collect_expanded_slot_bindings_from_object_type(inner, seen, out);
         }
-        verter_analysis::type_expr::TypeExpr::Intersection(types)
-        | verter_analysis::type_expr::TypeExpr::Union(types) => {
+        verter_semantic::analysis::type_expr::TypeExpr::Intersection(types)
+        | verter_semantic::analysis::type_expr::TypeExpr::Union(types) => {
             for inner in types.iter() {
                 collect_expanded_slot_bindings_from_object_type(inner, seen, out);
             }
         }
-        verter_analysis::type_expr::TypeExpr::Object(obj) => {
+        verter_semantic::analysis::type_expr::TypeExpr::Object(obj) => {
             for member in &obj.properties {
-                let verter_analysis::type_expr::ObjectMember::Property(prop) = member else {
+                let verter_semantic::analysis::type_expr::ObjectMember::Property(prop) = member
+                else {
                     continue;
                 };
                 if !seen.insert(prop.name.clone()) {
@@ -281,7 +283,7 @@ fn collect_expanded_slot_bindings_from_object_type(
 
 fn enrich_missing_slot_bindings(
     resolved_macros: &[ResolvedMacroMeta],
-    evaluated_types: &mut verter_analysis::type_expand::ExpandedComponentTypes,
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
 ) {
     let mut seen_names: rustc_hash::FxHashSet<String> = evaluated_types
         .slot_bindings
@@ -312,24 +314,23 @@ fn enrich_missing_slot_bindings(
                 if !seen_names.insert(field_name.clone()) {
                     continue;
                 }
-                evaluated_types
-                    .slot_bindings
-                    .push(verter_analysis::type_expand::ExpandedField {
+                evaluated_types.slot_bindings.push(
+                    verter_semantic::analysis::type_expand::ExpandedField {
                         name: field_name,
                         r#type: binding_type,
                         raw_type: None,
                         optional,
                         completeness: entry.result.completeness.clone(),
                         diagnostics: Vec::new(),
-                    });
+                    },
+                );
             }
         }
     }
 
-    for resolved in resolved_macros
-        .iter()
-        .filter(|resolved| resolved.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
-    {
+    for resolved in resolved_macros.iter().filter(|resolved| {
+        resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+    }) {
         for slot in &resolved.slots {
             for binding in &slot.bindings {
                 let field_name = format!("{}.{}", slot.name, binding.name);
@@ -339,20 +340,21 @@ fn enrich_missing_slot_bindings(
                 let raw_type = binding.type_annotation.clone();
                 let parsed_type = raw_type
                     .as_deref()
-                    .map(verter_analysis::type_expr_lower::parse_type_annotation)
-                    .unwrap_or_else(|| verter_analysis::type_expr::TypeExpr::Unknown {
+                    .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+                    .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
                         raw: "unknown".to_string(),
                     });
-                evaluated_types
-                    .slot_bindings
-                    .push(verter_analysis::type_expand::ExpandedField {
+                evaluated_types.slot_bindings.push(
+                    verter_semantic::analysis::type_expand::ExpandedField {
                         name: field_name,
                         r#type: parsed_type,
                         raw_type,
                         optional: false,
-                        completeness: verter_analysis::type_expand::ExpansionCompleteness::Exact,
+                        completeness:
+                            verter_semantic::analysis::type_expand::ExpansionCompleteness::Exact,
                         diagnostics: Vec::new(),
-                    });
+                    },
+                );
             }
         }
     }
@@ -647,7 +649,9 @@ impl VerterHost {
         &self,
         owner_canonical: &str,
         snapshot: &FileAnalysisSnapshot,
-        resolved_type_registry: &mut Vec<verter_analysis::component_meta::ResolvedTypeAnalysis>,
+        resolved_type_registry: &mut Vec<
+            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis,
+        >,
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
         cached_eval_inputs: Option<&crate::host_manage::ImportedEvalInputs>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -723,7 +727,7 @@ impl VerterHost {
         );
         let mut lookup =
             ImportedEvalLookup::new(&mut resolver, owner_canonical, snapshot.imports.as_slice());
-        let mut registry_eval_env: Option<verter_analysis::type_eval::EvalEnv> = None;
+        let mut registry_eval_env: Option<verter_semantic::analysis::type_eval::EvalEnv> = None;
 
         if let Some(inputs) = cached_eval_inputs {
             for alias in &inputs.type_aliases {
@@ -873,8 +877,9 @@ impl VerterHost {
                 .map(|decl| {
                     materialize_component_meta_registry_decl_body(
                         &decl,
-                        registry_eval_env
-                            .get_or_insert_with(verter_analysis::type_eval::EvalEnv::default),
+                        registry_eval_env.get_or_insert_with(
+                            verter_semantic::analysis::type_eval::EvalEnv::default,
+                        ),
                         &mut lookup,
                     )
                 });
@@ -1444,13 +1449,15 @@ struct PendingComponentMetaRegistryRef {
 }
 
 fn upsert_component_meta_registry_entry(
-    resolved_type_registry: &mut Vec<verter_analysis::component_meta::ResolvedTypeAnalysis>,
+    resolved_type_registry: &mut Vec<
+        verter_semantic::analysis::component_meta::ResolvedTypeAnalysis,
+    >,
     resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
     published_names: &mut rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     name: String,
-    type_expr: verter_analysis::type_expr::TypeExpr,
+    type_expr: verter_semantic::analysis::type_expr::TypeExpr,
     declaration: ResolvedTypeDeclaration,
 ) {
     let declaration_source_hint =
@@ -1497,11 +1504,13 @@ fn upsert_component_meta_registry_entry(
             declaration_source_hint.as_deref(),
         );
     }
-    resolved_type_registry.push(verter_analysis::component_meta::ResolvedTypeAnalysis {
-        name: name.clone(),
-        type_expr,
-        type_expansion: None,
-    });
+    resolved_type_registry.push(
+        verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            name: name.clone(),
+            type_expr,
+            type_expansion: None,
+        },
+    );
     resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
         name: name.clone(),
         declaration,
@@ -1518,7 +1527,7 @@ fn should_collect_component_meta_registry_nested_refs(source_hint: Option<&str>)
 }
 
 fn prune_package_imported_registry_aliases(
-    env: &mut verter_analysis::type_eval::EvalEnv,
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
     imported_inputs: &crate::host_manage::ImportedEvalInputs,
 ) {
     for alias in &imported_inputs.type_aliases {
@@ -1569,10 +1578,10 @@ fn enqueue_component_meta_registry_ref(
 }
 
 fn materialize_component_meta_registry_decl_body(
-    decl: &verter_analysis::type_eval::TypeDeclInfo,
-    registry_eval_env: &mut verter_analysis::type_eval::EvalEnv,
-    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
-) -> verter_analysis::type_expr::TypeExpr {
+    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
+    registry_eval_env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_semantic::analysis::type_eval::EvalLookup,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
     let saved = decl
         .type_parameters
         .iter()
@@ -1586,14 +1595,15 @@ fn materialize_component_meta_registry_decl_body(
     for param in &decl.type_parameters {
         registry_eval_env.type_bindings.insert(
             param.name.clone(),
-            Arc::new(verter_analysis::type_expr::TypeExpr::type_parameter(
-                param.clone(),
-            )),
+            Arc::new(verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone())),
         );
     }
 
-    let evaluated =
-        verter_analysis::type_eval::evaluate_with_lookup(&decl.body, registry_eval_env, lookup);
+    let evaluated = verter_semantic::analysis::type_eval::evaluate_with_lookup(
+        &decl.body,
+        registry_eval_env,
+        lookup,
+    );
     let materialized = materialize_component_meta_registry_type(
         &evaluated,
         registry_eval_env,
@@ -1616,9 +1626,9 @@ fn materialize_component_meta_registry_decl_body(
 }
 
 fn choose_preferred_component_meta_registry_candidate(
-    left: Option<verter_analysis::type_expr::TypeExpr>,
-    right: Option<verter_analysis::type_expr::TypeExpr>,
-) -> Option<verter_analysis::type_expr::TypeExpr> {
+    left: Option<verter_semantic::analysis::type_expr::TypeExpr>,
+    right: Option<verter_semantic::analysis::type_expr::TypeExpr>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
     match (left, right) {
         (Some(left), Some(right))
             if component_meta_registry_indexed_ref_penalty(&left)
@@ -1639,9 +1649,9 @@ fn choose_preferred_component_meta_registry_candidate(
 }
 
 fn component_meta_registry_indexed_ref_penalty(
-    expr: &verter_analysis::type_expr::TypeExpr,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> usize {
-    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::IndexedAccess { object, index } => {
@@ -1752,10 +1762,10 @@ fn component_meta_registry_indexed_ref_penalty(
 fn materialize_imported_component_meta_registry_decl_body_in_view(
     host: &VerterHost,
     canonical_id: &str,
-    decl: &verter_analysis::type_eval::TypeDeclInfo,
+    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
     _symbol_dependencies: &[verter_resolver::ImportedSymbolDependency],
     store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> verter_analysis::type_expr::TypeExpr {
+) -> verter_semantic::analysis::type_expr::TypeExpr {
     let Some(snapshot) = host
         .clone_current_imported_dependency_entry(canonical_id, store_view)
         .and_then(|dependency| dependency.snapshot.clone())
@@ -1770,17 +1780,17 @@ fn materialize_imported_component_meta_registry_decl_body_in_view(
     ) else {
         return decl.body.clone();
     };
-    let mut lookup = verter_analysis::type_eval::NoopEvalLookup;
+    let mut lookup = verter_semantic::analysis::type_eval::NoopEvalLookup;
     materialize_component_meta_registry_decl_body(decl, &mut env, &mut lookup)
 }
 
 fn materialize_component_meta_registry_type(
-    expr: &verter_analysis::type_expr::TypeExpr,
-    env: &mut verter_analysis::type_eval::EvalEnv,
-    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_semantic::analysis::type_eval::EvalLookup,
     remaining_depth: usize,
-) -> verter_analysis::type_expr::TypeExpr {
-    use verter_analysis::type_expr::{
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::{
         FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
     };
 
@@ -1817,17 +1827,19 @@ fn materialize_component_meta_registry_type(
         TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
             elements: elements
                 .iter()
-                .map(|element| verter_analysis::type_expr::TupleElement {
-                    label: element.label.clone(),
-                    ty: materialize_component_meta_registry_type(
-                        &element.ty,
-                        env,
-                        lookup,
-                        next_depth,
-                    ),
-                    optional: element.optional,
-                    rest: element.rest,
-                })
+                .map(
+                    |element| verter_semantic::analysis::type_expr::TupleElement {
+                        label: element.label.clone(),
+                        ty: materialize_component_meta_registry_type(
+                            &element.ty,
+                            env,
+                            lookup,
+                            next_depth,
+                        ),
+                        optional: element.optional,
+                        rest: element.rest,
+                    },
+                )
                 .collect(),
             readonly: *readonly,
         },
@@ -1859,8 +1871,8 @@ fn materialize_component_meta_registry_type(
                         optional: property.optional,
                         readonly: property.readonly,
                     }),
-                    ObjectMember::IndexSignature(signature) => {
-                        ObjectMember::IndexSignature(verter_analysis::type_expr::IndexSignature {
+                    ObjectMember::IndexSignature(signature) => ObjectMember::IndexSignature(
+                        verter_semantic::analysis::type_expr::IndexSignature {
                             key_name: signature.key_name.clone(),
                             key_type: materialize_component_meta_registry_type(
                                 &signature.key_type,
@@ -1875,8 +1887,8 @@ fn materialize_component_meta_registry_type(
                                 next_depth,
                             ),
                             readonly: signature.readonly,
-                        })
-                    }
+                        },
+                    ),
                     ObjectMember::CallSignature(function) => {
                         ObjectMember::CallSignature(materialize_component_meta_registry_function(
                             function, env, lookup, next_depth,
@@ -1887,8 +1899,8 @@ fn materialize_component_meta_registry_type(
                             function, env, lookup, next_depth,
                         ),
                     ),
-                    ObjectMember::Method(method) => {
-                        ObjectMember::Method(verter_analysis::type_expr::MethodSignature {
+                    ObjectMember::Method(method) => ObjectMember::Method(
+                        verter_semantic::analysis::type_expr::MethodSignature {
                             name: method.name.clone(),
                             function: materialize_component_meta_registry_function(
                                 &method.function,
@@ -1897,8 +1909,8 @@ fn materialize_component_meta_registry_type(
                                 next_depth,
                             ),
                             optional: method.optional,
-                        })
-                    }
+                        },
+                    ),
                 })
                 .collect();
             TypeExpr::Object(Arc::new(ObjectExpr { properties }))
@@ -1974,11 +1986,14 @@ fn materialize_component_meta_registry_type(
 }
 
 fn bind_component_meta_registry_type_parameters(
-    decl: &verter_analysis::type_eval::TypeDeclInfo,
-    args: &[verter_analysis::type_expr::TypeExpr],
-    env: &mut verter_analysis::type_eval::EvalEnv,
-    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
-) -> Vec<(String, Option<Arc<verter_analysis::type_expr::TypeExpr>>)> {
+    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
+    args: &[verter_semantic::analysis::type_expr::TypeExpr],
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_semantic::analysis::type_eval::EvalLookup,
+) -> Vec<(
+    String,
+    Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
+)> {
     let saved = decl
         .type_parameters
         .iter()
@@ -1992,23 +2007,21 @@ fn bind_component_meta_registry_type_parameters(
 
     for (index, param) in decl.type_parameters.iter().enumerate() {
         let binding = if index < args.len() {
-            Arc::new(verter_analysis::type_eval::evaluate_with_lookup(
+            Arc::new(verter_semantic::analysis::type_eval::evaluate_with_lookup(
                 &args[index],
                 env,
                 lookup,
             ))
         } else if let Some(default) = &param.default {
-            Arc::new(verter_analysis::type_eval::evaluate_with_lookup(
+            Arc::new(verter_semantic::analysis::type_eval::evaluate_with_lookup(
                 default, env, lookup,
             ))
         } else if let Some(constraint) = &param.constraint {
-            Arc::new(verter_analysis::type_eval::evaluate_with_lookup(
+            Arc::new(verter_semantic::analysis::type_eval::evaluate_with_lookup(
                 constraint, env, lookup,
             ))
         } else {
-            Arc::new(verter_analysis::type_expr::TypeExpr::type_parameter(
-                param.clone(),
-            ))
+            Arc::new(verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()))
         };
         env.type_bindings.insert(param.name.clone(), binding);
     }
@@ -2017,8 +2030,11 @@ fn bind_component_meta_registry_type_parameters(
 }
 
 fn restore_component_meta_registry_type_parameters(
-    saved: Vec<(String, Option<Arc<verter_analysis::type_expr::TypeExpr>>)>,
-    env: &mut verter_analysis::type_eval::EvalEnv,
+    saved: Vec<(
+        String,
+        Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
+    )>,
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
 ) {
     for (name, previous) in saved {
         if let Some(previous) = previous {
@@ -2030,17 +2046,17 @@ fn restore_component_meta_registry_type_parameters(
 }
 
 fn materialize_component_meta_registry_non_structural_type(
-    expr: &verter_analysis::type_expr::TypeExpr,
-    env: &mut verter_analysis::type_eval::EvalEnv,
-    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_semantic::analysis::type_eval::EvalLookup,
     remaining_depth: usize,
-) -> verter_analysis::type_expr::TypeExpr {
-    let registry_budget = verter_analysis::type_expand::ExpansionBudget {
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let registry_budget = verter_semantic::analysis::type_expand::ExpansionBudget {
         max_symbolic_work: COMPONENT_META_REGISTRY_MAX_SYMBOLIC_STEPS,
         ..Default::default()
     };
     if remaining_depth > 0 {
-        let shape = verter_analysis::type_expand::expand_object_shape_with_lookup(
+        let shape = verter_semantic::analysis::type_expand::expand_object_shape_with_lookup(
             expr,
             env,
             &registry_budget,
@@ -2056,7 +2072,7 @@ fn materialize_component_meta_registry_non_structural_type(
         }
     }
 
-    let evaluated = verter_analysis::type_eval::evaluate_with_lookup(expr, env, lookup);
+    let evaluated = verter_semantic::analysis::type_eval::evaluate_with_lookup(expr, env, lookup);
     if evaluated == *expr {
         expr.clone()
     } else {
@@ -2065,26 +2081,28 @@ fn materialize_component_meta_registry_non_structural_type(
 }
 
 fn materialize_component_meta_registry_function(
-    function: &verter_analysis::type_expr::FunctionExpr,
-    env: &mut verter_analysis::type_eval::EvalEnv,
-    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    function: &verter_semantic::analysis::type_expr::FunctionExpr,
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_semantic::analysis::type_eval::EvalLookup,
     remaining_depth: usize,
-) -> verter_analysis::type_expr::FunctionExpr {
-    verter_analysis::type_expr::FunctionExpr {
+) -> verter_semantic::analysis::type_expr::FunctionExpr {
+    verter_semantic::analysis::type_expr::FunctionExpr {
         parameters: function
             .parameters
             .iter()
-            .map(|parameter| verter_analysis::type_expr::FunctionParam {
-                name: parameter.name.clone(),
-                ty: materialize_component_meta_registry_type(
-                    &parameter.ty,
-                    env,
-                    lookup,
-                    remaining_depth,
-                ),
-                optional: parameter.optional,
-                rest: parameter.rest,
-            })
+            .map(
+                |parameter| verter_semantic::analysis::type_expr::FunctionParam {
+                    name: parameter.name.clone(),
+                    ty: materialize_component_meta_registry_type(
+                        &parameter.ty,
+                        env,
+                        lookup,
+                        remaining_depth,
+                    ),
+                    optional: parameter.optional,
+                    rest: parameter.rest,
+                },
+            )
             .collect(),
         return_type: function.return_type.as_ref().map(|ret| {
             Arc::new(materialize_component_meta_registry_type(
@@ -2099,7 +2117,7 @@ fn materialize_component_meta_registry_function(
 }
 
 fn component_meta_registry_shape_has_members(
-    shape: &verter_analysis::type_expand::ExpandedObjectShape,
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
 ) -> bool {
     !shape.properties.is_empty()
         || !shape.index_signatures.is_empty()
@@ -2107,62 +2125,73 @@ fn component_meta_registry_shape_has_members(
 }
 
 fn component_meta_registry_shape_to_type_expr(
-    shape: verter_analysis::type_expand::ExpandedObjectShape,
-    env: &mut verter_analysis::type_eval::EvalEnv,
-    lookup: &mut dyn verter_analysis::type_eval::EvalLookup,
+    shape: verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+    lookup: &mut dyn verter_semantic::analysis::type_eval::EvalLookup,
     remaining_depth: usize,
-) -> verter_analysis::type_expr::TypeExpr {
+) -> verter_semantic::analysis::type_expr::TypeExpr {
     let mut properties = Vec::new();
     let next_depth = remaining_depth.saturating_sub(1);
 
     for property in shape.properties {
-        properties.push(verter_analysis::type_expr::ObjectMember::Property(
-            verter_analysis::type_expr::ObjectProperty {
-                name: property.name,
-                ty: materialize_component_meta_registry_type(&property.ty, env, lookup, next_depth),
-                optional: property.optional,
-                readonly: property.readonly,
-            },
-        ));
-    }
-
-    for signature in shape.index_signatures {
-        properties.push(verter_analysis::type_expr::ObjectMember::IndexSignature(
-            verter_analysis::type_expr::IndexSignature {
-                key_name: "key".to_string(),
-                key_type: materialize_component_meta_registry_type(
-                    &signature.key_type,
-                    env,
-                    lookup,
-                    next_depth,
-                ),
-                value_type: materialize_component_meta_registry_type(
-                    &signature.value_type,
-                    env,
-                    lookup,
-                    next_depth,
-                ),
-                readonly: signature.readonly,
-            },
-        ));
-    }
-
-    for signature in shape.call_signatures {
-        let function = verter_analysis::type_expr::FunctionExpr {
-            parameters: signature
-                .parameters
-                .into_iter()
-                .map(|parameter| verter_analysis::type_expr::FunctionParam {
-                    name: (!parameter.name.is_empty()).then_some(parameter.name),
+        properties.push(
+            verter_semantic::analysis::type_expr::ObjectMember::Property(
+                verter_semantic::analysis::type_expr::ObjectProperty {
+                    name: property.name,
                     ty: materialize_component_meta_registry_type(
-                        &parameter.ty,
+                        &property.ty,
                         env,
                         lookup,
                         next_depth,
                     ),
-                    optional: parameter.optional,
-                    rest: parameter.rest,
-                })
+                    optional: property.optional,
+                    readonly: property.readonly,
+                },
+            ),
+        );
+    }
+
+    for signature in shape.index_signatures {
+        properties.push(
+            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
+                verter_semantic::analysis::type_expr::IndexSignature {
+                    key_name: "key".to_string(),
+                    key_type: materialize_component_meta_registry_type(
+                        &signature.key_type,
+                        env,
+                        lookup,
+                        next_depth,
+                    ),
+                    value_type: materialize_component_meta_registry_type(
+                        &signature.value_type,
+                        env,
+                        lookup,
+                        next_depth,
+                    ),
+                    readonly: signature.readonly,
+                },
+            ),
+        );
+    }
+
+    for signature in shape.call_signatures {
+        let function = verter_semantic::analysis::type_expr::FunctionExpr {
+            parameters: signature
+                .parameters
+                .into_iter()
+                .map(
+                    |parameter| verter_semantic::analysis::type_expr::FunctionParam {
+                        name: (!parameter.name.is_empty()).then_some(parameter.name),
+                        ty: materialize_component_meta_registry_type(
+                            &parameter.ty,
+                            env,
+                            lookup,
+                            next_depth,
+                        ),
+                        optional: parameter.optional,
+                        rest: parameter.rest,
+                    },
+                )
                 .collect(),
             return_type: Some(Arc::new(materialize_component_meta_registry_type(
                 &signature.return_type,
@@ -2172,24 +2201,23 @@ fn component_meta_registry_shape_to_type_expr(
             ))),
             type_parameters: signature.type_parameters,
         };
-        properties.push(verter_analysis::type_expr::ObjectMember::CallSignature(
-            function,
-        ));
+        properties
+            .push(verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function));
     }
 
-    verter_analysis::type_expr::TypeExpr::Object(Arc::new(verter_analysis::type_expr::ObjectExpr {
-        properties,
-    }))
+    verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr { properties },
+    ))
 }
 
 fn collect_component_meta_registry_refs(
-    expr: &verter_analysis::type_expr::TypeExpr,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
-    use verter_analysis::type_expr::TypeExpr;
+    use verter_semantic::analysis::type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Ref {
@@ -2255,7 +2283,7 @@ fn collect_component_meta_registry_refs(
         TypeExpr::Object(object) => {
             for member in object.properties.iter() {
                 match member {
-                    verter_analysis::type_expr::ObjectMember::Property(property) => {
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
                         collect_component_meta_registry_refs(
                             &property.ty,
                             published_names,
@@ -2264,7 +2292,9 @@ fn collect_component_meta_registry_refs(
                             source_hint,
                         );
                     }
-                    verter_analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                    verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
+                        signature,
+                    ) => {
                         collect_component_meta_registry_refs(
                             &signature.key_type,
                             published_names,
@@ -2280,8 +2310,10 @@ fn collect_component_meta_registry_refs(
                             source_hint,
                         );
                     }
-                    verter_analysis::type_expr::ObjectMember::CallSignature(function)
-                    | verter_analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
+                        function,
+                    ) => {
                         for parameter in function.parameters.iter() {
                             collect_component_meta_registry_refs(
                                 &parameter.ty,
@@ -2301,7 +2333,7 @@ fn collect_component_meta_registry_refs(
                             );
                         }
                     }
-                    verter_analysis::type_expr::ObjectMember::Method(method) => {
+                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
                         for parameter in method.function.parameters.iter() {
                             collect_component_meta_registry_refs(
                                 &parameter.ty,
@@ -2515,7 +2547,7 @@ impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
         self.host.local_type_declaration_id_in_view(
             canonical_source,
             resolved_name,
@@ -2614,21 +2646,21 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
     fn snapshot_imports<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_analysis::types::AnalyzedImport] {
+    ) -> &'a [verter_semantic::analysis::types::AnalyzedImport] {
         snapshot.imports.as_slice()
     }
 
     fn snapshot_macros<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_analysis::types::AnalyzedMacro] {
+    ) -> &'a [verter_semantic::analysis::types::AnalyzedMacro] {
         snapshot.macros.as_slice()
     }
 
     fn snapshot_macro_type_deps<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_analysis::types::MacroTypeDep] {
+    ) -> &'a [verter_semantic::analysis::types::MacroTypeDep] {
         snapshot.macro_type_deps.as_slice()
     }
 
@@ -2865,7 +2897,7 @@ fn resolve_jsdoc_block(
 
     let source = read_full_source(host, canonical_source, store_view)?;
     let (description, tags) =
-        verter_analysis::jsdoc::extract_jsdoc_near_offset(&source, span.start);
+        verter_semantic::analysis::jsdoc::extract_jsdoc_near_offset(&source, span.start);
     if description.is_none() && tags.is_empty() {
         return None;
     }
@@ -2901,7 +2933,7 @@ fn map_jsdoc_tag(
     _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     _kind: verter_workspace::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,
-    tag: verter_analysis::types::JsdocTag,
+    tag: verter_semantic::analysis::types::JsdocTag,
 ) -> ResolvedJsdocTag {
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
     let resolved_type = if mode == ResolverMode::Expanded {
@@ -2981,10 +3013,10 @@ fn resolve_jsdoc_tag_type(
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
     store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> Option<verter_analysis::type_expr::TypeExpr> {
-    let parsed = verter_analysis::type_expr_lower::parse_type_annotation(raw_type);
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
     let parsed = if parsed.is_unknown() {
-        verter_analysis::type_expr::TypeExpr::Unknown {
+        verter_semantic::analysis::type_expr::TypeExpr::Unknown {
             raw: raw_type.to_string(),
         }
     } else {
@@ -3032,8 +3064,11 @@ fn resolve_jsdoc_tag_type(
     );
     let mut lookup =
         ImportedEvalLookup::new(&mut resolver, canonical_source, snapshot.imports.as_slice());
-    let resolved =
-        verter_analysis::type_eval::evaluate_with_lookup(&parsed, &mut owner_env, &mut lookup);
+    let resolved = verter_semantic::analysis::type_eval::evaluate_with_lookup(
+        &parsed,
+        &mut owner_env,
+        &mut lookup,
+    );
     tracked_deps.extend(lookup.into_discovered_dependencies());
     Some(resolved)
 }

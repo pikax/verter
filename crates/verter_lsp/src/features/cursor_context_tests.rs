@@ -1,6 +1,6 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::template::*;
+use verter_semantic::analysis::template::*;
 use verter_session::FileAnalysisSnapshot;
 use verter_span::Span;
 
@@ -194,8 +194,8 @@ fn test_style_block_vbind() {
     let blocks = scan_sfc_blocks(source);
 
     let analysis = FileAnalysisSnapshot {
-        styles: (vec![verter_analysis::StyleBlockAnalysis {
-            v_binds: vec![verter_analysis::style::AnalyzedVBind {
+        styles: (vec![verter_semantic::analysis::StyleBlockAnalysis {
+            v_binds: vec![verter_semantic::analysis::style::AnalyzedVBind {
                 expression: "color".to_string(),
                 quoted: false,
                 start: 68,

@@ -936,13 +936,13 @@ fn test_module_reference(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
 ) -> verter_session::ScriptModuleReference {
     verter_session::ScriptModuleReference {
-        syntax: verter_analysis::ModuleReferenceSyntax::StaticImport,
-        semantics: verter_analysis::ModuleReferenceSemantics::Import,
+        syntax: verter_semantic::analysis::ModuleReferenceSyntax::StaticImport,
+        semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
         is_type_only: false,
         raw_text: raw_text.to_string(),
         literal_specifier: literal_specifier.map(str::to_string),
@@ -961,10 +961,10 @@ fn test_module_reference_with_semantics(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-    semantics: verter_analysis::ModuleReferenceSemantics,
+    semantics: verter_semantic::analysis::ModuleReferenceSemantics,
     is_type_only: bool,
 ) -> verter_session::ScriptModuleReference {
     verter_session::ScriptModuleReference {
@@ -985,13 +985,13 @@ fn test_analyzed_module_reference(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-) -> verter_analysis::AnalyzedModuleReference {
-    verter_analysis::AnalyzedModuleReference {
-        syntax: verter_analysis::ModuleReferenceSyntax::StaticImport,
-        semantics: verter_analysis::ModuleReferenceSemantics::Import,
+) -> verter_semantic::analysis::AnalyzedModuleReference {
+    verter_semantic::analysis::AnalyzedModuleReference {
+        syntax: verter_semantic::analysis::ModuleReferenceSyntax::StaticImport,
+        semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
         is_type_only: false,
         raw_text: raw_text.to_string(),
         literal_specifier: literal_specifier.map(str::to_string),
@@ -1206,10 +1206,10 @@ fn module_reference_request_kind_uses_require_semantics() {
         "'pkg'",
         Some("pkg"),
         &[],
-        verter_analysis::ModuleReferenceAnalyzability::Exact,
+        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
         0,
         5,
-        verter_analysis::ModuleReferenceSemantics::Require,
+        verter_semantic::analysis::ModuleReferenceSemantics::Require,
         false,
     );
     assert_eq!(
@@ -1221,10 +1221,10 @@ fn module_reference_request_kind_uses_require_semantics() {
         "'pkg'",
         Some("pkg"),
         &[],
-        verter_analysis::ModuleReferenceAnalyzability::Exact,
+        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
         0,
         5,
-        verter_analysis::ModuleReferenceSemantics::Import,
+        verter_semantic::analysis::ModuleReferenceSemantics::Import,
         true,
     );
     assert_eq!(
@@ -1257,7 +1257,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 foo_expr,
                 Some("./Foo.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 foo_start,
                 foo_start + foo_expr.len(),
             ),
@@ -1265,7 +1265,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 util_expr,
                 Some("./util"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 util_start,
                 util_start + util_expr.len(),
             ),
@@ -1273,7 +1273,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 dynamic_expr,
                 None,
                 &["./Foo.vue"],
-                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
                 dynamic_start,
                 dynamic_start + dynamic_expr.len(),
             ),
@@ -1318,7 +1318,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 foo_expr,
                 Some("./Foo.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 foo_start,
                 foo_start + foo_expr.len(),
             ),
@@ -1326,7 +1326,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 util_expr,
                 Some("./util"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 util_start,
                 util_start + util_expr.len(),
             ),
@@ -1334,7 +1334,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 dynamic_expr,
                 None,
                 &["./Foo.vue", "./util"],
-                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
                 dynamic_start,
                 dynamic_start + dynamic_expr.len(),
             ),
@@ -1409,7 +1409,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 temp_util_expr,
                 Some("./tempUtil"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 temp_util_start,
                 temp_util_start + temp_util_expr.len(),
             ),
@@ -1417,7 +1417,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 child_expr,
                 Some("./ExternalChild.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 child_start,
                 child_start + child_expr.len(),
             ),
@@ -1767,30 +1767,30 @@ async fn initialized_returns_before_background_configure_paths_completes() {
 
 #[test]
 fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
-    let analysis = verter_analysis::ScriptAnalysisSnapshot {
+    let analysis = verter_semantic::analysis::ScriptAnalysisSnapshot {
         imports: vec![
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: Some("C:/project/src/MyComp.vue".to_string()),
             },
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./utils".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: Some("C:/project/src/utils.ts".to_string()),
             },
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./Other.vue".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: None,
             },
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
@@ -1802,7 +1802,7 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
         bindings: Vec::new(),
         macros: Vec::new(),
         macro_type_deps: Vec::new(),
-        flags: verter_analysis::AnalysisFlags::empty(),
+        flags: verter_semantic::analysis::AnalysisFlags::empty(),
         exported_functions: Vec::new(),
         vue_api_calls: Vec::new(),
         dom_query_calls: Vec::new(),
@@ -1834,14 +1834,14 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
 #[test]
 fn collect_imported_vue_priority_ids_falls_back_to_relative_resolution() {
     let imports = vec![
-        verter_analysis::AnalyzedImport {
+        verter_semantic::analysis::AnalyzedImport {
             source: "./TypedSlotComp.vue".to_string(),
             is_type_only: false,
             bindings: Vec::new(),
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         },
-        verter_analysis::AnalyzedImport {
+        verter_semantic::analysis::AnalyzedImport {
             source: "./utils".to_string(),
             is_type_only: false,
             bindings: Vec::new(),
@@ -1899,7 +1899,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 "'./Foo.vue'",
                 Some("./Foo.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 0,
                 10,
             ),
@@ -1907,7 +1907,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 "`./${name}.vue`",
                 None,
                 &["./Bar.vue", "./util"],
-                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
                 11,
                 27,
             ),
@@ -1944,7 +1944,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
             "`./${name}.vue`",
             None,
             &[],
-            verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic,
+            verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic,
             0,
             15,
         )],
@@ -2170,7 +2170,7 @@ async fn resolve_component_document_for_usage_follows_barrel_reexports() {
     );
     assert!(
         child.analysis.macros.iter().any(|mac| {
-            mac.kind == verter_analysis::AnalyzedMacroKind::DefineEmits
+            mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
                 && mac.emit_fields.iter().any(|field| field.name == "custom")
         }),
         "resolved child analysis should expose the child's emit declaration"

@@ -99,7 +99,7 @@ pub(crate) fn try_resolve_src_block(
 pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
-    analysis_scope: verter_analysis::AnalysisScope,
+    analysis_scope: verter_semantic::analysis::AnalysisScope,
 ) -> (ParseSnapshot, ParsedSfc) {
     let parsed = parse_sfc(source, None, None);
     let snapshot = build_vue_snapshot_from_parsed(canonical_id, source, analysis_scope, &parsed);
@@ -121,7 +121,7 @@ pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
 pub(crate) fn build_vue_snapshot_from_parsed(
     canonical_id: &str,
     source: &str,
-    analysis_scope: verter_analysis::AnalysisScope,
+    analysis_scope: verter_semantic::analysis::AnalysisScope,
     parsed: &ParsedSfc,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
@@ -368,7 +368,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     );
 
     // Build style analyses for each style block (when style analysis flags are set)
-    let style_analyses: Vec<verter_analysis::StyleBlockAnalysis> =
+    let style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis> =
         if analysis_scope.needs_style_analysis() {
             build_style_analyses_from_parsed(&parsed, source, canonical_id)
         } else {
@@ -385,7 +385,10 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     let (mut script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
         build_script_analysis_from_parsed_with_diagnostic(&parsed, source)
     } else {
-        (verter_analysis::ScriptAnalysisSnapshot::default(), None)
+        (
+            verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
+            None,
+        )
     };
 
     // Cross-reference: mark script bindings that are referenced by CSS v-bind() in style blocks
@@ -547,7 +550,7 @@ fn build_single_style_analysis(
     style: &verter_compiler::parser::types::RootNodeStyle,
     source: &str,
     canonical_id: &str,
-) -> verter_analysis::StyleBlockAnalysis {
+) -> verter_semantic::analysis::StyleBlockAnalysis {
     let module_name =
         find_attr(&extract_attrs(&style.attributes, source), "module").filter(|v| v != "true");
     let content_offset = style.content.map(|span| span.start).unwrap_or(0);
@@ -564,11 +567,11 @@ fn build_single_style_analysis(
     let prepass_result = verter_compiler::css::prepass::prepass(css_content, &scope_id);
 
     // Build VueStyleInput from prepass results
-    let vue_input = verter_analysis::VueStyleInput {
+    let vue_input = verter_semantic::analysis::VueStyleInput {
         v_binds: prepass_result
             .v_bind_vars
             .iter()
-            .map(|vb| verter_analysis::VBindInput {
+            .map(|vb| verter_semantic::analysis::VBindInput {
                 expression: vb.expression.clone(),
                 quoted: false,
                 start: content_offset,
@@ -583,7 +586,7 @@ fn build_single_style_analysis(
 
     let analysis_lang = match style.lang {
         Some(verter_compiler::parser::types::StyleLang::Css) | None => {
-            let analysis = verter_analysis::build_css_style_analysis(
+            let analysis = verter_semantic::analysis::build_css_style_analysis(
                 css_content,
                 vue_input,
                 style.scoped,
@@ -597,22 +600,22 @@ fn build_single_style_analysis(
             return analysis;
         }
         Some(verter_compiler::parser::types::StyleLang::Scss) => {
-            verter_analysis::StyleAnalysisLang::Scss
+            verter_semantic::analysis::StyleAnalysisLang::Scss
         }
         Some(verter_compiler::parser::types::StyleLang::Sass) => {
-            verter_analysis::StyleAnalysisLang::Sass
+            verter_semantic::analysis::StyleAnalysisLang::Sass
         }
         Some(verter_compiler::parser::types::StyleLang::Less) => {
-            verter_analysis::StyleAnalysisLang::Less
+            verter_semantic::analysis::StyleAnalysisLang::Less
         }
         Some(verter_compiler::parser::types::StyleLang::Stylus) => {
-            verter_analysis::StyleAnalysisLang::Stylus
+            verter_semantic::analysis::StyleAnalysisLang::Stylus
         }
         Some(verter_compiler::parser::types::StyleLang::Unknown) => {
-            verter_analysis::StyleAnalysisLang::Unknown
+            verter_semantic::analysis::StyleAnalysisLang::Unknown
         }
     };
-    verter_analysis::build_preprocessor_style_analysis(
+    verter_semantic::analysis::build_preprocessor_style_analysis(
         analysis_lang,
         vue_input,
         style.scoped,
@@ -699,19 +702,22 @@ fn build_script_analysis_from_parsed_with_diagnostic(
     parsed: &ParsedSfc,
     source: &str,
 ) -> (
-    verter_analysis::ScriptAnalysisSnapshot,
+    verter_semantic::analysis::ScriptAnalysisSnapshot,
     Option<HostDiagnostic>,
 ) {
     let (combined_content, block_ranges) = collect_sfc_script_content(parsed, source);
     if combined_content.is_empty() {
-        return (verter_analysis::ScriptAnalysisSnapshot::default(), None);
+        return (
+            verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
+            None,
+        );
     }
     let source_type = sfc_script_source_type(parsed, source);
     let alloc = Allocator::new();
     let (mut analysis, diag) = catch_analysis_panic(
         "script analysis",
         std::panic::AssertUnwindSafe(|| {
-            verter_analysis::build_script_analysis(&combined_content, source_type, &alloc)
+            verter_semantic::analysis::build_script_analysis(&combined_content, source_type, &alloc)
         }),
     );
     adjust_analysis_spans(&mut analysis, &block_ranges);
@@ -722,7 +728,7 @@ fn build_export_signatures_from_parsed_with_diagnostic(
     parsed: &ParsedSfc,
     source: &str,
 ) -> (
-    Vec<verter_analysis::ExportSignature>,
+    Vec<verter_semantic::analysis::ExportSignature>,
     Option<HostDiagnostic>,
 ) {
     let (combined_content, block_ranges) = collect_sfc_script_content(parsed, source);
@@ -735,7 +741,11 @@ fn build_export_signatures_from_parsed_with_diagnostic(
     let (mut export_signatures, diag) = catch_analysis_panic(
         "export signature analysis",
         std::panic::AssertUnwindSafe(|| {
-            verter_analysis::build_export_signatures(&combined_content, source_type, &alloc)
+            verter_semantic::analysis::build_export_signatures(
+                &combined_content,
+                source_type,
+                &alloc,
+            )
         }),
     );
     adjust_export_signature_spans(&mut export_signatures, &block_ranges);
@@ -761,7 +771,7 @@ fn combined_offset_to_sfc(offset: u32, block_ranges: &[(u32, u32)]) -> u32 {
 /// Adjust all span fields in a `ScriptAnalysisSnapshot` from script-content-relative
 /// to SFC-absolute byte offsets.
 pub(crate) fn adjust_analysis_spans(
-    analysis: &mut verter_analysis::ScriptAnalysisSnapshot,
+    analysis: &mut verter_semantic::analysis::ScriptAnalysisSnapshot,
     block_ranges: &[(u32, u32)],
 ) {
     if block_ranges.is_empty() {
@@ -880,7 +890,7 @@ pub(crate) fn adjust_analysis_spans(
 }
 
 pub(crate) fn adjust_export_signature_spans(
-    export_signatures: &mut [verter_analysis::ExportSignature],
+    export_signatures: &mut [verter_semantic::analysis::ExportSignature],
     block_ranges: &[(u32, u32)],
 ) {
     if block_ranges.is_empty() {
@@ -906,7 +916,7 @@ pub(crate) fn adjust_export_signature_spans(
 /// when eager_analysis was false during upsert().
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
-) -> verter_analysis::ScriptAnalysisSnapshot {
+) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
     let parsed = parse_sfc(source, None, None);
     build_script_analysis_from_parsed(&parsed, source)
 }
@@ -914,7 +924,7 @@ pub(crate) fn build_script_analysis_from_source(
 pub(crate) fn build_script_analysis_from_parsed(
     parsed: &ParsedSfc,
     source: &str,
-) -> verter_analysis::ScriptAnalysisSnapshot {
+) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
     let (analysis, _diag) = build_script_analysis_from_parsed_with_diagnostic(parsed, source);
     analysis
 }
@@ -924,7 +934,7 @@ pub(crate) fn build_script_analysis_from_parsed(
 pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,
-) -> Vec<verter_analysis::StyleBlockAnalysis> {
+) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
     let parsed = parse_sfc(source, None, None);
     build_style_analyses_from_parsed(&parsed, source, canonical_id)
 }
@@ -933,7 +943,7 @@ pub(crate) fn build_style_analyses_from_parsed(
     parsed: &ParsedSfc,
     source: &str,
     canonical_id: &str,
-) -> Vec<verter_analysis::StyleBlockAnalysis> {
+) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
     parsed
         .style_nodes()
         .iter()
@@ -952,20 +962,21 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     let descriptor = DescriptorMin::default();
     let semantic_hash = whole_hash;
 
-    let export_signatures = verter_analysis::build_export_signatures_from_program(source, program);
-    let script_analysis = verter_analysis::build_script_analysis_with_scope_from_program(
+    let export_signatures =
+        verter_semantic::analysis::build_export_signatures_from_program(source, program);
+    let script_analysis = verter_semantic::analysis::build_script_analysis_with_scope_from_program(
         source,
         source_type,
         program,
-        verter_analysis::AnalysisScope::IMPORTS
-            | verter_analysis::AnalysisScope::BINDINGS
-            | verter_analysis::AnalysisScope::FUNC_RETURNS
-            | verter_analysis::AnalysisScope::REACTIVITY
-            | verter_analysis::AnalysisScope::MACROS
-            | verter_analysis::AnalysisScope::MACRO_TYPE_DEPS
-            | verter_analysis::AnalysisScope::VUE_API_USAGE
-            | verter_analysis::AnalysisScope::EXPORT_SIGNATURES
-            | verter_analysis::AnalysisScope::SCRIPT_USAGES,
+        verter_semantic::analysis::AnalysisScope::IMPORTS
+            | verter_semantic::analysis::AnalysisScope::BINDINGS
+            | verter_semantic::analysis::AnalysisScope::FUNC_RETURNS
+            | verter_semantic::analysis::AnalysisScope::REACTIVITY
+            | verter_semantic::analysis::AnalysisScope::MACROS
+            | verter_semantic::analysis::AnalysisScope::MACRO_TYPE_DEPS
+            | verter_semantic::analysis::AnalysisScope::VUE_API_USAGE
+            | verter_semantic::analysis::AnalysisScope::EXPORT_SIGNATURES
+            | verter_semantic::analysis::AnalysisScope::SCRIPT_USAGES,
     );
 
     ParseSnapshot {
@@ -1002,7 +1013,7 @@ pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseS
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
-            script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+            script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
             preprocessor_requests: Vec::new(),
@@ -1016,8 +1027,8 @@ pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseS
 mod tests {
     use super::*;
     use smallvec::SmallVec;
-    use verter_analysis::AnalysisScope;
     use verter_compiler::types::NodeProp;
+    use verter_semantic::analysis::AnalysisScope;
 
     // ── Helper: build a NodeProp pointing into a source string ──
 
@@ -1672,7 +1683,7 @@ watch(count, (value, oldValue) => {
             .script_analysis
             .vue_api_calls
             .iter()
-            .find(|call| call.api == verter_analysis::VueApiClassification::Watch)
+            .find(|call| call.api == verter_semantic::analysis::VueApiClassification::Watch)
             .expect("should find watch() call");
 
         assert_eq!(watch_call.callback_params.len(), 2);
@@ -1875,14 +1886,14 @@ onMounted(() => { console.log('mounted') })
             analysis
                 .vue_api_calls
                 .iter()
-                .any(|c| c.api == verter_analysis::VueApiClassification::Provide),
+                .any(|c| c.api == verter_semantic::analysis::VueApiClassification::Provide),
             "should detect provide() call"
         );
         assert!(
             analysis
                 .vue_api_calls
                 .iter()
-                .any(|c| c.api == verter_analysis::VueApiClassification::OnMounted),
+                .any(|c| c.api == verter_semantic::analysis::VueApiClassification::OnMounted),
             "should detect onMounted() call"
         );
         // Positive: IMPORTS should be populated
@@ -1897,7 +1908,7 @@ onMounted(() => { console.log('mounted') })
             analysis
                 .vue_api_calls
                 .iter()
-                .all(|c| c.api != verter_analysis::VueApiClassification::OnUnmounted),
+                .all(|c| c.api != verter_semantic::analysis::VueApiClassification::OnUnmounted),
             "should not detect onUnmounted which isn't in the source"
         );
     }

@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
-use verter_analysis::type_eval::{
+use verter_semantic::analysis::type_eval::{
     BuiltinUtilitySource, EvalEnv, EvalLookup, TypeDeclInfo, ValueDeclInfo,
 };
-use verter_analysis::type_expr::{FunctionExpr, TypeExpr};
-use verter_analysis::types::{AnalyzedImport, ImportBindingKind};
+use verter_semantic::analysis::type_expr::{FunctionExpr, TypeExpr};
+use verter_semantic::analysis::types::{AnalyzedImport, ImportBindingKind};
 
 use crate::{resolve_type_declaration, DeclarationMetadataResolver, ResolvedExportTarget};
 
@@ -205,7 +205,7 @@ impl<R: ImportedEvalLookupResolver> ImportedEvalLookup<'_, R> {
         remaining_path: &[String],
     ) -> Option<TypeExpr> {
         let mut current = if let Some(type_annotation) = decl.type_annotation.as_ref() {
-            verter_analysis::type_eval::evaluate(type_annotation, dep_env)
+            verter_semantic::analysis::type_eval::evaluate(type_annotation, dep_env)
         } else if let Some(function_signature) = decl.function_signature.as_ref() {
             TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
                 parameters: function_signature.parameters.clone(),
@@ -222,7 +222,7 @@ impl<R: ImportedEvalLookupResolver> ImportedEvalLookup<'_, R> {
         };
 
         for segment in remaining_path {
-            current = verter_analysis::type_eval::evaluate(
+            current = verter_semantic::analysis::type_eval::evaluate(
                 &TypeExpr::IndexedAccess {
                     object: std::sync::Arc::new(current),
                     index: std::sync::Arc::new(TypeExpr::string_literal(segment.as_str())),
@@ -344,12 +344,12 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
                 let decl = self.resolve_value_decl(&value_ref.path)?;
                 if let Some(shape) = decl.object_shape {
                     return shape.properties.iter().find_map(|member| match member {
-                        verter_analysis::type_expr::ObjectMember::Property(prop)
+                        verter_semantic::analysis::type_expr::ObjectMember::Property(prop)
                             if prop.name == key =>
                         {
                             Some(prop.ty.clone())
                         }
-                        verter_analysis::type_expr::ObjectMember::Method(method)
+                        verter_semantic::analysis::type_expr::ObjectMember::Method(method)
                             if method.name == key =>
                         {
                             Some(TypeExpr::Function(std::sync::Arc::new(
@@ -361,12 +361,12 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
                 }
 
                 let ty = decl.type_annotation?;
-                Some(verter_analysis::type_eval::evaluate(
+                Some(verter_semantic::analysis::type_eval::evaluate(
                     &TypeExpr::IndexedAccess {
                         object: std::sync::Arc::new(ty),
                         index: std::sync::Arc::new(TypeExpr::string_literal(key)),
                     },
-                    &mut verter_analysis::type_eval::EvalEnv::new(),
+                    &mut verter_semantic::analysis::type_eval::EvalEnv::new(),
                 ))
             }
             _ => None,
@@ -408,8 +408,10 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use verter_analysis::type_eval::{TypeDeclKind, ValueDeclKind};
-    use verter_analysis::type_expr::{LiteralValue, ObjectMember, ObjectProperty, PrimitiveName};
+    use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
+    use verter_semantic::analysis::type_expr::{
+        LiteralValue, ObjectMember, ObjectProperty, PrimitiveName,
+    };
     use verter_span::Span;
 
     #[derive(Default)]
@@ -448,7 +450,7 @@ mod tests {
             &self,
             _canonical_source: &str,
             _resolved_name: &str,
-        ) -> Option<verter_analysis::type_eval::DeclarationId> {
+        ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
             None
         }
 
@@ -521,7 +523,7 @@ mod tests {
     fn analyzed_import(
         source: &str,
         resolved_canonical_id: Option<&str>,
-        bindings: Vec<verter_analysis::types::AnalyzedImportBinding>,
+        bindings: Vec<verter_semantic::analysis::types::AnalyzedImportBinding>,
         is_type_only: bool,
     ) -> AnalyzedImport {
         AnalyzedImport {
@@ -538,8 +540,8 @@ mod tests {
         kind: ImportBindingKind,
         imported_name: Option<&str>,
         is_type_only: bool,
-    ) -> verter_analysis::types::AnalyzedImportBinding {
-        verter_analysis::types::AnalyzedImportBinding {
+    ) -> verter_semantic::analysis::types::AnalyzedImportBinding {
+        verter_semantic::analysis::types::AnalyzedImportBinding {
             name: name.to_string(),
             kind,
             imported_name: imported_name.map(str::to_string),
@@ -592,7 +594,7 @@ mod tests {
             kind: ValueDeclKind::Const,
             type_annotation: None,
             function_signature: None,
-            object_shape: Some(verter_analysis::type_expr::ObjectExpr {
+            object_shape: Some(verter_semantic::analysis::type_expr::ObjectExpr {
                 properties: vec![ObjectMember::Property(ObjectProperty {
                     name: "slots".to_string(),
                     ty: TypeExpr::Literal(LiteralValue::String("panel".to_string())),

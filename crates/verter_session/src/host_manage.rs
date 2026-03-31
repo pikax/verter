@@ -372,15 +372,19 @@ const COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS: usize = 2_000;
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 impl FallthroughResolutionView for crate::types::FallthroughResolution {
-    fn accepted_props(&self) -> &[verter_analysis::component_meta::AcceptedPropAnalysis] {
+    fn accepted_props(&self) -> &[verter_semantic::analysis::component_meta::AcceptedPropAnalysis] {
         &self.accepted_props
     }
 
-    fn accepted_events(&self) -> &[verter_analysis::component_meta::AcceptedEventAnalysis] {
+    fn accepted_events(
+        &self,
+    ) -> &[verter_semantic::analysis::component_meta::AcceptedEventAnalysis] {
         &self.accepted_events
     }
 
-    fn fallthrough_surface(&self) -> &verter_analysis::component_meta::FallthroughSurface {
+    fn fallthrough_surface(
+        &self,
+    ) -> &verter_semantic::analysis::component_meta::FallthroughSurface {
         &self.fallthrough_surface
     }
 
@@ -413,7 +417,7 @@ impl FallthroughRequestHost for VerterHost {
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
@@ -491,7 +495,7 @@ impl FallthroughRequestHost for VerterHost {
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: Option<&Self::View>,
@@ -509,7 +513,7 @@ impl FallthroughRequestHost for VerterHost {
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         result: &Self::Resolution,
     ) {
@@ -530,7 +534,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         &self,
         canonical_id: &str,
         tag: &str,
-    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
+    ) -> Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
         let (project_anchor, cache_generation) =
             self.host.project_intrinsic_cache_anchor(canonical_id);
@@ -597,7 +601,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<Self::ChildResolution> {
@@ -643,7 +647,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
 
 impl FallthroughComputeHost for HostFallthroughResolver<'_> {
     type Snapshot = FileAnalysisSnapshot;
-    type EvalEnv = verter_analysis::type_eval::EvalEnv;
+    type EvalEnv = verter_semantic::analysis::type_eval::EvalEnv;
 
     fn resolve_root_consumption(
         &self,
@@ -651,7 +655,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         branch_key: &str,
         snapshot: &Self::Snapshot,
         element_index: u32,
-        base: &verter_analysis::component_meta::ConsumedRootBindings,
+        base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<Self::EvalEnv>,
     ) -> ResolvedConsumedBindings {
@@ -693,7 +697,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
-    ) -> Option<rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>> {
+    ) -> Option<rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>> {
         self.host
             .build_generic_child_prop_overrides(snapshot, usage_index, eval_env)
     }
@@ -715,36 +719,38 @@ pub(crate) fn component_meta_symbolic_step_budget() -> usize {
 
 fn component_meta_expansion_budget_with_max_symbolic_work(
     max_symbolic_work: usize,
-) -> verter_analysis::type_expand::ExpansionBudget {
-    verter_analysis::type_expand::ExpansionBudget {
+) -> verter_semantic::analysis::type_expand::ExpansionBudget {
+    verter_semantic::analysis::type_expand::ExpansionBudget {
         max_symbolic_work,
         ..Default::default()
     }
 }
 
-pub(crate) fn component_meta_expansion_budget() -> verter_analysis::type_expand::ExpansionBudget {
+pub(crate) fn component_meta_expansion_budget(
+) -> verter_semantic::analysis::type_expand::ExpansionBudget {
     component_meta_expansion_budget_with_max_symbolic_work(COMPONENT_META_MAX_SYMBOLIC_STEPS)
 }
 
 fn expanded_component_types_hit_symbolic_budget(
-    types: &verter_analysis::type_expand::ExpandedComponentTypes,
+    types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
 ) -> bool {
-    use verter_analysis::type_expand::ExpansionStopReason;
+    use verter_semantic::analysis::type_expand::ExpansionStopReason;
 
-    let field_has_budget = |field: &verter_analysis::type_expand::ExpandedField| {
+    let field_has_budget = |field: &verter_semantic::analysis::type_expand::ExpandedField| {
         field
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
     };
-    let macro_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroObjectShape| {
-        shape
-            .result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
-    };
-    let props_has_budget = |shape: &verter_analysis::type_expand::ExpandedMacroProps| {
+    let macro_has_budget =
+        |shape: &verter_semantic::analysis::type_expand::ExpandedMacroObjectShape| {
+            shape
+                .result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+        };
+    let props_has_budget = |shape: &verter_semantic::analysis::type_expand::ExpandedMacroProps| {
         shape
             .result
             .diagnostics
@@ -769,7 +775,7 @@ fn computed_evaluated_types_hit_symbolic_budget(computed: &ComputedEvaluatedType
 }
 
 fn expanded_component_types_have_component_surface(
-    types: &verter_analysis::type_expand::ExpandedComponentTypes,
+    types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
 ) -> bool {
     !types.props.is_empty()
         || !types.define_props.is_empty()
@@ -974,7 +980,7 @@ impl<'a> HostImportedEvalResolver<'a> {
     fn cached_dependency_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         self.host
             .clone_current_imported_dependency_entry(canonical_id, self.store_view)
             .and_then(|dependency| dependency.env.clone())
@@ -1016,7 +1022,7 @@ impl<'a> HostImportedEvalResolver<'a> {
         owner_canonical_id: &str,
         owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
         owner_eval_source: &str,
-        owner_env: &verter_analysis::type_eval::EvalEnv,
+        owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
     ) -> rustc_hash::FxHashSet<String> {
         let _trace = component_meta_trace_scope!(
             "collect_required_owner_import_names",
@@ -1138,10 +1144,10 @@ fn is_builtin_type_symbol(name: &str) -> bool {
 }
 
 pub(crate) fn collect_type_expr_symbol_refs(
-    expr: &verter_analysis::type_expr::TypeExpr,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
     refs: &mut std::collections::BTreeSet<String>,
 ) {
-    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Ref {
@@ -1278,7 +1284,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         &self,
         canonical_id: &str,
         source: &str,
-        sig: &verter_analysis::ExportSignature,
+        sig: &verter_semantic::analysis::ExportSignature,
     ) -> Option<String> {
         let declaration_file = canonical_id.ends_with(".d.ts")
             || canonical_id.ends_with(".d.mts")
@@ -1304,7 +1310,7 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
     fn dependency_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         self.host
             .base_eval_env_arc_in_view(canonical_id, self.store_view)
     }
@@ -1352,7 +1358,7 @@ impl DeclarationMetadataResolver for HostImportedEvalResolver<'_> {
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
         self.host.local_type_declaration_id_in_view(
             canonical_source,
             resolved_name,
@@ -1435,7 +1441,7 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
     fn resolve_import_canonical_id(
         &self,
         owner_canonical_id: &str,
-        import: &verter_analysis::AnalyzedImport,
+        import: &verter_semantic::analysis::AnalyzedImport,
     ) -> Option<String> {
         self.resolve_imported_dependency_canonical(
             owner_canonical_id,
@@ -1448,7 +1454,7 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
         &mut self,
         request: ImportedTypeAliasResolveRequest,
         discovered_dependencies: &mut std::collections::BTreeSet<String>,
-    ) -> Option<verter_analysis::type_eval::TypeDeclInfo> {
+    ) -> Option<verter_semantic::analysis::type_eval::TypeDeclInfo> {
         verter_resolver::prepare_imported_type_alias(self, request, discovered_dependencies)
             .map(|alias| alias.decl)
     }
@@ -1486,7 +1492,7 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
     fn dependency_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         self.cached_dependency_eval_env(canonical_id)
             .map(|env| (*env).clone())
     }
@@ -1496,7 +1502,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
     fn dependency_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         self.cached_dependency_eval_env(canonical_id)
     }
 
@@ -1513,7 +1519,8 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
         request: &ImportedTypeAliasResolveRequest,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-    ) -> Result<Option<verter_analysis::type_expr::TypeExpr>, ImportedTypeAliasPrepareError> {
+    ) -> Result<Option<verter_semantic::analysis::type_expr::TypeExpr>, ImportedTypeAliasPrepareError>
+    {
         let _trace = component_meta_trace_scope!(
             "resolve_external_type_body",
             format!(
@@ -1588,7 +1595,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
         source_canonical_id: &str,
         exported_name: &str,
         canonical_dependencies: &mut std::collections::BTreeSet<String>,
-    ) -> Option<verter_analysis::type_expr::TypeExpr> {
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
         resolver_evaluate_imported_decl_with_owner_env(
             self,
             source_canonical_id,
@@ -1601,7 +1608,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
         &self,
         source_canonical_id: &str,
         exported_name: &str,
-        decl_body: &verter_analysis::type_expr::TypeExpr,
+        decl_body: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> Vec<ImportedSymbolDependency> {
         self.host.imported_symbol_dependencies_in_view(
             source_canonical_id,
@@ -1640,7 +1647,7 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
     fn resolve_imported_type_dependency(
         &self,
         owner_canonical_id: &str,
-        import: &verter_analysis::AnalyzedImport,
+        import: &verter_semantic::analysis::AnalyzedImport,
     ) -> Option<String> {
         self.resolve_imported_dependency_canonical(
             owner_canonical_id,
@@ -1716,7 +1723,7 @@ impl ImportedEvalOwnerResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
         owner_eval_source: &str,
-        owner_env: &verter_analysis::type_eval::EvalEnv,
+        owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
     ) -> rustc_hash::FxHashSet<String> {
         self.cached_required_owner_import_names(
             owner_canonical_id,
@@ -1757,7 +1764,7 @@ impl ImportedEvalOwnerContextResolver for HostImportedEvalResolver<'_> {
         owner_canonical_id: &str,
         _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
         _owner_eval_source: &str,
-    ) -> verter_analysis::type_eval::EvalEnv {
+    ) -> verter_semantic::analysis::type_eval::EvalEnv {
         self.host
             .base_eval_env_in_view(owner_canonical_id, self.store_view)
             // Owner eval env must come from the cache-owning pass. If it is absent,
@@ -1847,8 +1854,8 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         &self,
         source_canonical_id: &str,
         exported_name: &str,
-        decl: &verter_analysis::type_eval::TypeDeclInfo,
-        owner_env: &verter_analysis::type_eval::EvalEnv,
+        decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
+        owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
     ) -> rustc_hash::FxHashSet<String> {
         if let Some(cached) = self
             .host
@@ -1915,7 +1922,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         canonical_id: &str,
         context: &PreparedImportedDeclContext,
         imported_inputs: &ImportedEvalInputs,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         let _trace = component_meta_trace_scope!(
             "build_owner_eval_env_for_decl",
             format!(
@@ -2072,7 +2079,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
                             resolved_canonical_id: import.resolved_canonical_id.clone(),
                             is_namespace: matches!(
                                 binding.kind,
-                                verter_analysis::types::ImportBindingKind::Namespace
+                                verter_semantic::analysis::types::ImportBindingKind::Namespace
                             ),
                         })
                 })
@@ -2164,7 +2171,7 @@ impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
     fn base_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         self.host
             .base_eval_env_arc_in_view(canonical_id, self.store_view)
     }
@@ -2174,7 +2181,7 @@ impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
         _snapshot: &Self::Snapshot,
         owner_local_type_names: &rustc_hash::FxHashSet<String>,
         imported_inputs: &ImportedEvalInputs,
-        env: &mut verter_analysis::type_eval::EvalEnv,
+        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
     ) {
         self.host
             .materialize_imported_type_aliases_into_env_in_view(
@@ -2190,7 +2197,7 @@ impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
         snapshot: &Self::Snapshot,
         owner_local_value_names: &rustc_hash::FxHashSet<String>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
-        env: &mut verter_analysis::type_eval::EvalEnv,
+        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
     ) {
         self.host
             .materialize_imported_runtime_values_into_env_in_view(
@@ -2336,7 +2343,7 @@ impl VerterHost {
     fn sfc_script_setup_type_params(
         source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-    ) -> Vec<verter_analysis::type_expr::TypeParam> {
+    ) -> Vec<verter_semantic::analysis::type_expr::TypeParam> {
         let Some(setup) = cached_parse.and_then(|parsed| parsed.script_setup()) else {
             return Vec::new();
         };
@@ -2347,25 +2354,25 @@ impl VerterHost {
         if clause.is_empty() {
             return Vec::new();
         }
-        verter_analysis::type_eval_build::parse_type_parameter_clause(clause)
+        verter_semantic::analysis::type_eval_build::parse_type_parameter_clause(clause)
     }
 
     fn apply_sfc_script_setup_type_params(
-        env: &mut verter_analysis::type_eval::EvalEnv,
+        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
         source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) {
         for param in Self::sfc_script_setup_type_params(source, cached_parse) {
             env.type_bindings.insert(
                 param.name.clone(),
-                Arc::new(verter_analysis::type_expr::TypeExpr::type_parameter(param)),
+                Arc::new(verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param)),
             );
         }
     }
 
     fn owner_generic_type_bindings(
-        env: &verter_analysis::type_eval::EvalEnv,
-    ) -> rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr> {
+        env: &verter_semantic::analysis::type_eval::EvalEnv,
+    ) -> rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr> {
         env.type_bindings
             .iter()
             .map(|(name, bound)| (name.clone(), (**bound).clone()))
@@ -2486,7 +2493,7 @@ impl VerterHost {
         &self,
         cache_key: &str,
         whole_hash: Hash16,
-    ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         self.eval_env_cache
             .lock()
             .get(cache_key)
@@ -2779,7 +2786,7 @@ impl VerterHost {
 
         let (script_analysis, export_signatures) = if eval_source.is_empty() {
             (
-                verter_analysis::ScriptAnalysisSnapshot::default(),
+                verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
                 Vec::new(),
             )
         } else {
@@ -2791,7 +2798,7 @@ impl VerterHost {
             );
             if parsed_eval_program.parse_failed {
                 (
-                    verter_analysis::ScriptAnalysisSnapshot::default(),
+                    verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
                     Vec::new(),
                 )
             } else {
@@ -2995,7 +3002,7 @@ impl VerterHost {
                 );
                 self.enrich_destructured_bindings(&mut snapshot);
                 let snapshot = Arc::new(snapshot);
-                let env = Arc::new(verter_analysis::type_eval_build::build_eval_env(
+                let env = Arc::new(verter_semantic::analysis::type_eval_build::build_eval_env(
                     program,
                     base.raw_source.as_ref(),
                 ));
@@ -3118,7 +3125,7 @@ impl VerterHost {
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
         eval_source: &Arc<str>,
     ) -> (
-        Arc<verter_analysis::type_eval::EvalEnv>,
+        Arc<verter_semantic::analysis::type_eval::EvalEnv>,
         Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
     ) {
         let parsed_eval_program = self.cached_parsed_eval_program_entry(
@@ -3128,8 +3135,9 @@ impl VerterHost {
             Self::imported_eval_source_type(canonical_id, raw_source, cached_parse),
         );
         if parsed_eval_program.parse_failed {
-            let mut env =
-                verter_analysis::type_eval_build::parse_and_build_env(eval_source.as_ref());
+            let mut env = verter_semantic::analysis::type_eval_build::parse_and_build_env(
+                eval_source.as_ref(),
+            );
             Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
             return (
                 Arc::new(env),
@@ -3141,8 +3149,10 @@ impl VerterHost {
         }
 
         let program = parsed_eval_program.program.borrow_dependent();
-        let mut env =
-            verter_analysis::type_eval_build::build_eval_env(program, eval_source.as_ref());
+        let mut env = verter_semantic::analysis::type_eval_build::build_eval_env(
+            program,
+            eval_source.as_ref(),
+        );
         Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
         (
             Arc::new(env),
@@ -3175,7 +3185,7 @@ impl VerterHost {
         owner_canonical_id: &str,
         tag: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+    ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
         let vue_entry =
             self.resolve_project_intrinsic_entry_in_view(owner_canonical_id, "vue", store_view)?;
         let jsx_entry = self.resolve_project_intrinsic_entry_in_view(
@@ -3229,7 +3239,7 @@ impl VerterHost {
         entry: &crate::ImportedDependencyCacheEntry,
         type_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+    ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
         let shape =
             self.expand_project_intrinsic_shape_for_type_in_view(entry, type_name, store_view)?;
         Some(Self::owned_intrinsic_members_from_shape(shape))
@@ -3240,7 +3250,7 @@ impl VerterHost {
         entry: &crate::ImportedDependencyCacheEntry,
         tag: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+    ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
         let intrinsics_shape = self.expand_project_intrinsic_shape_for_type_in_view(
             entry,
             "JSX.IntrinsicElements",
@@ -3261,10 +3271,10 @@ impl VerterHost {
         entry: &crate::ImportedDependencyCacheEntry,
         type_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_expand::ExpandedObjectShape> {
+    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
         self.expand_project_intrinsic_shape_for_expr_in_view(
             entry,
-            &verter_analysis::type_expr::TypeExpr::named(type_name),
+            &verter_semantic::analysis::type_expr::TypeExpr::named(type_name),
             store_view,
         )
     }
@@ -3272,9 +3282,9 @@ impl VerterHost {
     fn expand_project_intrinsic_shape_for_expr_in_view(
         &self,
         entry: &crate::ImportedDependencyCacheEntry,
-        expr: &verter_analysis::type_expr::TypeExpr,
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_expand::ExpandedObjectShape> {
+    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
         let snapshot = entry.snapshot.as_ref()?;
         let mut env = entry.env.as_ref()?.as_ref().clone();
         let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
@@ -3288,7 +3298,7 @@ impl VerterHost {
             &entry.resolved_canonical_id,
             snapshot.imports.as_slice(),
         );
-        let expanded = verter_analysis::type_expand::expand_object_shape_with_lookup(
+        let expanded = verter_semantic::analysis::type_expand::expand_object_shape_with_lookup(
             expr,
             &mut env,
             &component_meta_expansion_budget(),
@@ -3298,34 +3308,36 @@ impl VerterHost {
     }
 
     fn owned_intrinsic_members_from_shape(
-        shape: verter_analysis::type_expand::ExpandedObjectShape,
-    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
+        shape: verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    ) -> Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember> {
         let mut members = rustc_hash::FxHashMap::default();
         for property in shape.properties {
             if let Some(event_name) =
-                verter_analysis::html_intrinsics::on_prop_to_event_name(property.name.as_str())
+                verter_semantic::analysis::html_intrinsics::on_prop_to_event_name(
+                    property.name.as_str(),
+                )
             {
                 members.entry(format!("listener:{event_name}")).or_insert(
-                    verter_analysis::html_intrinsics::OwnedIntrinsicMember {
+                    verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember {
                         name: event_name,
-                        kind: verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener,
+                        kind: verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener,
                         type_expr: property.ty,
                     },
                 );
                 continue;
             }
 
-            if !verter_analysis::html_intrinsics::should_expose_intrinsic_member(
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr,
+            if !verter_semantic::analysis::html_intrinsics::should_expose_intrinsic_member(
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr,
                 property.name.as_str(),
             ) {
                 continue;
             }
 
             members.entry(format!("attr:{}", property.name)).or_insert(
-                verter_analysis::html_intrinsics::OwnedIntrinsicMember {
+                verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember {
                     name: property.name,
-                    kind: verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr,
+                    kind: verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr,
                     type_expr: property.ty,
                 },
             );
@@ -3334,12 +3346,12 @@ impl VerterHost {
         let mut members: Vec<_> = members.into_values().collect();
         members.sort_by(|left, right| {
             let left_rank = match left.kind {
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
             };
             let right_rank = match right.kind {
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
             };
             left_rank
                 .cmp(&right_rank)
@@ -3349,17 +3361,17 @@ impl VerterHost {
     }
 
     fn merge_intrinsic_members(
-        primary: Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>,
-        fallback: Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>,
-    ) -> Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember> {
+        primary: Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>,
+        fallback: Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>,
+    ) -> Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember> {
         let mut members = rustc_hash::FxHashMap::default();
         for member in fallback {
             members.insert(
                 format!(
                     "{}:{}",
                     match member.kind {
-                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => "attr",
-                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
+                        verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr => "attr",
+                        verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
                             "listener"
                         }
                     },
@@ -3373,8 +3385,8 @@ impl VerterHost {
                 format!(
                     "{}:{}",
                     match member.kind {
-                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => "attr",
-                        verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
+                        verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr => "attr",
+                        verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
                             "listener"
                         }
                     },
@@ -3387,12 +3399,12 @@ impl VerterHost {
         let mut members: Vec<_> = members.into_values().collect();
         members.sort_by(|left, right| {
             let left_rank = match left.kind {
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
             };
             let right_rank = match right.kind {
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr => 0,
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener => 1,
             };
             left_rank
                 .cmp(&right_rank)
@@ -3518,7 +3530,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         exported_name: &str,
-        decl_body: &verter_analysis::type_expr::TypeExpr,
+        decl_body: &verter_semantic::analysis::type_expr::TypeExpr,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Vec<ImportedSymbolDependency> {
         let analysis = match self.external_type_analysis_in_view(canonical_id, store_view) {
@@ -3601,7 +3613,7 @@ impl VerterHost {
     pub(crate) fn required_imported_symbol_dependencies_for_type_decl_in_view(
         &self,
         canonical_id: &str,
-        decl: &verter_analysis::type_eval::TypeDeclInfo,
+        decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Vec<ImportedSymbolDependency> {
         let analysis = match self.external_type_analysis_in_view(canonical_id, store_view) {
@@ -3676,9 +3688,9 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
-        decl: &verter_analysis::type_eval::TypeDeclInfo,
+        decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         let mut visiting = rustc_hash::FxHashSet::default();
         self.build_shallow_imported_decl_eval_env_with_visiting_in_view(
             canonical_id,
@@ -3693,10 +3705,10 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
-        decl: &verter_analysis::type_eval::TypeDeclInfo,
+        decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
         store_view: Option<&crate::resolver_store::HostStoreView>,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         let mut env = self.base_eval_env_in_view(canonical_id, store_view)?;
         let owner_local_value_names: rustc_hash::FxHashSet<String> =
             env.value_symbols.keys().cloned().collect();
@@ -4528,8 +4540,8 @@ impl VerterHost {
         raw_source: Arc<str>,
         cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         eval_source: Option<Arc<str>>,
-        script_analysis: Option<Arc<verter_analysis::ScriptAnalysisSnapshot>>,
-        export_signatures: Option<Arc<Vec<verter_analysis::ExportSignature>>>,
+        script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+        export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
         external_type_analysis: Option<
             Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
         >,
@@ -4568,7 +4580,7 @@ impl VerterHost {
         cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         snapshot: Option<Arc<FileAnalysisSnapshot>>,
         eval_source: Option<Arc<str>>,
-        env: Option<Arc<verter_analysis::type_eval::EvalEnv>>,
+        env: Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
         external_type_analysis: Option<
             Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
         >,
@@ -4608,8 +4620,8 @@ impl VerterHost {
         &self,
         cache_keys: &[String],
         whole_hash: Hash16,
-        cached_env: Arc<verter_analysis::type_eval::EvalEnv>,
-    ) -> Arc<verter_analysis::type_eval::EvalEnv> {
+        cached_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
+    ) -> Arc<verter_semantic::analysis::type_eval::EvalEnv> {
         let mut cache = self.eval_env_cache.lock();
         for cache_key in cache_keys {
             if let Some((cached_hash, existing_env)) = cache.get(cache_key) {
@@ -4651,7 +4663,7 @@ impl VerterHost {
     pub(crate) fn base_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         self.base_eval_env_in_view(canonical_id, None)
     }
 
@@ -4659,7 +4671,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Arc<verter_analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         let _trace = component_meta_trace_scope!(
             "base_eval_env",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
@@ -4707,7 +4719,7 @@ impl VerterHost {
         canonical_source: &str,
         resolved_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
         if self
             .get_raw_analysis_snapshot_in_view(canonical_source, store_view)
             .is_some_and(|snapshot| {
@@ -4731,7 +4743,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         self.base_eval_env_arc_in_view(canonical_id, store_view)
             .map(|env| (*env).clone())
     }
@@ -4781,8 +4793,8 @@ impl VerterHost {
     fn dependency_resolutions_from_parts_in_view(
         &self,
         canonical_id: &str,
-        imports: &[verter_analysis::AnalyzedImport],
-        export_signatures: &[verter_analysis::ExportSignature],
+        imports: &[verter_semantic::analysis::AnalyzedImport],
+        export_signatures: &[verter_semantic::analysis::ExportSignature],
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
         let mut resolutions: rustc_hash::FxHashMap<String, DependencyResolution> = imports
@@ -4998,7 +5010,7 @@ impl VerterHost {
     }
 
     fn is_expanded_types_empty(
-        result: &verter_analysis::type_expand::ExpandedComponentTypes,
+        result: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     ) -> bool {
         result.is_empty()
     }
@@ -5334,7 +5346,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         owner_eval_source: Option<&str>,
-        owner_env: Option<&verter_analysis::type_eval::EvalEnv>,
+        owner_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> ImportedEvalInputs {
         self.imported_eval_inputs_with_owner_context_in_view(
             owner_canonical_id,
@@ -5353,7 +5365,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         owner_eval_source: Option<&str>,
-        owner_env: Option<&verter_analysis::type_eval::EvalEnv>,
+        owner_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> ImportedEvalInputs {
         let _trace = component_meta_trace_scope!(
@@ -5577,7 +5589,7 @@ impl VerterHost {
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: &ImportedEvalInputs,
-    ) -> Option<verter_analysis::type_expand::ExpandedComponentTypes> {
+    ) -> Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes> {
         self.compute_evaluated_types_with_tracking(canonical, snapshot, imported_inputs)
             .and_then(|computed| computed.evaluated_types)
     }
@@ -5603,7 +5615,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: &ImportedEvalInputs,
         owner_eval_source: Option<&str>,
-        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+        owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Option<ComputedEvaluatedTypes> {
         self.compute_evaluated_types_with_tracking_from_owner_context_in_view(
             canonical,
@@ -5621,7 +5633,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: &ImportedEvalInputs,
         owner_eval_source: Option<&str>,
-        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+        owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<ComputedEvaluatedTypes> {
         let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
@@ -5687,9 +5699,9 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: &ImportedEvalInputs,
         eval_source: &str,
-        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+        owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-        budget: verter_analysis::type_expand::ExpansionBudget,
+        budget: verter_semantic::analysis::type_expand::ExpansionBudget,
     ) -> Option<ComputedEvaluatedTypes> {
         let required_runtime_value_names = if let Some(owner_env) = owner_env.as_ref() {
             collect_required_runtime_value_names(snapshot, eval_source, owner_env)
@@ -5720,7 +5732,7 @@ impl VerterHost {
         let mut lookup =
             ImportedEvalLookup::new(&mut resolver, canonical, snapshot.imports.as_slice());
 
-        let result = verter_analysis::type_eval_build::expand_macro_types_with_lookup(
+        let result = verter_semantic::analysis::type_eval_build::expand_macro_types_with_lookup(
             snapshot.macros.as_ref(),
             Some(eval_source),
             &mut env,
@@ -5752,7 +5764,7 @@ impl VerterHost {
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
-    ) -> Option<verter_analysis::type_expand::ExpandedComponentTypes> {
+    ) -> Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes> {
         self.provenance
             .evaluate_types_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -5770,7 +5782,7 @@ impl VerterHost {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Option<verter_analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
         self.provenance
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -5812,7 +5824,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
     ) -> Option<(
-        verter_analysis::component_meta::ComponentMetaAnalysis,
+        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
         crate::meta_resolve::ResolvedComponentMetaState,
     )> {
         self.provenance
@@ -5870,12 +5882,12 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: Option<&HostStoreView>,
     ) -> Option<crate::types::FallthroughResolution> {
-        use verter_analysis::component_meta::*;
+        use verter_semantic::analysis::component_meta::*;
         let started = component_meta_debug_enabled().then(Instant::now);
         let _trace = component_meta_trace_scope!(
             "resolve_fallthrough_surface",
@@ -6006,7 +6018,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -6051,7 +6063,7 @@ impl VerterHost {
         canonical_id: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -6064,13 +6076,13 @@ impl VerterHost {
         );
         let resolved_type_registry =
             resolver_component_meta_type_registry(&resolved.resolved_type_registry);
-        let input = verter_analysis::component_meta::ComponentMetaInput {
+        let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
             macros: &resolved.snapshot.macros,
             bindings: &resolved.snapshot.bindings,
             imports: &resolved.snapshot.imports,
             template: resolved.snapshot.template.as_deref(),
             options_api: resolved.snapshot.options_api.as_ref(),
-            analysis_flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(
+            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
                 resolved.snapshot.script_flags,
             ),
             styles: &resolved.snapshot.styles,
@@ -6081,7 +6093,7 @@ impl VerterHost {
             evaluated_types: resolved.evaluated_types.as_ref(),
             file_path: canonical_id,
         };
-        let base_meta = verter_analysis::component_meta::extract_component_meta(input);
+        let base_meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
         let fallthrough_resolver = HostFallthroughResolver {
             host: self,
             parent_canonical_id: canonical_id,
@@ -6129,10 +6141,10 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         let dep_resolutions = self
             .dependency_resolutions_for_eval_in_view(canonical_id, store_view)
             .unwrap_or_default();
@@ -6158,11 +6170,11 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         imported_inputs: &ImportedEvalInputs,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         let _trace = component_meta_trace_scope!(
             "build_fallthrough_eval_env",
             format!(
@@ -6197,7 +6209,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: Option<&ImportedEvalInputs>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_analysis::type_eval::EvalEnv> {
+    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         let owner_env = self.base_eval_env_in_view(canonical_id, store_view);
         let Some(imported_inputs) = imported_inputs else {
             return owner_env;
@@ -6222,9 +6234,9 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         imported_inputs: &ImportedEvalInputs,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
-        owner_env: Option<verter_analysis::type_eval::EvalEnv>,
+        owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<OwnerEvalEnvBuild> {
@@ -6283,7 +6295,7 @@ impl VerterHost {
         &self,
         owner_local_type_names: &rustc_hash::FxHashSet<String>,
         imported_inputs: &ImportedEvalInputs,
-        env: &mut verter_analysis::type_eval::EvalEnv,
+        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         let _trace = component_meta_trace_scope!(
@@ -6441,7 +6453,10 @@ impl VerterHost {
                         )
                     })
                     .map(|mut env| {
-                        verter_analysis::type_eval::evaluate(&hydrated.decl.body, &mut env)
+                        verter_semantic::analysis::type_eval::evaluate(
+                            &hydrated.decl.body,
+                            &mut env,
+                        )
                     });
                 if let Some(preferred) = verter_resolver::choose_preferred_imported_type_body(
                     evaluated,
@@ -6470,7 +6485,7 @@ impl VerterHost {
 
     fn materialize_shallow_type_symbol_into_env_in_view(
         &self,
-        env: &mut verter_analysis::type_eval::EvalEnv,
+        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
         local_name: &str,
         canonical_id: &str,
         exported_name: &str,
@@ -6489,7 +6504,7 @@ impl VerterHost {
 
     fn materialize_shallow_type_symbol_leaf_into_env_in_view(
         &self,
-        env: &mut verter_analysis::type_eval::EvalEnv,
+        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
         local_name: &str,
         canonical_id: &str,
         exported_name: &str,
@@ -6559,7 +6574,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         owner_local_value_names: &rustc_hash::FxHashSet<String>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
-        env: &mut verter_analysis::type_eval::EvalEnv,
+        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         let _trace = component_meta_trace_scope!(
@@ -6607,8 +6622,8 @@ impl VerterHost {
         &self,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
-        eval_env: &mut Option<verter_analysis::type_eval::EvalEnv>,
-    ) -> Option<rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>> {
+        eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+    ) -> Option<rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>> {
         if !self.config.generic_root_propagation {
             return None;
         }
@@ -6642,14 +6657,14 @@ impl VerterHost {
         &self,
         snapshot: &FileAnalysisSnapshot,
         element_index: u32,
-        base: &verter_analysis::component_meta::ConsumedRootBindings,
+        base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
-        eval_env: &mut Option<verter_analysis::type_eval::EvalEnv>,
+        eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> ResolvedConsumedBindings {
-        use verter_analysis::component_meta::PartialBranchReason;
+        use verter_semantic::analysis::component_meta::PartialBranchReason;
 
         let mut resolved = ResolvedConsumedBindings {
-            bindings: verter_analysis::component_meta::ConsumedRootBindings {
+            bindings: verter_semantic::analysis::component_meta::ConsumedRootBindings {
                 attrs: base.attrs.clone(),
                 listeners: base.listeners.clone(),
                 has_dynamic_attr_name: base.has_dynamic_attr_name,
@@ -6719,7 +6734,9 @@ impl VerterHost {
                 };
 
                 let Some(ty) =
-                    verter_analysis::type_eval_build::evaluate_value_expression(expression, env)
+                    verter_semantic::analysis::type_eval_build::evaluate_value_expression(
+                        expression, env,
+                    )
                 else {
                     push_partial_reason(
                         &mut resolved.partial_reasons,
@@ -6763,7 +6780,7 @@ impl VerterHost {
         &self,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
-        eval_env: &mut Option<verter_analysis::type_eval::EvalEnv>,
+        eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Vec<DynamicRootCandidate> {
         let Some(template) = snapshot.template.as_deref() else {
             return Vec::new();
@@ -6785,7 +6802,7 @@ impl VerterHost {
 
         let mut candidates = Vec::new();
         if let Some(lowered) =
-            verter_analysis::type_eval_build::parse_value_expression_type(&expression)
+            verter_semantic::analysis::type_eval_build::parse_value_expression_type(&expression)
         {
             candidates.extend(collect_dynamic_root_candidates_from_type(
                 &lowered,
@@ -6794,7 +6811,10 @@ impl VerterHost {
         }
         if let Some(env) = eval_env.as_mut() {
             if let Some(evaluated) =
-                verter_analysis::type_eval_build::evaluate_value_expression(&expression, env)
+                verter_semantic::analysis::type_eval_build::evaluate_value_expression(
+                    &expression,
+                    env,
+                )
             {
                 candidates.extend(collect_dynamic_root_candidates_from_type(
                     &evaluated,
@@ -6836,7 +6856,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
         result: &crate::types::FallthroughResolution,
     ) {
@@ -6868,7 +6888,7 @@ impl VerterHost {
         result: &crate::types::FallthroughResolution,
     ) -> Vec<verter_resolver::fallthrough_resolver::FallthroughBranchResult> {
         match &result.fallthrough_surface {
-            verter_analysis::component_meta::FallthroughSurface::Branches { branches } => branches
+            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { branches } => branches
                 .iter()
                 .map(
                     |branch| verter_resolver::fallthrough_resolver::FallthroughBranchResult {
@@ -6885,12 +6905,12 @@ impl VerterHost {
                             .collect(),
                         resolved: !matches!(
                             branch.status,
-                            verter_analysis::component_meta::BranchStatus::Unresolved { .. }
+                            verter_semantic::analysis::component_meta::BranchStatus::Unresolved { .. }
                         ),
                     },
                 )
                 .collect(),
-            verter_analysis::component_meta::FallthroughSurface::None { .. } => Vec::new(),
+            verter_semantic::analysis::component_meta::FallthroughSurface::None { .. } => Vec::new(),
         }
     }
 
@@ -6908,7 +6928,7 @@ impl VerterHost {
                     fallthrough_surface: result.fallthrough_surface.clone(),
                     all_resolved: matches!(
                         result.accepted_surface_completeness,
-                        verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact
+                        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact
                     ),
                     branches,
                 },
@@ -6932,7 +6952,7 @@ impl VerterHost {
                     fallthrough_surface: result.fallthrough_surface.clone(),
                     has_single_root: matches!(
                         result.fallthrough_surface,
-                        verter_analysis::component_meta::FallthroughSurface::Branches { ref branches } if branches.len() == 1
+                        verter_semantic::analysis::component_meta::FallthroughSurface::Branches { ref branches } if branches.len() == 1
                     ),
                     branches,
                 },
@@ -6965,7 +6985,7 @@ impl VerterHost {
                         .collect(),
                     resolved: matches!(
                         result.accepted_surface_completeness,
-                        verter_analysis::component_meta::AcceptedSurfaceCompleteness::Exact
+                        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact
                     ),
                 },
             ),
@@ -6976,16 +6996,16 @@ impl VerterHost {
 
     fn build_runtime_intrinsic_surface_node(
         &self,
-        members: &[verter_analysis::html_intrinsics::OwnedIntrinsicMember],
+        members: &[verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember],
     ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
         let mut attr_names = Vec::new();
         let mut event_names = Vec::new();
         for member in members {
             match member.kind {
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Attr => {
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Attr => {
                     attr_names.push(member.name.clone());
                 }
-                verter_analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
+                verter_semantic::analysis::html_intrinsics::IntrinsicMemberKind::Listener => {
                     event_names.push(member.name.clone());
                 }
             }
@@ -7086,7 +7106,7 @@ impl VerterHost {
     fn runtime_intrinsic_node_to_members(
         &self,
         node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
-    ) -> Option<Vec<verter_analysis::html_intrinsics::OwnedIntrinsicMember>> {
+    ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
         match node.value {
             verter_resolver::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
                 intrinsic,
@@ -7103,7 +7123,7 @@ impl VerterHost {
             verter_resolver::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
                 consumed,
             ) => Some(ResolvedConsumedBindings {
-                bindings: verter_analysis::component_meta::ConsumedRootBindings {
+                bindings: verter_semantic::analysis::component_meta::ConsumedRootBindings {
                     attrs: consumed.attrs,
                     listeners: consumed.listeners,
                     has_dynamic_attr_name: consumed.has_dynamic_attr_name,
@@ -7278,10 +7298,10 @@ impl VerterHost {
         cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
-        imports: &[verter_analysis::AnalyzedImport],
-        macros: &[verter_analysis::AnalyzedMacro],
-        bindings: &[verter_analysis::AnalyzedBinding],
-    ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
+        imports: &[verter_semantic::analysis::AnalyzedImport],
+        macros: &[verter_semantic::analysis::AnalyzedMacro],
+        bindings: &[verter_semantic::analysis::AnalyzedBinding],
+    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
         let ext_map = if !src_blocks.is_empty() {
             let mut map = rustc_hash::FxHashMap::default();
             for req in external_requests {
@@ -7560,11 +7580,12 @@ impl VerterHost {
             let define_props = snapshot
                 .macros
                 .iter()
-                .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps);
+                .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps);
             if let Some(dp) = define_props {
                 for field in &dp.prop_fields {
                     if let Some(type_ann) = &field.type_annotation {
-                        let classes = verter_analysis::parse_string_literal_union(type_ann);
+                        let classes =
+                            verter_semantic::analysis::parse_string_literal_union(type_ann);
                         if !classes.is_empty() {
                             unions.push((field.name.clone(), classes));
                         }
@@ -7573,9 +7594,9 @@ impl VerterHost {
             }
             for binding in &snapshot.bindings {
                 if let Some(type_ann) = &binding.type_annotation {
-                    let effective =
-                        verter_analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
-                    let classes = verter_analysis::parse_string_literal_union(effective);
+                    let effective = verter_semantic::analysis::unwrap_reactive_type(type_ann)
+                        .unwrap_or(type_ann);
+                    let classes = verter_semantic::analysis::parse_string_literal_union(effective);
                     if !classes.is_empty() {
                         unions.push((binding.name.clone(), classes));
                     }
@@ -8200,7 +8221,9 @@ impl VerterHost {
     /// match binding names to field names and replace `MaybeRef` with the
     /// field's actual `ReactivityKind`.
     pub(crate) fn enrich_destructured_bindings(&self, snapshot: &mut FileAnalysisSnapshot) {
-        use verter_analysis::types::{BindingInitializer, ComposableReturn, ReactivityKind};
+        use verter_semantic::analysis::types::{
+            BindingInitializer, ComposableReturn, ReactivityKind,
+        };
 
         // Build a map of import source → resolved canonical ID from the snapshot
         let import_resolved: rustc_hash::FxHashMap<&str, &str> = snapshot
@@ -8710,7 +8733,7 @@ impl VerterHost {
     pub(crate) fn raw_template_analysis_for_file(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
         #[cfg(feature = "scheduler")]
         {
             use crate::host_executor::HostSourceData;
@@ -8750,7 +8773,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         profile_hash: u64,
-    ) -> Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
         let override_with_parse = {
             let cc = self.compile_cache.get(canonical)?;
             cc.content_overrides.get(&profile_hash)?.clone()
@@ -8780,7 +8803,7 @@ impl VerterHost {
         &self,
         var_name: &str,
         profile: Option<&CompileProfile>,
-    ) -> verter_analysis::CssVarFlow {
+    ) -> verter_semantic::analysis::CssVarFlow {
         #[cfg(feature = "scheduler")]
         let profile_hash = profile.map(compile_profile_hash);
         #[cfg(not(feature = "scheduler"))]
@@ -8800,7 +8823,7 @@ impl VerterHost {
             files.keys().cloned().collect()
         };
 
-        let mut flow = verter_analysis::CssVarFlow {
+        let mut flow = verter_semantic::analysis::CssVarFlow {
             name: var_name.to_string(),
             ..Default::default()
         };
@@ -8908,8 +8931,8 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<(
         FileKind,
-        verter_analysis::ScriptAnalysisSnapshot,
-        Vec<verter_analysis::ExportSignature>,
+        verter_semantic::analysis::ScriptAnalysisSnapshot,
+        Vec<verter_semantic::analysis::ExportSignature>,
     )> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
@@ -9018,8 +9041,8 @@ impl VerterHost {
     /// Shared logic for finding an export span from analysis data.
     fn find_export_span(
         file_kind: FileKind,
-        script_analysis: &verter_analysis::ScriptAnalysisSnapshot,
-        export_signatures: &[verter_analysis::ExportSignature],
+        script_analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
+        export_signatures: &[verter_semantic::analysis::ExportSignature],
         binding_name: &str,
     ) -> Option<(u32, u32)> {
         if file_kind == FileKind::VueSfc {
@@ -9233,7 +9256,7 @@ impl VerterHost {
 fn collect_required_owner_import_names(
     snapshot: &FileAnalysisSnapshot,
     owner_eval_source: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
 ) -> rustc_hash::FxHashSet<String> {
     let owner_snapshot = ImportedEvalOwnerSnapshot {
         imports: snapshot.imports.as_slice(),
@@ -9247,7 +9270,7 @@ fn collect_required_owner_import_names(
 fn collect_required_owner_import_names_from_parts(
     owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
     owner_eval_source: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
 ) -> rustc_hash::FxHashSet<String> {
     let started = component_meta_debug_enabled().then(Instant::now);
     let mut required = rustc_hash::FxHashSet::default();
@@ -9268,7 +9291,9 @@ fn collect_required_owner_import_names_from_parts(
     let type_bindings = VerterHost::owner_generic_type_bindings(owner_env);
     let mut active_locals = rustc_hash::FxHashSet::default();
     let macro_type_params =
-        verter_analysis::type_eval_build::collect_define_macro_type_params(owner_eval_source);
+        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(
+            owner_eval_source,
+        );
     let mut define_props_index = 0usize;
     let mut define_emits_index = 0usize;
     let mut define_slots_index = 0usize;
@@ -9294,19 +9319,20 @@ fn collect_required_owner_import_names_from_parts(
         // behind the macro root. Only fall back to shared macro deps when the
         // local macro analyzer captured no root type references.
         if mac.is_type_based {
-            let is_define_slots = mac.kind == verter_analysis::AnalyzedMacroKind::DefineSlots;
+            let is_define_slots =
+                mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots;
             let macro_type_expr = match mac.kind {
-                verter_analysis::AnalyzedMacroKind::DefineProps => {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
                     let expr = macro_type_params.define_props.get(define_props_index);
                     define_props_index += 1;
                     expr
                 }
-                verter_analysis::AnalyzedMacroKind::DefineEmits => {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
                     let expr = macro_type_params.define_emits.get(define_emits_index);
                     define_emits_index += 1;
                     expr
                 }
-                verter_analysis::AnalyzedMacroKind::DefineSlots => {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
                     let expr = macro_type_params.define_slots.get(define_slots_index);
                     define_slots_index += 1;
                     expr
@@ -9370,7 +9396,8 @@ fn collect_required_owner_import_names_from_parts(
 
         for field in &mac.prop_fields {
             if let Some(type_ann) = field.type_annotation.as_deref() {
-                let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                let expr =
+                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_ann);
                 if !expr.is_unknown() {
                     collect_surface_eval_import_names_from_expr(
                         &expr,
@@ -9385,7 +9412,8 @@ fn collect_required_owner_import_names_from_parts(
 
         for field in &mac.emit_fields {
             if let Some(payload) = field.payload_type.as_deref() {
-                let expr = verter_analysis::type_expr_lower::parse_type_annotation(payload);
+                let expr =
+                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(payload);
                 if !expr.is_unknown() {
                     collect_surface_eval_import_names_from_expr(
                         &expr,
@@ -9398,12 +9426,14 @@ fn collect_required_owner_import_names_from_parts(
             }
         }
 
-        if mac.kind != verter_analysis::AnalyzedMacroKind::DefineSlots {
+        if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
             for slot in &mac.slot_fields {
                 for binding in &slot.bindings {
                     if let Some(type_ann) = binding.type_annotation.as_deref() {
                         let expr =
-                            verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                            verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                                type_ann,
+                            );
                         if !expr.is_unknown() {
                             collect_surface_eval_import_names_from_expr(
                                 &expr,
@@ -9422,7 +9452,7 @@ fn collect_required_owner_import_names_from_parts(
             let Some(type_ann) = binding_type_annotations.get(field.name.as_str()) else {
                 continue;
             };
-            let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+            let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_ann);
             if expr.is_unknown() {
                 continue;
             }
@@ -9450,7 +9480,7 @@ fn collect_required_owner_import_names_from_parts(
 fn collect_required_runtime_value_names(
     snapshot: &FileAnalysisSnapshot,
     owner_eval_source: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
 ) -> rustc_hash::FxHashSet<String> {
     let owner_snapshot = ImportedEvalOwnerSnapshot {
         imports: snapshot.imports.as_slice(),
@@ -9491,7 +9521,7 @@ fn collect_required_template_runtime_value_names(
 fn collect_required_runtime_value_names_from_parts(
     owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
     owner_eval_source: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
 ) -> rustc_hash::FxHashSet<String> {
     let mut required = rustc_hash::FxHashSet::default();
     if owner_eval_source.is_empty() {
@@ -9501,7 +9531,9 @@ fn collect_required_runtime_value_names_from_parts(
     let type_bindings = VerterHost::owner_generic_type_bindings(owner_env);
     let mut active_locals = rustc_hash::FxHashSet::default();
     let macro_type_params =
-        verter_analysis::type_eval_build::collect_define_macro_type_params(owner_eval_source);
+        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(
+            owner_eval_source,
+        );
     let mut define_props_index = 0usize;
     let mut define_emits_index = 0usize;
     let mut define_slots_index = 0usize;
@@ -9519,17 +9551,17 @@ fn collect_required_runtime_value_names_from_parts(
     for mac in owner_snapshot.macros.iter() {
         if mac.is_type_based {
             let macro_type_expr = match mac.kind {
-                verter_analysis::AnalyzedMacroKind::DefineProps => {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
                     let expr = macro_type_params.define_props.get(define_props_index);
                     define_props_index += 1;
                     expr
                 }
-                verter_analysis::AnalyzedMacroKind::DefineEmits => {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
                     let expr = macro_type_params.define_emits.get(define_emits_index);
                     define_emits_index += 1;
                     expr
                 }
-                verter_analysis::AnalyzedMacroKind::DefineSlots => {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
                     let expr = macro_type_params.define_slots.get(define_slots_index);
                     define_slots_index += 1;
                     expr
@@ -9560,7 +9592,8 @@ fn collect_required_runtime_value_names_from_parts(
 
         for field in &mac.prop_fields {
             if let Some(type_ann) = field.type_annotation.as_deref() {
-                let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                let expr =
+                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_ann);
                 if !expr.is_unknown() {
                     collect_runtime_value_names_from_expr(
                         &expr,
@@ -9575,7 +9608,8 @@ fn collect_required_runtime_value_names_from_parts(
 
         for field in &mac.emit_fields {
             if let Some(payload) = field.payload_type.as_deref() {
-                let expr = verter_analysis::type_expr_lower::parse_type_annotation(payload);
+                let expr =
+                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(payload);
                 if !expr.is_unknown() {
                     collect_runtime_value_names_from_expr(
                         &expr,
@@ -9588,12 +9622,14 @@ fn collect_required_runtime_value_names_from_parts(
             }
         }
 
-        if mac.kind != verter_analysis::AnalyzedMacroKind::DefineSlots {
+        if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
             for slot in &mac.slot_fields {
                 for binding in &slot.bindings {
                     if let Some(type_ann) = binding.type_annotation.as_deref() {
                         let expr =
-                            verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+                            verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                                type_ann,
+                            );
                         if !expr.is_unknown() {
                             collect_runtime_value_names_from_expr(
                                 &expr,
@@ -9612,7 +9648,7 @@ fn collect_required_runtime_value_names_from_parts(
             let Some(type_ann) = binding_type_annotations.get(field.name.as_str()) else {
                 continue;
             };
-            let expr = verter_analysis::type_expr_lower::parse_type_annotation(type_ann);
+            let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_ann);
             if expr.is_unknown() {
                 continue;
             }
@@ -9631,14 +9667,14 @@ fn collect_required_runtime_value_names_from_parts(
 
 fn collect_required_runtime_value_names_for_symbol(
     symbol: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
     if owner_env.type_symbols.contains_key(symbol) || type_bindings.contains_key(symbol) {
         collect_runtime_value_names_from_expr(
-            &verter_analysis::type_expr::TypeExpr::named(symbol),
+            &verter_semantic::analysis::type_expr::TypeExpr::named(symbol),
             owner_env,
             type_bindings,
             active_locals,
@@ -9648,9 +9684,9 @@ fn collect_required_runtime_value_names_for_symbol(
 }
 
 fn collect_runtime_value_names_from_function(
-    func: &verter_analysis::type_expr::FunctionExpr,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
@@ -9658,7 +9694,7 @@ fn collect_runtime_value_names_from_function(
     for param in &func.type_parameters {
         local_bindings.insert(
             param.name.clone(),
-            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
+            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
         );
         if let Some(constraint) = param.constraint.as_deref() {
             collect_runtime_value_names_from_expr(
@@ -9700,13 +9736,13 @@ fn collect_runtime_value_names_from_function(
 }
 
 fn collect_runtime_value_names_from_expr(
-    expr: &verter_analysis::type_expr::TypeExpr,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
-    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Primitive(_)
@@ -9863,9 +9899,11 @@ fn collect_runtime_value_names_from_expr(
                         );
                     }
                     let arg = type_arguments.get(index).cloned().or_else(|| {
-                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ))
+                        Some(
+                            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
+                                param.clone(),
+                            ),
+                        )
                     });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
@@ -9975,8 +10013,8 @@ fn collect_runtime_value_names_from_expr(
 }
 
 fn collect_required_import_names_for_type_decl(
-    decl: &verter_analysis::type_eval::TypeDeclInfo,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
+    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
 ) -> rustc_hash::FxHashSet<String> {
     let mut required = rustc_hash::FxHashSet::default();
     let mut active_locals = rustc_hash::FxHashSet::default();
@@ -9985,7 +10023,7 @@ fn collect_required_import_names_for_type_decl(
     for param in &decl.type_parameters {
         type_bindings.insert(
             param.name.clone(),
-            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
+            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
         );
         if let Some(constraint) = param.constraint.as_deref() {
             collect_surface_eval_import_names_from_expr(
@@ -10018,8 +10056,8 @@ fn collect_required_import_names_for_type_decl(
 }
 
 fn collect_required_runtime_value_names_for_type_decl(
-    decl: &verter_analysis::type_eval::TypeDeclInfo,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
+    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
 ) -> rustc_hash::FxHashSet<String> {
     let mut required = rustc_hash::FxHashSet::default();
     let mut active_locals = rustc_hash::FxHashSet::default();
@@ -10028,7 +10066,7 @@ fn collect_required_runtime_value_names_for_type_decl(
     for param in &decl.type_parameters {
         type_bindings.insert(
             param.name.clone(),
-            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
+            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
         );
         if let Some(constraint) = param.constraint.as_deref() {
             collect_runtime_value_names_from_expr(
@@ -10062,15 +10100,15 @@ fn collect_required_runtime_value_names_for_type_decl(
 
 fn collect_required_import_names_for_symbol(
     symbol: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     imported_binding_names: &rustc_hash::FxHashSet<&str>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
     if owner_env.type_symbols.contains_key(symbol) || type_bindings.contains_key(symbol) {
         collect_surface_eval_import_names_from_expr(
-            &verter_analysis::type_expr::TypeExpr::named(symbol),
+            &verter_semantic::analysis::type_expr::TypeExpr::named(symbol),
             owner_env,
             type_bindings,
             active_locals,
@@ -10093,15 +10131,15 @@ fn collect_required_import_names_for_symbol(
 
 fn collect_required_slot_import_names_for_symbol(
     symbol: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     imported_binding_names: &rustc_hash::FxHashSet<&str>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
     if owner_env.type_symbols.contains_key(symbol) || type_bindings.contains_key(symbol) {
         collect_slot_eval_import_names_from_expr(
-            &verter_analysis::type_expr::TypeExpr::named(symbol),
+            &verter_semantic::analysis::type_expr::TypeExpr::named(symbol),
             owner_env,
             type_bindings,
             active_locals,
@@ -10146,9 +10184,9 @@ fn slot_member_walk_mode(mode: SlotImportWalkMode) -> SlotImportWalkMode {
 }
 
 fn collect_slot_eval_import_names_from_expr(
-    expr: &verter_analysis::type_expr::TypeExpr,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
@@ -10163,14 +10201,14 @@ fn collect_slot_eval_import_names_from_expr(
 }
 
 fn collect_slot_eval_import_names_from_expr_with_mode(
-    expr: &verter_analysis::type_expr::TypeExpr,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
     mode: SlotImportWalkMode,
 ) {
-    use verter_analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Primitive(_)
@@ -10352,9 +10390,11 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
                     let arg = type_arguments.get(index).cloned().or_else(|| {
-                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ))
+                        Some(
+                            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
+                                param.clone(),
+                            ),
+                        )
                     });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
@@ -10532,9 +10572,9 @@ fn collect_slot_eval_import_names_from_expr_with_mode(
 }
 
 fn collect_slot_eval_import_names_from_function_structural(
-    func: &verter_analysis::type_expr::FunctionExpr,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
@@ -10542,7 +10582,7 @@ fn collect_slot_eval_import_names_from_function_structural(
     for param in &func.type_parameters {
         local_bindings.insert(
             param.name.clone(),
-            verter_analysis::type_expr::TypeExpr::type_parameter(param.clone()),
+            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
         );
         if let Some(constraint) = param.constraint.as_deref() {
             collect_slot_eval_import_names_from_expr_with_mode(
@@ -10589,15 +10629,15 @@ fn collect_slot_eval_import_names_from_function_structural(
 }
 
 fn collect_slot_eval_import_names_for_member(
-    object: &verter_analysis::type_expr::TypeExpr,
+    object: &verter_semantic::analysis::type_expr::TypeExpr,
     key: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
     mode: SlotImportWalkMode,
 ) {
-    use verter_analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
 
     match object {
         TypeExpr::Object(obj) => {
@@ -10661,9 +10701,11 @@ fn collect_slot_eval_import_names_for_member(
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
                     let arg = type_arguments.get(index).cloned().or_else(|| {
-                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ))
+                        Some(
+                            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
+                                param.clone(),
+                            ),
+                        )
                     });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
@@ -10761,10 +10803,10 @@ fn collect_slot_eval_import_names_for_member(
 #[allow(clippy::too_many_arguments)]
 fn collect_slot_eval_import_names_for_builtin_member(
     name: &str,
-    type_arguments: &[verter_analysis::type_expr::TypeExpr],
+    type_arguments: &[verter_semantic::analysis::type_expr::TypeExpr],
     key: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
     mode: SlotImportWalkMode,
@@ -10814,13 +10856,13 @@ fn collect_slot_eval_import_names_for_builtin_member(
 }
 
 fn collect_surface_eval_import_names_from_expr(
-    expr: &verter_analysis::type_expr::TypeExpr,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
-    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Primitive(_)
@@ -10961,9 +11003,11 @@ fn collect_surface_eval_import_names_from_expr(
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
                     let arg = type_arguments.get(index).cloned().or_else(|| {
-                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ))
+                        Some(
+                            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
+                                param.clone(),
+                            ),
+                        )
                     });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
@@ -11000,8 +11044,9 @@ fn collect_surface_eval_import_names_from_expr(
             }
         }
         TypeExpr::IndexedAccess { object, index } => {
-            if let TypeExpr::Literal(verter_analysis::type_expr::LiteralValue::String(key)) =
-                index.as_ref()
+            if let TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                key,
+            )) = index.as_ref()
             {
                 collect_surface_eval_import_names_for_member(
                     object,
@@ -11089,14 +11134,14 @@ fn collect_surface_eval_import_names_from_expr(
 }
 
 fn collect_surface_eval_import_names_for_member(
-    object: &verter_analysis::type_expr::TypeExpr,
+    object: &verter_semantic::analysis::type_expr::TypeExpr,
     key: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
-    use verter_analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
 
     match object {
         TypeExpr::Object(obj) => {
@@ -11155,9 +11200,11 @@ fn collect_surface_eval_import_names_for_member(
                 let mut local_bindings = type_bindings.clone();
                 for (index, param) in decl.type_parameters.iter().enumerate() {
                     let arg = type_arguments.get(index).cloned().or_else(|| {
-                        Some(verter_analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ))
+                        Some(
+                            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
+                                param.clone(),
+                            ),
+                        )
                     });
                     if let Some(arg) = arg {
                         local_bindings.insert(param.name.to_string(), arg);
@@ -11239,10 +11286,10 @@ fn collect_surface_eval_import_names_for_member(
 
 fn collect_surface_eval_import_names_for_builtin_member(
     name: &str,
-    type_arguments: &[verter_analysis::type_expr::TypeExpr],
+    type_arguments: &[verter_semantic::analysis::type_expr::TypeExpr],
     key: &str,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
@@ -11288,9 +11335,9 @@ fn collect_surface_eval_import_names_for_builtin_member(
 }
 
 fn collect_string_literal_keys(
-    expr: &verter_analysis::type_expr::TypeExpr,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> rustc_hash::FxHashSet<String> {
-    use verter_analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
 
     let mut keys = rustc_hash::FxHashSet::default();
     match expr {
@@ -11311,9 +11358,9 @@ fn collect_string_literal_keys(
 }
 
 fn collect_surface_eval_import_names_from_function(
-    func: &verter_analysis::type_expr::FunctionExpr,
-    owner_env: &verter_analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_analysis::type_expr::TypeExpr>,
+    func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
+    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
     active_locals: &mut rustc_hash::FxHashSet<String>,
     required: &mut rustc_hash::FxHashSet<String>,
 ) {
@@ -11362,10 +11409,10 @@ fn extract_component_meta_from_inputs(
     host: &VerterHost,
     canonical_or_alias: &str,
     snapshot: &FileAnalysisSnapshot,
-    resolved_macros: &[verter_analysis::component_meta::ResolvedMacroInput],
-    resolved_type_registry: &[verter_analysis::component_meta::ResolvedTypeAnalysis],
-    evaluated_types: Option<&verter_analysis::type_expand::ExpandedComponentTypes>,
-) -> verter_analysis::component_meta::ComponentMetaAnalysis {
+    resolved_macros: &[verter_semantic::analysis::component_meta::ResolvedMacroInput],
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let _trace = component_meta_trace_scope!(
@@ -11379,13 +11426,13 @@ fn extract_component_meta_from_inputs(
             evaluated_types.is_some(),
         ),
     );
-    let input = verter_analysis::component_meta::ComponentMetaInput {
+    let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
         macros: &snapshot.macros,
         bindings: &snapshot.bindings,
         imports: &snapshot.imports,
         template: snapshot.template.as_deref(),
         options_api: snapshot.options_api.as_ref(),
-        analysis_flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(
+        analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
             snapshot.script_flags,
         ),
         styles: &snapshot.styles,
@@ -11396,7 +11443,7 @@ fn extract_component_meta_from_inputs(
         evaluated_types,
         file_path: &canonical,
     };
-    let mut meta = verter_analysis::component_meta::extract_component_meta(input);
+    let mut meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
     component_meta_trace_event!(
         "extract_component_meta_declared_surface",
         format!(
@@ -11423,10 +11470,10 @@ fn extract_component_meta_from_inputs(
 
 fn parse_annotation_or_unknown_for_public_instance(
     raw: &str,
-) -> verter_analysis::type_expr::TypeExpr {
-    let parsed = verter_analysis::type_expr_lower::parse_type_annotation(raw);
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw);
     if parsed.is_unknown() {
-        verter_analysis::type_expr::TypeExpr::Unknown {
+        verter_semantic::analysis::type_expr::TypeExpr::Unknown {
             raw: raw.to_string(),
         }
     } else {
@@ -11435,16 +11482,16 @@ fn parse_annotation_or_unknown_for_public_instance(
 }
 
 fn build_public_instance_slot_type(
-    slot: &verter_analysis::component_meta::SlotAnalysis,
-) -> verter_analysis::type_expr::TypeExpr {
-    let parameter_type = verter_analysis::type_expr::TypeExpr::Object(Arc::new(
-        verter_analysis::type_expr::ObjectExpr {
+    slot: &verter_semantic::analysis::component_meta::SlotAnalysis,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let parameter_type = verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr {
             properties: slot
                 .bindings
                 .iter()
                 .map(|binding| {
-                    verter_analysis::type_expr::ObjectMember::Property(
-                        verter_analysis::type_expr::ObjectProperty {
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(
+                        verter_semantic::analysis::type_expr::ObjectProperty {
                             name: binding.name.clone(),
                             ty: binding.type_expr.clone(),
                             optional: false,
@@ -11459,15 +11506,15 @@ fn build_public_instance_slot_type(
         .return_type
         .as_deref()
         .map(parse_annotation_or_unknown_for_public_instance)
-        .unwrap_or(verter_analysis::type_expr::TypeExpr::Primitive(
-            verter_analysis::type_expr::PrimitiveName::Unknown,
+        .unwrap_or(verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+            verter_semantic::analysis::type_expr::PrimitiveName::Unknown,
         ));
-    let function = verter_analysis::type_expr::TypeExpr::Function(Arc::new(
-        verter_analysis::type_expr::FunctionExpr {
+    let function = verter_semantic::analysis::type_expr::TypeExpr::Function(Arc::new(
+        verter_semantic::analysis::type_expr::FunctionExpr {
             parameters: if slot.bindings.is_empty() {
                 Vec::new()
             } else {
-                vec![verter_analysis::type_expr::FunctionParam {
+                vec![verter_semantic::analysis::type_expr::FunctionParam {
                     name: Some("props".to_string()),
                     ty: parameter_type,
                     optional: false,
@@ -11481,23 +11528,23 @@ fn build_public_instance_slot_type(
     if slot.is_required {
         function
     } else {
-        verter_analysis::type_expr::TypeExpr::union(vec![
+        verter_semantic::analysis::type_expr::TypeExpr::union(vec![
             function,
-            verter_analysis::type_expr::TypeExpr::Primitive(
-                verter_analysis::type_expr::PrimitiveName::Undefined,
+            verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                verter_semantic::analysis::type_expr::PrimitiveName::Undefined,
             ),
         ])
     }
 }
 
 fn build_public_instance_slots_member(
-    slots: &[verter_analysis::component_meta::SlotAnalysis],
-) -> verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+    slots: &[verter_semantic::analysis::component_meta::SlotAnalysis],
+) -> verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
     let slot_properties = slots
         .iter()
         .map(|slot| {
-            verter_analysis::type_expr::ObjectMember::Property(
-                verter_analysis::type_expr::ObjectProperty {
+            verter_semantic::analysis::type_expr::ObjectMember::Property(
+                verter_semantic::analysis::type_expr::ObjectProperty {
                     name: slot.name.clone(),
                     ty: build_public_instance_slot_type(slot),
                     optional: !slot.is_required,
@@ -11507,11 +11554,11 @@ fn build_public_instance_slots_member(
         })
         .collect();
 
-    verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+    verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
         name: "$slots".to_string(),
-        kind: verter_analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
-        type_expr: verter_analysis::type_expr::TypeExpr::Object(Arc::new(
-            verter_analysis::type_expr::ObjectExpr {
+        kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
+        type_expr: verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+            verter_semantic::analysis::type_expr::ObjectExpr {
                 properties: slot_properties,
             },
         )),
@@ -11528,11 +11575,11 @@ fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -
 fn sfc_attributes_from_props(
     props: &[verter_compiler::types::NodeProp],
     source: &str,
-) -> Vec<verter_analysis::component_meta::SfcAttributeAnalysis> {
+) -> Vec<verter_semantic::analysis::component_meta::SfcAttributeAnalysis> {
     crate::parse::extract_attrs(props, source)
         .into_iter()
         .map(
-            |(name, value)| verter_analysis::component_meta::SfcAttributeAnalysis {
+            |(name, value)| verter_semantic::analysis::component_meta::SfcAttributeAnalysis {
                 name: name.to_string(),
                 value: if value.is_empty() {
                     None
@@ -11551,7 +11598,7 @@ fn sfc_custom_block_type(source: &str, tag_open: &verter_compiler::types::NodeTa
 pub(crate) fn populate_sfc_blocks_sidecar(
     host: &VerterHost,
     canonical_id: &str,
-    meta: &mut verter_analysis::component_meta::ComponentMetaAnalysis,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) {
     if !canonical_id.ends_with(".vue") {
         return;
@@ -11567,7 +11614,7 @@ pub(crate) fn populate_sfc_blocks_sidecar(
 
     let template = parsed.template_ast().map(|template| {
         let attrs = crate::parse::extract_attrs(&template.root.attributes, source);
-        verter_analysis::component_meta::TemplateBlockAnalysis {
+        verter_semantic::analysis::component_meta::TemplateBlockAnalysis {
             lang: string_from_span(source, template.root.lang),
             src: crate::parse::find_attr(&attrs, "src"),
             attributes: sfc_attributes_from_props(&template.root.attributes, source),
@@ -11576,7 +11623,7 @@ pub(crate) fn populate_sfc_blocks_sidecar(
 
     let script = parsed.script().map(|script| {
         let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_analysis::component_meta::ScriptBlockAnalysis {
+        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
             lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
             src: crate::parse::find_attr(&attrs, "src"),
             generic: string_from_span(source, script.generic),
@@ -11587,7 +11634,7 @@ pub(crate) fn populate_sfc_blocks_sidecar(
 
     let script_setup = parsed.script_setup().map(|script| {
         let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_analysis::component_meta::ScriptBlockAnalysis {
+        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
             lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
             src: crate::parse::find_attr(&attrs, "src"),
             generic: string_from_span(source, script.generic),
@@ -11602,7 +11649,7 @@ pub(crate) fn populate_sfc_blocks_sidecar(
         .enumerate()
         .map(|(index, style)| {
             let attrs = crate::parse::extract_attrs(&style.attributes, source);
-            verter_analysis::component_meta::StyleBlockInfoAnalysis {
+            verter_semantic::analysis::component_meta::StyleBlockInfoAnalysis {
                 index,
                 lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
                 src: crate::parse::find_attr(&attrs, "src"),
@@ -11621,7 +11668,7 @@ pub(crate) fn populate_sfc_blocks_sidecar(
         .enumerate()
         .map(|(index, block)| {
             let attrs = crate::parse::extract_attrs(&block.attributes, source);
-            verter_analysis::component_meta::CustomBlockAnalysis {
+            verter_semantic::analysis::component_meta::CustomBlockAnalysis {
                 index,
                 block_type: sfc_custom_block_type(source, &block.tag_open),
                 lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
@@ -11631,17 +11678,19 @@ pub(crate) fn populate_sfc_blocks_sidecar(
         })
         .collect();
 
-    meta.sfc_blocks = Some(verter_analysis::component_meta::SfcBlocksAnalysis {
-        template,
-        script,
-        script_setup,
-        styles,
-        custom,
-    });
+    meta.sfc_blocks = Some(
+        verter_semantic::analysis::component_meta::SfcBlocksAnalysis {
+            template,
+            script,
+            script_setup,
+            styles,
+            custom,
+        },
+    );
 }
 
 pub(crate) fn populate_public_instance_sidecar(
-    meta: &mut verter_analysis::component_meta::ComponentMetaAnalysis,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) {
     let mut members = Vec::new();
 
@@ -11650,9 +11699,9 @@ pub(crate) fn populate_public_instance_sidecar(
     }
 
     members.extend(meta.props.iter().map(|prop| {
-        verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+        verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
             name: prop.name.clone(),
-            kind: verter_analysis::component_meta::PublicInstanceMemberKind::Prop,
+            kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Prop,
             type_expr: prop.type_expr.clone(),
             type_expansion: prop.type_expansion.clone(),
             raw_type: prop.raw_type.clone(),
@@ -11661,9 +11710,9 @@ pub(crate) fn populate_public_instance_sidecar(
     }));
 
     for exposed in &meta.exposed {
-        let next = verter_analysis::component_meta::PublicInstanceMemberAnalysis {
+        let next = verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
             name: exposed.name.clone(),
-            kind: verter_analysis::component_meta::PublicInstanceMemberKind::Exposed,
+            kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed,
             type_expr: exposed.type_expr.clone(),
             type_expansion: exposed.type_expansion.clone(),
             raw_type: None,
@@ -11679,10 +11728,13 @@ pub(crate) fn populate_public_instance_sidecar(
     meta.public_instance = if members.is_empty() {
         None
     } else {
-        Some(verter_analysis::component_meta::PublicInstanceAnalysis {
-            members,
-            completeness: verter_analysis::component_meta::PublicInstanceCompleteness::Partial,
-        })
+        Some(
+            verter_semantic::analysis::component_meta::PublicInstanceAnalysis {
+                members,
+                completeness:
+                    verter_semantic::analysis::component_meta::PublicInstanceCompleteness::Partial,
+            },
+        )
     };
 }
 
@@ -11692,7 +11744,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
     store_view: Option<&HostStoreView>,
-) -> verter_analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let resolved_macros = resolver_component_meta_resolved_macros(
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,

@@ -7,7 +7,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateElement;
+use verter_semantic::analysis::template::TemplateElement;
 
 pub struct UseVOnExact;
 
@@ -88,7 +88,7 @@ impl LintRule for UseVOnExact {
 mod tests {
     use super::*;
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

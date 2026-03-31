@@ -2,12 +2,12 @@ use super::*;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
-use verter_analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use verter_resolver::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
     should_attempt_owner_env_resolution, ImportedEvalCollectorResolver, ImportedEvalLookupResolver,
     ImportedEvalSourceMergeResolver,
 };
+use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use verter_workspace::WorkspaceAccess;
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
@@ -251,8 +251,8 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
     }
 }
 
-fn object_with_props(names: &[&str]) -> verter_analysis::type_expr::TypeExpr {
-    use verter_analysis::type_expr::{
+fn object_with_props(names: &[&str]) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::{
         ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
     };
 
@@ -271,9 +271,9 @@ fn object_with_props(names: &[&str]) -> verter_analysis::type_expr::TypeExpr {
     }))
 }
 
-fn empty_object() -> verter_analysis::type_expr::TypeExpr {
-    verter_analysis::type_expr::TypeExpr::Object(std::sync::Arc::new(
-        verter_analysis::type_expr::ObjectExpr {
+fn empty_object() -> verter_semantic::analysis::type_expr::TypeExpr {
+    verter_semantic::analysis::type_expr::TypeExpr::Object(std::sync::Arc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr {
             properties: Vec::new(),
         },
     ))
@@ -287,28 +287,32 @@ fn exact_dependency(specifier: &str, resolved: &str) -> DependencyResolution {
     }
 }
 
-fn budget_exceeded_field(name: &str) -> verter_analysis::type_expand::ExpandedField {
-    verter_analysis::type_expand::ExpandedField {
+fn budget_exceeded_field(name: &str) -> verter_semantic::analysis::type_expand::ExpandedField {
+    verter_semantic::analysis::type_expand::ExpandedField {
         name: name.to_string(),
         r#type: TypeExpr::Primitive(PrimitiveName::String),
         raw_type: None,
         optional: false,
-        completeness: verter_analysis::type_expand::ExpansionCompleteness::Partial,
-        diagnostics: vec![verter_analysis::type_expand::ExpansionDiagnostic {
-            reason: verter_analysis::type_expand::ExpansionStopReason::BudgetExceeded,
-            context: "test".to_string(),
-            property_name: Some(name.to_string()),
-        }],
+        completeness: verter_semantic::analysis::type_expand::ExpansionCompleteness::Partial,
+        diagnostics: vec![
+            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+                reason: verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
+                context: "test".to_string(),
+                property_name: Some(name.to_string()),
+            },
+        ],
     }
 }
 
 #[test]
 fn component_meta_expansion_retry_skips_non_empty_budget_limited_results() {
     let computed = ComputedEvaluatedTypes {
-        evaluated_types: Some(verter_analysis::type_expand::ExpandedComponentTypes {
-            props: vec![budget_exceeded_field("label")],
-            ..Default::default()
-        }),
+        evaluated_types: Some(
+            verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+                props: vec![budget_exceeded_field("label")],
+                ..Default::default()
+            },
+        ),
         discovered_dependencies: BTreeSet::new(),
     };
 
@@ -321,15 +325,17 @@ fn component_meta_expansion_retry_skips_non_empty_budget_limited_results() {
 #[test]
 fn component_meta_expansion_retry_keeps_empty_budget_limited_results_retryable() {
     let computed = ComputedEvaluatedTypes {
-        evaluated_types: Some(verter_analysis::type_expand::ExpandedComponentTypes {
-            props: Vec::new(),
-            define_props: Vec::new(),
-            define_emits: Vec::new(),
-            emits: Vec::new(),
-            define_slots: Vec::new(),
-            slot_bindings: Vec::new(),
-            bindings: vec![budget_exceeded_field("binding")],
-        }),
+        evaluated_types: Some(
+            verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+                props: Vec::new(),
+                define_props: Vec::new(),
+                define_emits: Vec::new(),
+                emits: Vec::new(),
+                define_slots: Vec::new(),
+                slot_bindings: Vec::new(),
+                bindings: vec![budget_exceeded_field("binding")],
+            },
+        ),
         discovered_dependencies: BTreeSet::new(),
     };
 
@@ -474,7 +480,9 @@ defineProps<Props>()
 
 #[test]
 fn choose_preferred_imported_type_body_prefers_more_specific_shapes() {
-    let resolved_body = Some(verter_analysis::type_expr::TypeExpr::named("Props"));
+    let resolved_body = Some(verter_semantic::analysis::type_expr::TypeExpr::named(
+        "Props",
+    ));
     let decl_body = Some(object_with_props(&["label", "count"]));
 
     let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
@@ -501,7 +509,7 @@ fn choose_preferred_imported_type_body_keeps_existing_body_on_equal_specificity(
 
 #[test]
 fn choose_preferred_imported_type_body_rejects_empty_object_placeholders() {
-    use verter_analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
 
     let resolved_body = Some(empty_object());
     let decl_body = Some(TypeExpr::union(vec![
@@ -520,12 +528,15 @@ fn choose_preferred_imported_type_body_rejects_empty_object_placeholders() {
 #[test]
 fn imported_type_body_specificity_prefers_object_surfaces_over_refs_and_typeof() {
     let typeof_score = imported_type_body_specificity_score(
-        &verter_analysis::type_expr::TypeExpr::TypeOf(verter_analysis::type_expr::ValueRef {
-            path: vec!["theme".to_string()],
-        }),
+        &verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+            verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["theme".to_string()],
+            },
+        ),
     );
-    let ref_score =
-        imported_type_body_specificity_score(&verter_analysis::type_expr::TypeExpr::named("Props"));
+    let ref_score = imported_type_body_specificity_score(
+        &verter_semantic::analysis::type_expr::TypeExpr::named("Props"),
+    );
     let object_score = imported_type_body_specificity_score(&object_with_props(&["label"]));
 
     assert!(
@@ -548,32 +559,32 @@ fn imported_type_body_specificity_rewards_richer_object_surfaces() {
 #[test]
 fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested_members() {
     let resolved_body = Some(object_with_props(&["next"]));
-    let decl_body = Some(verter_analysis::type_expr::TypeExpr::Object(
-        std::sync::Arc::new(verter_analysis::type_expr::ObjectExpr {
+    let decl_body = Some(verter_semantic::analysis::type_expr::TypeExpr::Object(
+        std::sync::Arc::new(verter_semantic::analysis::type_expr::ObjectExpr {
             properties: vec![
-                verter_analysis::type_expr::ObjectMember::Property(
-                    verter_analysis::type_expr::ObjectProperty {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
                         name: "base".to_string(),
-                        ty: verter_analysis::type_expr::TypeExpr::Primitive(
-                            verter_analysis::type_expr::PrimitiveName::String,
+                        ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                            verter_semantic::analysis::type_expr::PrimitiveName::String,
                         ),
                         optional: true,
                         readonly: false,
                     },
                 ),
-                verter_analysis::type_expr::ObjectMember::Property(
-                    verter_analysis::type_expr::ObjectProperty {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
                         name: "current".to_string(),
-                        ty: verter_analysis::type_expr::TypeExpr::named("T"),
+                        ty: verter_semantic::analysis::type_expr::TypeExpr::named("T"),
                         optional: true,
                         readonly: false,
                     },
                 ),
-                verter_analysis::type_expr::ObjectMember::Property(
-                    verter_analysis::type_expr::ObjectProperty {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
                         name: "next".to_string(),
-                        ty: verter_analysis::type_expr::TypeExpr::Primitive(
-                            verter_analysis::type_expr::PrimitiveName::Number,
+                        ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                            verter_semantic::analysis::type_expr::PrimitiveName::Number,
                         ),
                         optional: true,
                         readonly: false,
@@ -593,10 +604,10 @@ fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested
 
 #[test]
 fn owner_env_resolution_is_skipped_for_simple_concrete_bodies() {
-    let decl = verter_analysis::type_eval::TypeDeclInfo {
+    let decl = verter_semantic::analysis::type_eval::TypeDeclInfo {
         name: "Props".to_string(),
         declaration_id: 0,
-        kind: verter_analysis::type_eval::TypeDeclKind::Alias,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: object_with_props(&["label"]),
     };
@@ -610,14 +621,14 @@ fn owner_env_resolution_is_skipped_for_simple_concrete_bodies() {
 
 #[test]
 fn owner_env_resolution_is_retained_for_top_level_non_object_surfaces() {
-    let decl = verter_analysis::type_eval::TypeDeclInfo {
+    let decl = verter_semantic::analysis::type_eval::TypeDeclInfo {
         name: "Props".to_string(),
         declaration_id: 0,
-        kind: verter_analysis::type_eval::TypeDeclKind::Alias,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
         type_parameters: Vec::new(),
-        body: verter_analysis::type_expr::TypeExpr::intersection(vec![
+        body: verter_semantic::analysis::type_expr::TypeExpr::intersection(vec![
             object_with_props(&["label"]),
-            verter_analysis::type_expr::TypeExpr::named("Shared"),
+            verter_semantic::analysis::type_expr::TypeExpr::named("Shared"),
         ]),
     };
     let resolved_body = object_with_props(&["label"]);
@@ -1271,16 +1282,16 @@ fn stale_store_view_keeps_resolved_exports_on_captured_reexport_graph() {
 
 #[test]
 fn owner_env_resolution_is_retained_for_nested_heritage_like_surfaces() {
-    let decl = verter_analysis::type_eval::TypeDeclInfo {
+    let decl = verter_semantic::analysis::type_eval::TypeDeclInfo {
         name: "EditorOptions".to_string(),
         declaration_id: 0,
-        kind: verter_analysis::type_eval::TypeDeclKind::Interface,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind::Interface,
         type_parameters: Vec::new(),
-        body: verter_analysis::type_expr::TypeExpr::intersection(vec![
-            verter_analysis::type_expr::TypeExpr::named_with_args(
+        body: verter_semantic::analysis::type_expr::TypeExpr::intersection(vec![
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
                 "UnionCommands",
-                vec![verter_analysis::type_expr::TypeExpr::Primitive(
-                    verter_analysis::type_expr::PrimitiveName::String,
+                vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                    verter_semantic::analysis::type_expr::PrimitiveName::String,
                 )],
             ),
             object_with_props(&["next"]),
@@ -1296,12 +1307,12 @@ fn owner_env_resolution_is_retained_for_nested_heritage_like_surfaces() {
 
 #[test]
 fn owner_env_resolution_is_retained_for_empty_object_placeholders() {
-    use verter_analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
 
-    let decl = verter_analysis::type_eval::TypeDeclInfo {
+    let decl = verter_semantic::analysis::type_eval::TypeDeclInfo {
         name: "LinkPropsKeys".to_string(),
         declaration_id: 0,
-        kind: verter_analysis::type_eval::TypeDeclKind::Alias,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: TypeExpr::Literal(LiteralValue::String("replace".to_string())),
     };
@@ -1694,7 +1705,7 @@ export { RouteLocationRaw as Lt, St, vt }
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -1815,7 +1826,7 @@ export { RouteLocationRaw as Lt, St, vt }
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -1906,7 +1917,7 @@ export { RouteLocationRaw as Lt, St, vt }
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -2000,7 +2011,7 @@ export { RouteLocationRaw as Lt, St, vt }
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -2089,7 +2100,7 @@ export interface Beta { beta?: number }
         ws.clone(),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -2185,7 +2196,7 @@ export interface Beta { beta?: number }
         ws.clone(),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -2359,7 +2370,7 @@ export interface Alpha extends Base { alpha?: string }
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -2589,7 +2600,7 @@ fn imported_eval_inputs_discard_canonical_dependency_cache_when_hash_changes() {
         ws.clone(),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -2714,7 +2725,7 @@ fn generic_dependency_state_paths_reuse_cached_imported_snapshot_and_env() {
         ws.clone(),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -2931,7 +2942,7 @@ fn read_dep_source_for_type_resolution_reuses_imported_dependency_cache() {
         ws.clone(),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -3264,7 +3275,7 @@ fn resolve_type_dependency_canonical_reuses_cached_import_routes_for_imported_ow
         ws.clone(),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -3534,7 +3545,7 @@ export { RouterLinkProps as o }
         ws,
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -3681,7 +3692,7 @@ defineProps<Props>()
         .get("Props")
         .cloned()
         .expect("materialized Props decl should exist");
-    let evaluated = verter_analysis::type_eval::evaluate(&props_decl.body, &mut env);
+    let evaluated = verter_semantic::analysis::type_eval::evaluate(&props_decl.body, &mut env);
     let TypeExpr::Object(object) = evaluated else {
         panic!("Props should evaluate to an object");
     };
@@ -3889,7 +3900,7 @@ import { shared } from './shared'
     assert!(
         matches!(
             meta.fallthrough_surface,
-            verter_analysis::component_meta::FallthroughSurface::Branches { .. }
+            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
         ),
         "button fallthrough should still resolve through the imported Link root",
     );
@@ -5510,7 +5521,7 @@ fn get_analysis_resolves_alias_import() {
     // Configure workspace resolver with alias
     {
         host.workspace().configure_resolver(vec![
-            verter_analysis::project_resolver::IdeProjectConfig {
+            verter_semantic::analysis::project_resolver::IdeProjectConfig {
                 root: "/project".to_string(),
                 workspace_root: "/project".to_string(),
                 tsconfig_path: None,
@@ -5520,9 +5531,11 @@ fn get_analysis_resolves_alias_import() {
                     replacement: "/project/src/".to_string(),
                 }],
                 compiler_options:
-                    verter_analysis::project_resolver::IdeProjectCompilerOptions::default(),
+                    verter_semantic::analysis::project_resolver::IdeProjectCompilerOptions::default(
+                    ),
                 references: vec![],
-                membership: verter_analysis::project_resolver::ProjectMembership::MatchAll,
+                membership:
+                    verter_semantic::analysis::project_resolver::ProjectMembership::MatchAll,
             },
         ]);
     }
@@ -5860,14 +5873,14 @@ const { x, y, reset } = useMouse()
     let x_binding = analysis.bindings.iter().find(|b| b.name == "x").unwrap();
     assert_eq!(
         x_binding.reactivity_kind,
-        verter_analysis::ReactivityKind::Ref,
+        verter_semantic::analysis::ReactivityKind::Ref,
         "x should be enriched from MaybeRef to Ref via composable return shape"
     );
 
     let y_binding = analysis.bindings.iter().find(|b| b.name == "y").unwrap();
     assert_eq!(
         y_binding.reactivity_kind,
-        verter_analysis::ReactivityKind::Ref,
+        verter_semantic::analysis::ReactivityKind::Ref,
         "y should be enriched from MaybeRef to Ref via composable return shape"
     );
 
@@ -5879,14 +5892,14 @@ const { x, y, reset } = useMouse()
         .unwrap();
     assert_eq!(
         reset_binding.reactivity_kind,
-        verter_analysis::ReactivityKind::None,
+        verter_semantic::analysis::ReactivityKind::None,
         "reset (a function) should be None, not reactive"
     );
 
     // Negative: non-enriched bindings should not be affected
     assert!(
         !x_binding.is_reactive
-            || x_binding.reactivity_kind != verter_analysis::ReactivityKind::MaybeRef,
+            || x_binding.reactivity_kind != verter_semantic::analysis::ReactivityKind::MaybeRef,
         "x should NOT remain MaybeRef after enrichment"
     );
 }
@@ -6936,7 +6949,7 @@ fn resolve_component_meta_uses_workspace_type_resolution_for_package_declaration
 
     let host = VerterHost::new(HostConfig::default(), ws);
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -6991,7 +7004,7 @@ defineProps<Props>()
     let props: Vec<&str> = state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .flat_map(|m| m.props.iter())
         .map(|p| p.name.as_str())
         .collect();
@@ -7005,7 +7018,7 @@ defineProps<Props>()
     let dp = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .unwrap();
     assert!(
         dp.prop_fields.is_empty(),
@@ -7068,7 +7081,7 @@ defineEmits<Events>()
     let emits: Vec<_> = state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineEmits)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
         .flat_map(|m| m.emits.iter())
         .collect();
     let change = emits.iter().find(|e| e.name == "change");
@@ -7105,7 +7118,7 @@ defineSlots<Slots>()
     let slots: Vec<_> = state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
         .flat_map(|m| m.slots.iter())
         .collect();
     let default_slot = slots.iter().find(|s| s.name == "default");
@@ -7150,7 +7163,7 @@ defineSlots<Slots>()
     let slot_names: Vec<&str> = state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
         .flat_map(|m| m.slots.iter())
         .map(|s| s.name.as_str())
         .collect();
@@ -7237,7 +7250,7 @@ defineSlots<Slots>()
     let slots: Vec<_> = state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
         .flat_map(|m| m.slots.iter())
         .collect();
 
@@ -7276,7 +7289,7 @@ defineSlots<{
     let ds = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
         .expect("should have DefineSlots macro");
 
     let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
@@ -7306,7 +7319,7 @@ defineSlots<{
     let ds = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineSlots)
+        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
         .expect("should have DefineSlots macro");
 
     let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
@@ -8566,7 +8579,7 @@ export type Avatar = {
         )
         .expect("prepared env should build");
     let prepared_avatar =
-        verter_analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
+        verter_semantic::analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
     assert!(
         matches!(prepared_avatar, TypeExpr::Object(_)),
         "prepared Avatar should evaluate without widening through unrelated imported siblings",
@@ -8678,7 +8691,8 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
             None,
         )
         .expect("prepared env should build");
-    let evaluated = verter_analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
+    let evaluated =
+        verter_semantic::analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
     let TypeExpr::Object(object) = evaluated else {
         panic!("ButtonProps should evaluate to an object");
     };

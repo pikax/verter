@@ -125,7 +125,7 @@ pub(crate) fn parse_hover_to_expansion(
 
     // Determine completeness based on whether we got Unknown
     let completeness = match &type_expr {
-        verter_analysis::type_expr::TypeExpr::Unknown { .. } => {
+        verter_semantic::analysis::type_expr::TypeExpr::Unknown { .. } => {
             ExpansionCompleteness::OpaqueFallback
         }
         _ => ExpansionCompleteness::Exact,
@@ -171,9 +171,9 @@ pub(crate) fn extract_type_from_hover(contents: &str) -> &str {
 /// Extract members from an object type expression.
 #[cfg(feature = "type-runtime")]
 pub(crate) fn extract_members_from_type(
-    type_expr: &verter_analysis::type_expr::TypeExpr,
+    type_expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Vec<ExpandedMember> {
-    use verter_analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     match type_expr {
         TypeExpr::Object(obj) => obj

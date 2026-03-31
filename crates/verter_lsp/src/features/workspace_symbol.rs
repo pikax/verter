@@ -127,8 +127,8 @@ pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformatio
 }
 
 /// Convert AnalyzedBindingKind to LSP SymbolKind.
-fn binding_to_symbol_kind(kind: &verter_analysis::AnalyzedBindingKind) -> SymbolKind {
-    use verter_analysis::AnalyzedBindingKind;
+fn binding_to_symbol_kind(kind: &verter_semantic::analysis::AnalyzedBindingKind) -> SymbolKind {
+    use verter_semantic::analysis::AnalyzedBindingKind;
     match kind {
         AnalyzedBindingKind::Const | AnalyzedBindingKind::Let | AnalyzedBindingKind::Var => {
             SymbolKind::VARIABLE

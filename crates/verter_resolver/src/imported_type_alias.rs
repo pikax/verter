@@ -1,8 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
-use verter_analysis::type_expand::{expand_object_shape, ExpandedObjectShape, ExpansionBudget};
-use verter_analysis::type_expr::{
+use verter_semantic::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+use verter_semantic::analysis::type_expand::{
+    expand_object_shape, ExpandedObjectShape, ExpansionBudget,
+};
+use verter_semantic::analysis::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, ObjectExpr, ObjectMember, ObjectProperty,
     PrimitiveName, TypeExpr, TypeParam,
 };
@@ -277,7 +279,8 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
                 std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
-        let normalized_body = verter_analysis::type_eval::evaluate(&body, &mut normalized_env);
+        let normalized_body =
+            verter_semantic::analysis::type_eval::evaluate(&body, &mut normalized_env);
         decl.body = choose_preferred_imported_type_body(Some(body), Some(normalized_body))
             .expect("preferred imported type body should exist");
     } else {
@@ -287,7 +290,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
                 std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
-        decl.body = verter_analysis::type_eval::evaluate(&decl.body, &mut dep_env);
+        decl.body = verter_semantic::analysis::type_eval::evaluate(&decl.body, &mut dep_env);
     }
     resolver.cache_prepared_imported_type_alias(
         &resolved_source_canonical_id,
@@ -370,12 +373,14 @@ fn normalize_type_parameter_refs(
             elements: Arc::from(
                 elements
                     .iter()
-                    .map(|element| verter_analysis::type_expr::TupleElement {
-                        label: element.label.clone(),
-                        ty: normalize_type_parameter_refs(&element.ty, type_parameters),
-                        optional: element.optional,
-                        rest: element.rest,
-                    })
+                    .map(
+                        |element| verter_semantic::analysis::type_expr::TupleElement {
+                            label: element.label.clone(),
+                            ty: normalize_type_parameter_refs(&element.ty, type_parameters),
+                            optional: element.optional,
+                            rest: element.rest,
+                        },
+                    )
                     .collect::<Vec<_>>(),
             ),
             readonly: *readonly,
@@ -420,13 +425,13 @@ fn normalize_type_parameter_refs(
                     ObjectMember::ConstructSignature(func) => ObjectMember::ConstructSignature(
                         normalize_function_expr(func, type_parameters),
                     ),
-                    ObjectMember::Method(method) => {
-                        ObjectMember::Method(verter_analysis::type_expr::MethodSignature {
+                    ObjectMember::Method(method) => ObjectMember::Method(
+                        verter_semantic::analysis::type_expr::MethodSignature {
                             name: method.name.clone(),
                             function: normalize_function_expr(&method.function, type_parameters),
                             optional: method.optional,
-                        })
-                    }
+                        },
+                    ),
                 })
                 .collect(),
         })),
@@ -527,7 +532,7 @@ fn materialize_imported_type_body(
             Arc::new(TypeExpr::type_parameter(param.clone())),
         );
     }
-    let evaluated_body = verter_analysis::type_eval::evaluate(body, &mut eval_env);
+    let evaluated_body = verter_semantic::analysis::type_eval::evaluate(body, &mut eval_env);
     let mut expansion_env = eval_env.clone();
     let expanded = expand_object_shape(
         &evaluated_body,
@@ -1162,8 +1167,8 @@ mod tests {
     use super::*;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
-    use verter_analysis::type_eval::{DeclarationId, TypeDeclKind};
-    use verter_analysis::type_expr::{
+    use verter_semantic::analysis::type_eval::{DeclarationId, TypeDeclKind};
+    use verter_semantic::analysis::type_expr::{
         ObjectExpr, ObjectProperty, PrimitiveName, TypeExpr, TypeParam,
     };
 

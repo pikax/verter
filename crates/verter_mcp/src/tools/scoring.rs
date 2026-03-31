@@ -1,9 +1,11 @@
 //! Scoring engine: a11y, quality, and template complexity metrics.
 
-use verter_analysis::template::TemplateAnalysisSnapshot;
-use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot, VueApiClassification};
-use verter_analysis::StyleBlockAnalysis;
 use verter_diagnostics::{LintConfig, LintPreset, Linter, Severity};
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::types::{
+    AnalysisFlags, ScriptAnalysisSnapshot, VueApiClassification,
+};
+use verter_semantic::analysis::StyleBlockAnalysis;
 
 /// Template complexity metrics computed from existing analysis data.
 #[derive(Debug, Default, serde::Serialize)]
@@ -202,7 +204,7 @@ pub fn compute_quality_score(
         let prop_count = s
             .macros
             .iter()
-            .filter(|m| m.kind == verter_analysis::types::AnalyzedMacroKind::DefineProps)
+            .filter(|m| m.kind == verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps)
             .count() as i32;
         // Check if too many bindings (>30 is a smell)
         if s.bindings.len() > 30 {
@@ -211,7 +213,7 @@ pub fn compute_quality_score(
         if prop_count > 0 {
             // Penalize components with too many props (>15 is a design smell)
             for m in &s.macros {
-                if m.kind == verter_analysis::types::AnalyzedMacroKind::DefineProps
+                if m.kind == verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps
                     && m.prop_fields.len() > 15
                 {
                     penalty += (m.prop_fields.len() as i32 - 15) * 2;

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use verter_analysis::type_expr::{
+use verter_semantic::analysis::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier, MethodSignature,
     ObjectMember, ObjectProperty, TupleElement, TypeExpr, TypeParam, ValueRef,
 };

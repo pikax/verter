@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_analysis::type_eval::EvalEnv;
-use verter_analysis::types::{AnalyzedImport, ImportBindingKind};
+use verter_semantic::analysis::type_eval::EvalEnv;
+use verter_semantic::analysis::types::{AnalyzedImport, ImportBindingKind};
 
 pub trait ImportedRuntimeValueResolver {
     fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>>;
@@ -69,8 +69,10 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::sync::Arc;
-    use verter_analysis::type_eval::{EvalEnv, ValueDeclInfo, ValueDeclKind};
-    use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+    use verter_semantic::analysis::type_eval::{EvalEnv, ValueDeclInfo, ValueDeclKind};
+    use verter_semantic::analysis::types::{
+        AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+    };
     use verter_span::Span;
 
     #[derive(Default)]
@@ -111,7 +113,9 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_analysis::type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: Some(
+                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
+            ),
             function_signature: None,
             object_shape: None,
         });
@@ -154,7 +158,9 @@ mod tests {
             name: "themeConfig".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_analysis::type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: Some(
+                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
+            ),
             function_signature: None,
             object_shape: None,
         });
@@ -169,9 +175,9 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 3,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_analysis::type_expr::TypeExpr::string_literal(
-                "local",
-            )),
+            type_annotation: Some(
+                verter_semantic::analysis::type_expr::TypeExpr::string_literal("local"),
+            ),
             function_signature: None,
             object_shape: None,
         });
@@ -187,9 +193,7 @@ mod tests {
             env.value_symbols
                 .get("theme")
                 .and_then(|value| value.type_annotation.clone()),
-            Some(verter_analysis::type_expr::TypeExpr::string_literal(
-                "local"
-            ))
+            Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("local"))
         );
     }
 
@@ -224,7 +228,9 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_analysis::type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: Some(
+                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
+            ),
             function_signature: None,
             object_shape: None,
         });
@@ -232,9 +238,9 @@ mod tests {
             name: "helper".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_analysis::type_expr::TypeExpr::string_literal(
-                "helper",
-            )),
+            type_annotation: Some(
+                verter_semantic::analysis::type_expr::TypeExpr::string_literal("helper"),
+            ),
             function_signature: None,
             object_shape: None,
         });
@@ -295,7 +301,9 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_analysis::type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: Some(
+                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
+            ),
             function_signature: None,
             object_shape: None,
         });
@@ -304,9 +312,9 @@ mod tests {
             name: "helper".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_analysis::type_expr::TypeExpr::string_literal(
-                "helper",
-            )),
+            type_annotation: Some(
+                verter_semantic::analysis::type_expr::TypeExpr::string_literal("helper"),
+            ),
             function_signature: None,
             object_shape: None,
         });

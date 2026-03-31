@@ -17,7 +17,7 @@ hotpath = [
   "dep:hotpath",
   "hotpath/hotpath",
   "verter_compiler/hotpath",
-  "verter_analysis/hotpath",
+  "verter_semantic/hotpath",
   "verter_resolver/hotpath",
   "verter_scheduler?/hotpath",
   "verter_workspace/hotpath",
@@ -25,7 +25,6 @@ hotpath = [
 
 [dependencies]
 verter_compiler = { path = "../verter_compiler" }
-verter_analysis = { path = "../verter_analysis" }
 verter_semantic = { path = "../verter_semantic" }
 verter_resolver = { path = "../verter_resolver" }
 verter_span = { path = "../verter_span" }

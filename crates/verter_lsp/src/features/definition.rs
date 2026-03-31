@@ -9,8 +9,8 @@
 // - DOM query selector strings → matching template elements (with CSS rule fallback)
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::types::{DomQueryCallSite, DomQueryKind};
-use verter_analysis::{match_selector, MatchResult};
+use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
+use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
@@ -125,9 +125,9 @@ pub fn definition_at_position(
         if in_template {
             // Navigate $props → defineProps, $emit → defineEmits, $slots → defineSlots
             let macro_kind = match word.as_str() {
-                "$props" => Some(verter_analysis::AnalyzedMacroKind::DefineProps),
-                "$emit" => Some(verter_analysis::AnalyzedMacroKind::DefineEmits),
-                "$slots" => Some(verter_analysis::AnalyzedMacroKind::DefineSlots),
+                "$props" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineProps),
+                "$emit" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineEmits),
+                "$slots" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineSlots),
                 _ => None,
             };
             if let Some(kind) = macro_kind {
@@ -495,7 +495,7 @@ fn css_definition_from_template(
 fn find_css_target_in_template(
     offset: usize,
     source: &str,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<CssTarget> {
     for element in &template.elements {
         for attr in &element.attributes {

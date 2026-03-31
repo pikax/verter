@@ -1579,7 +1579,7 @@ impl VerterLanguageServer {
     fn component_import_binding_name(
         &self,
         analysis: &verter_session::FileAnalysisSnapshot,
-        component: &verter_analysis::template::TemplateComponentUsage,
+        component: &verter_semantic::analysis::template::TemplateComponentUsage,
     ) -> Option<String> {
         let import_source = component.import_source.as_ref()?;
         let import = analysis
@@ -1602,7 +1602,7 @@ impl VerterLanguageServer {
         &self,
         parent_uri: &Uri,
         parent_analysis: &verter_session::FileAnalysisSnapshot,
-        component: &verter_analysis::template::TemplateComponentUsage,
+        component: &verter_semantic::analysis::template::TemplateComponentUsage,
     ) -> Option<ResolvedComponentDocument> {
         let import_source = component.import_source.as_ref()?;
         let parent_canonical_id = uri_to_canonical_id(parent_uri);
@@ -1709,7 +1709,7 @@ impl VerterLanguageServer {
 
         let mut emit_locations = Vec::new();
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_analysis::AnalyzedMacroKind::DefineEmits {
+            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineEmits {
                 continue;
             }
             for emit_field in &mac.emit_fields {
@@ -2313,7 +2313,7 @@ impl VerterLanguageServer {
 
         // Tier 1: defineModel macro
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_analysis::AnalyzedMacroKind::DefineModel {
+            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineModel {
                 continue;
             }
             let macro_model_name = mac.model_name.as_deref().unwrap_or("modelValue");
@@ -2382,7 +2382,7 @@ impl VerterLanguageServer {
     ) -> Option<GotoDefinitionResponse> {
         // Check defineSlots macro first
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_analysis::AnalyzedMacroKind::DefineSlots {
+            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
                 continue;
             }
             if let Some(slot_field) = mac.slot_fields.iter().find(|f| f.name == slot_name) {
@@ -2422,7 +2422,7 @@ impl VerterLanguageServer {
     ) -> Option<GotoDefinitionResponse> {
         // Check defineSlots macro
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_analysis::AnalyzedMacroKind::DefineSlots {
+            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
                 continue;
             }
             if let Some(slot_field) = mac.slot_fields.iter().find(|f| f.name == slot_name) {
@@ -3579,7 +3579,7 @@ impl VerterLanguageServer {
         let roots = self.workspace_roots.lock().await.clone();
         let Some(root) = roots.first() else {
             return Ok(serde_json::to_value(
-                verter_analysis::routes::RouteAnalysisSnapshot::default(),
+                verter_semantic::analysis::routes::RouteAnalysisSnapshot::default(),
             )
             .unwrap_or_default());
         };
@@ -3599,8 +3599,10 @@ impl VerterLanguageServer {
         }
 
         let project_root = std::path::Path::new(root);
-        let snapshot =
-            verter_analysis::routes::build_route_analysis(project_root, &template_components);
+        let snapshot = verter_semantic::analysis::routes::build_route_analysis(
+            project_root,
+            &template_components,
+        );
 
         Ok(serde_json::to_value(snapshot).unwrap_or_default())
     }

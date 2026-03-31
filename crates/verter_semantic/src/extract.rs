@@ -1,6 +1,6 @@
 //! Extraction of semantic facts from analysis snapshots.
 //!
-//! Converts `verter_analysis` types into `verter_semantic` fact types.
+//! Converts `verter_semantic::analysis` types into `verter_semantic` fact types.
 //! This is the bridge between the raw analysis layer and the semantic DB.
 
 use crate::input::{AnalyzedMacro, AnalyzedMacroKind, ReactivityKind, ScriptAnalysisSnapshot};

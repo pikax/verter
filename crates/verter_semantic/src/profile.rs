@@ -60,7 +60,7 @@ impl QueryProfile {
     ///
     /// Returns a u32 that can be used with `AnalysisScope::from_bits_truncate()`.
     pub fn recommended_analysis_scope_bits(&self) -> u32 {
-        // Bit positions match AnalysisScope in verter_analysis::scope
+        // Bit positions match AnalysisScope in verter_semantic::analysis::scope
         const IMPORTS: u32 = 1 << 0;
         const BINDINGS: u32 = 1 << 1;
         const REACTIVITY: u32 = 1 << 2;

@@ -20,7 +20,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use verter_analysis::type_expr::TypeExpr;
+use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_span::Span;
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,9 @@ mod tests {
     fn expanded_member_carries_optionality_and_description() {
         let member = ExpandedMember {
             name: "count".to_string(),
-            type_expr: TypeExpr::primitive(verter_analysis::type_expr::PrimitiveName::Number),
+            type_expr: TypeExpr::primitive(
+                verter_semantic::analysis::type_expr::PrimitiveName::Number,
+            ),
             raw_type: Some("number".to_string()),
             optional: true,
             description: Some("The counter value".to_string()),

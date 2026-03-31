@@ -2,12 +2,14 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo};
-use verter_analysis::type_expand::{expand_object_shape, ExpandedObjectShape, ExpansionBudget};
-use verter_analysis::type_expr::{
+use verter_semantic::analysis::type_eval::{EvalEnv, TypeDeclInfo};
+use verter_semantic::analysis::type_expand::{
+    expand_object_shape, ExpandedObjectShape, ExpansionBudget,
+};
+use verter_semantic::analysis::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
 };
-use verter_analysis::{AnalyzedBinding, AnalyzedImport, AnalyzedMacro, MacroTypeDep};
+use verter_semantic::analysis::{AnalyzedBinding, AnalyzedImport, AnalyzedMacro, MacroTypeDep};
 
 use crate::{choose_preferred_imported_type_body, ImportedEvalInputs, ImportedEvalOwnerSnapshot};
 
@@ -171,7 +173,7 @@ pub fn evaluate_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
                 std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
-        let evaluated = verter_analysis::type_eval::evaluate(&decl.body, &mut dep_env);
+        let evaluated = verter_semantic::analysis::type_eval::evaluate(&decl.body, &mut dep_env);
         let cached = CachedEvaluatedImportedDecl {
             body: Arc::new(evaluated.clone()),
             canonical_dependencies: canonical_dependencies.clone(),
@@ -240,7 +242,7 @@ pub fn materialize_imported_decl_with_owner_env<R: ImportedDeclEvalResolver>(
                 std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
             );
         }
-        let evaluated = verter_analysis::type_eval::evaluate(&decl.body, &mut dep_env);
+        let evaluated = verter_semantic::analysis::type_eval::evaluate(&decl.body, &mut dep_env);
         let materialized = materialize_imported_decl_body(&evaluated, &mut dep_env);
         choose_preferred_imported_type_body(Some(evaluated), materialized)
     })();
@@ -313,8 +315,8 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeSet;
     use std::sync::Arc;
-    use verter_analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
-    use verter_analysis::type_expr::{
+    use verter_semantic::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+    use verter_semantic::analysis::type_expr::{
         ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, TypeParam,
     };
 
@@ -613,15 +615,17 @@ mod tests {
             kind: TypeDeclKind::Interface,
             type_parameters: Vec::new(),
             body: TypeExpr::Object(std::sync::Arc::new(
-                verter_analysis::type_expr::ObjectExpr {
-                    properties: vec![verter_analysis::type_expr::ObjectMember::Property(
-                        verter_analysis::type_expr::ObjectProperty {
-                            name: "path".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: false,
-                            readonly: false,
-                        },
-                    )],
+                verter_semantic::analysis::type_expr::ObjectExpr {
+                    properties: vec![
+                        verter_semantic::analysis::type_expr::ObjectMember::Property(
+                            verter_semantic::analysis::type_expr::ObjectProperty {
+                                name: "path".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                    ],
                 },
             )),
         });
@@ -631,15 +635,17 @@ mod tests {
             kind: TypeDeclKind::Interface,
             type_parameters: Vec::new(),
             body: TypeExpr::Object(std::sync::Arc::new(
-                verter_analysis::type_expr::ObjectExpr {
-                    properties: vec![verter_analysis::type_expr::ObjectMember::Property(
-                        verter_analysis::type_expr::ObjectProperty {
-                            name: "name".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: false,
-                            readonly: false,
-                        },
-                    )],
+                verter_semantic::analysis::type_expr::ObjectExpr {
+                    properties: vec![
+                        verter_semantic::analysis::type_expr::ObjectMember::Property(
+                            verter_semantic::analysis::type_expr::ObjectProperty {
+                                name: "name".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                    ],
                 },
             )),
         });
@@ -702,7 +708,7 @@ mod tests {
             TypeExpr::Object(obj) => obj.properties.iter().any(|member| {
                 matches!(
                     member,
-                    verter_analysis::type_expr::ObjectMember::Property(prop)
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(prop)
                         if prop.name == "path"
                 )
             }),
@@ -712,7 +718,7 @@ mod tests {
             TypeExpr::Object(obj) => obj.properties.iter().any(|member| {
                 matches!(
                     member,
-                    verter_analysis::type_expr::ObjectMember::Property(prop)
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(prop)
                         if prop.name == "name"
                 )
             }),
@@ -799,10 +805,10 @@ mod tests {
     #[test]
     fn materialize_imported_decl_with_owner_env_prefers_expanded_object_shape() {
         let mut env = EvalEnv::new();
-        env.add_value(verter_analysis::type_eval::ValueDeclInfo {
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: "theme".to_string(),
             declaration_id: 3,
-            kind: verter_analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: None,
             function_signature: None,
             object_shape: Some(ObjectExpr {
@@ -840,7 +846,9 @@ mod tests {
                             default: None,
                         })),
                         index: Arc::new(TypeExpr::Literal(
-                            verter_analysis::type_expr::LiteralValue::String("slots".to_string()),
+                            verter_semantic::analysis::type_expr::LiteralValue::String(
+                                "slots".to_string(),
+                            ),
                         )),
                     },
                     optional: false,
@@ -856,7 +864,7 @@ mod tests {
             body: TypeExpr::Ref {
                 name: Arc::from("ComponentConfig"),
                 type_arguments: Arc::from([TypeExpr::TypeOf(
-                    verter_analysis::type_expr::ValueRef {
+                    verter_semantic::analysis::type_expr::ValueRef {
                         path: vec!["theme".to_string()],
                     },
                 )]),
@@ -878,7 +886,7 @@ mod tests {
                     TypeExpr::Ref {
                         name: Arc::from("ComponentConfig"),
                         type_arguments: Arc::from([TypeExpr::TypeOf(
-                            verter_analysis::type_expr::ValueRef {
+                            verter_semantic::analysis::type_expr::ValueRef {
                                 path: vec!["theme".to_string()],
                             },
                         )]),

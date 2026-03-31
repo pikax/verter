@@ -1,10 +1,10 @@
 use super::*;
-use verter_analysis::template::{
+use verter_semantic::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_analysis::types::AnalyzedMacro;
-use verter_analysis::types::VueApiCallSite;
+use verter_semantic::analysis::types::AnalyzedMacro;
+use verter_semantic::analysis::types::VueApiCallSite;
 
 /// Helper to build a parent analysis with component usages.
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
@@ -647,7 +647,7 @@ fn dynamic_component_vmodel_skipped() {
 
 // ── data-*/aria-* fallthrough tests ─────────────────────────────
 
-use verter_analysis::template::TemplateElement;
+use verter_semantic::analysis::template::TemplateElement;
 
 /// Helper to build a child analysis with props and a given number of root elements.
 fn make_child_with_roots(prop_names: &[&str], root_count: usize) -> FileAnalysisSnapshot {
@@ -773,7 +773,7 @@ fn aria_attr_not_flagged_on_non_fragment_component() {
 
 /// Helper: child with DefineProps macro prop_fields, NO template.prop_definitions.
 fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
-    use verter_analysis::types::{AnalyzedPropField, TypeResolutionSource};
+    use verter_semantic::analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
@@ -854,7 +854,7 @@ fn macro_fallback_unknown_prop_flagged() {
 #[test]
 fn macro_fallback_with_defaults_pattern() {
     // withDefaults wraps defineProps — the inner DefineProps macro has the real props
-    use verter_analysis::types::{AnalyzedPropField, TypeResolutionSource};
+    use verter_semantic::analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     let child = FileAnalysisSnapshot {
         macros: vec![
@@ -1001,15 +1001,17 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
             emit_fields: vec![],
             slot_fields: slot_names
                 .iter()
-                .map(|(name, required)| verter_analysis::AnalyzedSlotField {
-                    name: name.to_string(),
-                    is_required: *required,
-                    span: verter_span::Span::new(0, 10),
-                    bindings: vec![],
-                    description: None,
-                    tags: vec![],
-                    return_type: None,
-                })
+                .map(
+                    |(name, required)| verter_semantic::analysis::AnalyzedSlotField {
+                        name: name.to_string(),
+                        is_required: *required,
+                        span: verter_span::Span::new(0, 10),
+                        bindings: vec![],
+                        description: None,
+                        tags: vec![],
+                        return_type: None,
+                    },
+                )
                 .collect(),
             default_keys: vec![],
             expose_fields: vec![],

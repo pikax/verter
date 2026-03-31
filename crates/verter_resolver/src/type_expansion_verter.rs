@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use verter_analysis::type_expr::{PrimitiveName, TypeExpr};
+use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 #[cfg(test)]
 use verter_span::Span;
 
@@ -32,7 +32,7 @@ pub trait VerterComponentMetaProvider: Send + Sync {
     fn get_component_meta(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_analysis::component_meta::ComponentMetaAnalysis>;
+    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>;
 
     /// Get the resolved macro metadata for a file (for type expansion).
     fn get_resolved_macros(&self, canonical_id: &str) -> Vec<ResolvedMacroMeta> {
@@ -180,7 +180,7 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 mod tests {
     use super::*;
     use crate::ResolvedTypeDeclaration;
-    use verter_analysis::types::AnalyzedMacroKind;
+    use verter_semantic::analysis::types::AnalyzedMacroKind;
 
     fn make_resolved_macro() -> ResolvedMacroMeta {
         ResolvedMacroMeta {
@@ -199,7 +199,7 @@ mod tests {
             },
             native_props: vec![],
             props: vec![
-                verter_analysis::AnalyzedPropField {
+                verter_semantic::analysis::AnalyzedPropField {
                     name: "msg".to_string(),
                     is_optional: false,
                     type_annotation: Some("string".to_string()),
@@ -209,7 +209,7 @@ mod tests {
                     resolution_source: Default::default(),
                     resolution_error: None,
                 },
-                verter_analysis::AnalyzedPropField {
+                verter_semantic::analysis::AnalyzedPropField {
                     name: "count".to_string(),
                     is_optional: true,
                     type_annotation: Some("number".to_string()),

@@ -20,7 +20,7 @@ pub struct RouteReachabilityReport {
 ///
 /// Checks whether the file is imported by any known route configuration.
 /// This is a simplified check — full route analysis requires the route
-/// analysis snapshot from verter_analysis::routes.
+/// analysis snapshot from verter_semantic::analysis::routes.
 pub fn analyze_route_reachability(
     file_id: &str,
     import_graph: &FileImportGraph,

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::types::AnalyzedMacroKind;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 use crate::documents::line_index::LineIndex;
 use crate::features::action_utils;

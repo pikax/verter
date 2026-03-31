@@ -24,7 +24,7 @@ verter_compiler = { path = "../verter_compiler", features = ["bench"] }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
 verter_diagnostics = { path = "../verter_diagnostics" }
-verter_analysis = { path = "../verter_analysis" }
+verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }

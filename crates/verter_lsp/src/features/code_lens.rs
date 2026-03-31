@@ -179,8 +179,8 @@ fn style_summary(analysis: &FileAnalysisSnapshot, block: &SfcBlock) -> String {
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::types::VueApiCallSite;
-    use verter_analysis::*;
+    use verter_semantic::analysis::types::VueApiCallSite;
+    use verter_semantic::analysis::*;
 
     #[test]
     fn test_script_code_lens() {

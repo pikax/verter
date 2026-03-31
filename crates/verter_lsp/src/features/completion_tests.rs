@@ -1,7 +1,7 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::types::ImportBindingKind;
-use verter_analysis::*;
+use verter_semantic::analysis::types::ImportBindingKind;
+use verter_semantic::analysis::*;
 
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
@@ -240,7 +240,7 @@ fn test_class_completions_in_static_class() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![make_element_for_completion("div", &["fo"], None, source)],
                 ..Default::default()
             })
@@ -294,7 +294,7 @@ fn test_no_class_completions_outside_class_attr() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![make_element_for_completion("div", &[], Some("app"), source)],
                 ..Default::default()
             })
@@ -330,7 +330,7 @@ fn test_class_completions_no_style_block() {
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![make_element_for_completion("div", &["foo"], None, source)],
                 ..Default::default()
             })
@@ -366,7 +366,7 @@ fn make_element_for_completion(
     classes: &[&str],
     id: Option<&str>,
     source: &str,
-) -> verter_analysis::TemplateElement {
+) -> verter_semantic::analysis::TemplateElement {
     // Find the element's span in source for accurate positioning
     let tag_pattern = format!("<{}", tag);
     let span_start = source.find(&tag_pattern).unwrap_or(0) as u32;
@@ -395,7 +395,7 @@ fn make_element_for_completion(
         // value_span is the content inside the quotes
         let val_start = attr_start + "class=\"".len() as u32;
         let val_end = val_start + class_val.len() as u32;
-        attrs.push(verter_analysis::TemplateAttribute {
+        attrs.push(verter_semantic::analysis::TemplateAttribute {
             name: "class".into(),
             value: Some(class_val),
             is_dynamic: false,
@@ -410,7 +410,7 @@ fn make_element_for_completion(
         let attr_end = attr_start + id_pattern.len() as u32;
         let val_start = attr_start + "id=\"".len() as u32;
         let val_end = val_start + id_val.len() as u32;
-        attrs.push(verter_analysis::TemplateAttribute {
+        attrs.push(verter_semantic::analysis::TemplateAttribute {
             name: "id".into(),
             value: Some(id_val.into()),
             is_dynamic: false,
@@ -419,11 +419,11 @@ fn make_element_for_completion(
             value_span: Some(verter_span::Span::new(val_start, val_end)),
         });
     }
-    verter_analysis::TemplateElement {
+    verter_semantic::analysis::TemplateElement {
         tag: tag.into(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_analysis::ElementNamespace::Html,
+        namespace: verter_semantic::analysis::ElementNamespace::Html,
         attributes: attrs,
         directives: vec![],
         v_for: None,
@@ -460,22 +460,23 @@ fn test_class_completions_in_dynamic_class() {
     let class_pattern = ":class=\"{ 'btn': active }\"";
     let attr_start = source.find(class_pattern).unwrap_or(0) as u32;
     let attr_end = attr_start + class_pattern.len() as u32;
-    el.attributes.push(verter_analysis::TemplateAttribute {
-        name: "class".into(),
-        value: Some("{ 'btn': active }".into()),
-        is_dynamic: true,
-        span: verter_span::Span::new(attr_start, attr_end),
-        name_end: attr_start + ":class".len() as u32,
-        value_span: Some(verter_span::Span::new(
-            attr_start + ":class=\"".len() as u32,
-            attr_end - 1, // exclude closing quote
-        )),
-    });
+    el.attributes
+        .push(verter_semantic::analysis::TemplateAttribute {
+            name: "class".into(),
+            value: Some("{ 'btn': active }".into()),
+            is_dynamic: true,
+            span: verter_span::Span::new(attr_start, attr_end),
+            name_end: attr_start + ":class".len() as u32,
+            value_span: Some(verter_span::Span::new(
+                attr_start + ":class=\"".len() as u32,
+                attr_end - 1, // exclude closing quote
+            )),
+        });
 
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -528,19 +529,20 @@ fn test_no_class_completions_outside_dynamic_string() {
     let class_pattern = ":class=\"{ btn: active }\"";
     let attr_start = source.find(class_pattern).unwrap_or(0) as u32;
     let attr_end = attr_start + class_pattern.len() as u32;
-    el.attributes.push(verter_analysis::TemplateAttribute {
-        name: "class".into(),
-        value: Some("{ btn: active }".into()),
-        is_dynamic: true,
-        span: verter_span::Span::new(attr_start, attr_end),
-        name_end: 0,
-        value_span: None,
-    });
+    el.attributes
+        .push(verter_semantic::analysis::TemplateAttribute {
+            name: "class".into(),
+            value: Some("{ btn: active }".into()),
+            is_dynamic: true,
+            span: verter_span::Span::new(attr_start, attr_end),
+            name_end: 0,
+            value_span: None,
+        });
 
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -818,7 +820,7 @@ fn make_event_directive_analysis(
 
     let name_end = dir_start + raw_name.split('.').next().unwrap_or(raw_name).len() as u32;
 
-    let dir = verter_analysis::template::TemplateDirective {
+    let dir = verter_semantic::analysis::template::TemplateDirective {
         name: "on".to_string(),
         raw_name: raw_name.to_string(),
         argument: Some(event_name.to_string()),
@@ -831,11 +833,11 @@ fn make_event_directive_analysis(
         modifier_spans,
     };
 
-    let el = verter_analysis::TemplateElement {
+    let el = verter_semantic::analysis::TemplateElement {
         tag: tag.to_string(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_analysis::ElementNamespace::Html,
+        namespace: verter_semantic::analysis::ElementNamespace::Html,
         attributes: vec![],
         directives: vec![dir],
         span: verter_span::Span::new(span_start, span_end),
@@ -846,7 +848,7 @@ fn make_event_directive_analysis(
 
     FileAnalysisSnapshot {
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -897,7 +899,7 @@ fn make_vmodel_directive_analysis(
         }
     }
 
-    let dir = verter_analysis::template::TemplateDirective {
+    let dir = verter_semantic::analysis::template::TemplateDirective {
         name: "model".to_string(),
         raw_name: raw_name.to_string(),
         argument: None,
@@ -910,11 +912,11 @@ fn make_vmodel_directive_analysis(
         modifier_spans,
     };
 
-    let el = verter_analysis::TemplateElement {
+    let el = verter_semantic::analysis::TemplateElement {
         tag: tag.to_string(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_analysis::ElementNamespace::Html,
+        namespace: verter_semantic::analysis::ElementNamespace::Html,
         attributes: vec![],
         directives: vec![dir],
         span: verter_span::Span::new(span_start, span_end),
@@ -925,7 +927,7 @@ fn make_vmodel_directive_analysis(
 
     FileAnalysisSnapshot {
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -935,15 +937,15 @@ fn make_vmodel_directive_analysis(
     }
 }
 
-fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_analysis::StyleBlockAnalysis {
+fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_semantic::analysis::StyleBlockAnalysis {
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
     let scoped = style_block.attrs_raw.contains("scoped");
 
-    verter_analysis::style::build_css_style_analysis(
+    verter_semantic::analysis::style::build_css_style_analysis(
         css_content,
-        verter_analysis::style::VueStyleInput {
+        verter_semantic::analysis::style::VueStyleInput {
             v_binds: vec![],
             special_pseudos: vec![],
         },
@@ -1183,12 +1185,12 @@ fn test_no_completions_on_closing_tag() {
 /// Helper to build analysis with a binding and template component list.
 fn make_analysis_with_template(
     bindings: Vec<AnalyzedBinding>,
-    components: Vec<verter_analysis::template::TemplateComponentUsage>,
+    components: Vec<verter_semantic::analysis::template::TemplateComponentUsage>,
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         bindings,
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 components,
                 ..Default::default()
             })
@@ -1294,19 +1296,21 @@ fn test_tag_name_includes_components() {
 
     let analysis = make_analysis_with_template(
         vec![],
-        vec![verter_analysis::template::TemplateComponentUsage {
-            name: "MyComp".to_string(),
-            import_source: Some("./MyComp.vue".to_string()),
-            is_dynamic: false,
-            props: vec![],
-            has_spread: false,
-            slots_used: vec![],
-            static_classes: vec![],
-            has_dynamic_class: false,
-            dynamic_classes: vec![],
-            v_models: vec![],
-            span: verter_span::Span::new(0, 0),
-        }],
+        vec![
+            verter_semantic::analysis::template::TemplateComponentUsage {
+                name: "MyComp".to_string(),
+                import_source: Some("./MyComp.vue".to_string()),
+                is_dynamic: false,
+                props: vec![],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                v_models: vec![],
+                span: verter_span::Span::new(0, 0),
+            },
+        ],
     );
 
     let cursor = source.find("  <\n").unwrap() + 3;
@@ -1608,14 +1612,14 @@ fn test_attr_value_shows_bindings() {
             used_in_style: false,
         }],
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
-                elements: vec![verter_analysis::TemplateElement {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                elements: vec![verter_semantic::analysis::TemplateElement {
                     tag: "div".to_string(),
                     is_component: false,
                     is_self_closing: false,
-                    namespace: verter_analysis::ElementNamespace::Html,
+                    namespace: verter_semantic::analysis::ElementNamespace::Html,
                     attributes: vec![],
-                    directives: vec![verter_analysis::template::TemplateDirective {
+                    directives: vec![verter_semantic::analysis::template::TemplateDirective {
                         name: "bind".to_string(),
                         raw_name: ":foo".to_string(),
                         argument: Some("foo".to_string()),
@@ -2116,7 +2120,9 @@ fn test_no_member_access_standalone_identifier_not_dot() {
 
 #[test]
 fn test_template_completions_include_vfor_variables() {
-    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
+    use verter_semantic::analysis::template::{
+        TemplateAnalysisSnapshot, TemplateElement, VForDirective,
+    };
 
     let analysis = FileAnalysisSnapshot {
         bindings: vec![AnalyzedBinding {
@@ -2175,7 +2181,9 @@ fn test_template_completions_include_vfor_variables() {
 
 #[test]
 fn test_template_completions_vfor_not_included_outside_scope() {
-    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
+    use verter_semantic::analysis::template::{
+        TemplateAnalysisSnapshot, TemplateElement, VForDirective,
+    };
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
@@ -2214,7 +2222,9 @@ fn test_template_completions_vfor_not_included_outside_scope() {
 
 #[test]
 fn test_template_completions_vfor_destructured_pattern() {
-    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
+    use verter_semantic::analysis::template::{
+        TemplateAnalysisSnapshot, TemplateElement, VForDirective,
+    };
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
@@ -2285,20 +2295,22 @@ fn test_component_prop_completions_from_macros() {
             used_in_style: false,
         }],
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
-                components: vec![verter_analysis::template::TemplateComponentUsage {
-                    name: "MyChild".to_string(),
-                    import_source: Some("./MyChild.vue".to_string()),
-                    is_dynamic: false,
-                    props: vec![],
-                    has_spread: false,
-                    slots_used: vec![],
-                    static_classes: vec![],
-                    has_dynamic_class: false,
-                    dynamic_classes: vec![],
-                    v_models: vec![],
-                    span: verter_span::Span::new(0, 0),
-                }],
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                components: vec![
+                    verter_semantic::analysis::template::TemplateComponentUsage {
+                        name: "MyChild".to_string(),
+                        import_source: Some("./MyChild.vue".to_string()),
+                        is_dynamic: false,
+                        props: vec![],
+                        has_spread: false,
+                        slots_used: vec![],
+                        static_classes: vec![],
+                        has_dynamic_class: false,
+                        dynamic_classes: vec![],
+                        v_models: vec![],
+                        span: verter_span::Span::new(0, 0),
+                    },
+                ],
                 ..Default::default()
             })
             .into(),
@@ -2318,7 +2330,7 @@ fn test_component_prop_completions_from_macros() {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![
-                    verter_analysis::AnalyzedPropField {
+                    verter_semantic::analysis::AnalyzedPropField {
                         name: "foo".to_string(),
                         span: verter_span::Span::new(0, 3),
                         type_annotation: None,
@@ -2328,7 +2340,7 @@ fn test_component_prop_completions_from_macros() {
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
                     },
-                    verter_analysis::AnalyzedPropField {
+                    verter_semantic::analysis::AnalyzedPropField {
                         name: "barBaz".to_string(),
                         span: verter_span::Span::new(10, 16),
                         type_annotation: None,
@@ -2355,7 +2367,7 @@ fn test_component_prop_completions_from_macros() {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
-                emit_fields: vec![verter_analysis::AnalyzedEmitField {
+                emit_fields: vec![verter_semantic::analysis::AnalyzedEmitField {
                     name: "custom".to_string(),
                     span: verter_span::Span::new(0, 6),
                     payload_type: None,
@@ -2370,7 +2382,7 @@ fn test_component_prop_completions_from_macros() {
                 span: verter_span::Span::new(0, 0),
             },
         ]),
-        template: Some((verter_analysis::TemplateAnalysisSnapshot::default()).into()),
+        template: Some((verter_semantic::analysis::TemplateAnalysisSnapshot::default()).into()),
         ..Default::default()
     };
 

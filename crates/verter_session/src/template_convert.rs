@@ -1,19 +1,19 @@
-//! Convert raw template data from `verter_compiler` into `verter_analysis` types.
+//! Convert raw template data from `verter_compiler` into `verter_semantic::analysis` types.
 //!
 //! This module bridges the two independent crates: `verter_compiler` produces
 //! [`RawTemplateData`] during compilation, and this function converts it into
 //! [`TemplateAnalysisSnapshot`] that `verter_session` stores alongside script/style analysis.
 
-use verter_analysis::template::{
+use verter_compiler::compile::template_data::RawTemplateData;
+use verter_semantic::analysis::template::{
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace,
     IfChain, PropValueConstness, TemplateAnalysisSnapshot, TemplateAttribute,
     TemplateBindingOccurrence, TemplateComponentUsage, TemplateComponentVModel, TemplateDirective,
     TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef, TemplateTextSegment,
     UnresolvedBinding, VForDirective, VModelDirective,
 };
-use verter_compiler::compile::template_data::RawTemplateData;
 
-/// Convert raw template data from `verter_compiler` into `verter_analysis` types.
+/// Convert raw template data from `verter_compiler` into `verter_semantic::analysis` types.
 ///
 /// The `script_imports` map resolves component tag names to their import source
 /// paths for cross-file analysis. This is populated from the script analysis
@@ -76,7 +76,7 @@ pub fn convert_raw_to_analysis(
             let mut dynamic_classes = c
                 .dynamic_class_expr
                 .as_deref()
-                .map(verter_analysis::extract_dynamic_class_names)
+                .map(verter_semantic::analysis::extract_dynamic_class_names)
                 .unwrap_or_default();
 
             // If extract_dynamic_class_names found nothing, try resolving
@@ -323,7 +323,7 @@ pub fn convert_raw_to_analysis(
                 .filter(|a| a.is_dynamic && a.name == "class")
                 .filter_map(|a| a.value.as_deref())
                 .chain(bind_class_expressions.iter().copied())
-                .flat_map(verter_analysis::extract_dynamic_class_names)
+                .flat_map(verter_semantic::analysis::extract_dynamic_class_names)
                 .collect();
 
             // If no class names from object/array/ternary, try resolving
@@ -345,22 +345,22 @@ pub fn convert_raw_to_analysis(
             }
 
             // Extract CSS variables from :style bindings (e.g., { '--color': val })
-            let dynamic_style_vars: Vec<verter_analysis::template::DynamicStyleVar> = e
+            let dynamic_style_vars: Vec<verter_semantic::analysis::template::DynamicStyleVar> = e
                 .attributes
                 .iter()
                 .filter(|a| a.is_dynamic && a.name == "style")
                 .filter_map(|a| a.value.as_deref())
                 .chain(bind_style_expressions.iter().copied())
-                .flat_map(verter_analysis::template::extract_dynamic_style_vars)
+                .flat_map(verter_semantic::analysis::template::extract_dynamic_style_vars)
                 .collect();
 
             // Extract CSS variables from static style attributes (e.g., style="--color: red")
-            let static_style_vars: Vec<verter_analysis::template::StaticStyleVar> = e
+            let static_style_vars: Vec<verter_semantic::analysis::template::StaticStyleVar> = e
                 .attributes
                 .iter()
                 .filter(|a| !a.is_dynamic && a.name == "style")
                 .filter_map(|a| a.value.as_deref())
-                .flat_map(verter_analysis::template::extract_static_style_vars)
+                .flat_map(verter_semantic::analysis::template::extract_static_style_vars)
                 .collect();
 
             let component_usage_index = if e.is_component {

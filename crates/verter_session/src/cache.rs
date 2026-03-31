@@ -255,7 +255,7 @@ mod tests {
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
-            script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+            script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Arc::new(Vec::new()),
             template_analysis: None,

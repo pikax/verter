@@ -11,8 +11,8 @@ use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
-use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
 use verter_diagnostics::{Linter, Severity};
+use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
 use verter_session::VerterHost;
 
 use crate::config::McpServerConfig;
@@ -207,8 +207,8 @@ pub struct VerterMcpServer {
 
 fn build_script_snapshot(
     analysis: &verter_session::FileAnalysisSnapshot,
-) -> verter_analysis::types::ScriptAnalysisSnapshot {
-    verter_analysis::types::ScriptAnalysisSnapshot {
+) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
         module_references: analysis.module_references.to_vec(),
         bindings: analysis.bindings.clone(),
@@ -302,7 +302,7 @@ impl VerterMcpServer {
         });
 
         // Detect routing framework after scanning
-        let route_framework = verter_analysis::detect_routing_framework(root);
+        let route_framework = verter_semantic::analysis::detect_routing_framework(root);
         let route_info = serde_json::json!({
             "framework": route_framework,
         });
@@ -552,7 +552,7 @@ impl VerterMcpServer {
             .template
             .ok_or_else(|| mcp_err("No template analysis available"))?;
 
-        let parsed = match verter_analysis::parse_selector(&params.selector) {
+        let parsed = match verter_semantic::analysis::parse_selector(&params.selector) {
             Some(s) => s,
             None => {
                 return Ok(CallToolResult::success(vec![Content::text(
@@ -563,7 +563,7 @@ impl VerterMcpServer {
 
         let mut results = Vec::new();
         for (idx, el) in tpl.elements.iter().enumerate() {
-            let result = verter_analysis::match_selector(&parsed, idx, &tpl.elements);
+            let result = verter_semantic::analysis::match_selector(&parsed, idx, &tpl.elements);
             results.push(serde_json::json!({
                 "element": el.tag,
                 "index": idx,
@@ -1435,16 +1435,18 @@ impl VerterMcpServer {
                 // These are almost always consumed by the framework or other bindings
                 if matches!(
                     &binding.initializer,
-                    Some(verter_analysis::types::BindingInitializer::FunctionCall {
-                        vue_api: Some(_),
-                        ..
-                    })
+                    Some(
+                        verter_semantic::analysis::types::BindingInitializer::FunctionCall {
+                            vue_api: Some(_),
+                            ..
+                        }
+                    )
                 ) {
                     continue;
                 }
                 // Skip bindings initialized by external composable calls (useSomething())
                 // These often have side effects or are consumed by other composables
-                if let Some(verter_analysis::types::BindingInitializer::FunctionCall {
+                if let Some(verter_semantic::analysis::types::BindingInitializer::FunctionCall {
                     callee,
                     ..
                 }) = &binding.initializer
@@ -2307,13 +2309,13 @@ impl VerterMcpServer {
         &self,
         Parameters(params): Parameters<ApiNameParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let classification = verter_analysis::classify_vue_api(&params.name);
+        let classification = verter_semantic::analysis::classify_vue_api(&params.name);
         let response = serde_json::json!({
             "api_name": params.name,
             "classification": format!("{:?}", classification),
-            "is_lifecycle": verter_analysis::is_lifecycle_api(classification),
-            "is_reactivity": verter_analysis::is_reactivity_api(classification),
-            "is_watcher": verter_analysis::is_watcher_api(classification),
+            "is_lifecycle": verter_semantic::analysis::is_lifecycle_api(classification),
+            "is_reactivity": verter_semantic::analysis::is_reactivity_api(classification),
+            "is_watcher": verter_semantic::analysis::is_watcher_api(classification),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -2601,7 +2603,7 @@ impl VerterMcpServer {
 
         let snapshot = self.build_route_snapshot(root);
         let canonical = self.resolve(&params.path);
-        let flat = verter_analysis::flatten_routes(&snapshot.routes);
+        let flat = verter_semantic::analysis::flatten_routes(&snapshot.routes);
         let matching: Vec<_> = flat
             .into_iter()
             .filter(|r| {
@@ -2702,7 +2704,7 @@ impl VerterMcpServer {
             .map(|(id, _)| id)
             .collect();
 
-        let report = verter_analysis::analyze_route_health(&snapshot, &existing_files);
+        let report = verter_semantic::analysis::analyze_route_health(&snapshot, &existing_files);
         let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -2712,7 +2714,7 @@ impl VerterMcpServer {
     fn build_route_snapshot(
         &self,
         project_root: &std::path::Path,
-    ) -> verter_analysis::RouteAnalysisSnapshot {
+    ) -> verter_semantic::analysis::RouteAnalysisSnapshot {
         // Collect template component usages from all loaded Vue files
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
@@ -2722,17 +2724,19 @@ impl VerterMcpServer {
             .collect();
 
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        let template_components: Vec<(String, Vec<verter_analysis::TemplateComponentUsage>)> =
-            analyses
-                .iter()
-                .filter_map(|(id, a)| {
-                    a.template
-                        .as_ref()
-                        .map(|t| (id.clone(), t.components.clone()))
-                })
-                .collect();
+        let template_components: Vec<(
+            String,
+            Vec<verter_semantic::analysis::TemplateComponentUsage>,
+        )> = analyses
+            .iter()
+            .filter_map(|(id, a)| {
+                a.template
+                    .as_ref()
+                    .map(|t| (id.clone(), t.components.clone()))
+            })
+            .collect();
 
-        verter_analysis::build_route_analysis(project_root, &template_components)
+        verter_semantic::analysis::build_route_analysis(project_root, &template_components)
     }
 
     // ── Store Analysis Tools ──────────────────────────────────────────
@@ -3336,7 +3340,7 @@ impl ServerHandler for VerterMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_analysis::types::TypeResolutionSource;
+    use verter_semantic::analysis::types::TypeResolutionSource;
     use verter_session::{HostConfig, UpsertRequest};
 
     fn make_host() -> Arc<VerterHost> {
@@ -3528,9 +3532,9 @@ const count = ref(0)
     #[test]
     fn scoring_uses_prop_fields_not_type_references() {
         // Construct a script snapshot with many type_references but few prop_fields
-        let script = verter_analysis::types::ScriptAnalysisSnapshot {
+        let script = verter_semantic::analysis::types::ScriptAnalysisSnapshot {
             module_references: Vec::new(),
-            macros: vec![verter_analysis::types::AnalyzedMacro {
+            macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
                 is_type_based: true,
                 type_references: vec![
@@ -3552,7 +3556,7 @@ const count = ref(0)
                 has_inherit_attrs_false: false,
                 prop_fields: vec![
                     // Only 3 actual props — should NOT be penalized
-                    verter_analysis::types::AnalyzedPropField {
+                    verter_semantic::analysis::types::AnalyzedPropField {
                         name: "a".into(),
                         is_optional: false,
                         span: verter_span::Span::new(0, 1),
@@ -3562,7 +3566,7 @@ const count = ref(0)
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
                     },
-                    verter_analysis::types::AnalyzedPropField {
+                    verter_semantic::analysis::types::AnalyzedPropField {
                         name: "b".into(),
                         is_optional: false,
                         span: verter_span::Span::new(2, 3),
@@ -3572,7 +3576,7 @@ const count = ref(0)
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
                     },
-                    verter_analysis::types::AnalyzedPropField {
+                    verter_semantic::analysis::types::AnalyzedPropField {
                         name: "c".into(),
                         is_optional: false,
                         span: verter_span::Span::new(4, 5),
@@ -3594,7 +3598,7 @@ const count = ref(0)
             bindings: vec![],
             imports: vec![],
             macro_type_deps: vec![],
-            flags: verter_analysis::types::AnalysisFlags::empty(),
+            flags: verter_semantic::analysis::types::AnalysisFlags::empty(),
             exported_functions: vec![],
             vue_api_calls: vec![],
             dom_query_calls: vec![],
@@ -3737,7 +3741,7 @@ import { RouterLink, RouterView } from 'vue-router'
         // The snapshot should detect framework as Unknown (no package.json)
         assert_eq!(
             snapshot.framework,
-            verter_analysis::RoutingFramework::Unknown
+            verter_semantic::analysis::RoutingFramework::Unknown
         );
         // There should be no routes extracted (no router config file at /test)
         assert!(
@@ -3754,20 +3758,20 @@ import { RouterLink, RouterView } from 'vue-router'
         // Unit test for detect_routing_framework_from_json
         let vue_router = r#"{"dependencies": {"vue": "^3", "vue-router": "^4"}}"#;
         assert_eq!(
-            verter_analysis::detect_routing_framework_from_json(vue_router),
-            verter_analysis::RoutingFramework::VueRouter
+            verter_semantic::analysis::detect_routing_framework_from_json(vue_router),
+            verter_semantic::analysis::RoutingFramework::VueRouter
         );
 
         let nuxt = r#"{"dependencies": {"nuxt": "^3"}}"#;
         assert_eq!(
-            verter_analysis::detect_routing_framework_from_json(nuxt),
-            verter_analysis::RoutingFramework::NuxtPages
+            verter_semantic::analysis::detect_routing_framework_from_json(nuxt),
+            verter_semantic::analysis::RoutingFramework::NuxtPages
         );
 
         let empty = r#"{"dependencies": {"vue": "^3"}}"#;
         assert_eq!(
-            verter_analysis::detect_routing_framework_from_json(empty),
-            verter_analysis::RoutingFramework::Unknown
+            verter_semantic::analysis::detect_routing_framework_from_json(empty),
+            verter_semantic::analysis::RoutingFramework::Unknown
         );
     }
     // ── SSR readiness scoring ──
