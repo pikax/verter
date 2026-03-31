@@ -11,7 +11,9 @@
 
 use rustc_hash::FxHashMap;
 
+use crate::facts::binding::BindingDeclaration;
 use crate::facts::component::ComponentSurface;
+use crate::facts::reactivity::ReactivityFact;
 use crate::query::{Completeness, QueryResult};
 use crate::refs::FileRef;
 use crate::revision::RevisionMarker;
@@ -23,6 +25,8 @@ struct FileSemantic {
     revision: RevisionMarker,
     /// Cached component surface (if this file is a Vue SFC).
     component_surface: Option<ComponentSurface>,
+    /// Cached binding declarations with reactivity facts.
+    bindings: Option<Vec<(BindingDeclaration, ReactivityFact)>>,
 }
 
 /// The semantic database.
@@ -71,9 +75,43 @@ impl SemanticDb {
         let entry = self.files.entry(file_id).or_insert_with(|| FileSemantic {
             revision,
             component_surface: None,
+            bindings: None,
         });
         entry.revision = revision;
         entry.component_surface = Some(surface);
+    }
+
+    /// Query binding facts for a file.
+    pub fn bindings(
+        &self,
+        file_ref: &FileRef,
+        current_revision: RevisionMarker,
+    ) -> QueryResult<Option<Vec<(BindingDeclaration, ReactivityFact)>>> {
+        match self.files.get(&file_ref.file_id) {
+            Some(entry) if entry.revision == current_revision => {
+                QueryResult::complete(entry.bindings.clone(), current_revision)
+            }
+            Some(entry) if current_revision.is_newer_than(&entry.revision) => {
+                QueryResult::partial(entry.bindings.clone(), current_revision, vec![])
+            }
+            _ => QueryResult::unavailable(None, current_revision, vec![]),
+        }
+    }
+
+    /// Store computed binding facts for a file.
+    pub fn set_bindings(
+        &mut self,
+        file_id: String,
+        revision: RevisionMarker,
+        bindings: Vec<(BindingDeclaration, ReactivityFact)>,
+    ) {
+        let entry = self.files.entry(file_id).or_insert_with(|| FileSemantic {
+            revision,
+            component_surface: None,
+            bindings: None,
+        });
+        entry.revision = revision;
+        entry.bindings = Some(bindings);
     }
 
     /// Invalidate all cached facts for a file.

@@ -467,6 +467,64 @@ impl VerterHost {
         QueryResult::complete(surface, revision)
     }
 
+    /// Query binding declarations and reactivity facts for a file.
+    pub fn semantic_bindings(
+        &self,
+        canonical_id: &str,
+    ) -> verter_semantic::query::QueryResult<
+        Option<
+            Vec<(
+                verter_semantic::facts::binding::BindingDeclaration,
+                verter_semantic::facts::reactivity::ReactivityFact,
+            )>,
+        >,
+    > {
+        use verter_semantic::query::QueryResult;
+        use verter_semantic::refs::FileRef;
+        use verter_semantic::revision::RevisionMarker;
+
+        let revision = RevisionMarker {
+            workspace_revision: self
+                .store_view_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            parser_revision: self.tick.load(std::sync::atomic::Ordering::Relaxed),
+            compiler_revision: 0,
+            provider_revision: 0,
+        };
+
+        let file_ref = FileRef::new(canonical_id);
+
+        // Check cache first
+        {
+            let db = self.semantic_db.lock();
+            let cached = db.bindings(&file_ref, revision);
+            if cached.is_complete() {
+                return cached;
+            }
+        }
+
+        // Extract from analysis
+        #[cfg(feature = "scheduler")]
+        let analysis = self.scheduler_script_analysis(canonical_id);
+        #[cfg(not(feature = "scheduler"))]
+        let analysis: Option<verter_analysis::ScriptAnalysisSnapshot> = {
+            let files = self.files.read();
+            files
+                .get(canonical_id)
+                .and_then(|f| f.script_analysis.as_ref())
+                .map(|a| a.as_ref().clone())
+        };
+
+        let bindings = analysis.map(|a| verter_semantic::extract::extract_bindings(&a));
+
+        if let Some(ref b) = bindings {
+            let mut db = self.semantic_db.lock();
+            db.set_bindings(canonical_id.to_string(), revision, b.clone());
+        }
+
+        QueryResult::complete(bindings, revision)
+    }
+
     /// Access the unified resolver runtime for counter reads and diagnostics.
     pub fn resolver_runtime(
         &self,
