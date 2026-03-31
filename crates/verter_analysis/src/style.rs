@@ -2,17 +2,17 @@
 //!
 //! Uses a lightweight byte-level CSS scanner to extract selectors, specificity,
 //! classes, IDs, custom properties, and at-rules from CSS blocks. Vue-specific
-//! features (v-bind, :deep, :global, :slotted) are passed through from verter_core.
+//! features (v-bind, :deep, :global, :slotted) are passed through from verter_compiler.
 //!
 //! For non-CSS preprocessors (SCSS, Less, etc.), only Vue features are stored.
 
 use verter_span::Span;
 
 // =============================================================================
-// Vue Feature Input Types (constructed by verter_session from verter_core output)
+// Vue Feature Input Types (constructed by verter_session from verter_compiler output)
 // =============================================================================
 
-/// Pre-extracted Vue-specific CSS features from verter_core.
+/// Pre-extracted Vue-specific CSS features from verter_compiler.
 /// `verter_session` converts `CssParsed*` types into these.
 #[derive(Debug, Clone, Default)]
 pub struct VueStyleInput {
@@ -68,7 +68,7 @@ pub struct StyleBlockAnalysis {
     #[serde(default)]
     pub content_offset: u32,
 
-    // Vue features (from verter_core, all languages)
+    // Vue features (from verter_compiler, all languages)
     pub v_binds: Vec<AnalyzedVBind>,
     pub special_pseudos: Vec<AnalyzedSpecialPseudo>,
 
@@ -513,7 +513,7 @@ pub enum StyleAnalysisLang {
 ///
 /// Scans `css_content` with a byte-level scanner to extract selectors, specificity,
 /// classes, IDs, custom properties, and at-rules.
-/// `vue_input` contains pre-extracted Vue features from verter_core.
+/// `vue_input` contains pre-extracted Vue features from verter_compiler.
 /// All stored spans are SFC-absolute byte offsets.
 pub fn build_css_style_analysis(
     css_content: &str,

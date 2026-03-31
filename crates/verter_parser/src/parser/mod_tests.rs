@@ -48,6 +48,15 @@ fn span_str(input: &str, start: u32, end: u32) -> &str {
     &input[start as usize..end as usize]
 }
 
+/// Parse an SFC string into a ParsedSfc using the parser's own API.
+fn parse_sfc(input: &str) -> crate::parser::types::ParsedSfc {
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+    syn.into_parsed_sfc()
+}
+
 // ========================================================================
 // 1. Script root nodes
 // ========================================================================
@@ -3391,7 +3400,7 @@ fn is_member_expression_accepts_ts_as_cast() {
 fn v_slot_dotted_name_includes_full_name_in_arg() {
     // v-slot:item.title should have arg_end covering "item.title", not just "item"
     let input = r#"<template><Comp><template v-slot:item.title="{ val }"><span>{{ val }}</span></template></Comp></template>"#;
-    let parsed = crate::compile::parse_sfc(input, None, None);
+    let parsed = parse_sfc(input);
     let ast = parsed.template_ast().expect("template AST");
 
     // Find the inner <template v-slot:item.title> element
@@ -3437,7 +3446,7 @@ fn v_slot_shorthand_dotted_name() {
     // #item.title shorthand should also get the full name
     let input =
         r#"<template><Comp><template #item.title="{ val }"><span/></template></Comp></template>"#;
-    let parsed = crate::compile::parse_sfc(input, None, None);
+    let parsed = parse_sfc(input);
     let ast = parsed.template_ast().expect("template AST");
 
     let comp_node = &ast.nodes[ast.root.content.as_ref().unwrap().children[0].0];

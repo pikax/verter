@@ -4,7 +4,7 @@ use verter_analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, JsdocTag,
 };
-use verter_core::utils::oxc::vue::resolve_type::{
+use verter_compiler::utils::oxc::vue::resolve_type::{
     resolve_external_type, ResolvedElements, ResolvedEmitSignature, ResolvedMemberVisibility,
 };
 
@@ -106,7 +106,7 @@ pub fn project_macro_surfaces(
                     let resolved_as_slot = prop.types.iter().any(|runtime| {
                         matches!(
                             runtime,
-                            verter_core::utils::oxc::vue::resolve_type::RuntimeType::Function
+                            verter_compiler::utils::oxc::vue::resolve_type::RuntimeType::Function
                         )
                     });
                     if bindings.is_empty() && return_type.is_none() && !resolved_as_slot {
@@ -343,7 +343,7 @@ fn collect_native_props(elements: &ResolvedElements) -> Vec<ResolvedNativeProp> 
 
 fn raw_prop_type_text(
     source: Option<&str>,
-    prop: &verter_core::utils::oxc::vue::resolve_type::ResolvedProp,
+    prop: &verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp,
 ) -> Option<String> {
     prop.type_span
         .and_then(|span| slice_source_span(source, span))
@@ -352,7 +352,7 @@ fn raw_prop_type_text(
 
 fn raw_emit_payload_text(
     source: Option<&str>,
-    emit: &verter_core::utils::oxc::vue::resolve_type::ResolvedEmit,
+    emit: &verter_compiler::utils::oxc::vue::resolve_type::ResolvedEmit,
 ) -> Option<String> {
     slice_source_span(source, emit.span)
         .and_then(|text| raw_emit_payload_text_from_source(&text, &emit.signature))
@@ -581,7 +581,7 @@ fn member_jsdoc(source: Option<&str>, span: verter_span::Span) -> (Option<String
 mod tests {
     use super::*;
     use verter_analysis::TypeResolutionSource;
-    use verter_core::utils::oxc::vue::resolve_type::{ResolvedEmit, ResolvedProp};
+    use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedEmit, ResolvedProp};
 
     fn prop(
         name: &str,

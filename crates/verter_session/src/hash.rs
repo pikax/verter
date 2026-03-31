@@ -7,7 +7,7 @@
 //! | Algorithm | Used By | Purpose | Persisted? |
 //! |-----------|---------|---------|------------|
 //! | **XXH3-128** | `verter_session` | Content and semantic hashing for compile cache invalidation | No (in-process only) |
-//! | **SHA-256** | `verter_core`, `verter_analysis` | Scope IDs (`data-v-{hash}`), CSS Modules class names, export signatures, type resolution fingerprinting | Scope IDs and CSS Modules output **yes** (embedded in compiled CSS/HTML); export/type sigs **no** |
+//! | **SHA-256** | `verter_compiler`, `verter_analysis` | Scope IDs (`data-v-{hash}`), CSS Modules class names, export signatures, type resolution fingerprinting | Scope IDs and CSS Modules output **yes** (embedded in compiled CSS/HTML); export/type sigs **no** |
 //! | **DefaultHasher** | `verter_session` | `CompileProfile` and `StyleOverride` cache keys | No (in-process, non-deterministic across Rust versions) |
 //!
 //! SHA-256 is used for scope IDs and CSS Modules to match `@vue/compiler-sfc` output.

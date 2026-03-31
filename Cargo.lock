@@ -3596,7 +3596,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "verter_analysis",
- "verter_core",
+ "verter_compiler",
  "verter_diagnostics",
  "verter_session",
  "verter_span",
@@ -3605,7 +3605,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "verter_core"
+name = "verter_compiler"
 version = "0.0.1-beta.1"
 dependencies = [
  "allocator-api2 0.4.0",
@@ -3631,6 +3631,7 @@ dependencies = [
  "serde_repr",
  "sha2",
  "smallvec",
+ "verter_parser",
  "verter_span",
  "web-time",
 ]
@@ -3732,7 +3733,7 @@ dependencies = [
  "tokio",
  "verter_actions",
  "verter_analysis",
- "verter_core",
+ "verter_compiler",
  "verter_diagnostics",
  "verter_ffi",
  "verter_protocol",
@@ -3742,6 +3743,32 @@ dependencies = [
  "verter_span",
  "verter_type_runtime",
  "verter_workspace",
+]
+
+[[package]]
+name = "verter_parser"
+version = "0.0.1-beta.1"
+dependencies = [
+ "allocator-api2 0.4.0",
+ "bitflags",
+ "bumpalo",
+ "hex",
+ "hotpath",
+ "lazy_static",
+ "memchr",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_diagnostics",
+ "oxc_parser",
+ "oxc_span",
+ "phf 0.13.1",
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "sha2",
+ "smallvec",
+ "verter_span",
 ]
 
 [[package]]
@@ -3766,7 +3793,7 @@ dependencies = [
  "parking_lot",
  "rustc-hash 2.1.1",
  "verter_analysis",
- "verter_core",
+ "verter_compiler",
  "verter_span",
  "verter_type_runtime",
  "verter_workspace",
@@ -3807,7 +3834,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "verter_analysis",
- "verter_core",
+ "verter_compiler",
  "verter_resolver",
  "verter_scheduler",
  "verter_span",
@@ -3837,7 +3864,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "verter_core",
+ "verter_compiler",
  "verter_session",
  "verter_workspace",
  "walkdir",

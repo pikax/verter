@@ -17,7 +17,7 @@ session_metrics = ["verter_session/session_metrics"]
 scheduler = ["verter_session/scheduler", "verter_scheduler"]
 
 [dependencies]
-verter_core = { path = "../verter_core", version = "0.0.1-beta.1" }
+verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_resolver = { path = "../verter_resolver", version = "0.0.1-beta.1", features = [
   "type-runtime",

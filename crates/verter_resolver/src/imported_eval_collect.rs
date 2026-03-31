@@ -137,7 +137,7 @@ pub trait ImportedEvalSourceMergeResolver {
     ) -> FxHashSet<String> {
         let _ = canonical_id;
         let alloc = oxc_allocator::Allocator::new();
-        verter_core::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
+        verter_compiler::utils::oxc::vue::resolve_type::collect_required_import_names_for_external_type(
             exported_name,
             eval_source,
             &alloc,

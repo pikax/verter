@@ -32,7 +32,7 @@
 
 mod expression;
 mod helpers;
-pub(crate) mod keywords;
+pub mod keywords;
 mod slot;
 mod types;
 mod vfor;

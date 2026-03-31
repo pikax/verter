@@ -72,7 +72,7 @@ pub enum ScriptLang {
 /// Structural description of an SFC's blocks.
 ///
 /// Spans are SFC-absolute. This is a neutral DTO — it does not reference
-/// parser-internal types from `verter_core`.
+/// parser-internal types from `verter_compiler`.
 #[derive(Debug, Clone)]
 pub struct SfcStructure {
     /// `<script>` block content span (SFC-absolute), if present.

@@ -29,7 +29,7 @@ pub struct HostSourceData {
     pub(crate) parse: ParseSnapshot,
     /// Cached parsed SFC from `parse_vue_snapshot`. Reused during compilation
     /// to avoid re-parsing. `None` for non-SFC files.
-    pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     /// Discriminates Vue SFC vs non-SFC (host-level enum, not scheduler's).
     pub(crate) file_kind: crate::types::FileKind,
     /// Wall-clock parse duration in milliseconds.

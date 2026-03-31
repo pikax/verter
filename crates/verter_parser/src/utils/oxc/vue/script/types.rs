@@ -7,7 +7,7 @@
 #![allow(unused_imports)]
 
 use crate::common::Span;
-use crate::template::code_gen::binding::BindingType;
+use crate::types::BindingType;
 
 /// The parsing mode for a script block
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

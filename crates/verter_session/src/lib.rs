@@ -15,7 +15,7 @@
 //! ## Dependencies
 //!
 //! - **`verter_workspace`** — sole authority for file access and import resolution
-//! - **`verter_core`** — SFC tokenizer, parser, and template/script/style codegen
+//! - **`verter_compiler`** — SFC tokenizer, parser, and template/script/style codegen
 //! - **`verter_analysis`** — static analysis (imports, bindings, macros, style analysis)
 //!
 //! ## Key types
@@ -75,12 +75,12 @@ mod upsert;
 pub use types::*;
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
-pub use verter_core::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
-pub use verter_core::VERTER_TYPES_STANDALONE_DTS;
+pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
+pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
-// without adding verter_core as a direct dependency.
-pub use verter_core::compile::CompileTarget;
+// without adding verter_compiler as a direct dependency.
+pub use verter_compiler::compile::CompileTarget;
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -93,7 +93,7 @@ use shared::{default_shared, read_lock, write_lock, Shared};
 
 type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
 type CachedTypeResolutionContext<'a> =
-    verter_core::utils::oxc::vue::resolve_type::TypeResolutionContext<'a, 'a>;
+    verter_compiler::utils::oxc::vue::resolve_type::TypeResolutionContext<'a, 'a>;
 
 struct ParsedEvalProgramOwner {
     allocator: oxc_allocator::Allocator,
@@ -199,11 +199,11 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub whole_hash: Hash16,
     pub resolved_canonical_id: String,
     pub raw_source: Arc<str>,
-    pub cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     pub script_analysis: Option<Arc<verter_analysis::ScriptAnalysisSnapshot>>,
     pub export_signatures: Option<Arc<Vec<verter_analysis::ExportSignature>>>,
     pub external_type_analysis:
-        Option<Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
+        Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
     pub eval_source: Option<Arc<str>>,
     pub env: Option<Arc<verter_analysis::type_eval::EvalEnv>>,

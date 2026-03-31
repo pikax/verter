@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use oxc_allocator::Allocator;
 use std::hint::black_box;
 
-use verter_core::code_transform::{CodeTransform, SourceMapOptions};
+use verter_compiler::code_transform::{CodeTransform, SourceMapOptions};
 
 fn load_fixture(name: &str) -> String {
     let path = format!(

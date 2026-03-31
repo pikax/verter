@@ -288,14 +288,15 @@ pub(crate) fn should_invalidate_dependent_view(
                 let key = (dependency_id.to_string(), type_name.to_string());
 
                 if let Some(resolved) =
-                    verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
+                    verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type(
                         type_name, dep_src, &alloc,
                     )
                 {
-                    let new_hash = verter_core::utils::oxc::vue::resolve_type::hash_resolved_type(
-                        &resolved,
-                        dep_src.as_bytes(),
-                    );
+                    let new_hash =
+                        verter_compiler::utils::oxc::vue::resolve_type::hash_resolved_type(
+                            &resolved,
+                            dep_src.as_bytes(),
+                        );
 
                     if let Some(old_hash) = view.resolved_type_hashes.get(&key) {
                         if *old_hash == new_hash {

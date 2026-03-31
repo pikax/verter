@@ -26,8 +26,8 @@ use std::time::Instant;
 use web_time::Instant;
 
 use oxc_allocator::Allocator;
-use verter_core::compile::CodegenOptions;
-use verter_core::compile::{
+use verter_compiler::compile::CodegenOptions;
+use verter_compiler::compile::{
     compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
 use verter_resolver::{
@@ -50,7 +50,7 @@ use crate::types::*;
 use crate::VerterHost;
 
 type ResolvedExternalTypes =
-    rustc_hash::FxHashMap<String, verter_core::utils::oxc::vue::resolve_type::ResolvedElements>;
+    rustc_hash::FxHashMap<String, verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>;
 
 type ExternalTypeCache = verter_resolver::ExternalTypeBodyCache;
 
@@ -101,7 +101,7 @@ impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCo
         cache: &mut ExternalTypeCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         profile_hash: Option<u64>,
-    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
         self.host.resolve_external_type_from_loaded_files(
             owner_canonical,
@@ -234,7 +234,7 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         dep_canonical: &str,
         type_name: &str,
         _effective_source: &str,
-        _analysis: &verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
     ) -> rustc_hash::FxHashSet<String> {
         self.host.required_import_names_for_exported_type_in_view(
             dep_canonical,
@@ -261,12 +261,12 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         dep_canonical: &str,
         type_name: &str,
         _effective_source: &str,
-        _analysis: &verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
         >,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.host
             .resolve_external_type_from_cached_dependency_state_in_view(
                 dep_canonical,
@@ -288,7 +288,7 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         &self,
         dep_canonical: &str,
         _effective_source: &str,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
         self.host
             .external_type_analysis_in_view(dep_canonical, Some(self.store_view))
             .map(|analysis| (*analysis).clone())
@@ -446,7 +446,7 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         &self,
         dep_canonical: &str,
         type_name: &str,
-        resolved: Option<&verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+        resolved: Option<&verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         tracked_deps: &[String],
     ) {
         let effective_canonical = self
@@ -584,7 +584,7 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         &self,
         dep_canonical: &str,
         _effective_source: &str,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
         self.host
             .external_type_analysis_in_view(dep_canonical, self.store_view)
             .map(|analysis| (*analysis).clone())
@@ -595,7 +595,7 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         dep_canonical: &str,
         type_name: &str,
         _effective_source: &str,
-        _analysis: &verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
     ) -> rustc_hash::FxHashSet<String> {
         self.host.required_import_names_for_exported_type_in_view(
             dep_canonical,
@@ -616,12 +616,12 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         dep_canonical: &str,
         type_name: &str,
         _effective_source: &str,
-        _analysis: &verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
         >,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.host
             .resolve_external_type_from_cached_dependency_state_in_view(
                 dep_canonical,
@@ -645,7 +645,7 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         use_host_cache: bool,
         profile_hash: Option<u64>,
         depth: usize,
-    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
         self.host.resolve_external_type_from_loaded_files_in_view(
             owner_canonical,
@@ -678,7 +678,7 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         profile_hash: Option<u64>,
         depth: usize,
         debug_enabled: bool,
-    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
         let _ = debug_enabled;
         resolve_type_through_barrel_via_resolver(
@@ -787,7 +787,7 @@ impl BarrelResolutionResolver for ViewExternalTypeResolver<'_> {
         use_host_cache: bool,
         profile_hash: Option<u64>,
         depth: usize,
-    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
         self.host.resolve_external_type_from_loaded_files_in_view(
             owner_canonical,
@@ -910,7 +910,7 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
         &self,
         dep_canonical: &str,
         _effective_source: &str,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
         self.host
             .external_type_analysis_in_view(dep_canonical, None)
             .map(|analysis| (*analysis).clone())
@@ -921,7 +921,7 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
         dep_canonical: &str,
         type_name: &str,
         _effective_source: &str,
-        _analysis: &verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
     ) -> rustc_hash::FxHashSet<String> {
         self.host
             .required_import_names_for_exported_type_in_view(dep_canonical, type_name, None)
@@ -939,12 +939,12 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
         dep_canonical: &str,
         type_name: &str,
         _effective_source: &str,
-        _analysis: &verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
         >,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.host
             .resolve_external_type_from_cached_dependency_state_in_view(
                 dep_canonical,
@@ -968,7 +968,7 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
         use_host_cache: bool,
         profile_hash: Option<u64>,
         depth: usize,
-    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
         resolve_external_type_request(
             self,
@@ -1001,7 +1001,7 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
         profile_hash: Option<u64>,
         depth: usize,
         debug_enabled: bool,
-    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
+    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
         let _ = debug_enabled;
         let resolver = ViewExternalTypeResolver {
@@ -1217,7 +1217,7 @@ impl ExternalTypeRequestResolver for HostLiveExternalTypeRequestResolver<'_> {
         dep_source_hash: verter_resolver::ResolverHash16,
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
-        resolved: Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+        resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         tracked_deps: Vec<String>,
     ) {
         let key = crate::types::ResolvedTypeCacheKey {
@@ -1876,7 +1876,7 @@ impl VerterHost {
         profile_hash: Option<u64>,
         depth: usize,
     ) -> Result<
-        Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+        Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
         self.resolve_external_type_from_loaded_files_in_view(
@@ -1914,7 +1914,7 @@ impl VerterHost {
         depth: usize,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Result<
-        Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+        Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
         let _trace = component_meta_trace_scope!(
@@ -2225,7 +2225,7 @@ impl VerterHost {
     }
 
     fn build_export_registry_from_external_type_analysis(
-        analysis: &verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
         source_hash: Hash16,
     ) -> crate::types::FileExportRegistry {
         let mut named = rustc_hash::FxHashMap::default();
@@ -2740,7 +2740,7 @@ impl VerterHost {
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
     ///
     /// On cache hit, returns immediately. On cache miss, compiles the file using
-    /// `verter_core::compile`, caches the result, and returns the requested node.
+    /// `verter_compiler::compile`, caches the result, and returns the requested node.
     /// In dev mode with [`CompileErrorPolicy::DevServeLastKnownGood`], falls back
     /// to the last successful compilation when the current source has errors.
     pub fn get_virtual_file(&self, query: VirtualQuery) -> Result<VirtualFileResponse, HostError> {
@@ -3357,17 +3357,17 @@ impl VerterHost {
             );
         self.sync_transitive_macro_type_dependencies(&canonical, &transitive_macro_type_deps);
         let tsc_mode = match mode {
-            PublicApiMode::Public => verter_core::tsc::TscMode::Public,
-            PublicApiMode::Testing => verter_core::tsc::TscMode::Testing,
+            PublicApiMode::Public => verter_compiler::tsc::TscMode::Public,
+            PublicApiMode::Testing => verter_compiler::tsc::TscMode::Testing,
         };
 
         // Try cached extract path: avoids re-parsing SFC + OXC on cache hit.
         let extract = if let Some(cached) = cached_extract {
             cached
-        } else if let Some(fresh) = verter_core::tsc::extract_tsc_state(
+        } else if let Some(fresh) = verter_compiler::tsc::extract_tsc_state(
             &source,
             &component_name,
-            &verter_core::tsc::TscExtractOptions {
+            &verter_compiler::tsc::TscExtractOptions {
                 filename: Some(canonical.clone()),
             },
         ) {
@@ -3389,10 +3389,10 @@ impl VerterHost {
             arc
         } else {
             // No <script setup> — fall through to direct path for empty stub
-            let tsc_out = verter_core::tsc::generate_tsc_output_with_options(
+            let tsc_out = verter_compiler::tsc::generate_tsc_output_with_options(
                 &source,
                 &component_name,
-                &verter_core::tsc::TscGenOptions {
+                &verter_compiler::tsc::TscGenOptions {
                     conditional_root_narrowing: false,
                     filename: Some(canonical.clone()),
                     external_types,
@@ -3409,7 +3409,7 @@ impl VerterHost {
             });
         };
 
-        let tsc_out = verter_core::tsc::generate_tsc_from_state(
+        let tsc_out = verter_compiler::tsc::generate_tsc_from_state(
             &extract,
             &source,
             &component_name,
@@ -3590,13 +3590,13 @@ impl VerterHost {
                     .iter()
                     .map(|d| HostDiagnostic {
                         severity: match d.severity {
-                            verter_core::compile::CompileDiagnosticSeverity::Error => {
+                            verter_compiler::compile::CompileDiagnosticSeverity::Error => {
                                 HostSeverity::Error
                             }
-                            verter_core::compile::CompileDiagnosticSeverity::Warning => {
+                            verter_compiler::compile::CompileDiagnosticSeverity::Warning => {
                                 HostSeverity::Warning
                             }
-                            verter_core::compile::CompileDiagnosticSeverity::Info => {
+                            verter_compiler::compile::CompileDiagnosticSeverity::Info => {
                                 HostSeverity::Info
                             }
                         },
@@ -3815,7 +3815,7 @@ pub(crate) fn template_converter_inputs(
 /// scan so type resolution still sees the original script text.
 pub(crate) fn extract_vue_script_content(
     source: &str,
-    cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+    cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
 ) -> Option<String> {
     let scanned = extract_vue_script_content_from_source(source);
     let parsed =
@@ -3831,7 +3831,7 @@ pub(crate) fn extract_vue_script_content(
 
 fn extract_vue_script_content_from_parsed(
     source: &str,
-    parsed: &verter_core::parser::types::ParsedSfc,
+    parsed: &verter_compiler::parser::types::ParsedSfc,
 ) -> Option<String> {
     let mut script_blocks: Vec<(u32, u32)> = [parsed.script(), parsed.script_setup()]
         .into_iter()

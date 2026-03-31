@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
 use verter_analysis::{AnalyzedImport, MacroTypeDep};
-use verter_core::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 use verter_span::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +100,7 @@ mod tests {
     };
     use std::collections::{BTreeMap, BTreeSet};
     use verter_analysis::{AnalyzedImport, MacroTypeDep};
-    use verter_core::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
+    use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
     use verter_span::Span;
 
     #[derive(Default)]

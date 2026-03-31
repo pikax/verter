@@ -1,1 +1,1 @@
-//! Benchmarks and examples for verter_core.
+//! Benchmarks and examples for verter_compiler.

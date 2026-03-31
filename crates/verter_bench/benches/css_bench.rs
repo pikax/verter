@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
-use verter_core::css::{
+use verter_compiler::css::{
     modules::apply_css_modules, prepass::prepass, scoped::apply_scoped, scoped::apply_scoped_raw,
     ProcessStyleOptions,
 };
@@ -141,7 +141,8 @@ fn bench_process_style(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
             });
         });
@@ -162,7 +163,8 @@ fn bench_process_style(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
             });
         });
@@ -183,7 +185,8 @@ fn bench_process_style(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
                 black_box(&result.module_classes);
             });
@@ -205,7 +208,8 @@ fn bench_process_style(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
             });
         });
@@ -226,7 +230,8 @@ fn bench_process_style(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.v_bind_vars);
             });
         });
@@ -247,7 +252,8 @@ fn bench_process_style(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
             });
         });
@@ -486,7 +492,8 @@ fn bench_fast_vs_normal(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
             });
         });
@@ -502,7 +509,7 @@ fn bench_fast_vs_normal(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style_fast(black_box(css), black_box(&options))
+                    verter_compiler::css::process_style_fast(black_box(css), black_box(&options))
                         .unwrap();
                 black_box(&result.code);
             });
@@ -525,7 +532,8 @@ fn bench_fast_vs_normal(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
             });
         });
@@ -541,7 +549,7 @@ fn bench_fast_vs_normal(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style_fast(black_box(css), black_box(&options))
+                    verter_compiler::css::process_style_fast(black_box(css), black_box(&options))
                         .unwrap();
                 black_box(&result.code);
             });
@@ -574,7 +582,8 @@ fn bench_fast_vs_normal(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                    verter_compiler::css::process_style(black_box(css), black_box(&options))
+                        .unwrap();
                 black_box(&result.code);
             });
         });
@@ -590,7 +599,7 @@ fn bench_fast_vs_normal(c: &mut Criterion) {
             };
             b.iter(|| {
                 let result =
-                    verter_core::css::process_style_fast(black_box(css), black_box(&options))
+                    verter_compiler::css::process_style_fast(black_box(css), black_box(&options))
                         .unwrap();
                 black_box(&result.code);
             });

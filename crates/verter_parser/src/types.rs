@@ -67,3 +67,63 @@ impl NodeProp {
         !self.is_directive
     }
 }
+
+// ── Binding classification ─────────────────────────────────────────────────
+
+/// Classification of a binding for correct accessor prefix/suffix in template codegen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BindingType {
+    SetupConst,
+    SetupLet,
+    SetupRef,
+    SetupReactiveConst,
+    SetupMaybeRef,
+    LiteralConst,
+    Props,
+    PropsAliased,
+    SetupImport,
+    Data,
+    Options,
+}
+
+impl BindingType {
+    #[inline]
+    pub fn reactivity_level(&self) -> ReactivityLevel {
+        match self {
+            BindingType::SetupConst | BindingType::SetupImport | BindingType::LiteralConst => {
+                ReactivityLevel::Static
+            }
+            _ => ReactivityLevel::Dynamic,
+        }
+    }
+
+    #[inline]
+    pub fn is_setup(&self) -> bool {
+        matches!(
+            self,
+            BindingType::SetupConst
+                | BindingType::SetupLet
+                | BindingType::SetupRef
+                | BindingType::SetupReactiveConst
+                | BindingType::SetupMaybeRef
+                | BindingType::SetupImport
+                | BindingType::LiteralConst
+        )
+    }
+
+    #[inline]
+    pub fn is_props(&self) -> bool {
+        matches!(self, BindingType::Props | BindingType::PropsAliased)
+    }
+
+    #[inline]
+    pub fn needs_value_access(&self) -> bool {
+        matches!(self, BindingType::SetupRef | BindingType::SetupMaybeRef)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReactivityLevel {
+    Static,
+    Dynamic,
+}

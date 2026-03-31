@@ -3,7 +3,7 @@ use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use std::hint::black_box;
-use verter_core::utils::oxc::{
+use verter_compiler::utils::oxc::{
     extract_bindings_from_expression, extract_bindings_from_program, BindingContext,
 };
 

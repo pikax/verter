@@ -142,7 +142,7 @@ pub struct ProcessStyleResult {
 pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
     let css = buffer_to_string(css)?;
     catch_panic(std::panic::AssertUnwindSafe(|| {
-        let core_options = verter_core::css::ProcessStyleOptions {
+        let core_options = verter_compiler::css::ProcessStyleOptions {
             scope_id: &options.scopeId,
             scoped: options.scoped.unwrap_or(false),
             is_module: options.isModule.unwrap_or(false),
@@ -151,7 +151,7 @@ pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<Proces
             sourcemap: options.sourcemap.unwrap_or(false),
         };
 
-        verter_core::css::process_style(&css, &core_options)
+        verter_compiler::css::process_style(&css, &core_options)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
     }))?
     .map(|result| ProcessStyleResult {
@@ -2298,7 +2298,7 @@ fn build_selector_match_results(
 
 use oxc_allocator::Allocator;
 use rayon::prelude::*;
-use verter_core::compile::{compile as compile_sfc, CodegenOptions, VerterCompileOptions};
+use verter_compiler::compile::{compile as compile_sfc, CodegenOptions, VerterCompileOptions};
 
 /// A single file to compile in a batch.
 #[napi(object)]

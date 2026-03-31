@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use verter_core::compile::{format_import_specifier, VerterCompileResult};
+use verter_compiler::compile::{format_import_specifier, VerterCompileResult};
 
 use crate::id::render_ids;
 use crate::types::{CompileProfile, FileMeta, HmrStrategy, SrcBlockInfo, VirtualNodeKind};
@@ -498,7 +498,7 @@ mod tests {
     // Phase 2: assemble_main_module tests
     // ═══════════════════════════════════════════════════════════
 
-    use verter_core::compile::{
+    use verter_compiler::compile::{
         VerterCompileResult, VerterCustomBlock, VerterScriptBlock, VerterTemplateBlock,
     };
 
@@ -652,7 +652,7 @@ mod tests {
     /// @ai-generated - assemble_main_module with styles produces import lines
     #[test]
     fn assemble_main_module_with_styles_produces_import_lines() {
-        use verter_core::compile::VerterStyleBlock;
+        use verter_compiler::compile::VerterStyleBlock;
 
         let compiled = VerterCompileResult {
             script: None,
@@ -776,14 +776,14 @@ mod tests {
         assert_eq!(script, original); // unchanged — no "\n}});\n" marker
     }
 
-    /// @ai-generated - Canary: verter_core's setup wrapper output contains the
+    /// @ai-generated - Canary: verter_compiler's setup wrapper output contains the
     /// exact markers that filter_setup_return relies on. If core changes format,
     /// this test catches the mismatch.
     #[test]
     fn filter_setup_return_markers_present_in_real_compile_output() {
         use oxc_allocator::Allocator;
-        use verter_core::compile::CodegenOptions;
-        use verter_core::compile::{compile as compile_sfc, VerterCompileOptions};
+        use verter_compiler::compile::CodegenOptions;
+        use verter_compiler::compile::{compile as compile_sfc, VerterCompileOptions};
 
         let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
         let alloc = Allocator::new();
@@ -798,7 +798,7 @@ mod tests {
         assert!(script.setup, "compiled script should be flagged as setup");
 
         // These are the exact markers filter_setup_return searches for.
-        // If verter_core changes the wrapper format, this test will fail
+        // If verter_compiler changes the wrapper format, this test will fail
         // and signal that filter_setup_return needs updating.
         assert!(
             script.code.contains("\n}});\n"),
@@ -817,8 +817,8 @@ mod tests {
     #[test]
     fn assemble_main_module_template_only_sfc() {
         use oxc_allocator::Allocator;
-        use verter_core::compile::CodegenOptions;
-        use verter_core::compile::{compile as compile_sfc, VerterCompileOptions};
+        use verter_compiler::compile::CodegenOptions;
+        use verter_compiler::compile::{compile as compile_sfc, VerterCompileOptions};
 
         let source = "<template><div>hello</div></template>";
         let alloc = Allocator::new();
@@ -873,8 +873,8 @@ mod tests {
     #[test]
     fn compile_multi_root_template_uses_fragment() {
         use oxc_allocator::Allocator;
-        use verter_core::compile::CodegenOptions;
-        use verter_core::compile::{compile as compile_sfc, VerterCompileOptions};
+        use verter_compiler::compile::CodegenOptions;
+        use verter_compiler::compile::{compile as compile_sfc, VerterCompileOptions};
 
         let source = "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div>aaaaa</template>";
         let alloc = Allocator::new();

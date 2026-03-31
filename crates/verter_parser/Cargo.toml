@@ -1,0 +1,39 @@
+[package]
+name = "verter_parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vue 3 SFC parser — tokenization, parsing, AST types, and shared utilities"
+repository.workspace = true
+documentation = "https://github.com/pikax/verter"
+homepage.workspace = true
+authors.workspace = true
+keywords = ["vue", "parser", "sfc", "typescript"]
+categories = ["compilers", "parsing"]
+publish = false
+
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+
+[dependencies]
+verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
+hotpath = { version = "0.13", optional = true }
+bitflags = "2"
+memchr = "2.7.6"
+rustc-hash = { workspace = true }
+smallvec = "1.13"
+lazy_static = "1.5"
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+oxc_diagnostics = "0.117.0"
+bumpalo = { version = "3.15.0", features = ["collections"] }
+serde = { workspace = true }
+serde_repr = "0.1"
+serde_json = { workspace = true }
+allocator-api2 = "0.4.0"
+phf = { version = "0.13", features = ["macros"] }
+sha2 = { workspace = true }
+hex = "0.4"

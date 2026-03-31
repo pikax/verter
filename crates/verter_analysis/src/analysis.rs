@@ -102,7 +102,7 @@ impl ImportBindingMap {
 ///
 /// Performs a single OXC parse and walks the AST to collect imports, bindings,
 /// macros, and cross-reference information. Lives in `verter_analysis` so it's
-/// reusable by `verter_core`, linters, and other tools.
+/// reusable by `verter_compiler`, linters, and other tools.
 ///
 /// Note: Import path resolution (relative → absolute) happens in the caller
 /// (e.g., `verter_session`), not here. This function is path-resolution-agnostic.

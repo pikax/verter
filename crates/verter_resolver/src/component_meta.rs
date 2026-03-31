@@ -6,7 +6,7 @@ use rustc_hash::FxHashSet;
 use verter_analysis::component_meta::ResolvedTypeAnalysis;
 use verter_analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 use verter_analysis::types::{AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep};
-use verter_core::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 
 use crate::{
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,

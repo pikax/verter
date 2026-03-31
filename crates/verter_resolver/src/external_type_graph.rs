@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_core::utils::oxc::vue::resolve_type::{
+use verter_compiler::utils::oxc::vue::resolve_type::{
     extract_export_surface, AnalyzedExternalTypeSource, ResolvedElements,
 };
 use verter_workspace::ResolveRequestKind;
@@ -580,7 +580,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeSet;
     use verter_analysis::hash_16;
-    use verter_core::utils::oxc::vue::resolve_type::{
+    use verter_compiler::utils::oxc::vue::resolve_type::{
         AnalyzedExternalTypeSource, ResolvedElements,
     };
     use verter_workspace::ResolveRequestKind;
@@ -699,7 +699,7 @@ mod tests {
                 oxc_parser::Parser::new(&allocator, effective_source, oxc_span::SourceType::ts())
                     .parse();
             (!parsed.panicked).then(|| {
-                verter_core::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+                verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
                     type_name,
                     &parsed.program,
                     effective_source.as_bytes(),

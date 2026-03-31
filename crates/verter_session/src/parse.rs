@@ -8,10 +8,10 @@ use oxc_ast::ast::Program;
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 
-use verter_core::compile::parse_sfc;
-use verter_core::diagnostics::DiagnosticSeverity;
-use verter_core::parser::types::ParsedSfc;
-use verter_core::types::NodeProp;
+use verter_compiler::compile::parse_sfc;
+use verter_compiler::diagnostics::DiagnosticSeverity;
+use verter_compiler::parser::types::ParsedSfc;
+use verter_compiler::types::NodeProp;
 
 use crate::hash::{hash_16, semantic_hash};
 use crate::id::resolve_external;
@@ -544,7 +544,7 @@ fn build_preprocessor_requests(
 /// Build a single style analysis from a parsed style node and the SFC source.
 /// Shared by `parse_vue_snapshot()` (eager) and `build_style_analyses_from_source()` (on-demand).
 fn build_single_style_analysis(
-    style: &verter_core::parser::types::RootNodeStyle,
+    style: &verter_compiler::parser::types::RootNodeStyle,
     source: &str,
     canonical_id: &str,
 ) -> verter_analysis::StyleBlockAnalysis {
@@ -559,9 +559,9 @@ fn build_single_style_analysis(
         .unwrap_or("");
 
     // Run CSS prepass to extract v-bind() expressions and their generated variable names
-    let component_name = verter_core::compile::extract_component_name(canonical_id);
-    let scope_id = verter_core::compile::get_hash(&component_name);
-    let prepass_result = verter_core::css::prepass::prepass(css_content, &scope_id);
+    let component_name = verter_compiler::compile::extract_component_name(canonical_id);
+    let scope_id = verter_compiler::compile::get_hash(&component_name);
+    let prepass_result = verter_compiler::css::prepass::prepass(css_content, &scope_id);
 
     // Build VueStyleInput from prepass results
     let vue_input = verter_analysis::VueStyleInput {
@@ -582,7 +582,7 @@ fn build_single_style_analysis(
     let sfc_source_len = source.len() as u32;
 
     let analysis_lang = match style.lang {
-        Some(verter_core::parser::types::StyleLang::Css) | None => {
+        Some(verter_compiler::parser::types::StyleLang::Css) | None => {
             let analysis = verter_analysis::build_css_style_analysis(
                 css_content,
                 vue_input,
@@ -596,19 +596,19 @@ fn build_single_style_analysis(
             }
             return analysis;
         }
-        Some(verter_core::parser::types::StyleLang::Scss) => {
+        Some(verter_compiler::parser::types::StyleLang::Scss) => {
             verter_analysis::StyleAnalysisLang::Scss
         }
-        Some(verter_core::parser::types::StyleLang::Sass) => {
+        Some(verter_compiler::parser::types::StyleLang::Sass) => {
             verter_analysis::StyleAnalysisLang::Sass
         }
-        Some(verter_core::parser::types::StyleLang::Less) => {
+        Some(verter_compiler::parser::types::StyleLang::Less) => {
             verter_analysis::StyleAnalysisLang::Less
         }
-        Some(verter_core::parser::types::StyleLang::Stylus) => {
+        Some(verter_compiler::parser::types::StyleLang::Stylus) => {
             verter_analysis::StyleAnalysisLang::Stylus
         }
-        Some(verter_core::parser::types::StyleLang::Unknown) => {
+        Some(verter_compiler::parser::types::StyleLang::Unknown) => {
             verter_analysis::StyleAnalysisLang::Unknown
         }
     };
@@ -1017,7 +1017,7 @@ mod tests {
     use super::*;
     use smallvec::SmallVec;
     use verter_analysis::AnalysisScope;
-    use verter_core::types::NodeProp;
+    use verter_compiler::types::NodeProp;
 
     // ── Helper: build a NodeProp pointing into a source string ──
 

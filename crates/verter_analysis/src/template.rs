@@ -1,6 +1,6 @@
 //! Template analysis types for Vue SFC templates.
 //!
-//! These types are populated by `verter_core` during compilation (as raw data),
+//! These types are populated by `verter_compiler` during compilation (as raw data),
 //! then converted by `verter_session` into these analysis types. They enable:
 //! - Cross-file render tree construction
 //! - Prop constness optimization
@@ -15,7 +15,7 @@ use verter_span::Span;
 // =============================================================================
 
 /// Complete template analysis for an SFC.
-/// Populated after compilation by converting raw template data from `verter_core`.
+/// Populated after compilation by converting raw template data from `verter_compiler`.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateAnalysisSnapshot {

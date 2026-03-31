@@ -7,20 +7,20 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 publish = false
-description = "Benchmarks and examples for verter_core"
+description = "Benchmarks and examples for verter_compiler"
 
 [features]
 hotpath = [
-  "verter_core/hotpath",
+  "verter_compiler/hotpath",
   "verter_session/hotpath",
   "verter_diagnostics/hotpath",
   "dep:hotpath",
   "hotpath/hotpath",
 ]
-hotpath-alloc = ["verter_core/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
+hotpath-alloc = ["verter_compiler/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
-verter_core = { path = "../verter_core", features = ["bench"] }
+verter_compiler = { path = "../verter_compiler", features = ["bench"] }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
 verter_diagnostics = { path = "../verter_diagnostics" }

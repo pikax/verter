@@ -807,7 +807,7 @@ defineProps<Props>()
         class_macro.native_props.iter().any(|prop| {
             prop.name == "hidden"
                 && prop.visibility
-                    == verter_core::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Protected
+                    == verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Protected
         }),
         "native state should preserve visibility metadata for protected members"
     );
@@ -815,7 +815,7 @@ defineProps<Props>()
         class_macro.native_props.iter().any(|prop| {
             prop.name == "secret"
                 && prop.visibility
-                    == verter_core::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Private
+                    == verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Private
         }),
         "native state should preserve visibility metadata for private members"
     );
@@ -891,7 +891,7 @@ defineProps<Props>()
         interface_macro.native_props.iter().any(|prop| {
             prop.name == "hidden"
                 && prop.visibility
-                    == verter_core::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Protected
+                    == verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Protected
         }),
         "native state should retain protected inherited class members"
     );
@@ -1340,7 +1340,7 @@ defineProps<Props>()
         class_macro.native_props.iter().any(|prop| {
             prop.name == "hidden"
                 && prop.visibility
-                    == verter_core::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Protected
+                    == verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Protected
         }),
         "native state should preserve protected members through default-import alias barrels"
     );

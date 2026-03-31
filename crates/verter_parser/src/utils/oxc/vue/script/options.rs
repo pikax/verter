@@ -17,7 +17,7 @@ use super::types::{
     ScriptItem,
 };
 use crate::common::Span;
-use crate::template::code_gen::binding::BindingType;
+use crate::types::BindingType;
 
 /// Context for options script parsing
 pub struct OptionsContext;

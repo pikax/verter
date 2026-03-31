@@ -16,7 +16,7 @@ scheduler = ["verter_scheduler", "dashmap"]
 hotpath = [
   "dep:hotpath",
   "hotpath/hotpath",
-  "verter_core/hotpath",
+  "verter_compiler/hotpath",
   "verter_analysis/hotpath",
   "verter_resolver/hotpath",
   "verter_scheduler?/hotpath",
@@ -24,7 +24,7 @@ hotpath = [
 ]
 
 [dependencies]
-verter_core = { path = "../verter_core" }
+verter_compiler = { path = "../verter_compiler" }
 verter_analysis = { path = "../verter_analysis" }
 verter_resolver = { path = "../verter_resolver" }
 verter_span = { path = "../verter_span" }

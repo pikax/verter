@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_core::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 
 use crate::{
     FactVersionRef, ResolutionNodeKey, ResolutionNodeKind, ResolvedTypeDeclaration,

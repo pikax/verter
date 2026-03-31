@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use verter_core::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions};
 
 // ── File discovery ──────────────────────────────────────────────────
 

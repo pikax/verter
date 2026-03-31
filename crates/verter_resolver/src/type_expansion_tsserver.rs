@@ -201,7 +201,7 @@ pub(crate) fn extract_members_from_type(
 /// - Preserves imports, type declarations, and setup body
 /// - Tracks SFC span → generated offset mappings
 ///
-/// For `Lsp` profile: same merge (full IDE codegen requires verter_core pipeline).
+/// For `Lsp` profile: same merge (full IDE codegen requires verter_compiler pipeline).
 #[cfg(feature = "type-runtime")]
 pub(crate) fn build_minimal_artifact(
     canonical_id: &str,

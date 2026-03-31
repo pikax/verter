@@ -2581,13 +2581,13 @@ impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<
             .external_type_analysis_in_view(canonical_source, self.store_view)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
-            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
                 verter_resolver::ResolvedDeclarationKind::TypeAlias
             }
-            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
                 verter_resolver::ResolvedDeclarationKind::Interface
             }
-            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
                 verter_resolver::ResolvedDeclarationKind::Class
             }
         };
@@ -2723,7 +2723,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut verter_resolver::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.host
             .resolve_external_type_from_loaded_files_in_view(
                 owner_canonical,

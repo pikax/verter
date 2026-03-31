@@ -1381,10 +1381,7 @@ impl Syntax {
                 // Common whitespace entities: &#32;, &#10;, &nbsp;, &#160;
                 let raw = &ctx.input[start as usize..end as usize];
                 let mut decoded = String::new();
-                crate::template::code_gen::shared::helpers::decode_html_entities_into(
-                    &mut decoded,
-                    raw,
-                );
+                crate::common::html_entities::decode_html_entities_into(&mut decoded, raw);
                 decoded.chars().all(|c| c.is_whitespace())
             };
             b.add_text(start, end, is_entity, is_whitespace_only);

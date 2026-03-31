@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_core::utils::oxc::vue::resolve_type::{extract_export_surface, ResolvedElements};
+use verter_compiler::utils::oxc::vue::resolve_type::{extract_export_surface, ResolvedElements};
 use verter_workspace::ResolveRequestKind;
 
 use crate::{ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16};
@@ -367,7 +367,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeSet;
     use verter_analysis::hash_16;
-    use verter_core::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
+    use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
     use verter_workspace::ResolveRequestKind;
 
     #[derive(Default)]

@@ -1414,13 +1414,13 @@ impl DeclarationMetadataResolver for HostImportedEvalResolver<'_> {
             .external_type_analysis_in_view(canonical_source, self.store_view)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
-            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
                 verter_resolver::ResolvedDeclarationKind::TypeAlias
             }
-            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
                 verter_resolver::ResolvedDeclarationKind::Interface
             }
-            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
                 verter_resolver::ResolvedDeclarationKind::Class
             }
         };
@@ -2335,7 +2335,7 @@ impl VerterHost {
 
     fn sfc_script_setup_type_params(
         source: &str,
-        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) -> Vec<verter_analysis::type_expr::TypeParam> {
         let Some(setup) = cached_parse.and_then(|parsed| parsed.script_setup()) else {
             return Vec::new();
@@ -2353,7 +2353,7 @@ impl VerterHost {
     fn apply_sfc_script_setup_type_params(
         env: &mut verter_analysis::type_eval::EvalEnv,
         source: &str,
-        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) {
         for param in Self::sfc_script_setup_type_params(source, cached_parse) {
             env.type_bindings.insert(
@@ -2374,7 +2374,7 @@ impl VerterHost {
 
     pub(crate) fn build_eval_script_source(
         source: &str,
-        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) -> String {
         crate::host_resolve::extract_vue_script_content(source, cached_parse)
             .unwrap_or_else(|| source.to_string())
@@ -2383,7 +2383,7 @@ impl VerterHost {
     fn imported_eval_source_type(
         canonical_id: &str,
         raw_source: &str,
-        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) -> oxc_span::SourceType {
         if canonical_id.ends_with(".vue") {
             cached_parse
@@ -2649,7 +2649,7 @@ impl VerterHost {
                     |parsed_program| {
                         let program = parsed_program.borrow_dependent();
                         let mut ctx =
-                            verter_core::utils::oxc::vue::resolve_type::build_type_context(
+                            verter_compiler::utils::oxc::vue::resolve_type::build_type_context(
                                 program,
                                 parsed_program.source_bytes(),
                                 0,
@@ -2871,7 +2871,7 @@ impl VerterHost {
                 ))
             });
         let external_type_analysis = if eval_source.is_empty() {
-            verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default()
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default()
         } else {
             let parsed_eval_program = self.cached_parsed_eval_program_entry(
                 canonical_id,
@@ -2880,10 +2880,13 @@ impl VerterHost {
                 source_type,
             );
             if parsed_eval_program.parse_failed {
-                verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default()
+                verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                )
             } else {
                 let program = parsed_eval_program.program.borrow_dependent();
-                verter_core::utils::oxc::vue::resolve_type::analyze_external_type_program(program)
+                verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(
+                    program,
+                )
             }
         };
 
@@ -2997,7 +3000,7 @@ impl VerterHost {
                     base.raw_source.as_ref(),
                 ));
                 let external_type_analysis = Arc::new(
-                    verter_core::utils::oxc::vue::resolve_type::analyze_external_type_program(
+                    verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(
                         program,
                     ),
                 );
@@ -3112,11 +3115,11 @@ impl VerterHost {
         canonical_id: &str,
         whole_hash: Hash16,
         raw_source: &str,
-        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
         eval_source: &Arc<str>,
     ) -> (
         Arc<verter_analysis::type_eval::EvalEnv>,
-        Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
     ) {
         let parsed_eval_program = self.cached_parsed_eval_program_entry(
             canonical_id,
@@ -3131,7 +3134,7 @@ impl VerterHost {
             return (
                 Arc::new(env),
                 Arc::new(
-                    verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
                     ),
                 ),
             );
@@ -3144,7 +3147,9 @@ impl VerterHost {
         (
             Arc::new(env),
             Arc::new(
-                verter_core::utils::oxc::vue::resolve_type::analyze_external_type_program(program),
+                verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(
+                    program,
+                ),
             ),
         )
     }
@@ -3758,7 +3763,8 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>> {
+    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
+    {
         self.clone_current_imported_dependency_entry(canonical_id, store_view)?
             .external_type_analysis
             .clone()
@@ -3768,7 +3774,8 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>> {
+    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
+    {
         let _trace = component_meta_trace_scope!(
             "external_type_analysis_in_view",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
@@ -3836,10 +3843,10 @@ impl VerterHost {
         type_name: &str,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
         >,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         let _trace = component_meta_trace_scope!(
             "resolve_external_type_from_cached_dependency_state_in_view",
             format!(
@@ -3893,7 +3900,7 @@ impl VerterHost {
         };
         let program = type_context.borrow_owner().borrow_dependent();
         let base_ctx = type_context.borrow_dependent();
-        let resolved = verter_core::utils::oxc::vue::resolve_type::resolve_external_type_in_context_with_analyzed_symbol_companion(
+        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_context_with_analyzed_symbol_companion(
             type_name,
             program,
             type_context.borrow_owner().source_bytes(),
@@ -4519,12 +4526,12 @@ impl VerterHost {
         canonical_id: &str,
         whole_hash: Hash16,
         raw_source: Arc<str>,
-        cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         eval_source: Option<Arc<str>>,
         script_analysis: Option<Arc<verter_analysis::ScriptAnalysisSnapshot>>,
         export_signatures: Option<Arc<Vec<verter_analysis::ExportSignature>>>,
         external_type_analysis: Option<
-            Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+            Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
         >,
         dependency_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
     ) -> Arc<crate::ImportedDependencyCacheEntry> {
@@ -4558,12 +4565,12 @@ impl VerterHost {
         canonical_id: &str,
         whole_hash: Hash16,
         raw_source: Arc<str>,
-        cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         snapshot: Option<Arc<FileAnalysisSnapshot>>,
         eval_source: Option<Arc<str>>,
         env: Option<Arc<verter_analysis::type_eval::EvalEnv>>,
         external_type_analysis: Option<
-            Arc<verter_core::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+            Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
         >,
         dependency_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
     ) -> Arc<crate::ImportedDependencyCacheEntry> {
@@ -4941,7 +4948,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         source: &Arc<str>,
-        cached_parse: Option<&verter_core::parser::types::ParsedSfc>,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) -> FileAnalysisSnapshot {
         if canonical.ends_with(".vue") {
             if let Some(parsed) = cached_parse {
@@ -5002,7 +5009,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<(
         Arc<str>,
-        Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         Hash16,
     )> {
         self.current_eval_state_in_view(canonical_id, None)
@@ -5014,7 +5021,7 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<(
         Arc<str>,
-        Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         Hash16,
     )> {
         let _trace = component_meta_trace_scope!(
@@ -5066,7 +5073,7 @@ impl VerterHost {
                 let source = self.read_analysis_source_in_view(canonical_id, store_view)?;
                 let cached_parse = canonical_id
                     .ends_with(".vue")
-                    .then(|| Arc::new(verter_core::compile::parse_sfc(&source, None, None)));
+                    .then(|| Arc::new(verter_compiler::compile::parse_sfc(&source, None, None)));
                 let whole_hash = crate::hash::hash_16(source.as_bytes());
                 let _ = self.cache_imported_dependency_state(
                     canonical_id,
@@ -5143,7 +5150,7 @@ impl VerterHost {
                 let source = self.read_analysis_source_in_view(canonical_id, store_view)?;
                 let cached_parse = canonical_id
                     .ends_with(".vue")
-                    .then(|| Arc::new(verter_core::compile::parse_sfc(&source, None, None)));
+                    .then(|| Arc::new(verter_compiler::compile::parse_sfc(&source, None, None)));
                 let whole_hash = crate::hash::hash_16(source.as_bytes());
                 let _ = self.cache_imported_dependency_state(
                     canonical_id,
@@ -7268,7 +7275,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         source: &Arc<str>,
-        cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
         imports: &[verter_analysis::AnalyzedImport],
@@ -7308,27 +7315,31 @@ impl VerterHost {
                 .as_deref()
                 .map(std::borrow::Cow::Borrowed)
                 .unwrap_or_else(|| {
-                    std::borrow::Cow::Owned(verter_core::compile::parse_sfc(
+                    std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
                         &merged_source,
                         None,
                         None,
                     ))
                 })
         } else {
-            std::borrow::Cow::Owned(verter_core::compile::parse_sfc(&merged_source, None, None))
+            std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
+                &merged_source,
+                None,
+                None,
+            ))
         };
 
         let alloc = oxc_allocator::Allocator::new();
-        let options = verter_core::compile::CodegenOptions {
-            target: verter_core::compile::CompileTarget::META,
+        let options = verter_compiler::compile::CodegenOptions {
+            target: verter_compiler::compile::CompileTarget::META,
             filename: Some(canonical.to_string()),
-            ..verter_core::compile::CodegenOptions::default()
+            ..verter_compiler::compile::CodegenOptions::default()
         };
-        let verter_opts = verter_core::compile::VerterCompileOptions {
+        let verter_opts = verter_compiler::compile::VerterCompileOptions {
             extract_template_data: true,
-            ..verter_core::compile::VerterCompileOptions::default()
+            ..verter_compiler::compile::VerterCompileOptions::default()
         };
-        let compiled = verter_core::compile::compile_from_parsed(
+        let compiled = verter_compiler::compile::compile_from_parsed(
             &merged_source,
             &parsed,
             &options,
@@ -7339,7 +7350,7 @@ impl VerterHost {
         let has_structural_errors = compiled.errors.iter().any(|d| {
             matches!(
                 d.severity,
-                verter_core::compile::CompileDiagnosticSeverity::Error
+                verter_compiler::compile::CompileDiagnosticSeverity::Error
             ) && !d.code.starts_with("XInvalidMacroType")
                 && !d.code.starts_with("XMissingMacroType")
         });
@@ -7484,28 +7495,32 @@ impl VerterHost {
                 .as_deref()
                 .map(std::borrow::Cow::Borrowed)
                 .unwrap_or_else(|| {
-                    std::borrow::Cow::Owned(verter_core::compile::parse_sfc(
+                    std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
                         &merged_source,
                         None,
                         None,
                     ))
                 })
         } else {
-            std::borrow::Cow::Owned(verter_core::compile::parse_sfc(&merged_source, None, None))
+            std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
+                &merged_source,
+                None,
+                None,
+            ))
         };
 
         // Compile with META target — script codegen + template data, no JS/TSX output
         let alloc = oxc_allocator::Allocator::new();
-        let options = verter_core::compile::CodegenOptions {
-            target: verter_core::compile::CompileTarget::META,
+        let options = verter_compiler::compile::CodegenOptions {
+            target: verter_compiler::compile::CompileTarget::META,
             filename: Some(canonical.to_string()),
-            ..verter_core::compile::CodegenOptions::default()
+            ..verter_compiler::compile::CodegenOptions::default()
         };
-        let verter_opts = verter_core::compile::VerterCompileOptions {
+        let verter_opts = verter_compiler::compile::VerterCompileOptions {
             extract_template_data: true,
-            ..verter_core::compile::VerterCompileOptions::default()
+            ..verter_compiler::compile::VerterCompileOptions::default()
         };
-        let compiled = verter_core::compile::compile_from_parsed(
+        let compiled = verter_compiler::compile::compile_from_parsed(
             &merged_source,
             &parsed,
             &options,
@@ -7519,7 +7534,7 @@ impl VerterHost {
         let has_structural_errors = compiled.errors.iter().any(|d| {
             matches!(
                 d.severity,
-                verter_core::compile::CompileDiagnosticSeverity::Error
+                verter_compiler::compile::CompileDiagnosticSeverity::Error
             ) && !d.code.starts_with("XInvalidMacroType")
                 && !d.code.starts_with("XMissingMacroType")
         });
@@ -11506,12 +11521,12 @@ fn build_public_instance_slots_member(
     }
 }
 
-fn string_from_span(source: &str, span: Option<verter_core::common::Span>) -> Option<String> {
+fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {
     span.map(|span| source[span.start as usize..span.end as usize].to_string())
 }
 
 fn sfc_attributes_from_props(
-    props: &[verter_core::types::NodeProp],
+    props: &[verter_compiler::types::NodeProp],
     source: &str,
 ) -> Vec<verter_analysis::component_meta::SfcAttributeAnalysis> {
     crate::parse::extract_attrs(props, source)
@@ -11529,7 +11544,7 @@ fn sfc_attributes_from_props(
         .collect()
 }
 
-fn sfc_custom_block_type(source: &str, tag_open: &verter_core::types::NodeTag) -> String {
+fn sfc_custom_block_type(source: &str, tag_open: &verter_compiler::types::NodeTag) -> String {
     source[tag_open.start as usize + 1..tag_open.name_end as usize].to_string()
 }
 

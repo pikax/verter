@@ -201,7 +201,7 @@ pub enum ResolverMode {
 /// compile slot in the cache, keyed by the hash of this struct.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CompileProfile {
-    /// Override filename passed to `verter_core` codegen (defaults to canonical ID).
+    /// Override filename passed to `verter_compiler` codegen (defaults to canonical ID).
     pub filename: Option<String>,
     /// Production mode: strips dev-only code (`__file`, HMR).
     pub is_production: bool,
@@ -228,8 +228,8 @@ pub struct CompileProfile {
     /// Generate source maps for compiled output.
     pub source_map: bool,
     /// Controls which compilation steps run.
-    /// See [`verter_core::compile::CompileTarget`] for available flags and presets.
-    pub target: verter_core::compile::CompileTarget,
+    /// See [`verter_compiler::compile::CompileTarget`] for available flags and presets.
+    pub target: verter_compiler::compile::CompileTarget,
     /// Embed `declare module "@verter/types"` in generated TSX.
     /// When `false` (default), relies on the real `@verter/types` package.
     pub embed_ambient_types: bool,
@@ -255,7 +255,7 @@ impl Default for CompileProfile {
             force_vapor: false,
             force_js: false,
             source_map: false,
-            target: verter_core::compile::CompileTarget::BUNDLER,
+            target: verter_compiler::compile::CompileTarget::BUNDLER,
             embed_ambient_types: false,
             conditional_root_narrowing: false,
             strict_slots: false,
@@ -918,7 +918,7 @@ pub(crate) struct CachedTsx {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
     pub(crate) is_jsx: bool,
-    pub(crate) destructured_block: Option<verter_core::compile::types::DestructuredBlockMeta>,
+    pub(crate) destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
 }
 
 /// Response from [`VerterHost::get_ide`].
@@ -931,7 +931,7 @@ pub struct IdeResponse {
     /// `true` for JavaScript SFCs (.jsx output), `false` for TypeScript (.tsx output).
     pub is_jsx: bool,
     /// Structured metadata for the destructured block region, if present.
-    pub destructured_block: Option<verter_core::compile::types::DestructuredBlockMeta>,
+    pub destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
 }
 
 /// Response from [`VerterHost::get_public_api`].
@@ -1001,7 +1001,7 @@ pub(crate) struct CompileInput {
     /// Used when converting template compiler metadata into host analysis.
     pub(crate) script_bindings: Vec<verter_analysis::AnalyzedBinding>,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
-    pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     /// Binding names referenced in style `v-bind()` expressions.
     /// Extracted from `FileEntry.style_analyses` at cache-miss time.
     pub(crate) style_v_bind_vars: Vec<String>,
@@ -1167,11 +1167,11 @@ pub(crate) struct FileEntry {
     /// the document version (e.g., dependency hydration clearing stale errors).
     pub(crate) diagnostics_generation: u64,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
-    pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     /// Cached intermediate TSC extract state. Populated on first `get_public_api_with_mode`
     /// call and reused for subsequent calls with different external types or modes.
     /// Cleared on source change (semantic_hash mismatch during upsert).
-    pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
+    pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
     /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
     pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
     /// Cached fallthrough resolution keyed by semantic fact versions and
@@ -1245,7 +1245,7 @@ pub(crate) struct CompileCacheEntry {
     // ── DerivedRawState: source-hash-keyed caches ──
     /// Cached TSC extract keyed by whole_hash. On read: stored hash must match
     /// effective_file_state().whole_hash. Cleared on upsert when whole_hash changes.
-    pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_core::tsc::ExtractedTscState>)>,
+    pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
     /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
     pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
 
@@ -1306,7 +1306,7 @@ pub(crate) struct EffectiveFileState {
     pub(crate) source: std::sync::Arc<str>,
     pub(crate) meta: FileMeta,
     pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
-    pub(crate) cached_parse: Option<std::sync::Arc<verter_core::parser::types::ParsedSfc>>,
+    pub(crate) cached_parse: Option<std::sync::Arc<verter_compiler::parser::types::ParsedSfc>>,
     pub(crate) whole_hash: Hash16,
 }
 
@@ -1320,7 +1320,7 @@ pub(crate) struct EffectiveFileState {
 pub(crate) struct ContentOverrideWithParse {
     pub(crate) layer: ContentOverrideLayer,
     pub(crate) parse: ParseSnapshot,
-    pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     pub(crate) source: Arc<str>,
 }
 
@@ -1511,7 +1511,7 @@ pub(crate) struct ResolvedTypeCacheKey {
 /// A resolved external type entry in the host-level cache.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedTypeCacheEntry {
-    pub resolved: Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+    pub resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
     /// Canonical IDs traversed during resolution. Replayed into the caller's
     /// `tracked_deps` on cache hit so the eval path knows which sources to read.
     pub tracked_deps: Vec<String>,

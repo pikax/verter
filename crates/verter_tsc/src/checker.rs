@@ -27,7 +27,7 @@ use base64::Engine;
 use oxc_allocator::Allocator;
 use rayon::prelude::*;
 use tempfile::TempDir;
-use verter_core::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
+use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 use crate::error_map::map_tsc_position;
@@ -146,7 +146,8 @@ fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
                 source_map: true,
                 ..Default::default()
             };
-            let result = verter_core::compile::compile(&source, &options, &verter_options, &alloc);
+            let result =
+                verter_compiler::compile::compile(&source, &options, &verter_options, &alloc);
 
             let tsx_block = result.tsx?;
 
@@ -343,7 +344,7 @@ pub fn run(
     // import from "@verter/types" but don't embed the ambient module block
     // (embed_ambient_types=false), avoiding duplicate declarations across files.
     let types_path = temp_dir.path().join("__verter_types.d.ts");
-    let _ = fs::write(&types_path, verter_core::VERTER_TYPES_AMBIENT_MODULE);
+    let _ = fs::write(&types_path, verter_compiler::VERTER_TYPES_AMBIENT_MODULE);
 
     // Build validation file list (Phase A TSX files + Phase 0 stubs).
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();

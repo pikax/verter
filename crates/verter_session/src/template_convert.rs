@@ -1,6 +1,6 @@
-//! Convert raw template data from `verter_core` into `verter_analysis` types.
+//! Convert raw template data from `verter_compiler` into `verter_analysis` types.
 //!
-//! This module bridges the two independent crates: `verter_core` produces
+//! This module bridges the two independent crates: `verter_compiler` produces
 //! [`RawTemplateData`] during compilation, and this function converts it into
 //! [`TemplateAnalysisSnapshot`] that `verter_session` stores alongside script/style analysis.
 
@@ -11,9 +11,9 @@ use verter_analysis::template::{
     TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef, TemplateTextSegment,
     UnresolvedBinding, VForDirective, VModelDirective,
 };
-use verter_core::compile::template_data::RawTemplateData;
+use verter_compiler::compile::template_data::RawTemplateData;
 
-/// Convert raw template data from `verter_core` into `verter_analysis` types.
+/// Convert raw template data from `verter_compiler` into `verter_analysis` types.
 ///
 /// The `script_imports` map resolves component tag names to their import source
 /// paths for cross-file analysis. This is populated from the script analysis
@@ -411,21 +411,23 @@ pub fn convert_raw_to_analysis(
                 text_children: e
                     .text_children
                     .iter()
-                    .map(|seg| match seg {
-                        verter_core::compile::template_data::RawTextSegment::Text {
+                    .map(|seg| {
+                        match seg {
+                        verter_compiler::compile::template_data::RawTextSegment::Text {
                             span,
                             is_entity,
                         } => TemplateTextSegment::Text {
                             span: *span,
                             is_entity: *is_entity,
                         },
-                        verter_core::compile::template_data::RawTextSegment::Interpolation {
+                        verter_compiler::compile::template_data::RawTextSegment::Interpolation {
                             span,
                             expression_span,
                         } => TemplateTextSegment::Interpolation {
                             span: *span,
                             expression_span: *expression_span,
                         },
+                    }
                     })
                     .collect(),
             }
@@ -539,8 +541,8 @@ fn is_simple_identifier(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_core::common::Span;
-    use verter_core::compile::template_data::*;
+    use verter_compiler::common::Span;
+    use verter_compiler::compile::template_data::*;
 
     /// @ai-generated - Empty raw data converts to empty snapshot
     #[test]

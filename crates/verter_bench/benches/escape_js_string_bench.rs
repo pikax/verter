@@ -1,7 +1,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
-use verter_core::template::code_gen::shared::helpers::{escape_js_string, escape_js_string_into};
+use verter_compiler::template::code_gen::shared::helpers::{
+    escape_js_string, escape_js_string_into,
+};
 
 fn datasets() -> Vec<(&'static str, String)> {
     let no_escape = "plain_text_segment_".repeat(256);

@@ -13,16 +13,16 @@ use oxc_span::SourceType;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use verter_core::code_transform::CodeTransform;
-use verter_core::css::process_style;
-use verter_core::css::types::ProcessStyleOptions;
-use verter_core::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
-use verter_core::parser::Syntax as NewSyntax;
-use verter_core::script::{generate_script, ScriptCodeGenOptions};
-use verter_core::style::generate_style;
-use verter_core::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
-use verter_core::template::oxc::parse_template_expressions;
-use verter_core::tokenizer::byte::tokenize;
+use verter_compiler::code_transform::CodeTransform;
+use verter_compiler::css::process_style;
+use verter_compiler::css::types::ProcessStyleOptions;
+use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_compiler::parser::Syntax as NewSyntax;
+use verter_compiler::script::{generate_script, ScriptCodeGenOptions};
+use verter_compiler::style::generate_style;
+use verter_compiler::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
+use verter_compiler::template::oxc::parse_template_expressions;
+use verter_compiler::tokenizer::byte::tokenize;
 
 fn load_fixture(name: &str) -> String {
     let path = format!(

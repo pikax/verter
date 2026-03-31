@@ -10,7 +10,7 @@ use crate::{
     HostConfig, HostDiagnostic, HostError, HostSeverity, PreprocessorBlockType, PublicApiMode,
     UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
-use verter_core::compile::CompileTarget;
+use verter_compiler::compile::CompileTarget;
 
 fn strict_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -3679,7 +3679,7 @@ const SETUP_MARKER = 2;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_core::compile::parse_sfc(source, None, None);
+    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
     let result = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
     assert!(result.is_some(), "should extract script content from SFC");
     let content = result.unwrap();
@@ -3717,7 +3717,7 @@ const SETUP = 2;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_core::compile::parse_sfc(source, None, None);
+    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
     let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
     let without_cache = crate::host_resolve::extract_vue_script_content(source, None);
     assert_eq!(
@@ -3742,7 +3742,7 @@ const AFTER_CLOSE = 1;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_core::compile::parse_sfc(source, None, None);
+    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
     let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
         .expect("cached extraction should succeed");
     let without_cache = crate::host_resolve::extract_vue_script_content(source, None)

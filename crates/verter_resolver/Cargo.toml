@@ -17,7 +17,7 @@ oxc_span = { workspace = true }
 parking_lot = "0.12"
 rustc-hash = { workspace = true }
 verter_analysis = { path = "../verter_analysis" }
-verter_core = { path = "../verter_core" }
+verter_compiler = { path = "../verter_compiler" }
 verter_span = { path = "../verter_span" }
 verter_type_runtime = { path = "../verter_type_runtime", optional = true }
 verter_workspace = { path = "../verter_workspace" }

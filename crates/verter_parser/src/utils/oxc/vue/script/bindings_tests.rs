@@ -1,5 +1,5 @@
 use super::*;
-use crate::template::code_gen::binding::BindingType;
+use crate::types::BindingType;
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;

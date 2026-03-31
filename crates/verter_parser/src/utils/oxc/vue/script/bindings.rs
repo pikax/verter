@@ -15,7 +15,7 @@ use super::resolve_type::{
 };
 use super::shared::ScriptParseContext;
 use crate::common::Span;
-use crate::template::code_gen::binding::BindingType;
+use crate::types::BindingType;
 
 /// Extract binding metadata from a parsed `<script setup>` program.
 ///

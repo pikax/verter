@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
-use verter_core::utils::oxc::vue::parse_vfor;
+use verter_compiler::utils::oxc::vue::parse_vfor;
 
 /// Common v-for expression patterns for benchmarking.
 const COMMON_VFOR_EXPRESSIONS: &[&str] = &[

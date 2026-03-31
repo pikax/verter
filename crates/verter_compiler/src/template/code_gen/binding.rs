@@ -7,82 +7,9 @@ use crate::utils::oxc::BindingExtractionResult;
 
 use super::types::CodeGenOutput;
 
-/// Classification of a binding for correct accessor prefix/suffix in template codegen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BindingType {
-    /// `const x = 'literal'` — literal value that never changes, can be inlined.
-    SetupConst,
-    /// `let x = ...` — reassignable variable.
-    SetupLet,
-    /// `const x = ref(...)` / `computed(...)` / `shallowRef(...)` — needs `.value` in inline mode.
-    SetupRef,
-    /// `const x = reactive({})` — mutable properties but identity is stable.
-    SetupReactiveConst,
-    /// `const x = useSomething()` — return value might be a ref.
-    SetupMaybeRef,
-    /// Literal value that can be inlined (e.g., string/number constant).
-    LiteralConst,
-    /// `defineProps` prop — accessed via `__props.x` (inline) or `$props.x` (standalone).
-    Props,
-    /// Destructured prop alias — `const { msg: m } = defineProps<...>()`.
-    PropsAliased,
-    /// Import specifier — may be type-only usage. Included in `__returned__`
-    /// only when the identifier appears in the template text (word-boundary match).
-    SetupImport,
-    /// `data()` return property (Options API).
-    Data,
-    /// `computed`/`inject`/etc. from Options API.
-    Options,
-}
-
-impl BindingType {
-    /// Whether this binding's value never changes (can skip patch flags / renderEffect).
-    #[inline]
-    pub fn reactivity_level(&self) -> ReactivityLevel {
-        match self {
-            BindingType::SetupConst | BindingType::SetupImport | BindingType::LiteralConst => {
-                ReactivityLevel::Static
-            }
-            _ => ReactivityLevel::Dynamic,
-        }
-    }
-
-    /// Whether this is a setup-type binding (non-props, non-options).
-    #[inline]
-    pub fn is_setup(&self) -> bool {
-        matches!(
-            self,
-            BindingType::SetupConst
-                | BindingType::SetupLet
-                | BindingType::SetupRef
-                | BindingType::SetupReactiveConst
-                | BindingType::SetupMaybeRef
-                | BindingType::SetupImport
-                | BindingType::LiteralConst
-        )
-    }
-
-    /// Whether this is a props-type binding.
-    #[inline]
-    pub fn is_props(&self) -> bool {
-        matches!(self, BindingType::Props | BindingType::PropsAliased)
-    }
-
-    /// Whether this binding needs `.value` access in inline mode.
-    #[inline]
-    pub fn needs_value_access(&self) -> bool {
-        matches!(self, BindingType::SetupRef | BindingType::SetupMaybeRef)
-    }
-}
-
-/// Reactivity classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReactivityLevel {
-    /// Value never changes — can be inlined, no patch flag, no renderEffect.
-    Static,
-    /// Value may change — needs patch flag (VDOM) or renderEffect (Vapor).
-    Dynamic,
-}
+// BindingType and ReactivityLevel canonical definitions are in verter_parser::types.
+// Re-exported here for backward compatibility.
+pub use verter_parser::types::{BindingType, ReactivityLevel};
 
 /// Resolves identifiers to their correct accessor prefix/suffix.
 ///

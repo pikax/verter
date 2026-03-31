@@ -4,7 +4,7 @@
 //! analysis, and a project-wide component graph. Used by `verter_session` for
 //! smart invalidation and LSP features.
 //!
-//! Depends on `verter_core` (indirectly via OXC) for AST parsing.
+//! Depends on `verter_compiler` (indirectly via OXC) for AST parsing.
 //!
 //! # Key exports
 //!

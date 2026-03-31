@@ -13,7 +13,7 @@ name = "verter-tsc"
 path = "src/main.rs"
 
 [dependencies]
-verter_core = { path = "../verter_core" }
+verter_compiler = { path = "../verter_compiler" }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
 clap = { version = "4", features = ["derive"] }
