@@ -51,6 +51,80 @@ impl QueryProfile {
     pub fn allows_cross_file_queries(&self) -> bool {
         !matches!(self, QueryProfile::LspInteractive)
     }
+
+    /// Recommended analysis scope bits for this profile.
+    ///
+    /// This bridges the transition from `AnalysisScope` bitflags to
+    /// lazy semantic queries. The returned value indicates which analysis
+    /// passes should be prewarmed for this profile.
+    ///
+    /// Returns a u32 that can be used with `AnalysisScope::from_bits_truncate()`.
+    pub fn recommended_analysis_scope_bits(&self) -> u32 {
+        // Bit positions match AnalysisScope in verter_analysis::scope
+        const IMPORTS: u32 = 1 << 0;
+        const BINDINGS: u32 = 1 << 1;
+        const REACTIVITY: u32 = 1 << 2;
+        const MACROS: u32 = 1 << 3;
+        const MACRO_TYPE_DEPS: u32 = 1 << 4;
+        const VUE_API_USAGE: u32 = 1 << 5;
+        const EXPORT_SIGNATURES: u32 = 1 << 6;
+        const TPL_COMPONENTS: u32 = 1 << 8;
+        const TPL_BINDINGS: u32 = 1 << 9;
+        const TPL_SLOTS: u32 = 1 << 10;
+        const TPL_REFS: u32 = 1 << 11;
+        const TPL_EVENTS: u32 = 1 << 12;
+        const TPL_CONSTNESS: u32 = 1 << 13;
+        const STYLE_CSS: u32 = 1 << 16;
+        const STYLE_VBIND: u32 = 1 << 17;
+        const STYLE_SCOPED: u32 = 1 << 18;
+        const CROSS_PROP_CONST: u32 = 1 << 26;
+
+        let script_base = IMPORTS | BINDINGS | REACTIVITY | MACROS;
+        let tpl_base = TPL_COMPONENTS | TPL_BINDINGS | TPL_SLOTS | TPL_REFS | TPL_EVENTS;
+        let style_base = STYLE_VBIND | STYLE_SCOPED;
+
+        match self {
+            QueryProfile::Build => script_base | MACRO_TYPE_DEPS | EXPORT_SIGNATURES,
+            QueryProfile::BuildOptimized => {
+                script_base
+                    | MACRO_TYPE_DEPS
+                    | EXPORT_SIGNATURES
+                    | tpl_base
+                    | TPL_CONSTNESS
+                    | style_base
+                    | CROSS_PROP_CONST
+            }
+            QueryProfile::LspInteractive => script_base | tpl_base | style_base,
+            QueryProfile::LspBackground => {
+                script_base
+                    | MACRO_TYPE_DEPS
+                    | VUE_API_USAGE
+                    | EXPORT_SIGNATURES
+                    | tpl_base
+                    | TPL_CONSTNESS
+                    | style_base
+                    | STYLE_CSS
+                    | CROSS_PROP_CONST
+            }
+            QueryProfile::Lint => {
+                script_base | VUE_API_USAGE | tpl_base | TPL_CONSTNESS | style_base | STYLE_CSS
+            }
+            QueryProfile::Mcp => {
+                script_base
+                    | MACRO_TYPE_DEPS
+                    | VUE_API_USAGE
+                    | EXPORT_SIGNATURES
+                    | tpl_base
+                    | TPL_CONSTNESS
+                    | style_base
+                    | STYLE_CSS
+                    | CROSS_PROP_CONST
+            }
+            QueryProfile::ComponentMeta => {
+                script_base | MACRO_TYPE_DEPS | VUE_API_USAGE | EXPORT_SIGNATURES | tpl_base
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -97,5 +171,50 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: QueryProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn build_scope_is_minimal() {
+        let bits = QueryProfile::Build.recommended_analysis_scope_bits();
+        // Positive: has imports, bindings, macros, macro type deps, exports
+        assert_ne!(bits & (1 << 0), 0, "should have IMPORTS");
+        assert_ne!(bits & (1 << 1), 0, "should have BINDINGS");
+        assert_ne!(bits & (1 << 3), 0, "should have MACROS");
+        assert_ne!(bits & (1 << 4), 0, "should have MACRO_TYPE_DEPS");
+        assert_ne!(bits & (1 << 6), 0, "should have EXPORT_SIGNATURES");
+        // Negative: no template or style analysis in basic build
+        assert_eq!(bits & (1 << 8), 0, "should NOT have TPL_COMPONENTS");
+        assert_eq!(bits & (1 << 16), 0, "should NOT have STYLE_CSS");
+    }
+
+    #[test]
+    fn lsp_interactive_includes_template() {
+        let bits = QueryProfile::LspInteractive.recommended_analysis_scope_bits();
+        assert_ne!(bits & (1 << 8), 0, "should have TPL_COMPONENTS");
+        assert_ne!(bits & (1 << 9), 0, "should have TPL_BINDINGS");
+        // Negative: no cross-file in interactive mode
+        assert_eq!(bits & (1 << 26), 0, "should NOT have CROSS_PROP_CONST");
+    }
+
+    #[test]
+    fn lsp_background_is_most_comprehensive() {
+        let bg = QueryProfile::LspBackground.recommended_analysis_scope_bits();
+        let interactive = QueryProfile::LspInteractive.recommended_analysis_scope_bits();
+        // Background should be a superset of interactive
+        assert_eq!(
+            bg & interactive,
+            interactive,
+            "background should include all interactive bits"
+        );
+        // Plus additional analysis
+        assert_ne!(bg & (1 << 16), 0, "should have STYLE_CSS");
+        assert_ne!(bg & (1 << 26), 0, "should have CROSS_PROP_CONST");
+    }
+
+    #[test]
+    fn build_optimized_includes_cross_file() {
+        let bits = QueryProfile::BuildOptimized.recommended_analysis_scope_bits();
+        assert_ne!(bits & (1 << 26), 0, "should have CROSS_PROP_CONST");
+        assert_ne!(bits & (1 << 13), 0, "should have TPL_CONSTNESS");
     }
 }
