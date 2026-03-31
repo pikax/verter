@@ -17,7 +17,9 @@ description: "Review .claude/feedback/ files and process them into actionable pl
 
 2. **Categorize entries** by scope (the part of the codebase they affect):
    - `lsp` — `crates/verter_lsp/`
-   - `core` — `crates/verter_core/`
+   - `compiler` — `crates/verter_compiler/`
+   - `parser` — `crates/verter_parser/`
+   - `semantic` — `crates/verter_semantic/`
    - `diagnostics` — `crates/verter_diagnostics/`
    - `analysis` — `crates/verter_analysis/`
    - `vscode` — `packages/vue-vscode/`

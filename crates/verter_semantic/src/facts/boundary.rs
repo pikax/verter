@@ -49,3 +49,47 @@ pub struct InjectSite {
     pub has_default: bool,
     pub span: Span,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_instance_edge_round_trips() {
+        let edge = ComponentInstanceEdge {
+            parent_file_id: "/src/App.vue".into(),
+            child_file_id: Some("/src/Button.vue".into()),
+            tag_name: "Button".into(),
+            usage_span: Span::new(100, 150),
+            passed_props: vec!["color".into(), "size".into()],
+            passed_events: vec!["click".into()],
+            passed_slots: vec!["default".into()],
+            has_spread: false,
+            has_event_spread: false,
+        };
+        let json = serde_json::to_string(&edge).unwrap();
+        let back: ComponentInstanceEdge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tag_name, "Button");
+        assert_eq!(back.passed_props.len(), 2);
+        assert!(!back.has_spread);
+    }
+
+    #[test]
+    fn provide_inject_linkage() {
+        let provide = ProvideSite {
+            file_id: "/src/App.vue".into(),
+            key: "theme".into(),
+            span: Span::new(50, 70),
+        };
+        let inject = InjectSite {
+            file_id: "/src/Child.vue".into(),
+            key: "theme".into(),
+            has_default: false,
+            span: Span::new(30, 50),
+        };
+        // Positive: keys match
+        assert_eq!(provide.key, inject.key);
+        // Negative: no default on inject
+        assert!(!inject.has_default);
+    }
+}

@@ -27,3 +27,37 @@ pub enum SsrReadinessStatus {
     /// Cannot determine SSR readiness.
     Unknown,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_reachability_variants() {
+        let variants = [
+            RouteReachabilityStatus::Reachable,
+            RouteReachabilityStatus::Conditional,
+            RouteReachabilityStatus::Unreachable,
+            RouteReachabilityStatus::Unknown,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+
+    #[test]
+    fn ssr_readiness_round_trips() {
+        for status in [
+            SsrReadinessStatus::Compatible,
+            SsrReadinessStatus::Incompatible,
+            SsrReadinessStatus::Conditional,
+            SsrReadinessStatus::Unknown,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: SsrReadinessStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+}

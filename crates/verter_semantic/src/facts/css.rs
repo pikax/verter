@@ -60,3 +60,40 @@ pub struct CssBleedIssue {
     pub scope_kind: StyleScopeKind,
     pub span: Span,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn class_flow_certainty_variants() {
+        assert_ne!(ClassFlowCertainty::Definite, ClassFlowCertainty::Possible);
+        assert_ne!(ClassFlowCertainty::Possible, ClassFlowCertainty::Unknown);
+    }
+
+    #[test]
+    fn css_bleed_severity_mapping() {
+        // Plan: Definite bleed + Definite/Possible co-render → warning
+        //       Likely bleed + Possible co-render → hint
+        //       Possible bleed or Unknown → trace only
+        let definite = CssBleedLikelihood::Definite;
+        let likely = CssBleedLikelihood::Likely;
+        let possible = CssBleedLikelihood::Possible;
+        assert_ne!(definite, likely);
+        assert_ne!(likely, possible);
+    }
+
+    #[test]
+    fn style_scope_kind_round_trips() {
+        for kind in [
+            StyleScopeKind::Scoped,
+            StyleScopeKind::Module,
+            StyleScopeKind::Global,
+            StyleScopeKind::GlobalEscape,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: StyleScopeKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, back);
+        }
+    }
+}

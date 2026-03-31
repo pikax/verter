@@ -17,3 +17,32 @@ pub enum CoRenderabilityStatus {
     /// Cannot determine co-renderability.
     Unknown,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn co_renderability_variants_are_distinct() {
+        let all = [
+            CoRenderabilityStatus::Definite,
+            CoRenderabilityStatus::Possible,
+            CoRenderabilityStatus::MutuallyExclusive,
+            CoRenderabilityStatus::Unknown,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+
+    #[test]
+    fn co_renderability_serializes() {
+        let status = CoRenderabilityStatus::MutuallyExclusive;
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("MutuallyExclusive"));
+        let back: CoRenderabilityStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(status, back);
+    }
+}
