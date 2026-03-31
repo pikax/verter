@@ -711,4 +711,109 @@ mod tests {
         let result = db.component_surface(&FileRef::new("a.vue"), rev2);
         assert!(result.is_complete());
     }
+
+    #[test]
+    fn many_files_cached_independently() {
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        for i in 0..10 {
+            let id = format!("file_{i}.vue");
+            let mut surface = ComponentSurface::default();
+            surface.declared.props.push(PropFact {
+                name: format!("prop_{i}"),
+                is_optional: false,
+                type_text: None,
+                default_value: None,
+                description: None,
+                span: Span::new(0, 5),
+            });
+            db.set_component_surface(id, rev, surface);
+        }
+
+        assert_eq!(db.cached_file_count(), 10);
+
+        // Each file has its own prop
+        for i in 0..10 {
+            let result = db.component_surface(&FileRef::new(format!("file_{i}.vue")), rev);
+            assert!(result.is_complete());
+            let s = result.value.unwrap();
+            assert_eq!(s.declared.props[0].name, format!("prop_{i}"));
+        }
+
+        // Invalidate one doesn't affect others
+        db.invalidate("file_5.vue");
+        assert_eq!(db.cached_file_count(), 9);
+        assert!(db
+            .component_surface(&FileRef::new("file_0.vue"), rev)
+            .is_complete());
+    }
+
+    #[test]
+    fn cross_file_chain_a_imports_b_imports_c() {
+        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        // C has a prop
+        let mut c_surface = ComponentSurface::default();
+        c_surface.declared.props.push(PropFact {
+            name: "deep".into(),
+            is_optional: false,
+            type_text: Some("string".into()),
+            default_value: None,
+            description: None,
+            span: Span::new(10, 14),
+        });
+        db.set_component_surface("/c.vue".into(), rev, c_surface);
+
+        // B imports C
+        db.set_import_graph(
+            "/b.vue".into(),
+            rev,
+            FileImportGraph {
+                imports: vec![ImportedSymbol {
+                    local_name: "C".into(),
+                    source_specifier: "./c.vue".into(),
+                    resolved_file_id: Some("/c.vue".into()),
+                    exported_name: "default".into(),
+                    kind: ImportKind::Default,
+                    is_type_only: false,
+                    span: Span::new(7, 8),
+                }],
+                import_sources: vec!["/c.vue".into()],
+            },
+        );
+
+        // A imports B
+        db.set_import_graph(
+            "/a.vue".into(),
+            rev,
+            FileImportGraph {
+                imports: vec![ImportedSymbol {
+                    local_name: "B".into(),
+                    source_specifier: "./b.vue".into(),
+                    resolved_file_id: Some("/b.vue".into()),
+                    exported_name: "default".into(),
+                    kind: ImportKind::Default,
+                    is_type_only: false,
+                    span: Span::new(7, 8),
+                }],
+                import_sources: vec!["/b.vue".into()],
+            },
+        );
+
+        // A→B resolves to B's file entry (not C — single hop only)
+        let result = db.resolve_imported_component_surface("/a.vue", "B", rev);
+        // B has a file entry (from import_graph) but no surface → Complete(None)
+        assert!(result.is_complete());
+        assert!(result.value.is_none(), "B has no component surface cached");
+
+        // But B→C works (C has cached surface)
+        let result = db.resolve_imported_component_surface("/b.vue", "C", rev);
+        assert!(result.is_complete());
+        let surface = result.value.unwrap();
+        assert_eq!(surface.declared.props[0].name, "deep");
+    }
 }

@@ -681,6 +681,83 @@ mod tests {
         assert!(surface.completeness.is_none());
     }
 
+    #[test]
+    fn with_defaults_merges_default_values() {
+        use verter_analysis::types::AnalyzedDefaultValue;
+
+        let props_mac = make_props_macro(vec![
+            make_prop("color", false), // required
+            make_prop("size", true),   // optional
+        ]);
+        let defaults_mac = AnalyzedMacro {
+            kind: AnalyzedMacroKind::WithDefaults,
+            is_type_based: true,
+            type_references: Vec::new(),
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![make_prop("color", false)],
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: vec!["color".into()],
+            default_values: vec![AnalyzedDefaultValue {
+                key: "color".into(),
+                value: "'blue'".into(),
+                span: Span::new(40, 46),
+            }],
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: Span::new(30, 60),
+        };
+
+        let snapshot = make_snapshot(vec![props_mac, defaults_mac]);
+        let surface = extract_declared_surface(&snapshot);
+
+        // Positive: color now has default and became optional
+        let color = surface.props.iter().find(|p| p.name == "color").unwrap();
+        assert_eq!(color.default_value.as_deref(), Some("'blue'"));
+        assert!(
+            color.is_optional,
+            "prop with default should become optional"
+        );
+
+        // Negative: size unchanged
+        let size = surface.props.iter().find(|p| p.name == "size").unwrap();
+        assert!(size.default_value.is_none());
+    }
+
+    #[test]
+    fn multiple_define_emits_merged() {
+        let mac = AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineEmits,
+            emit_fields: vec![
+                AnalyzedEmitField {
+                    name: "change".into(),
+                    span: Span::new(10, 16),
+                    payload_type: Some("[val: string]".into()),
+                    description: None,
+                    tags: Vec::new(),
+                },
+                AnalyzedEmitField {
+                    name: "submit".into(),
+                    span: Span::new(20, 26),
+                    payload_type: None,
+                    description: None,
+                    tags: Vec::new(),
+                },
+            ],
+            ..make_props_macro(vec![])
+        };
+        let snapshot = make_snapshot(vec![mac]);
+        let surface = extract_declared_surface(&snapshot);
+
+        assert_eq!(surface.events.len(), 2);
+        assert_eq!(surface.events[0].name, "change");
+        assert_eq!(surface.events[1].name, "submit");
+        // Negative: no props from emits
+        assert!(surface.props.is_empty());
+    }
+
     // ── Binding and reactivity tests ───────────────────────────────────────
 
     fn make_binding(
@@ -929,6 +1006,145 @@ mod tests {
 
         // Negative: no sources in set since none resolved
         assert!(graph.import_sources.is_empty());
+    }
+
+    #[test]
+    fn extract_import_graph_namespace_import() {
+        use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+
+        let mut snapshot = make_snapshot(vec![]);
+        snapshot.imports = vec![AnalyzedImport {
+            source: "vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Vue".to_string(),
+                kind: ImportBindingKind::Namespace,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(7, 10),
+            }],
+            span: Span::new(0, 25),
+            resolved_canonical_id: None,
+        }];
+
+        let graph = extract_import_graph(&snapshot);
+
+        assert_eq!(graph.imports.len(), 1);
+        assert_eq!(graph.imports[0].kind, ImportKind::Namespace);
+        // Namespace: exported_name is the local name (no "default")
+        assert_eq!(graph.imports[0].exported_name, "Vue");
+    }
+
+    #[test]
+    fn extract_import_graph_type_only_propagation() {
+        use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+
+        let mut snapshot = make_snapshot(vec![]);
+        // Declaration-level type-only: `import type { Foo } from "..."`
+        snapshot.imports = vec![AnalyzedImport {
+            source: "./types".to_string(),
+            is_type_only: true,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Props".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
+                is_type_only: false, // specifier not type-only, but declaration is
+                vue_api: None,
+                span: Span::new(14, 19),
+            }],
+            span: Span::new(0, 35),
+            resolved_canonical_id: Some("/src/types.ts".into()),
+        }];
+
+        let graph = extract_import_graph(&snapshot);
+
+        // Positive: declaration-level type-only propagates to symbol
+        assert!(graph.imports[0].is_type_only);
+    }
+
+    #[test]
+    fn extract_import_graph_specifier_level_type_only() {
+        use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+
+        let mut snapshot = make_snapshot(vec![]);
+        // `import { type Foo, bar } from "..."`
+        snapshot.imports = vec![AnalyzedImport {
+            source: "./mixed".to_string(),
+            is_type_only: false, // declaration NOT type-only
+            bindings: vec![
+                AnalyzedImportBinding {
+                    name: "Foo".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
+                    is_type_only: true, // specifier IS type-only
+                    vue_api: None,
+                    span: Span::new(14, 17),
+                },
+                AnalyzedImportBinding {
+                    name: "bar".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
+                    is_type_only: false,
+                    vue_api: None,
+                    span: Span::new(19, 22),
+                },
+            ],
+            span: Span::new(0, 40),
+            resolved_canonical_id: Some("/src/mixed.ts".into()),
+        }];
+
+        let graph = extract_import_graph(&snapshot);
+
+        assert_eq!(graph.imports.len(), 2);
+        // Positive: Foo is type-only
+        assert!(graph.imports[0].is_type_only);
+        // Negative: bar is NOT type-only
+        assert!(!graph.imports[1].is_type_only);
+    }
+
+    #[test]
+    fn extract_import_graph_multiple_sources() {
+        use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+
+        let mut snapshot = make_snapshot(vec![]);
+        snapshot.imports = vec![
+            AnalyzedImport {
+                source: "./a".to_string(),
+                is_type_only: false,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "A".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
+                    is_type_only: false,
+                    vue_api: None,
+                    span: Span::new(9, 10),
+                }],
+                span: Span::new(0, 20),
+                resolved_canonical_id: Some("/src/a.ts".into()),
+            },
+            AnalyzedImport {
+                source: "./b".to_string(),
+                is_type_only: false,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "B".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
+                    is_type_only: false,
+                    vue_api: None,
+                    span: Span::new(30, 31),
+                }],
+                span: Span::new(25, 45),
+                resolved_canonical_id: Some("/src/b.ts".into()),
+            },
+        ];
+
+        let graph = extract_import_graph(&snapshot);
+
+        assert_eq!(graph.imports.len(), 2);
+        assert_eq!(graph.import_sources.len(), 2);
+        assert!(graph.import_sources.contains(&"/src/a.ts".to_string()));
+        assert!(graph.import_sources.contains(&"/src/b.ts".to_string()));
     }
 
     // ── Prop constness tests ───────────────────────────────────────────────
