@@ -968,11 +968,11 @@ mod tests {
         use crate::extract::{
             extract_boundary_edges, extract_component_surface, extract_import_graph,
         };
+        use crate::input::TemplateAnalysisSnapshot;
         use crate::input::{
             AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
             AnalyzedPropField, ImportBindingKind, ScriptAnalysisSnapshot, TypeResolutionSource,
         };
-        use verter_analysis::TemplateAnalysisSnapshot;
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -1030,15 +1030,15 @@ mod tests {
 
         // Simulate template with <Child unknown-prop />
         let mut template = TemplateAnalysisSnapshot::default();
-        template.components = vec![verter_analysis::TemplateComponentUsage {
+        template.components = vec![crate::input::TemplateComponentUsage {
             name: "Child".into(),
             import_source: Some("./child.vue".into()),
             is_dynamic: false,
-            props: vec![verter_analysis::TemplatePropUsage {
+            props: vec![crate::input::TemplatePropUsage {
                 name: "unknownProp".into(),
                 is_bound: false,
                 expression: None,
-                constness: verter_analysis::template::PropValueConstness::Const,
+                constness: crate::input::PropValueConstness::Const,
                 referenced_bindings: vec![],
                 from_spread: false,
                 span: Span::new(100, 111),
@@ -1083,6 +1083,93 @@ mod tests {
         assert!(resolved.is_complete());
         assert_eq!(resolved.value.unwrap().declared.props[0].name, "color");
     }
+
+    // ── Invalidation tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn invalidate_single_file_preserves_others() {
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+        db.set_component_surface("a.vue".into(), rev, ComponentSurface::default());
+        db.set_component_surface("b.vue".into(), rev, ComponentSurface::default());
+        assert_eq!(db.cached_file_count(), 2);
+
+        db.invalidate("a.vue");
+        assert_eq!(db.cached_file_count(), 1);
+        assert_eq!(
+            db.component_surface(&FileRef::new("a.vue"), rev)
+                .completeness,
+            Completeness::Unavailable
+        );
+        assert!(db
+            .component_surface(&FileRef::new("b.vue"), rev)
+            .is_complete());
+    }
+
+    #[test]
+    fn invalidate_nonexistent_is_noop() {
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+        db.set_component_surface("a.vue".into(), rev, ComponentSurface::default());
+        db.invalidate("nonexistent.vue");
+        assert_eq!(db.cached_file_count(), 1);
+    }
+
+    #[test]
+    fn full_reset_clears_everything() {
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+        db.set_component_surface("a.vue".into(), rev, ComponentSurface::default());
+        db.set_component_surface("b.vue".into(), rev, ComponentSurface::default());
+        db.set_component_surface("c.vue".into(), rev, ComponentSurface::default());
+        assert_eq!(db.cached_file_count(), 3);
+
+        // Simulate semantic_invalidate_all
+        db = SemanticDb::new();
+        assert_eq!(db.cached_file_count(), 0);
+        for id in &["a.vue", "b.vue", "c.vue"] {
+            assert_eq!(
+                db.component_surface(&FileRef::new(*id), rev).completeness,
+                Completeness::Unavailable
+            );
+        }
+    }
+
+    #[test]
+    fn invalidate_then_recache() {
+        let mut db = SemanticDb::new();
+        let rev1 = make_revision(1);
+        let rev2 = make_revision(2);
+
+        let mut old = ComponentSurface::default();
+        old.declared.props.push(PropFact {
+            name: "old".into(),
+            is_optional: false,
+            type_text: None,
+            default_value: None,
+            description: None,
+            span: Span::new(0, 3),
+        });
+        db.set_component_surface("a.vue".into(), rev1, old);
+        db.invalidate("a.vue");
+
+        let mut fresh = ComponentSurface::default();
+        fresh.declared.props.push(PropFact {
+            name: "fresh".into(),
+            is_optional: true,
+            type_text: Some("string".into()),
+            default_value: None,
+            description: None,
+            span: Span::new(0, 5),
+        });
+        db.set_component_surface("a.vue".into(), rev2, fresh);
+
+        let result = db.component_surface(&FileRef::new("a.vue"), rev2);
+        assert!(result.is_complete());
+        assert_eq!(result.value.unwrap().declared.props[0].name, "fresh");
+    }
+
+    // ── End-to-end pipeline tests ──────────────────────────────────────────
 
     #[test]
     fn pipeline_extract_cache_reactivity_analyze() {
