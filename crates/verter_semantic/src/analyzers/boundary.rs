@@ -33,6 +33,8 @@ pub enum BoundaryIssueKind {
     MissingRequiredProp,
     /// An event was listened that the child doesn't emit.
     UnknownEvent,
+    /// A required slot was not provided.
+    MissingRequiredSlot,
 }
 
 /// Analyze a single component usage edge against the child's declared surface.
@@ -119,6 +121,21 @@ pub fn analyze_boundary(
                     kind: BoundaryIssueKind::UnknownEvent,
                     component_name: edge.tag_name.clone(),
                     member_name: listened.clone(),
+                    usage_span: edge.usage_span,
+                });
+            }
+        }
+    }
+
+    // Check for missing required slots
+    for slot in &child_surface.declared.slots {
+        if slot.is_required {
+            let is_provided = edge.passed_slots.iter().any(|s| s == &slot.name);
+            if !is_provided {
+                issues.push(BoundaryIssue {
+                    kind: BoundaryIssueKind::MissingRequiredSlot,
+                    component_name: edge.tag_name.clone(),
+                    member_name: slot.name.clone(),
                     usage_span: edge.usage_span,
                 });
             }
@@ -464,5 +481,104 @@ mod tests {
         // Negative: optional props not reported
         assert!(!names.contains(&"opt1"));
         assert!(!names.contains(&"opt2"));
+    }
+
+    // ── Slot validation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn missing_required_slot_detected() {
+        use crate::facts::component::SlotFact;
+
+        let edge = make_edge("Tabs", vec![], vec![]);
+        let mut surface = make_surface(vec![], vec![]);
+        surface.declared.slots.push(SlotFact {
+            name: "default".into(),
+            is_required: true,
+            bindings: vec![],
+            description: None,
+            span: verter_span::Span::new(10, 20),
+        });
+        let issues = analyze_boundary(&edge, &surface);
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, BoundaryIssueKind::MissingRequiredSlot);
+        assert_eq!(issues[0].member_name, "default");
+    }
+
+    #[test]
+    fn provided_required_slot_no_issue() {
+        use crate::facts::component::SlotFact;
+
+        let mut edge = make_edge("Tabs", vec![], vec![]);
+        edge.passed_slots = vec!["default".into()];
+        let mut surface = make_surface(vec![], vec![]);
+        surface.declared.slots.push(SlotFact {
+            name: "default".into(),
+            is_required: true,
+            bindings: vec![],
+            description: None,
+            span: verter_span::Span::new(10, 20),
+        });
+        let issues = analyze_boundary(&edge, &surface);
+
+        assert!(issues.is_empty(), "required slot provided: {issues:?}");
+    }
+
+    #[test]
+    fn optional_slot_not_required() {
+        use crate::facts::component::SlotFact;
+
+        let edge = make_edge("Card", vec![], vec![]);
+        let mut surface = make_surface(vec![], vec![]);
+        surface.declared.slots.push(SlotFact {
+            name: "footer".into(),
+            is_required: false,
+            bindings: vec![],
+            description: None,
+            span: verter_span::Span::new(10, 20),
+        });
+        let issues = analyze_boundary(&edge, &surface);
+
+        // Negative: optional slot not reported as missing
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn multiple_slots_mixed_required() {
+        use crate::facts::component::SlotFact;
+
+        let mut edge = make_edge("Layout", vec![], vec![]);
+        edge.passed_slots = vec!["header".into()]; // only header provided
+        let mut surface = make_surface(vec![], vec![]);
+        surface.declared.slots.push(SlotFact {
+            name: "header".into(),
+            is_required: true,
+            bindings: vec![],
+            description: None,
+            span: verter_span::Span::new(10, 20),
+        });
+        surface.declared.slots.push(SlotFact {
+            name: "main".into(),
+            is_required: true,
+            bindings: vec![],
+            description: None,
+            span: verter_span::Span::new(30, 40),
+        });
+        surface.declared.slots.push(SlotFact {
+            name: "footer".into(),
+            is_required: false,
+            bindings: vec![],
+            description: None,
+            span: verter_span::Span::new(50, 60),
+        });
+
+        let issues = analyze_boundary(&edge, &surface);
+
+        // Only "main" is missing (required + not provided)
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, BoundaryIssueKind::MissingRequiredSlot);
+        assert_eq!(issues[0].member_name, "main");
+
+        // Negative: header (provided) and footer (optional) not reported
     }
 }
