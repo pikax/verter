@@ -158,4 +158,59 @@ mod tests {
         assert_eq!(report.facts[0].source_file_id, "/src/App.vue");
         assert_eq!(report.facts[0].target_file_id, "/src/Button.vue");
     }
+
+    // ── Plan-required class flow coverage ──────────────────────────────────
+
+    #[test]
+    fn inherit_attrs_false_blocks_all_class_flow() {
+        // Plan: "inheritAttrs: false" → no class forwarding
+        let edge = make_edge_with_class(Some("/src/Button.vue"));
+        let mut surface = ComponentSurface::default();
+        surface.inherit_attrs_disabled = true;
+        let report = analyze_class_flow(&edge, &surface);
+
+        // Negative: no flow when inheritAttrs disabled
+        assert!(report.facts.is_empty());
+        // Confirm the edge DID pass class
+        assert!(edge.passed_props.contains(&"class".to_string()));
+    }
+
+    #[test]
+    fn non_class_props_dont_create_flow() {
+        // Only "class" prop creates flow, not other props
+        let mut edge = make_edge_with_class(Some("/src/Button.vue"));
+        edge.passed_props = vec!["color".into(), "size".into(), "disabled".into()];
+        let surface = ComponentSurface::default();
+        let report = analyze_class_flow(&edge, &surface);
+
+        assert!(report.facts.is_empty());
+    }
+
+    #[test]
+    fn spread_with_inherit_attrs_false_no_flow() {
+        let mut edge = make_edge_with_class(Some("/src/Button.vue"));
+        edge.has_spread = true;
+        let mut surface = ComponentSurface::default();
+        surface.inherit_attrs_disabled = true;
+        let report = analyze_class_flow(&edge, &surface);
+
+        // Negative: even with spread, inheritAttrs:false blocks flow
+        assert!(report.facts.is_empty());
+    }
+
+    #[test]
+    fn multiple_class_usages_each_produce_flow() {
+        // Two edges with class should produce two flow facts
+        let edge1 = make_edge_with_class(Some("/src/A.vue"));
+        let edge2 = make_edge_with_class(Some("/src/B.vue"));
+        let surface = ComponentSurface::default();
+
+        let r1 = analyze_class_flow(&edge1, &surface);
+        let r2 = analyze_class_flow(&edge2, &surface);
+
+        assert_eq!(r1.facts.len(), 1);
+        assert_eq!(r2.facts.len(), 1);
+        assert_eq!(r1.facts[0].target_file_id, "/src/A.vue");
+        assert_eq!(r2.facts[0].target_file_id, "/src/B.vue");
+    }
 }

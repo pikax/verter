@@ -138,4 +138,61 @@ mod tests {
         let report = analyze_route_reachability("/src/Contact.vue", &graph, &routes);
         assert_eq!(report.status, RouteReachabilityStatus::Reachable);
     }
+
+    // ── Plan-required route coverage ───────────────────────────────────────
+
+    #[test]
+    fn same_file_is_route_and_imported_by_route() {
+        // A route component importing from another route component
+        let graph = FileImportGraph {
+            imports: vec![],
+            import_sources: vec!["/src/About.vue".to_string()],
+        };
+        let routes = vec!["/src/Home.vue".to_string(), "/src/About.vue".to_string()];
+        let report = analyze_route_reachability("/src/Home.vue", &graph, &routes);
+
+        // Direct match takes priority
+        assert_eq!(report.status, RouteReachabilityStatus::Reachable);
+        assert!(report.reason.contains("route configuration"));
+    }
+
+    #[test]
+    fn layout_component_not_in_routes_is_unknown() {
+        // Plan: "layout relationships"
+        let graph = FileImportGraph::default();
+        let routes = vec!["/src/Home.vue".to_string()];
+        let report = analyze_route_reachability("/src/layouts/Default.vue", &graph, &routes);
+
+        assert_eq!(report.status, RouteReachabilityStatus::Unknown);
+    }
+
+    #[test]
+    fn reason_differs_for_direct_vs_imported() {
+        let graph = FileImportGraph {
+            imports: vec![],
+            import_sources: vec!["/src/Home.vue".to_string()],
+        };
+        let routes = vec!["/src/Home.vue".to_string()];
+
+        let direct = analyze_route_reachability("/src/Home.vue", &graph, &routes);
+        let imported = analyze_route_reachability("/src/HomeContent.vue", &graph, &routes);
+
+        assert_ne!(direct.reason, imported.reason);
+        assert!(direct.reason.contains("directly"));
+        assert!(imported.reason.contains("imported"));
+    }
+
+    #[test]
+    fn empty_import_sources_with_routes_is_unknown() {
+        let graph = FileImportGraph {
+            imports: vec![],
+            import_sources: vec![],
+        };
+        let routes = vec!["/src/Home.vue".to_string()];
+        let report = analyze_route_reachability("/src/Other.vue", &graph, &routes);
+
+        assert_eq!(report.status, RouteReachabilityStatus::Unknown);
+        // Negative: not Reachable even though routes exist
+        assert_ne!(report.status, RouteReachabilityStatus::Reachable);
+    }
 }

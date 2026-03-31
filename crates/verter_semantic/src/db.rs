@@ -563,4 +563,152 @@ mod tests {
             Completeness::Unavailable
         );
     }
+
+    // ── Integration: extract → cache → query cycle ─────────────────────────
+
+    #[test]
+    fn extract_cache_query_component_surface_cycle() {
+        use crate::extract::extract_component_surface;
+        use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot};
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        // Create a script analysis with defineProps
+        let mut snapshot = ScriptAnalysisSnapshot::default();
+        snapshot.macros = vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: Vec::new(),
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![verter_analysis::types::AnalyzedPropField {
+                name: "title".into(),
+                is_optional: false,
+                span: Span::new(20, 25),
+                type_annotation: Some("string".into()),
+                description: None,
+                tags: Vec::new(),
+                resolution_source: verter_analysis::types::TypeResolutionSource::Rust,
+                resolution_error: None,
+            }],
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: Span::new(0, 50),
+        }];
+
+        // Extract
+        let surface = extract_component_surface(&snapshot);
+
+        // Cache
+        db.set_component_surface("comp.vue".into(), rev, surface);
+
+        // Query
+        let result = db.component_surface(&FileRef::new("comp.vue"), rev);
+
+        // Positive: full cycle works end-to-end
+        assert!(result.is_complete());
+        let s = result.value.unwrap();
+        assert_eq!(s.declared.props.len(), 1);
+        assert_eq!(s.declared.props[0].name, "title");
+        assert_eq!(s.declared.props[0].type_text.as_deref(), Some("string"));
+
+        // Negative: accepted equals declared (no cross-file resolution)
+        assert_eq!(s.accepted_props.len(), 1);
+    }
+
+    #[test]
+    fn extract_cache_query_cross_file_cycle() {
+        use crate::extract::{extract_component_surface, extract_import_graph};
+        use verter_analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
+            ImportBindingKind, ScriptAnalysisSnapshot,
+        };
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        // Child component with a prop
+        let mut child_snap = ScriptAnalysisSnapshot::default();
+        child_snap.macros = vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: Vec::new(),
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![verter_analysis::types::AnalyzedPropField {
+                name: "label".into(),
+                is_optional: true,
+                span: Span::new(10, 15),
+                type_annotation: Some("string".into()),
+                description: None,
+                tags: Vec::new(),
+                resolution_source: verter_analysis::types::TypeResolutionSource::Rust,
+                resolution_error: None,
+            }],
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: Span::new(0, 50),
+        }];
+        let child_surface = extract_component_surface(&child_snap);
+        db.set_component_surface("/child.vue".into(), rev, child_surface);
+
+        // Parent with import of child
+        let mut parent_snap = ScriptAnalysisSnapshot::default();
+        parent_snap.imports = vec![AnalyzedImport {
+            source: "./child.vue".into(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Child".into(),
+                kind: ImportBindingKind::Default,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(7, 12),
+            }],
+            span: Span::new(0, 30),
+            resolved_canonical_id: Some("/child.vue".into()),
+        }];
+        let parent_graph = extract_import_graph(&parent_snap);
+        db.set_import_graph("/parent.vue".into(), rev, parent_graph);
+
+        // Cross-file query: resolve Child from parent
+        let result = db.resolve_imported_component_surface("/parent.vue", "Child", rev);
+
+        // Positive: cross-file cycle works
+        assert!(result.is_complete());
+        let surface = result.value.unwrap();
+        assert_eq!(surface.declared.props.len(), 1);
+        assert_eq!(surface.declared.props[0].name, "label");
+    }
+
+    #[test]
+    fn revision_mismatch_after_update_returns_partial() {
+        let mut db = SemanticDb::new();
+        let rev1 = make_revision(1);
+        let rev2 = make_revision(2);
+
+        db.set_component_surface("a.vue".into(), rev1, ComponentSurface::default());
+
+        // Query at newer revision → partial (stale)
+        let result = db.component_surface(&FileRef::new("a.vue"), rev2);
+        assert_eq!(result.completeness, Completeness::Partial);
+
+        // Update to rev2
+        db.set_component_surface("a.vue".into(), rev2, ComponentSurface::default());
+
+        // Now query at rev2 → complete
+        let result = db.component_surface(&FileRef::new("a.vue"), rev2);
+        assert!(result.is_complete());
+    }
 }

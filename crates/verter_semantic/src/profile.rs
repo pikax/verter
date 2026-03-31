@@ -217,4 +217,49 @@ mod tests {
         assert_ne!(bits & (1 << 26), 0, "should have CROSS_PROP_CONST");
         assert_ne!(bits & (1 << 13), 0, "should have TPL_CONSTNESS");
     }
+
+    #[test]
+    fn lint_includes_vue_api_usage() {
+        let bits = QueryProfile::Lint.recommended_analysis_scope_bits();
+        assert_ne!(bits & (1 << 5), 0, "should have VUE_API_USAGE");
+        // Negative: no export signatures (not needed for lint)
+        assert_eq!(bits & (1 << 6), 0, "should NOT have EXPORT_SIGNATURES");
+    }
+
+    #[test]
+    fn mcp_is_comprehensive() {
+        let bits = QueryProfile::Mcp.recommended_analysis_scope_bits();
+        // MCP needs everything for explanations
+        assert_ne!(bits & (1 << 4), 0, "should have MACRO_TYPE_DEPS");
+        assert_ne!(bits & (1 << 5), 0, "should have VUE_API_USAGE");
+        assert_ne!(bits & (1 << 6), 0, "should have EXPORT_SIGNATURES");
+        assert_ne!(bits & (1 << 16), 0, "should have STYLE_CSS");
+        assert_ne!(bits & (1 << 26), 0, "should have CROSS_PROP_CONST");
+    }
+
+    #[test]
+    fn component_meta_includes_macros_and_template() {
+        let bits = QueryProfile::ComponentMeta.recommended_analysis_scope_bits();
+        assert_ne!(bits & (1 << 3), 0, "should have MACROS");
+        assert_ne!(bits & (1 << 4), 0, "should have MACRO_TYPE_DEPS");
+        assert_ne!(bits & (1 << 8), 0, "should have TPL_COMPONENTS");
+        // Negative: no style CSS analysis needed for meta
+        assert_eq!(bits & (1 << 16), 0, "should NOT have STYLE_CSS");
+    }
+
+    #[test]
+    fn all_profiles_include_imports() {
+        for profile in [
+            QueryProfile::Build,
+            QueryProfile::BuildOptimized,
+            QueryProfile::LspInteractive,
+            QueryProfile::LspBackground,
+            QueryProfile::Lint,
+            QueryProfile::Mcp,
+            QueryProfile::ComponentMeta,
+        ] {
+            let bits = profile.recommended_analysis_scope_bits();
+            assert_ne!(bits & (1 << 0), 0, "{profile:?} should include IMPORTS");
+        }
+    }
 }
