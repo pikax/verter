@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn extract_cache_query_component_surface_cycle() {
         use crate::extract::extract_component_surface;
-        use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot};
+        use crate::input::{AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot};
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -583,14 +583,14 @@ mod tests {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
-            prop_fields: vec![verter_analysis::types::AnalyzedPropField {
+            prop_fields: vec![crate::input::AnalyzedPropField {
                 name: "title".into(),
                 is_optional: false,
                 span: Span::new(20, 25),
                 type_annotation: Some("string".into()),
                 description: None,
                 tags: Vec::new(),
-                resolution_source: verter_analysis::types::TypeResolutionSource::Rust,
+                resolution_source: crate::input::TypeResolutionSource::Rust,
                 resolution_error: None,
             }],
             emit_fields: Vec::new(),
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn extract_cache_query_cross_file_cycle() {
         use crate::extract::{extract_component_surface, extract_import_graph};
-        use verter_analysis::types::{
+        use crate::input::{
             AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
             ImportBindingKind, ScriptAnalysisSnapshot,
         };
@@ -642,14 +642,14 @@ mod tests {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
-            prop_fields: vec![verter_analysis::types::AnalyzedPropField {
+            prop_fields: vec![crate::input::AnalyzedPropField {
                 name: "label".into(),
                 is_optional: true,
                 span: Span::new(10, 15),
                 type_annotation: Some("string".into()),
                 description: None,
                 tags: Vec::new(),
-                resolution_source: verter_analysis::types::TypeResolutionSource::Rust,
+                resolution_source: crate::input::TypeResolutionSource::Rust,
                 resolution_error: None,
             }],
             emit_fields: Vec::new(),
