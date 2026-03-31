@@ -194,4 +194,54 @@ mod tests {
         assert_eq!(r.completeness, Completeness::Unavailable);
         assert!(!r.is_complete());
     }
+
+    #[test]
+    fn stale_ref_flag() {
+        let mut r = QueryResult::complete(10, RevisionMarker::initial());
+        assert!(!r.stale_ref);
+        r.stale_ref = true;
+        assert!(r.stale_ref);
+        // Still complete even with stale ref
+        assert!(r.is_complete());
+    }
+
+    #[test]
+    fn semantic_evaluation_partial_carries_both_dep_lists() {
+        use crate::revision::DependencyKind;
+        let deps = vec![SemanticDependency {
+            kind: DependencyKind::ParserSnapshot,
+            key: "a.vue".into(),
+            revision: 1,
+        }];
+        let missing = vec![SemanticDependency {
+            kind: DependencyKind::ProviderSnapshot,
+            key: "tsgo".into(),
+            revision: 0,
+        }];
+        let eval = SemanticEvaluation::partial(42, deps.clone(), missing.clone());
+        assert_eq!(eval.completeness, Completeness::Partial);
+        assert_eq!(eval.dependencies.len(), 1);
+        assert_eq!(eval.missing_dependencies.len(), 1);
+
+        // Promote to QueryResult
+        let result = eval.into_query_result(RevisionMarker::initial());
+        assert_eq!(result.completeness, Completeness::Partial);
+        assert_eq!(result.missing_inputs.len(), 1);
+        assert_eq!(result.missing_inputs[0].key, "tsgo");
+    }
+
+    #[test]
+    fn map_on_partial_preserves_completeness() {
+        use crate::revision::DependencyKind;
+        let missing = vec![SemanticDependency {
+            kind: DependencyKind::WorkspaceResolution,
+            key: "ext".into(),
+            revision: 0,
+        }];
+        let r = QueryResult::partial(10, RevisionMarker::initial(), missing);
+        let mapped = r.map(|v| v.to_string());
+        assert_eq!(mapped.value, "10");
+        assert_eq!(mapped.completeness, Completeness::Partial);
+        assert_eq!(mapped.missing_inputs.len(), 1);
+    }
 }

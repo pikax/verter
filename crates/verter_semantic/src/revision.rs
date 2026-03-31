@@ -122,4 +122,53 @@ mod tests {
         };
         assert_ne!(d1, d3);
     }
+
+    #[test]
+    fn revision_marker_serializes() {
+        let r = RevisionMarker {
+            workspace_revision: 5,
+            parser_revision: 10,
+            compiler_revision: 3,
+            provider_revision: 1,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RevisionMarker = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn is_newer_detects_provider_advance() {
+        let base = RevisionMarker::initial();
+        let newer = RevisionMarker {
+            provider_revision: 1,
+            ..base
+        };
+        assert!(newer.is_newer_than(&base));
+    }
+
+    #[test]
+    fn is_newer_detects_compiler_advance() {
+        let base = RevisionMarker::initial();
+        let newer = RevisionMarker {
+            compiler_revision: 1,
+            ..base
+        };
+        assert!(newer.is_newer_than(&base));
+    }
+
+    #[test]
+    fn all_dependency_kinds_distinct() {
+        let kinds = [
+            DependencyKind::WorkspaceResolution,
+            DependencyKind::ParserSnapshot,
+            DependencyKind::CompilerIr,
+            DependencyKind::ProviderSnapshot,
+            DependencyKind::SemanticFact,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
 }

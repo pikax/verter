@@ -115,4 +115,55 @@ mod tests {
         let back: ComponentRef = serde_json::from_str(&json).unwrap();
         assert_eq!(r, back);
     }
+
+    #[test]
+    fn symbol_ref_serializes() {
+        let r = SymbolRef {
+            file_id: "utils.ts".into(),
+            symbol_key: "fn_0".into(),
+            display_name: "formatDate".into(),
+            span: Span::new(100, 110),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: SymbolRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn route_ref_serializes() {
+        let r = RouteRef {
+            file_id: "routes.ts".into(),
+            route_key: "home".into(),
+            span: Span::new(50, 70),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RouteRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn computed_ref_serializes() {
+        let r = ComputedRef {
+            file_id: "store.ts".into(),
+            computed_key: "computed_0".into(),
+            name: "fullName".into(),
+            span: Span::new(200, 208),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ComputedRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn refs_use_span_not_offsets() {
+        // Verify refs carry Span (SFC-absolute), not raw u32 offsets
+        let b = BindingRef {
+            file_id: "f.vue".into(),
+            binding_key: "k".into(),
+            name: "x".into(),
+            span: Span::new(10, 15),
+        };
+        assert_eq!(b.span.start, 10);
+        assert_eq!(b.span.end, 15);
+    }
 }

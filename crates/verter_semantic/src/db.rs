@@ -416,4 +416,151 @@ mod tests {
         // Positive: unavailable — no import graph cached
         assert_eq!(result.completeness, Completeness::Unavailable);
     }
+
+    // ── Binding cache tests ────────────────────────────────────────────────
+
+    #[test]
+    fn set_and_query_bindings() {
+        use crate::facts::binding::{BindingDeclaration, BindingKind};
+        use crate::facts::reactivity::ReactivityFact;
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        let bindings = vec![(
+            BindingDeclaration {
+                name: "count".into(),
+                kind: BindingKind::Const,
+                span: Span::new(10, 15),
+                usages: vec![],
+            },
+            ReactivityFact::non_reactive(),
+        )];
+
+        db.set_bindings("app.vue".into(), rev, bindings);
+
+        let file = FileRef::new("app.vue");
+        let result = db.bindings(&file, rev);
+        assert!(result.is_complete());
+        let b = result.value.unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].0.name, "count");
+    }
+
+    #[test]
+    fn bindings_stale_revision_returns_partial() {
+        use crate::facts::binding::{BindingDeclaration, BindingKind};
+        use crate::facts::reactivity::ReactivityFact;
+
+        let mut db = SemanticDb::new();
+        let rev1 = make_revision(1);
+        let rev2 = make_revision(2);
+
+        db.set_bindings(
+            "app.vue".into(),
+            rev1,
+            vec![(
+                BindingDeclaration {
+                    name: "x".into(),
+                    kind: BindingKind::Const,
+                    span: Span::new(0, 1),
+                    usages: vec![],
+                },
+                ReactivityFact::non_reactive(),
+            )],
+        );
+
+        let result = db.bindings(&FileRef::new("app.vue"), rev2);
+        assert_eq!(result.completeness, Completeness::Partial);
+        assert!(result.value.is_some()); // stale data still returned
+    }
+
+    // ── Import graph cache tests ───────────────────────────────────────────
+
+    #[test]
+    fn set_and_query_import_graph() {
+        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        let graph = FileImportGraph {
+            imports: vec![ImportedSymbol {
+                local_name: "Foo".into(),
+                source_specifier: "./foo".into(),
+                resolved_file_id: Some("/src/foo.ts".into()),
+                exported_name: "Foo".into(),
+                kind: ImportKind::Named,
+                is_type_only: false,
+                span: Span::new(10, 13),
+            }],
+            import_sources: vec!["/src/foo.ts".into()],
+        };
+
+        db.set_import_graph("app.vue".into(), rev, graph);
+        let result = db.import_graph(&FileRef::new("app.vue"), rev);
+        assert!(result.is_complete());
+        let g = result.value.unwrap();
+        assert_eq!(g.imports.len(), 1);
+        assert_eq!(g.imports[0].local_name, "Foo");
+    }
+
+    #[test]
+    fn import_graph_missing_returns_unavailable() {
+        let db = SemanticDb::new();
+        let result = db.import_graph(&FileRef::new("missing.vue"), make_revision(1));
+        assert_eq!(result.completeness, Completeness::Unavailable);
+    }
+
+    // ── Multi-fact per file ────────────────────────────────────────────────
+
+    #[test]
+    fn surface_and_bindings_independent_within_file() {
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        db.set_component_surface("app.vue".into(), rev, ComponentSurface::default());
+
+        // Bindings not set yet → unavailable
+        let b_result = db.bindings(&FileRef::new("app.vue"), rev);
+        // Surface is set
+        let s_result = db.component_surface(&FileRef::new("app.vue"), rev);
+
+        assert!(s_result.is_complete());
+        // Bindings were not set, but the file entry exists with None bindings
+        assert!(b_result.is_complete()); // complete with None value
+        assert!(b_result.value.is_none());
+    }
+
+    #[test]
+    fn invalidate_clears_all_facts() {
+        use crate::facts::symbol::FileImportGraph;
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        db.set_component_surface("a.vue".into(), rev, ComponentSurface::default());
+        db.set_bindings("a.vue".into(), rev, vec![]);
+        db.set_import_graph("a.vue".into(), rev, FileImportGraph::default());
+
+        assert_eq!(db.cached_file_count(), 1);
+
+        db.invalidate("a.vue");
+        assert_eq!(db.cached_file_count(), 0);
+
+        // All queries return unavailable
+        let file = FileRef::new("a.vue");
+        assert_eq!(
+            db.component_surface(&file, rev).completeness,
+            Completeness::Unavailable
+        );
+        assert_eq!(
+            db.bindings(&file, rev).completeness,
+            Completeness::Unavailable
+        );
+        assert_eq!(
+            db.import_graph(&file, rev).completeness,
+            Completeness::Unavailable
+        );
+    }
 }
