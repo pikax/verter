@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use crate::facts::binding::BindingDeclaration;
 use crate::facts::component::ComponentSurface;
 use crate::facts::reactivity::ReactivityFact;
-use crate::query::{Completeness, QueryResult};
+use crate::query::QueryResult;
 use crate::refs::FileRef;
 use crate::revision::RevisionMarker;
 
@@ -128,7 +128,8 @@ impl SemanticDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facts::component::{DeclaredSurface, PropFact};
+    use crate::facts::component::PropFact;
+    use crate::query::Completeness;
     use verter_span::Span;
 
     fn make_revision(ws: u64) -> RevisionMarker {

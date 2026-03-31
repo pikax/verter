@@ -409,6 +409,18 @@ impl VerterHost {
         self.workspace.read().clone()
     }
 
+    /// Current semantic revision marker based on session state.
+    fn semantic_revision(&self) -> verter_semantic::revision::RevisionMarker {
+        verter_semantic::revision::RevisionMarker {
+            workspace_revision: self
+                .store_view_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            parser_revision: self.tick.load(std::sync::atomic::Ordering::Relaxed),
+            compiler_revision: 0,
+            provider_revision: 0,
+        }
+    }
+
     /// Query the component surface for a file via the semantic DB.
     ///
     /// Extracts the declared surface from the file's script analysis,
@@ -423,17 +435,8 @@ impl VerterHost {
     > {
         use verter_semantic::query::QueryResult;
         use verter_semantic::refs::FileRef;
-        use verter_semantic::revision::RevisionMarker;
 
-        let revision = RevisionMarker {
-            workspace_revision: self
-                .store_view_epoch
-                .load(std::sync::atomic::Ordering::Relaxed),
-            parser_revision: self.tick.load(std::sync::atomic::Ordering::Relaxed),
-            compiler_revision: 0,
-            provider_revision: 0,
-        };
-
+        let revision = self.semantic_revision();
         let file_ref = FileRef::new(canonical_id);
 
         // Check cache first
@@ -481,17 +484,8 @@ impl VerterHost {
     > {
         use verter_semantic::query::QueryResult;
         use verter_semantic::refs::FileRef;
-        use verter_semantic::revision::RevisionMarker;
 
-        let revision = RevisionMarker {
-            workspace_revision: self
-                .store_view_epoch
-                .load(std::sync::atomic::Ordering::Relaxed),
-            parser_revision: self.tick.load(std::sync::atomic::Ordering::Relaxed),
-            compiler_revision: 0,
-            provider_revision: 0,
-        };
-
+        let revision = self.semantic_revision();
         let file_ref = FileRef::new(canonical_id);
 
         // Check cache first

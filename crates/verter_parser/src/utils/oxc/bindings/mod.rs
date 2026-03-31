@@ -19,7 +19,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use verter_core::utils::bindings::{extract_bindings_from_expression, BindingContext};
+//! use verter_parser::utils::bindings::{extract_bindings_from_expression, BindingContext};
 //!
 //! let allocator = Allocator::default();
 //! let parser = Parser::new(&allocator, "foo + bar", SourceType::tsx());

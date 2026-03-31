@@ -9,7 +9,7 @@
 //! from the `script_detector` module, which is re-exported at the cursor level.
 //!
 //! ```
-//! use verter_core::cursor::ScriptDetector;
+//! use verter_parser::cursor::ScriptDetector;
 //!
 //! let detector = ScriptDetector::new();
 //! let result = detector.detect(b"<script lang=\"ts\"></script>");

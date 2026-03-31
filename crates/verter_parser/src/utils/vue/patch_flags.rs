@@ -10,7 +10,7 @@
  * AND (`&`), e.g.
  *
  * ```rust
- * # use verter_core::utils::vue::patch_flags::PatchFlags;
+ * # use verter_parser::utils::vue::patch_flags::PatchFlags;
  * let flag = PatchFlags::Text
  *     .into_flag()
  *     .add(PatchFlags::Class);
@@ -144,7 +144,7 @@ pub enum PatchFlags {
      * When checking for a special flag, always compare using equality:
      *
      * ```rust,no_run
-     * # use verter_core::utils::vue::patch_flags::PatchFlags;
+     * # use verter_parser::utils::vue::patch_flags::PatchFlags;
      * # let patch_flag = PatchFlags::Cached.into_flag();
      * if patch_flag.is(PatchFlags::Cached) { /* ... */ }
      * ```
@@ -490,14 +490,14 @@ impl PatchFlag {
  * This allows:
  *
  * ```rust
- * # use verter_core::utils::vue::patch_flags::{PatchFlags, TEXT};
+ * # use verter_parser::utils::vue::patch_flags::{PatchFlags, TEXT};
  * let flag = TEXT.add(PatchFlags::Class);
  * ```
  *
  * or:
  *
  * ```rust
- * # use verter_core::utils::vue::patch_flags::{TEXT, CLASS};
+ * # use verter_parser::utils::vue::patch_flags::{TEXT, CLASS};
  * let flag = TEXT.union(CLASS);
  * ```
  */

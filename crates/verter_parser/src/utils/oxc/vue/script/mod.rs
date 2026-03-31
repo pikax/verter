@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use verter_core::syntax::plugins::analysis::plugins::script::{
+//! use verter_parser::syntax::plugins::analysis::plugins::script::{
 //!     parse_script, ScriptMode, ScriptParseResult,
 //! };
 //!

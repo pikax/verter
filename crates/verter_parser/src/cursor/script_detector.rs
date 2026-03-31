@@ -122,7 +122,7 @@ pub struct DetectResult {
 /// # Example
 ///
 /// ```
-/// use verter_core::cursor::ScriptDetector;
+/// use verter_parser::cursor::ScriptDetector;
 ///
 /// let detector = ScriptDetector::new();
 /// let vue_file = b"<template><div>Hello</div></template>\n<script setup lang=\"ts\">\n</script>";
