@@ -211,4 +211,44 @@ mod tests {
         let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
         assert_eq!(report.status, SsrReadinessStatus::Incompatible);
     }
+
+    // ── Plan-required SSR coverage ─────────────────────────────────────────
+
+    #[test]
+    fn mixed_safe_and_unsafe_bindings() {
+        // Plan: "conditional/incompatible SSR cases"
+        let bindings = vec![
+            make_binding("count"),    // safe
+            make_binding("message"),  // safe
+            make_binding("document"), // unsafe
+            make_binding("computed"), // safe
+        ];
+        let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
+        assert_eq!(report.status, SsrReadinessStatus::Incompatible);
+        // Positive: only document flagged
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].binding_name, "document");
+    }
+
+    #[test]
+    fn alert_confirm_prompt_detected() {
+        for name in &["alert", "confirm", "prompt"] {
+            let bindings = vec![make_binding(name)];
+            let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
+            assert_eq!(
+                report.status,
+                SsrReadinessStatus::Incompatible,
+                "{name} should be detected as browser-only"
+            );
+        }
+    }
+
+    #[test]
+    fn match_media_and_get_computed_style_detected() {
+        for name in &["matchMedia", "getComputedStyle"] {
+            let bindings = vec![make_binding(name)];
+            let report = analyze_ssr_readiness(&bindings, &FileImportGraph::default());
+            assert_eq!(report.status, SsrReadinessStatus::Incompatible);
+        }
+    }
 }

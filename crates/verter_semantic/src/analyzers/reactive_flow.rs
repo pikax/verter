@@ -327,4 +327,111 @@ mod tests {
         // Negative: used in style v-bind → not unused
         assert!(issues.is_empty());
     }
+
+    // ── Plan-required reactivity coverage ──────────────────────────────────
+
+    #[test]
+    fn destructuring_from_props_shows_loss() {
+        // Plan: "destructuring with and without toRefs"
+        let decl = make_decl("msg", vec![template_usage()]);
+        let fact = ReactivityFact {
+            status: ReactivityStatus::NonReactive,
+            source: Some(ReactivitySource::Props),
+            trace: vec![
+                ProvenanceStep {
+                    kind: ProvenanceStepKind::Source,
+                    span: Span::new(5, 20),
+                    description: "const props = defineProps<{msg: string}>()".into(),
+                },
+                ProvenanceStep {
+                    kind: ProvenanceStepKind::Destructure,
+                    span: Span::new(25, 45),
+                    description: "const { msg } = props".into(),
+                },
+                ProvenanceStep {
+                    kind: ProvenanceStepKind::Loss,
+                    span: Span::new(25, 45),
+                    description: "destructuring without toRefs loses reactivity".into(),
+                },
+            ],
+        };
+        let issues = analyze_reactive_flow(&[(decl, fact)]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, ReactiveFlowIssueKind::ReactivityLoss);
+        assert!(issues[0].explanation.contains("toRefs"));
+    }
+
+    #[test]
+    fn computed_from_ref_no_loss() {
+        // Plan: "computed() dependencies sourced from refs"
+        let decl = make_decl("doubled", vec![template_usage()]);
+        let fact = ReactivityFact {
+            status: ReactivityStatus::Reactive,
+            source: Some(ReactivitySource::Computed),
+            trace: vec![
+                ProvenanceStep {
+                    kind: ProvenanceStepKind::Source,
+                    span: Span::new(10, 40),
+                    description: "computed(() => count.value * 2)".into(),
+                },
+                ProvenanceStep {
+                    kind: ProvenanceStepKind::EffectRead,
+                    span: Span::new(25, 36),
+                    description: "reads count (ref)".into(),
+                },
+            ],
+        };
+        let issues = analyze_reactive_flow(&[(decl, fact)]);
+        // Negative: computed from ref is clean
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn composable_return_conservative_downgrade() {
+        // Plan: "conservative downgrade behavior for dynamic/open-ended cases"
+        let decl = make_decl("data", vec![template_usage()]);
+        let fact = ReactivityFact {
+            status: ReactivityStatus::MaybeReactive,
+            source: None,
+            trace: vec![ProvenanceStep {
+                kind: ProvenanceStepKind::Source,
+                span: Span::new(10, 30),
+                description: "useFetch('/api')".into(),
+            }],
+        };
+        let issues = analyze_reactive_flow(&[(decl, fact)]);
+        // Positive: flags as possibly non-reactive when used in template
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, ReactiveFlowIssueKind::PossiblyNonReactive);
+    }
+
+    #[test]
+    fn store_ref_no_loss() {
+        // Plan: "computed() dependencies sourced from stores"
+        let decl = make_decl("count", vec![template_usage()]);
+        let fact = ReactivityFact {
+            status: ReactivityStatus::Reactive,
+            source: Some(ReactivitySource::StoreToRefs),
+            trace: vec![ProvenanceStep {
+                kind: ProvenanceStepKind::Source,
+                span: Span::new(10, 40),
+                description: "storeToRefs(useCounterStore())".into(),
+            }],
+        };
+        let issues = analyze_reactive_flow(&[(decl, fact)]);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn inject_reactive_no_loss() {
+        // Plan: "computed() dependencies sourced from injects"
+        let decl = make_decl("theme", vec![template_usage()]);
+        let fact = ReactivityFact {
+            status: ReactivityStatus::Reactive,
+            source: Some(ReactivitySource::Inject),
+            trace: vec![],
+        };
+        let issues = analyze_reactive_flow(&[(decl, fact)]);
+        assert!(issues.is_empty());
+    }
 }

@@ -382,4 +382,87 @@ mod tests {
         let issues = analyze_boundary(&edge, &surface);
         assert!(issues.is_empty());
     }
+
+    // ── Plan-required boundary coverage ────────────────────────────────────
+
+    #[test]
+    fn v_model_unmatched_event_is_unknown() {
+        // Plan: "unknown models"
+        let edge = make_edge("Input", vec![], vec!["update:value"]);
+        let surface = make_surface(vec![], vec![]); // no models, no events
+        let issues = analyze_boundary(&edge, &surface);
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, BoundaryIssueKind::UnknownEvent);
+        assert_eq!(issues[0].member_name, "update:value");
+    }
+
+    #[test]
+    fn multiple_models_matched_correctly() {
+        let edge = make_edge(
+            "Form",
+            vec![],
+            vec!["update:firstName", "update:lastName", "update:email"],
+        );
+        let mut surface = make_surface(vec![], vec![]);
+        surface.declared.models.push(ModelFact {
+            name: "firstName".into(),
+            type_text: None,
+            span: Span::new(0, 10),
+        });
+        surface.declared.models.push(ModelFact {
+            name: "lastName".into(),
+            type_text: None,
+            span: Span::new(10, 20),
+        });
+        // email model NOT declared
+        let issues = analyze_boundary(&edge, &surface);
+
+        // Positive: only email is unknown
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].member_name, "update:email");
+    }
+
+    #[test]
+    fn all_props_passed_no_missing() {
+        let edge = make_edge("Card", vec!["title", "body", "footer"], vec![]);
+        let surface = make_surface(
+            vec![("title", false), ("body", false), ("footer", false)],
+            vec![],
+        );
+        let issues = analyze_boundary(&edge, &surface);
+        assert!(issues.is_empty(), "all required props passed: {issues:?}");
+    }
+
+    #[test]
+    fn issue_spans_match_edge_usage_span() {
+        let edge = make_edge("Comp", vec!["bad"], vec![]);
+        let surface = make_surface(vec![], vec![]);
+        let issues = analyze_boundary(&edge, &surface);
+
+        // Positive: span comes from the edge
+        assert_eq!(issues[0].usage_span, Span::new(100, 150));
+    }
+
+    #[test]
+    fn mixed_optional_required_only_required_reported() {
+        let edge = make_edge("Comp", vec![], vec![]);
+        let surface = make_surface(
+            vec![
+                ("opt1", true),
+                ("req1", false),
+                ("opt2", true),
+                ("req2", false),
+            ],
+            vec![],
+        );
+        let issues = analyze_boundary(&edge, &surface);
+        assert_eq!(issues.len(), 2);
+        let names: Vec<_> = issues.iter().map(|i| i.member_name.as_str()).collect();
+        assert!(names.contains(&"req1"));
+        assert!(names.contains(&"req2"));
+        // Negative: optional props not reported
+        assert!(!names.contains(&"opt1"));
+        assert!(!names.contains(&"opt2"));
+    }
 }

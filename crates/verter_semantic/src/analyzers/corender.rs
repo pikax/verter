@@ -126,4 +126,40 @@ mod tests {
         let report = analyze_co_renderability("a.vue", "b.vue", false, false, false);
         assert!(!report.reason.is_empty());
     }
+
+    // ── Plan-required co-renderability coverage ────────────────────────────
+
+    #[test]
+    fn both_exclusive_and_disjoint_still_exclusive() {
+        // Plan: "v-if/else exclusivity" combined with "disjoint routes"
+        let report = analyze_co_renderability("a.vue", "b.vue", false, true, true);
+        assert_eq!(report.status, CoRenderabilityStatus::MutuallyExclusive);
+    }
+
+    #[test]
+    fn shared_parent_not_in_branches_is_definite() {
+        // Plan: "shared subtree cases"
+        let report = analyze_co_renderability("sidebar.vue", "main.vue", true, false, false);
+        assert_eq!(report.status, CoRenderabilityStatus::Definite);
+        assert!(report.reason.contains("common parent"));
+    }
+
+    #[test]
+    fn unknown_dynamic_degrades_to_possible() {
+        // Plan: "unknown dynamic boundaries" → conservative downgrade
+        let report =
+            analyze_co_renderability("unknown_a.vue", "unknown_b.vue", false, false, false);
+        assert_eq!(report.status, CoRenderabilityStatus::Possible);
+        // Negative: not Definite or MutuallyExclusive
+        assert_ne!(report.status, CoRenderabilityStatus::Definite);
+        assert_ne!(report.status, CoRenderabilityStatus::MutuallyExclusive);
+    }
+
+    #[test]
+    fn symmetric_result() {
+        // Co-renderability should be symmetric: A,B == B,A
+        let ab = analyze_co_renderability("a.vue", "b.vue", true, false, false);
+        let ba = analyze_co_renderability("b.vue", "a.vue", true, false, false);
+        assert_eq!(ab.status, ba.status);
+    }
 }

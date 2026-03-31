@@ -245,4 +245,66 @@ mod tests {
         let report = classify_bleed_issues(&issues, true);
         assert_eq!(report.issues[0].severity, BleedSeverity::TraceOnly);
     }
+
+    // ── Plan-required CSS bleed coverage ────────────────────────────────────
+
+    #[test]
+    fn mixed_scoped_and_global_escape() {
+        // Plan: "mixed scoped/global escape cases"
+        let scoped = detect_bleed_from_scope(
+            "a.vue",
+            StyleScopeKind::Scoped,
+            &[(".safe", Span::new(10, 15))],
+        );
+        let global_escape = detect_bleed_from_scope(
+            "a.vue",
+            StyleScopeKind::GlobalEscape,
+            &[(".leaked", Span::new(20, 27))],
+        );
+
+        // Negative: scoped block has no bleed
+        assert!(scoped.is_empty());
+        // Positive: global escape has likely bleed
+        assert_eq!(global_escape.len(), 1);
+        assert_eq!(global_escape[0].likelihood, CssBleedLikelihood::Likely);
+    }
+
+    #[test]
+    fn classify_empty_issues() {
+        let report = classify_bleed_issues(&[], true);
+        assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn multiple_issues_mixed_severities() {
+        let issues = vec![
+            CssBleedIssue {
+                selector: ".a".into(),
+                source_file_id: "x.vue".into(),
+                likelihood: CssBleedLikelihood::Definite,
+                scope_kind: StyleScopeKind::Global,
+                span: Span::new(0, 2),
+            },
+            CssBleedIssue {
+                selector: ".b".into(),
+                source_file_id: "x.vue".into(),
+                likelihood: CssBleedLikelihood::Likely,
+                scope_kind: StyleScopeKind::GlobalEscape,
+                span: Span::new(5, 7),
+            },
+            CssBleedIssue {
+                selector: ".c".into(),
+                source_file_id: "x.vue".into(),
+                likelihood: CssBleedLikelihood::Possible,
+                scope_kind: StyleScopeKind::Global,
+                span: Span::new(10, 12),
+            },
+        ];
+
+        let report = classify_bleed_issues(&issues, true);
+        assert_eq!(report.issues.len(), 3);
+        assert_eq!(report.issues[0].severity, BleedSeverity::Warning);
+        assert_eq!(report.issues[1].severity, BleedSeverity::Hint);
+        assert_eq!(report.issues[2].severity, BleedSeverity::TraceOnly);
+    }
 }
