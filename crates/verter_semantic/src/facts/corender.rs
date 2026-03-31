@@ -45,4 +45,26 @@ mod tests {
         let back: CoRenderabilityStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, back);
     }
+
+    #[test]
+    fn all_statuses_round_trip() {
+        for status in [
+            CoRenderabilityStatus::Definite,
+            CoRenderabilityStatus::Possible,
+            CoRenderabilityStatus::MutuallyExclusive,
+            CoRenderabilityStatus::Unknown,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: CoRenderabilityStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn definite_is_not_mutually_exclusive() {
+        assert_ne!(
+            CoRenderabilityStatus::Definite,
+            CoRenderabilityStatus::MutuallyExclusive
+        );
+    }
 }

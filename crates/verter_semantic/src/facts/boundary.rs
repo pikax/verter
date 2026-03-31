@@ -92,4 +92,53 @@ mod tests {
         // Negative: no default on inject
         assert!(!inject.has_default);
     }
+
+    #[test]
+    fn edge_with_spread_flags() {
+        let edge = ComponentInstanceEdge {
+            parent_file_id: "p.vue".into(),
+            child_file_id: None,
+            tag_name: "Comp".into(),
+            usage_span: Span::new(0, 10),
+            passed_props: vec![],
+            passed_events: vec![],
+            passed_slots: vec![],
+            has_spread: true,
+            has_event_spread: true,
+        };
+        assert!(edge.has_spread);
+        assert!(edge.has_event_spread);
+        assert!(edge.child_file_id.is_none());
+    }
+
+    #[test]
+    fn inject_with_default() {
+        let inject = InjectSite {
+            file_id: "c.vue".into(),
+            key: "config".into(),
+            has_default: true,
+            span: Span::new(10, 20),
+        };
+        assert!(inject.has_default);
+    }
+
+    #[test]
+    fn edge_serializes() {
+        let edge = ComponentInstanceEdge {
+            parent_file_id: "p.vue".into(),
+            child_file_id: Some("c.vue".into()),
+            tag_name: "Button".into(),
+            usage_span: Span::new(50, 100),
+            passed_props: vec!["color".into()],
+            passed_events: vec!["click".into()],
+            passed_slots: vec!["default".into()],
+            has_spread: false,
+            has_event_spread: false,
+        };
+        let json = serde_json::to_string(&edge).unwrap();
+        let back: ComponentInstanceEdge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tag_name, "Button");
+        assert_eq!(back.passed_props, vec!["color"]);
+        assert_eq!(back.passed_events, vec!["click"]);
+    }
 }

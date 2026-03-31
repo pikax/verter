@@ -60,4 +60,31 @@ mod tests {
             assert_eq!(status, back);
         }
     }
+
+    #[test]
+    fn route_reachability_round_trips() {
+        for status in [
+            RouteReachabilityStatus::Reachable,
+            RouteReachabilityStatus::Conditional,
+            RouteReachabilityStatus::Unreachable,
+            RouteReachabilityStatus::Unknown,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: RouteReachabilityStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn ssr_conditional_is_distinct_from_others() {
+        assert_ne!(
+            SsrReadinessStatus::Conditional,
+            SsrReadinessStatus::Compatible
+        );
+        assert_ne!(
+            SsrReadinessStatus::Conditional,
+            SsrReadinessStatus::Incompatible
+        );
+        assert_ne!(SsrReadinessStatus::Conditional, SsrReadinessStatus::Unknown);
+    }
 }

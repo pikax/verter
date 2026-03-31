@@ -118,4 +118,58 @@ mod tests {
         assert_ne!(BindingKind::Import, BindingKind::TypeImport);
         assert_ne!(BindingKind::Function, BindingKind::AsyncFunction);
     }
+
+    #[test]
+    fn binding_declaration_serializes() {
+        let decl = BindingDeclaration {
+            name: "msg".into(),
+            kind: BindingKind::Const,
+            span: Span::new(0, 3),
+            usages: vec![],
+        };
+        let json = serde_json::to_string(&decl).unwrap();
+        assert!(json.contains("msg"));
+        let back: BindingDeclaration = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "msg");
+        assert_eq!(back.kind, BindingKind::Const);
+    }
+
+    #[test]
+    fn all_usage_kinds_distinct() {
+        let kinds = [
+            UsageKind::Read,
+            UsageKind::Write,
+            UsageKind::Call,
+            UsageKind::MemberAccess,
+            UsageKind::Destructure,
+            UsageKind::Spread,
+            UsageKind::TemplateInterpolation,
+            UsageKind::TemplateDirective,
+            UsageKind::StyleVBind,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+
+    #[test]
+    fn all_usage_blocks_distinct() {
+        assert_ne!(UsageBlock::Script, UsageBlock::Template);
+        assert_ne!(UsageBlock::Template, UsageBlock::Style);
+        assert_ne!(UsageBlock::Script, UsageBlock::Style);
+    }
+
+    #[test]
+    fn binding_with_no_usages() {
+        let decl = BindingDeclaration {
+            name: "unused".into(),
+            kind: BindingKind::Let,
+            span: Span::new(0, 6),
+            usages: vec![],
+        };
+        assert!(decl.usages.is_empty());
+        assert_eq!(decl.kind, BindingKind::Let);
+    }
 }

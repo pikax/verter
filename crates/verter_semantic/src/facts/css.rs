@@ -96,4 +96,49 @@ mod tests {
             assert_eq!(kind, back);
         }
     }
+
+    #[test]
+    fn class_flow_fact_serializes() {
+        let fact = ClassFlowFact {
+            class_name: "header".into(),
+            source_file_id: "a.vue".into(),
+            target_file_id: "b.vue".into(),
+            certainty: ClassFlowCertainty::Definite,
+            span: Span::new(10, 20),
+        };
+        let json = serde_json::to_string(&fact).unwrap();
+        let back: ClassFlowFact = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.class_name, "header");
+        assert_eq!(back.certainty, ClassFlowCertainty::Definite);
+    }
+
+    #[test]
+    fn css_bleed_issue_serializes() {
+        let issue = CssBleedIssue {
+            selector: ".foo".into(),
+            source_file_id: "a.vue".into(),
+            likelihood: CssBleedLikelihood::Likely,
+            scope_kind: StyleScopeKind::GlobalEscape,
+            span: Span::new(5, 9),
+        };
+        let json = serde_json::to_string(&issue).unwrap();
+        let back: CssBleedIssue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.selector, ".foo");
+        assert_eq!(back.likelihood, CssBleedLikelihood::Likely);
+    }
+
+    #[test]
+    fn all_bleed_likelihoods_distinct() {
+        let all = [
+            CssBleedLikelihood::Definite,
+            CssBleedLikelihood::Likely,
+            CssBleedLikelihood::Possible,
+            CssBleedLikelihood::Unknown,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
 }
