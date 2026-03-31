@@ -7,3 +7,4 @@
 pub mod binding;
 pub mod component;
 pub mod reactivity;
+pub mod symbol;

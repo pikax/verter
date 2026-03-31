@@ -14,6 +14,7 @@ use rustc_hash::FxHashMap;
 use crate::facts::binding::BindingDeclaration;
 use crate::facts::component::ComponentSurface;
 use crate::facts::reactivity::ReactivityFact;
+use crate::facts::symbol::FileImportGraph;
 use crate::query::QueryResult;
 use crate::refs::FileRef;
 use crate::revision::RevisionMarker;
@@ -27,6 +28,8 @@ struct FileSemantic {
     component_surface: Option<ComponentSurface>,
     /// Cached binding declarations with reactivity facts.
     bindings: Option<Vec<(BindingDeclaration, ReactivityFact)>>,
+    /// Cached import graph for cross-file symbol resolution.
+    import_graph: Option<FileImportGraph>,
 }
 
 /// The semantic database.
@@ -76,6 +79,7 @@ impl SemanticDb {
             revision,
             component_surface: None,
             bindings: None,
+            import_graph: None,
         });
         entry.revision = revision;
         entry.component_surface = Some(surface);
@@ -109,9 +113,44 @@ impl SemanticDb {
             revision,
             component_surface: None,
             bindings: None,
+            import_graph: None,
         });
         entry.revision = revision;
         entry.bindings = Some(bindings);
+    }
+
+    /// Query the import graph for a file.
+    pub fn import_graph(
+        &self,
+        file_ref: &FileRef,
+        current_revision: RevisionMarker,
+    ) -> QueryResult<Option<FileImportGraph>> {
+        match self.files.get(&file_ref.file_id) {
+            Some(entry) if entry.revision == current_revision => {
+                QueryResult::complete(entry.import_graph.clone(), current_revision)
+            }
+            Some(entry) if current_revision.is_newer_than(&entry.revision) => {
+                QueryResult::partial(entry.import_graph.clone(), current_revision, vec![])
+            }
+            _ => QueryResult::unavailable(None, current_revision, vec![]),
+        }
+    }
+
+    /// Store a computed import graph for a file.
+    pub fn set_import_graph(
+        &mut self,
+        file_id: String,
+        revision: RevisionMarker,
+        graph: FileImportGraph,
+    ) {
+        let entry = self.files.entry(file_id).or_insert_with(|| FileSemantic {
+            revision,
+            component_surface: None,
+            bindings: None,
+            import_graph: None,
+        });
+        entry.revision = revision;
+        entry.import_graph = Some(graph);
     }
 
     /// Invalidate all cached facts for a file.

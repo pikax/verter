@@ -12,6 +12,7 @@ use crate::facts::component::{
     SlotFact,
 };
 use crate::facts::reactivity::{ReactivityFact, ReactivitySource, ReactivityStatus};
+use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
 
 /// Extract the declared component surface from a script analysis snapshot.
 ///
@@ -276,6 +277,54 @@ fn classify_source_from_initializer(
             }
         }
         _ => None,
+    }
+}
+
+// ── Import graph extraction ────────────────────────────────────────────────
+
+/// Extract the file's import graph from a script analysis snapshot.
+///
+/// Converts `AnalyzedImport` entries into semantic `ImportedSymbol` facts
+/// with resolved canonical file IDs (when available from the host).
+pub fn extract_import_graph(analysis: &ScriptAnalysisSnapshot) -> FileImportGraph {
+    let mut imports = Vec::new();
+    let mut source_set = rustc_hash::FxHashSet::default();
+
+    for imp in &analysis.imports {
+        if let Some(ref cid) = imp.resolved_canonical_id {
+            source_set.insert(cid.clone());
+        }
+
+        for binding in &imp.bindings {
+            let kind = match binding.kind {
+                verter_analysis::types::ImportBindingKind::Named => ImportKind::Named,
+                verter_analysis::types::ImportBindingKind::Default => ImportKind::Default,
+                verter_analysis::types::ImportBindingKind::Namespace => ImportKind::Namespace,
+            };
+
+            let exported_name = match binding.kind {
+                verter_analysis::types::ImportBindingKind::Default => "default".to_string(),
+                _ => binding
+                    .imported_name
+                    .clone()
+                    .unwrap_or_else(|| binding.name.clone()),
+            };
+
+            imports.push(ImportedSymbol {
+                local_name: binding.name.clone(),
+                source_specifier: imp.source.clone(),
+                resolved_file_id: imp.resolved_canonical_id.clone(),
+                exported_name,
+                kind,
+                is_type_only: imp.is_type_only || binding.is_type_only,
+                span: binding.span,
+            });
+        }
+    }
+
+    FileImportGraph {
+        imports,
+        import_sources: source_set.into_iter().collect(),
     }
 }
 
@@ -628,5 +677,132 @@ mod tests {
 
         // Positive: source enriched from initializer even though ReactivityKind is None
         assert_eq!(bindings[0].1.source, Some(ReactivitySource::Ref));
+    }
+
+    // ── Import graph extraction tests ──────────────────────────────────────
+
+    #[test]
+    fn extract_import_graph_empty() {
+        let snapshot = make_snapshot(vec![]);
+        let graph = extract_import_graph(&snapshot);
+        assert!(graph.imports.is_empty());
+        assert!(graph.import_sources.is_empty());
+        assert!(!graph.has_unresolved());
+    }
+
+    #[test]
+    fn extract_import_graph_named_imports() {
+        use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+
+        let mut snapshot = make_snapshot(vec![]);
+        snapshot.imports = vec![AnalyzedImport {
+            source: "./types".to_string(),
+            is_type_only: false,
+            bindings: vec![
+                AnalyzedImportBinding {
+                    name: "Foo".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
+                    is_type_only: true,
+                    vue_api: None,
+                    span: Span::new(10, 13),
+                },
+                AnalyzedImportBinding {
+                    name: "bar".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: Some("originalBar".to_string()),
+                    is_type_only: false,
+                    vue_api: None,
+                    span: Span::new(15, 18),
+                },
+            ],
+            span: Span::new(0, 30),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+        }];
+
+        let graph = extract_import_graph(&snapshot);
+
+        // Positive: both symbols extracted
+        assert_eq!(graph.imports.len(), 2);
+        assert_eq!(graph.imports[0].local_name, "Foo");
+        assert_eq!(graph.imports[0].exported_name, "Foo"); // no rename
+        assert!(graph.imports[0].is_type_only);
+        assert_eq!(graph.imports[0].kind, ImportKind::Named);
+
+        // Positive: renamed import preserves original name
+        assert_eq!(graph.imports[1].local_name, "bar");
+        assert_eq!(graph.imports[1].exported_name, "originalBar");
+        assert!(!graph.imports[1].is_type_only);
+
+        // Positive: source tracked
+        assert_eq!(graph.import_sources.len(), 1);
+        assert!(graph.import_sources.contains(&"/src/types.ts".to_string()));
+
+        // Negative: no unresolved
+        assert!(!graph.has_unresolved());
+    }
+
+    #[test]
+    fn extract_import_graph_default_import() {
+        use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+
+        let mut snapshot = make_snapshot(vec![]);
+        snapshot.imports = vec![AnalyzedImport {
+            source: "./App.vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "App".to_string(),
+                kind: ImportBindingKind::Default,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(7, 10),
+            }],
+            span: Span::new(0, 30),
+            resolved_canonical_id: Some("/src/App.vue".to_string()),
+        }];
+
+        let graph = extract_import_graph(&snapshot);
+
+        assert_eq!(graph.imports.len(), 1);
+        assert_eq!(graph.imports[0].kind, ImportKind::Default);
+        assert_eq!(graph.imports[0].exported_name, "default");
+        assert_eq!(
+            graph.imports[0].resolved_file_id.as_deref(),
+            Some("/src/App.vue")
+        );
+    }
+
+    #[test]
+    fn extract_import_graph_unresolved_source() {
+        use verter_analysis::types::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+
+        let mut snapshot = make_snapshot(vec![]);
+        snapshot.imports = vec![AnalyzedImport {
+            source: "external-pkg".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "ext".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(10, 13),
+            }],
+            span: Span::new(0, 30),
+            resolved_canonical_id: None,
+        }];
+
+        let graph = extract_import_graph(&snapshot);
+
+        // Positive: symbol extracted
+        assert_eq!(graph.imports.len(), 1);
+        assert!(graph.imports[0].resolved_file_id.is_none());
+
+        // Positive: unresolved detected
+        assert!(graph.has_unresolved());
+
+        // Negative: no sources in set since none resolved
+        assert!(graph.import_sources.is_empty());
     }
 }
