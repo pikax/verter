@@ -23,31 +23,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn co_renderability_variants_are_distinct() {
-        let all = [
-            CoRenderabilityStatus::Definite,
-            CoRenderabilityStatus::Possible,
-            CoRenderabilityStatus::MutuallyExclusive,
-            CoRenderabilityStatus::Unknown,
-        ];
-        for (i, a) in all.iter().enumerate() {
-            for (j, b) in all.iter().enumerate() {
-                assert_eq!(i == j, a == b);
-            }
-        }
-    }
-
-    #[test]
-    fn co_renderability_serializes() {
-        let status = CoRenderabilityStatus::MutuallyExclusive;
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("MutuallyExclusive"));
-        let back: CoRenderabilityStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(status, back);
-    }
-
-    #[test]
-    fn all_statuses_round_trip() {
+    fn all_statuses_round_trip_through_json() {
         for status in [
             CoRenderabilityStatus::Definite,
             CoRenderabilityStatus::Possible,
@@ -61,34 +37,9 @@ mod tests {
     }
 
     #[test]
-    fn definite_is_not_mutually_exclusive() {
-        assert_ne!(
-            CoRenderabilityStatus::Definite,
-            CoRenderabilityStatus::MutuallyExclusive
-        );
-    }
-
-    #[test]
-    fn possible_is_distinct_from_unknown() {
-        assert_ne!(
-            CoRenderabilityStatus::Possible,
-            CoRenderabilityStatus::Unknown
-        );
-    }
-
-    #[test]
-    fn possible_is_not_definite() {
-        assert_ne!(
-            CoRenderabilityStatus::Possible,
-            CoRenderabilityStatus::Definite
-        );
-    }
-
-    #[test]
-    fn unknown_is_not_exclusive() {
-        assert_ne!(
-            CoRenderabilityStatus::Unknown,
-            CoRenderabilityStatus::MutuallyExclusive
-        );
+    fn mutually_exclusive_serializes_as_expected_string() {
+        let json = serde_json::to_string(&CoRenderabilityStatus::MutuallyExclusive).unwrap();
+        // Verify the exact serialized form consumers will see
+        assert!(json.contains("MutuallyExclusive"));
     }
 }

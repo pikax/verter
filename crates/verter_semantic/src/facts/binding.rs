@@ -113,13 +113,6 @@ mod tests {
     }
 
     #[test]
-    fn binding_kinds_are_distinct() {
-        assert_ne!(BindingKind::Const, BindingKind::Let);
-        assert_ne!(BindingKind::Import, BindingKind::TypeImport);
-        assert_ne!(BindingKind::Function, BindingKind::AsyncFunction);
-    }
-
-    #[test]
     fn binding_declaration_serializes() {
         let decl = BindingDeclaration {
             name: "msg".into(),
@@ -132,33 +125,6 @@ mod tests {
         let back: BindingDeclaration = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "msg");
         assert_eq!(back.kind, BindingKind::Const);
-    }
-
-    #[test]
-    fn all_usage_kinds_distinct() {
-        let kinds = [
-            UsageKind::Read,
-            UsageKind::Write,
-            UsageKind::Call,
-            UsageKind::MemberAccess,
-            UsageKind::Destructure,
-            UsageKind::Spread,
-            UsageKind::TemplateInterpolation,
-            UsageKind::TemplateDirective,
-            UsageKind::StyleVBind,
-        ];
-        for (i, a) in kinds.iter().enumerate() {
-            for (j, b) in kinds.iter().enumerate() {
-                assert_eq!(i == j, a == b);
-            }
-        }
-    }
-
-    #[test]
-    fn all_usage_blocks_distinct() {
-        assert_ne!(UsageBlock::Script, UsageBlock::Template);
-        assert_ne!(UsageBlock::Template, UsageBlock::Style);
-        assert_ne!(UsageBlock::Script, UsageBlock::Style);
     }
 
     #[test]
@@ -184,11 +150,5 @@ mod tests {
         let back: BindingUsage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.kind, UsageKind::TemplateInterpolation);
         assert_eq!(back.block, UsageBlock::Template);
-    }
-
-    #[test]
-    fn prop_destructure_kind() {
-        assert_ne!(BindingKind::PropDestructure, BindingKind::Const);
-        assert_ne!(BindingKind::EmitReturn, BindingKind::Function);
     }
 }

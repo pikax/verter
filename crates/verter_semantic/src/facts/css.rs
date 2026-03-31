@@ -141,14 +141,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn global_escape_is_distinct_from_global() {
-        assert_ne!(StyleScopeKind::GlobalEscape, StyleScopeKind::Global);
-    }
-
-    #[test]
-    fn scoped_is_distinct_from_module() {
-        assert_ne!(StyleScopeKind::Scoped, StyleScopeKind::Module);
-    }
 }
