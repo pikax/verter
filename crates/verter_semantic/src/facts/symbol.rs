@@ -175,4 +175,25 @@ mod tests {
         assert_ne!(sym.kind, ImportKind::Named);
         assert_ne!(sym.kind, ImportKind::Namespace);
     }
+
+    #[test]
+    fn imported_symbol_serializes() {
+        let sym = make_import("Foo", "./foo", Some("/src/foo.ts"));
+        let json = serde_json::to_string(&sym).unwrap();
+        let back: ImportedSymbol = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.local_name, "Foo");
+        assert_eq!(back.resolved_file_id.as_deref(), Some("/src/foo.ts"));
+    }
+
+    #[test]
+    fn file_import_graph_serializes() {
+        let graph = FileImportGraph {
+            imports: vec![make_import("X", "./x", Some("/x.ts"))],
+            import_sources: vec!["/x.ts".into()],
+        };
+        let json = serde_json::to_string(&graph).unwrap();
+        let back: FileImportGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.imports.len(), 1);
+        assert_eq!(back.import_sources.len(), 1);
+    }
 }

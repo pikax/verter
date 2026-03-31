@@ -172,4 +172,23 @@ mod tests {
         assert!(decl.usages.is_empty());
         assert_eq!(decl.kind, BindingKind::Let);
     }
+
+    #[test]
+    fn usage_serializes() {
+        let usage = BindingUsage {
+            kind: UsageKind::TemplateInterpolation,
+            span: Span::new(100, 105),
+            block: UsageBlock::Template,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let back: BindingUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, UsageKind::TemplateInterpolation);
+        assert_eq!(back.block, UsageBlock::Template);
+    }
+
+    #[test]
+    fn prop_destructure_kind() {
+        assert_ne!(BindingKind::PropDestructure, BindingKind::Const);
+        assert_ne!(BindingKind::EmitReturn, BindingKind::Function);
+    }
 }

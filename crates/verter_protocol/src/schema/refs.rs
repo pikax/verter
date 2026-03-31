@@ -77,4 +77,32 @@ mod tests {
         assert!(json.contains("\"componentKey\""));
         assert!(json.contains("\"exportName\""));
     }
+
+    #[test]
+    fn file_ref_dto_round_trip() {
+        let dto = FileRefDto {
+            file_id: "/src/App.vue".into(),
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: FileRefDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(dto, back);
+    }
+
+    #[test]
+    fn binding_ref_dto_camel_case() {
+        let dto = BindingRefDto {
+            file_id: "f.vue".into(),
+            binding_key: "k".into(),
+            name: "x".into(),
+            span_start: 0,
+            span_end: 1,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"bindingKey\""));
+        assert!(json.contains("\"spanStart\""));
+        assert!(json.contains("\"spanEnd\""));
+        // Negative: no snake_case
+        assert!(!json.contains("\"binding_key\""));
+        assert!(!json.contains("\"span_start\""));
+    }
 }

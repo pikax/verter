@@ -87,4 +87,36 @@ mod tests {
         );
         assert_ne!(SsrReadinessStatus::Conditional, SsrReadinessStatus::Unknown);
     }
+
+    #[test]
+    fn route_unreachable_is_distinct() {
+        assert_ne!(
+            RouteReachabilityStatus::Unreachable,
+            RouteReachabilityStatus::Unknown
+        );
+        assert_ne!(
+            RouteReachabilityStatus::Unreachable,
+            RouteReachabilityStatus::Reachable
+        );
+    }
+
+    #[test]
+    fn route_conditional_is_distinct() {
+        assert_ne!(
+            RouteReachabilityStatus::Conditional,
+            RouteReachabilityStatus::Reachable
+        );
+        assert_ne!(
+            RouteReachabilityStatus::Conditional,
+            RouteReachabilityStatus::Unreachable
+        );
+    }
+
+    #[test]
+    fn ssr_compatible_is_distinct() {
+        assert_ne!(
+            SsrReadinessStatus::Compatible,
+            SsrReadinessStatus::Incompatible
+        );
+    }
 }

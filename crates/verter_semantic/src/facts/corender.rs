@@ -67,4 +67,28 @@ mod tests {
             CoRenderabilityStatus::MutuallyExclusive
         );
     }
+
+    #[test]
+    fn possible_is_distinct_from_unknown() {
+        assert_ne!(
+            CoRenderabilityStatus::Possible,
+            CoRenderabilityStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn possible_is_not_definite() {
+        assert_ne!(
+            CoRenderabilityStatus::Possible,
+            CoRenderabilityStatus::Definite
+        );
+    }
+
+    #[test]
+    fn unknown_is_not_exclusive() {
+        assert_ne!(
+            CoRenderabilityStatus::Unknown,
+            CoRenderabilityStatus::MutuallyExclusive
+        );
+    }
 }

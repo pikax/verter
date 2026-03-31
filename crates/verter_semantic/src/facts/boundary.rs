@@ -141,4 +141,30 @@ mod tests {
         assert_eq!(back.passed_props, vec!["color"]);
         assert_eq!(back.passed_events, vec!["click"]);
     }
+
+    #[test]
+    fn provide_site_serializes() {
+        let site = ProvideSite {
+            file_id: "app.vue".into(),
+            key: "theme".into(),
+            span: Span::new(10, 30),
+        };
+        let json = serde_json::to_string(&site).unwrap();
+        let back: ProvideSite = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.key, "theme");
+    }
+
+    #[test]
+    fn inject_site_serializes() {
+        let site = InjectSite {
+            file_id: "child.vue".into(),
+            key: "config".into(),
+            has_default: true,
+            span: Span::new(5, 15),
+        };
+        let json = serde_json::to_string(&site).unwrap();
+        let back: InjectSite = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.key, "config");
+        assert!(back.has_default);
+    }
 }

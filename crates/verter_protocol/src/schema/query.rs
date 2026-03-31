@@ -115,4 +115,24 @@ mod tests {
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"staleRef\":true"));
     }
+
+    #[test]
+    fn completeness_dto_values() {
+        assert_ne!(CompletenessDto::Complete, CompletenessDto::Partial);
+        assert_ne!(CompletenessDto::Partial, CompletenessDto::Unavailable);
+        assert_ne!(CompletenessDto::Complete, CompletenessDto::Unavailable);
+    }
+
+    #[test]
+    fn revision_marker_dto_round_trip() {
+        let dto = RevisionMarkerDto {
+            workspace_revision: 42,
+            parser_revision: 7,
+            compiler_revision: 3,
+            provider_revision: 1,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: RevisionMarkerDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(dto, back);
+    }
 }
