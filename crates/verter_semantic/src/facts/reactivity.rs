@@ -190,4 +190,71 @@ mod tests {
         // Negative: result is NonReactive despite Props source
         assert_eq!(fact.status, ReactivityStatus::NonReactive);
     }
+
+    #[test]
+    fn all_reactivity_sources_distinct() {
+        let sources = [
+            ReactivitySource::Ref,
+            ReactivitySource::Reactive,
+            ReactivitySource::Computed,
+            ReactivitySource::Readonly,
+            ReactivitySource::Props,
+            ReactivitySource::Inject,
+            ReactivitySource::Store,
+            ReactivitySource::Composable,
+            ReactivitySource::ToRef,
+            ReactivitySource::StoreToRefs,
+        ];
+        for (i, a) in sources.iter().enumerate() {
+            for (j, b) in sources.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+
+    #[test]
+    fn all_provenance_step_kinds_distinct() {
+        let kinds = [
+            ProvenanceStepKind::Source,
+            ProvenanceStepKind::Alias,
+            ProvenanceStepKind::Projection,
+            ProvenanceStepKind::Destructure,
+            ProvenanceStepKind::Escape,
+            ProvenanceStepKind::Loss,
+            ProvenanceStepKind::EffectRead,
+            ProvenanceStepKind::Import,
+            ProvenanceStepKind::ReExport,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+
+    #[test]
+    fn reactivity_fact_serializes() {
+        let fact = ReactivityFact {
+            status: ReactivityStatus::Reactive,
+            source: Some(ReactivitySource::Computed),
+            trace: vec![ProvenanceStep {
+                kind: ProvenanceStepKind::Source,
+                span: Span::new(10, 40),
+                description: "computed(() => x.value * 2)".into(),
+            }],
+        };
+        let json = serde_json::to_string(&fact).unwrap();
+        let back: ReactivityFact = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, ReactivityStatus::Reactive);
+        assert_eq!(back.source, Some(ReactivitySource::Computed));
+        assert_eq!(back.trace.len(), 1);
+    }
+
+    #[test]
+    fn unknown_fact() {
+        let fact = ReactivityFact::unknown();
+        assert_eq!(fact.status, ReactivityStatus::Unknown);
+        assert!(fact.source.is_none());
+        assert!(fact.trace.is_empty());
+    }
 }

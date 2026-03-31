@@ -154,4 +154,52 @@ mod tests {
         let snap = FileSemanticSnapshot::empty("x.vue".into(), RevisionMarker::initial());
         assert!(snap.boundary_edges.is_empty());
     }
+
+    #[test]
+    fn find_binding_returns_none_for_empty() {
+        let snap = FileSemanticSnapshot::empty("x.vue".into(), RevisionMarker::initial());
+        assert!(snap.find_binding("anything").is_none());
+    }
+
+    #[test]
+    fn find_binding_matches_exact_name() {
+        use crate::facts::binding::{BindingDeclaration, BindingKind};
+        use crate::facts::reactivity::ReactivityFact;
+
+        let snap = FileSemanticSnapshot {
+            file_id: "x.vue".into(),
+            revision: RevisionMarker::initial(),
+            component_surface: None,
+            bindings: vec![
+                (
+                    BindingDeclaration {
+                        name: "count".into(),
+                        kind: BindingKind::Const,
+                        span: verter_span::Span::new(0, 5),
+                        usages: vec![],
+                    },
+                    ReactivityFact::non_reactive(),
+                ),
+                (
+                    BindingDeclaration {
+                        name: "counter".into(),
+                        kind: BindingKind::Const,
+                        span: verter_span::Span::new(10, 17),
+                        usages: vec![],
+                    },
+                    ReactivityFact::non_reactive(),
+                ),
+            ],
+            import_graph: FileImportGraph::default(),
+            boundary_edges: Vec::new(),
+        };
+
+        // Positive: exact match
+        assert!(snap.find_binding("count").is_some());
+        assert!(snap.find_binding("counter").is_some());
+
+        // Negative: partial match does NOT match (no string searching)
+        assert!(snap.find_binding("coun").is_none());
+        assert!(snap.find_binding("count1").is_none());
+    }
 }

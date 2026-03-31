@@ -190,4 +190,123 @@ mod tests {
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("\"trace\""));
     }
+
+    #[test]
+    fn prop_dto_round_trip() {
+        let prop = PropDto {
+            name: "size".into(),
+            is_optional: false,
+            type_text: Some("'sm' | 'md' | 'lg'".into()),
+            default_value: Some("'md'".into()),
+            description: Some("Button size".into()),
+            span_start: 10,
+            span_end: 50,
+        };
+        let json = serde_json::to_string(&prop).unwrap();
+        let back: PropDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "size");
+        assert!(!back.is_optional);
+        assert_eq!(back.type_text.as_deref(), Some("'sm' | 'md' | 'lg'"));
+    }
+
+    #[test]
+    fn event_dto_round_trip() {
+        let event = EventDto {
+            name: "update".into(),
+            payload_type: Some("[value: string]".into()),
+            description: None,
+            span_start: 30,
+            span_end: 40,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "update");
+        // Negative: no description in json
+        assert!(!json.contains("\"description\""));
+    }
+
+    #[test]
+    fn slot_dto_round_trip() {
+        let slot = SlotDto {
+            name: "header".into(),
+            is_required: true,
+            bindings: vec![SlotBindingDto {
+                name: "title".into(),
+                type_text: Some("string".into()),
+            }],
+            description: Some("Header area".into()),
+            span_start: 50,
+            span_end: 60,
+        };
+        let json = serde_json::to_string(&slot).unwrap();
+        let back: SlotDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "header");
+        assert!(back.is_required);
+        assert_eq!(back.bindings.len(), 1);
+    }
+
+    #[test]
+    fn model_dto_round_trip() {
+        let model = ModelDto {
+            name: "checked".into(),
+            type_text: Some("boolean".into()),
+            span_start: 0,
+            span_end: 20,
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        let back: ModelDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "checked");
+    }
+
+    #[test]
+    fn full_surface_round_trip() {
+        let surface = ComponentSurfaceDto {
+            props: vec![PropDto {
+                name: "color".into(),
+                is_optional: true,
+                type_text: Some("string".into()),
+                default_value: None,
+                description: None,
+                span_start: 0,
+                span_end: 10,
+            }],
+            events: vec![EventDto {
+                name: "click".into(),
+                payload_type: None,
+                description: None,
+                span_start: 20,
+                span_end: 30,
+            }],
+            slots: vec![],
+            models: vec![],
+            expose: vec![],
+            completeness: Some("exact".into()),
+            inherit_attrs_disabled: false,
+        };
+        let json = serde_json::to_string(&surface).unwrap();
+        let back: ComponentSurfaceDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.props.len(), 1);
+        assert_eq!(back.events.len(), 1);
+        assert_eq!(back.completeness.as_deref(), Some("exact"));
+        assert!(!back.inherit_attrs_disabled);
+    }
+
+    #[test]
+    fn reactivity_dto_with_trace_round_trip() {
+        let dto = ReactivityDto {
+            status: "reactive".into(),
+            source: Some("ref".into()),
+            trace: vec![ProvenanceStepDto {
+                kind: "source".into(),
+                description: "ref(0)".into(),
+                span_start: 10,
+                span_end: 15,
+            }],
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"trace\"")); // non-empty → included
+        let back: ReactivityDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.trace.len(), 1);
+        assert_eq!(back.trace[0].kind, "source");
+    }
 }

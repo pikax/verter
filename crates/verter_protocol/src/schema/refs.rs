@@ -61,4 +61,20 @@ mod tests {
         let back: BindingRefDto = serde_json::from_str(&json).unwrap();
         assert_eq!(dto, back);
     }
+
+    #[test]
+    fn component_ref_dto_round_trip() {
+        let dto = ComponentRefDto {
+            file_id: "button.vue".into(),
+            component_key: "default".into(),
+            export_name: "default".into(),
+            span_start: 0,
+            span_end: 100,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: ComponentRefDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(dto, back);
+        assert!(json.contains("\"componentKey\""));
+        assert!(json.contains("\"exportName\""));
+    }
 }

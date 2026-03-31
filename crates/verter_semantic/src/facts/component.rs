@@ -179,7 +179,6 @@ mod tests {
 
     #[test]
     fn root_reachability_variants() {
-        // Positive: all variants exist and are distinct
         let variants = [
             RootReachability::SingleNative,
             RootReachability::SingleComponent,
@@ -191,12 +190,81 @@ mod tests {
         ];
         for (i, a) in variants.iter().enumerate() {
             for (j, b) in variants.iter().enumerate() {
-                if i == j {
-                    assert_eq!(a, b);
-                } else {
-                    assert_ne!(a, b);
-                }
+                assert_eq!(i == j, a == b);
             }
         }
+    }
+
+    #[test]
+    fn component_surface_serializes() {
+        let mut surface = ComponentSurface::default();
+        surface.declared.props.push(PropFact {
+            name: "msg".into(),
+            is_optional: false,
+            type_text: Some("string".into()),
+            default_value: None,
+            description: Some("The message".into()),
+            span: Span::new(10, 20),
+        });
+        surface.declared.events.push(EventFact {
+            name: "click".into(),
+            payload_type: Some("[e: MouseEvent]".into()),
+            description: None,
+            span: Span::new(30, 40),
+        });
+        surface.inherit_attrs_disabled = true;
+
+        let json = serde_json::to_string(&surface).unwrap();
+        let back: ComponentSurface = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.declared.props[0].name, "msg");
+        assert_eq!(back.declared.events[0].name, "click");
+        assert!(back.inherit_attrs_disabled);
+    }
+
+    #[test]
+    fn prop_constness_variants() {
+        assert_ne!(PropConstness::AlwaysConst, PropConstness::SometimesDynamic);
+        assert_ne!(PropConstness::SometimesDynamic, PropConstness::Unknown);
+        assert_ne!(PropConstness::AlwaysConst, PropConstness::Unknown);
+    }
+
+    #[test]
+    fn slot_fact_with_bindings() {
+        let slot = SlotFact {
+            name: "header".into(),
+            is_required: true,
+            bindings: vec![
+                SlotBindingFact {
+                    name: "title".into(),
+                    type_text: Some("string".into()),
+                },
+                SlotBindingFact {
+                    name: "subtitle".into(),
+                    type_text: None,
+                },
+            ],
+            description: Some("Header slot".into()),
+            span: Span::new(50, 60),
+        };
+        assert_eq!(slot.bindings.len(), 2);
+        assert!(slot.is_required);
+        assert!(slot.bindings[1].type_text.is_none());
+    }
+
+    #[test]
+    fn model_fact_serializes() {
+        let model = ModelFact {
+            name: "modelValue".into(),
+            type_text: Some("string".into()),
+            span: Span::new(0, 20),
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        let back: ModelFact = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "modelValue");
+    }
+
+    #[test]
+    fn surface_completeness_variants() {
+        assert_ne!(SurfaceCompleteness::Exact, SurfaceCompleteness::LowerBound);
     }
 }

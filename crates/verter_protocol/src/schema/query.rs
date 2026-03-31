@@ -77,4 +77,42 @@ mod tests {
         assert!(json.contains("\"missingInputs\""));
         assert!(json.contains("provider:tsgo"));
     }
+
+    #[test]
+    fn unavailable_result_round_trip() {
+        let dto: QueryResultDto<Option<String>> = QueryResultDto {
+            value: None,
+            revision: RevisionMarkerDto {
+                workspace_revision: 0,
+                parser_revision: 0,
+                compiler_revision: 0,
+                provider_revision: 0,
+            },
+            completeness: CompletenessDto::Unavailable,
+            missing_inputs: vec!["parser:app.vue".into()],
+            stale_ref: false,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: QueryResultDto<Option<String>> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.completeness, CompletenessDto::Unavailable);
+        assert_eq!(back.missing_inputs.len(), 1);
+    }
+
+    #[test]
+    fn stale_ref_serializes() {
+        let dto = QueryResultDto {
+            value: 42,
+            revision: RevisionMarkerDto {
+                workspace_revision: 5,
+                parser_revision: 3,
+                compiler_revision: 0,
+                provider_revision: 0,
+            },
+            completeness: CompletenessDto::Complete,
+            missing_inputs: vec![],
+            stale_ref: true,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"staleRef\":true"));
+    }
 }
