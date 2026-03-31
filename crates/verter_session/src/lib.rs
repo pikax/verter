@@ -685,6 +685,23 @@ impl VerterHost {
     }
 
     /// Access the unified resolver runtime for counter reads and diagnostics.
+    /// Invalidate all cached semantic facts for a file.
+    ///
+    /// Called when the VFS reports a file change, a provider restarts,
+    /// or project config changes. This clears the semantic DB cache for
+    /// the given file, forcing re-extraction on the next query.
+    pub fn semantic_invalidate(&self, canonical_id: &str) {
+        self.semantic_db.lock().invalidate(canonical_id);
+    }
+
+    /// Invalidate all semantic caches (e.g., after provider restart).
+    ///
+    /// Per plan: "provider restart, backend switch, project-config change,
+    /// or external-type delta must invalidate dependent semantic queries."
+    pub fn semantic_invalidate_all(&self) {
+        *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
+    }
+
     pub fn resolver_runtime(
         &self,
     ) -> &verter_resolver::resolver_runtime::UnifiedResolverRuntime<
