@@ -958,4 +958,166 @@ mod tests {
         let b = db.bindings(&file, rev).value.unwrap();
         assert_eq!(b[0].0.name, "x");
     }
+
+    // ── End-to-end pipeline tests (extract → cache → analyze) ──────────────
+
+    #[test]
+    fn pipeline_extract_cache_boundary_analyze() {
+        // Full pipeline: create parent+child snapshots, extract, cache, analyze
+        use crate::analyzers::boundary::analyze_boundary;
+        use crate::extract::{
+            extract_boundary_edges, extract_component_surface, extract_import_graph,
+        };
+        use crate::input::{
+            AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
+            AnalyzedPropField, ImportBindingKind, ScriptAnalysisSnapshot, TypeResolutionSource,
+        };
+        use verter_analysis::TemplateAnalysisSnapshot;
+
+        let mut db = SemanticDb::new();
+        let rev = make_revision(1);
+
+        // Child: defineProps<{ color: string }>
+        let mut child_snap = ScriptAnalysisSnapshot::default();
+        child_snap.macros = vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: Vec::new(),
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![AnalyzedPropField {
+                name: "color".into(),
+                is_optional: false,
+                span: Span::new(20, 25),
+                type_annotation: Some("string".into()),
+                description: None,
+                tags: Vec::new(),
+                resolution_source: TypeResolutionSource::Rust,
+                resolution_error: None,
+            }],
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: Span::new(0, 50),
+        }];
+
+        // Extract and cache child surface
+        let child_surface = extract_component_surface(&child_snap);
+        db.set_component_surface("/child.vue".into(), rev, child_surface.clone());
+
+        // Parent: imports Child, uses <Child unknown-prop />
+        let mut parent_snap = ScriptAnalysisSnapshot::default();
+        parent_snap.imports = vec![AnalyzedImport {
+            source: "./child.vue".into(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Child".into(),
+                kind: ImportBindingKind::Default,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(7, 12),
+            }],
+            span: Span::new(0, 30),
+            resolved_canonical_id: Some("/child.vue".into()),
+        }];
+        let parent_graph = extract_import_graph(&parent_snap);
+        db.set_import_graph("/parent.vue".into(), rev, parent_graph.clone());
+
+        // Simulate template with <Child unknown-prop />
+        let mut template = TemplateAnalysisSnapshot::default();
+        template.components = vec![verter_analysis::TemplateComponentUsage {
+            name: "Child".into(),
+            import_source: Some("./child.vue".into()),
+            is_dynamic: false,
+            props: vec![verter_analysis::TemplatePropUsage {
+                name: "unknownProp".into(),
+                is_bound: false,
+                expression: None,
+                constness: verter_analysis::template::PropValueConstness::Const,
+                referenced_bindings: vec![],
+                from_spread: false,
+                span: Span::new(100, 111),
+                name_span: Span::new(100, 111),
+                is_shorthand: false,
+            }],
+            has_spread: false,
+            slots_used: vec![],
+            static_classes: vec![],
+            has_dynamic_class: false,
+            dynamic_classes: vec![],
+            v_models: vec![],
+            span: Span::new(90, 130),
+        }];
+
+        // Extract boundary edges
+        let edges = extract_boundary_edges("/parent.vue", &template, &parent_graph);
+        assert_eq!(edges.len(), 1);
+
+        // Run boundary analyzer
+        let issues = analyze_boundary(&edges[0], &child_surface);
+
+        // Positive: both unknown prop AND missing required detected
+        assert_eq!(issues.len(), 2);
+        let unknown: Vec<_> = issues
+            .iter()
+            .filter(|i| i.kind == crate::analyzers::boundary::BoundaryIssueKind::UnknownProp)
+            .collect();
+        let missing: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                i.kind == crate::analyzers::boundary::BoundaryIssueKind::MissingRequiredProp
+            })
+            .collect();
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].member_name, "unknownProp");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].member_name, "color");
+
+        // Cross-file resolution also works
+        let resolved = db.resolve_imported_component_surface("/parent.vue", "Child", rev);
+        assert!(resolved.is_complete());
+        assert_eq!(resolved.value.unwrap().declared.props[0].name, "color");
+    }
+
+    #[test]
+    fn pipeline_extract_cache_reactivity_analyze() {
+        // Full pipeline: extract bindings → analyze reactive flow
+        use crate::analyzers::reactive_flow::analyze_reactive_flow;
+        use crate::extract::extract_bindings;
+        use crate::input::{
+            AnalyzedBinding, AnalyzedBindingKind, ReactivityKind, ScriptAnalysisSnapshot,
+        };
+
+        let mut snapshot = ScriptAnalysisSnapshot::default();
+        snapshot.bindings = vec![AnalyzedBinding {
+            name: "count".into(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::Ref,
+            type_annotation: None,
+            initializer: None,
+            span: Span::new(10, 15),
+            used_in_script: false,
+            used_in_style: false,
+        }];
+
+        // Extract
+        let bindings = extract_bindings(&snapshot);
+        assert_eq!(bindings.len(), 1);
+
+        // Analyze reactive flow
+        let issues = analyze_reactive_flow(&bindings);
+
+        // Positive: reactive but unused → UnusedReactive
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].kind,
+            crate::analyzers::reactive_flow::ReactiveFlowIssueKind::UnusedReactive
+        );
+    }
 }
