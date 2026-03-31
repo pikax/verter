@@ -33,7 +33,7 @@ enum SplitResult {
 ///
 /// # Example
 /// ```ignore
-/// use verter_core::code_transform::CodeTransform;
+/// use verter_compiler::code_transform::CodeTransform;
 /// use oxc_allocator::Allocator;
 ///
 /// let allocator = Allocator::default();
@@ -560,7 +560,7 @@ impl<'a> CodeTransform<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// use verter_core::code_transform::CodeTransform;
+    /// use verter_compiler::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///
     /// let allocator = Allocator::default();
@@ -576,7 +576,7 @@ impl<'a> CodeTransform<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// use verter_core::code_transform::CodeTransform;
+    /// use verter_compiler::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///
     /// let allocator = Allocator::default();
@@ -598,7 +598,7 @@ impl<'a> CodeTransform<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// use verter_core::code_transform::CodeTransform;
+    /// use verter_compiler::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///
     /// let allocator = Allocator::default();
@@ -620,7 +620,7 @@ impl<'a> CodeTransform<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// use verter_core::code_transform::CodeTransform;
+    /// use verter_compiler::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///
     /// let allocator = Allocator::default();

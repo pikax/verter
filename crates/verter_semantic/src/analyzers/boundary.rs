@@ -139,9 +139,7 @@ fn is_always_forwarded_attr(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facts::component::{
-        ComponentSurface, DeclaredSurface, EventFact, ModelFact, PropFact,
-    };
+    use crate::facts::component::{ComponentSurface, EventFact, ModelFact, PropFact};
 
     fn make_edge(tag: &str, props: Vec<&str>, events: Vec<&str>) -> ComponentInstanceEdge {
         ComponentInstanceEdge {

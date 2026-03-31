@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use verter_core::code_transform::{CodeTransform, SourceMapOptions};
+//! use verter_compiler::code_transform::{CodeTransform, SourceMapOptions};
 //! use oxc_allocator::Allocator;
 //!
 //! // Create a transformer from source code
