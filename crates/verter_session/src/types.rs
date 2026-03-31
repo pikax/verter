@@ -124,6 +124,10 @@ pub struct HostConfig {
     /// - [`AnalysisScope::BUILD`](verter_analysis::AnalysisScope::BUILD) — minimal for compilation
     /// - [`AnalysisScope::LSP`](verter_analysis::AnalysisScope::LSP) — full for IDE features
     /// - [`AnalysisScope::LINTER`](verter_analysis::AnalysisScope::LINTER) — for lint rules
+    ///
+    /// **Migration**: Prefer [`QueryProfile`](verter_semantic::profile::QueryProfile) via
+    /// [`from_query_profile()`](Self::from_query_profile) which sets both this and the
+    /// session-level query profile automatically.
     pub analysis_scope: Option<verter_analysis::AnalysisScope>,
     /// Enable shared Rust-side generic root propagation for fallthrough resolution.
     ///
@@ -132,6 +136,21 @@ pub struct HostConfig {
     pub generic_root_propagation: bool,
     /// Type expansion backend: which backend resolves macro type parameters.
     pub type_expansion_backend: verter_resolver::type_expansion::TypeExpansionBackend,
+}
+
+impl HostConfig {
+    /// Create a config from a query profile.
+    ///
+    /// Sets `analysis_scope` from the profile's recommended scope mapping.
+    /// This is the preferred migration path from AnalysisScope to QueryProfile.
+    pub fn from_query_profile(profile: verter_semantic::profile::QueryProfile) -> Self {
+        let scope_bits = profile.recommended_analysis_scope_bits();
+        let scope = verter_analysis::AnalysisScope::from_bits_truncate(scope_bits);
+        Self {
+            analysis_scope: Some(scope),
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for HostConfig {
