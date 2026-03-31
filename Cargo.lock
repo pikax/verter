@@ -3850,6 +3850,7 @@ dependencies = [
  "verter_compiler",
  "verter_resolver",
  "verter_scheduler",
+ "verter_semantic",
  "verter_span",
  "verter_workspace",
  "web-time",

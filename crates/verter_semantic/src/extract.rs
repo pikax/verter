@@ -5,7 +5,6 @@
 
 use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 use verter_analysis::ScriptAnalysisSnapshot;
-use verter_span::Span;
 
 use crate::facts::component::{
     ComponentSurface, DeclaredSurface, EventFact, ExposeFact, ModelFact, PropFact, SlotBindingFact,

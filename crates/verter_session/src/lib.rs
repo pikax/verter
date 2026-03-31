@@ -296,6 +296,9 @@ pub struct VerterHost {
     /// Each entry is valid only for its exact whole_hash.
     pub(crate) imported_dependency_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<ImportedDependencyCacheEntry>>>,
+    /// Semantic query database: revision-gated caches for component surfaces,
+    /// binding facts, and reactivity provenance.
+    pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -350,6 +353,7 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
         }
     }
 
@@ -377,6 +381,7 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
         }
     }
 
@@ -402,6 +407,64 @@ impl VerterHost {
     /// Get a clone of the workspace Arc.
     pub fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
         self.workspace.read().clone()
+    }
+
+    /// Query the component surface for a file via the semantic DB.
+    ///
+    /// Extracts the declared surface from the file's script analysis,
+    /// caches it in the semantic DB, and returns a `QueryResult`.
+    /// Cross-file fallthrough is not resolved at this layer — the returned
+    /// accepted surface equals the declared surface.
+    pub fn semantic_component_surface(
+        &self,
+        canonical_id: &str,
+    ) -> verter_semantic::query::QueryResult<
+        Option<verter_semantic::facts::component::ComponentSurface>,
+    > {
+        use verter_semantic::query::QueryResult;
+        use verter_semantic::refs::FileRef;
+        use verter_semantic::revision::RevisionMarker;
+
+        let revision = RevisionMarker {
+            workspace_revision: self
+                .store_view_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            parser_revision: self.tick.load(std::sync::atomic::Ordering::Relaxed),
+            compiler_revision: 0,
+            provider_revision: 0,
+        };
+
+        let file_ref = FileRef::new(canonical_id);
+
+        // Check cache first
+        {
+            let db = self.semantic_db.lock();
+            let cached = db.component_surface(&file_ref, revision);
+            if cached.is_complete() {
+                return cached;
+            }
+        }
+
+        // Extract from analysis snapshot
+        #[cfg(feature = "scheduler")]
+        let analysis = self.scheduler_script_analysis(canonical_id);
+        #[cfg(not(feature = "scheduler"))]
+        let analysis: Option<verter_analysis::ScriptAnalysisSnapshot> = {
+            let files = self.files.read();
+            files
+                .get(canonical_id)
+                .and_then(|f| f.script_analysis.as_ref())
+                .map(|a| a.as_ref().clone())
+        };
+        let surface = analysis.map(|a| verter_semantic::extract::extract_component_surface(&a));
+
+        // Cache and return
+        if let Some(ref s) = surface {
+            let mut db = self.semantic_db.lock();
+            db.set_component_surface(canonical_id.to_string(), revision, s.clone());
+        }
+
+        QueryResult::complete(surface, revision)
     }
 
     /// Access the unified resolver runtime for counter reads and diagnostics.
