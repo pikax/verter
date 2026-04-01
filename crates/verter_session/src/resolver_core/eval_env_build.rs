@@ -5,8 +5,8 @@ use verter_semantic::analysis::type_eval::EvalEnv;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::AnalyzedMacro;
 
-use crate::fallthrough::inject_prop_type_overrides;
-use crate::ImportedEvalInputs;
+use crate::resolver_core::fallthrough::inject_prop_type_overrides;
+use crate::resolver_core::ImportedEvalInputs;
 
 pub struct OwnerEvalEnvBuild {
     pub env: EvalEnv,
@@ -95,7 +95,7 @@ mod tests {
     use super::{
         build_owner_eval_env_with_inputs, collect_requested_binding_names, OwnerEvalEnvAssembler,
     };
-    use crate::{ImportedEvalInputs, ImportedTypeAlias};
+    use crate::resolver_core::{ImportedEvalInputs, ImportedTypeAlias};
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -221,7 +221,7 @@ mod tests {
             ],
             canonical_dependencies: BTreeSet::new(),
             overflow: None,
-            stats: crate::ImportedEvalStats::default(),
+            stats: crate::resolver_core::ImportedEvalStats::default(),
         };
 
         let mut assembler = TestAssembler::default();
@@ -320,7 +320,7 @@ mod tests {
         );
 
         let imported_inputs = ImportedEvalInputs {
-            sources: vec![crate::ImportedEvalSource {
+            sources: vec![crate::resolver_core::ImportedEvalSource {
                 canonical_id: "/src/dep.ts".to_string(),
             }],
             type_aliases: vec![ImportedTypeAlias {
@@ -333,7 +333,7 @@ mod tests {
             }],
             canonical_dependencies: BTreeSet::new(),
             overflow: None,
-            stats: crate::ImportedEvalStats::default(),
+            stats: crate::resolver_core::ImportedEvalStats::default(),
         };
         assembler.type_aliases.insert(
             ("/src/dep.ts".to_string(), "Imported".to_string()),
@@ -459,7 +459,7 @@ mod tests {
                 type_aliases: Vec::new(),
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             None,
             None,
@@ -493,13 +493,13 @@ mod tests {
             &(),
             &[],
             &ImportedEvalInputs {
-                sources: vec![crate::ImportedEvalSource {
+                sources: vec![crate::resolver_core::ImportedEvalSource {
                     canonical_id: "/src/missing.ts".to_string(),
                 }],
                 type_aliases: Vec::new(),
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             None,
             None,

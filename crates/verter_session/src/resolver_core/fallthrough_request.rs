@@ -1,7 +1,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_expr::TypeExpr;
 
-use crate::{
+use crate::resolver_core::{
     fallthrough_cache_key, run_stable_request, FallthroughNodeKey, RequestRunResult,
     SingleflightGroup, StableExecutionValue, StableRequestExecutor, StoreView,
 };

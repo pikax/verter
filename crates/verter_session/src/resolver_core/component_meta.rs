@@ -10,7 +10,7 @@ use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
-use crate::{
+use crate::resolver_core::{
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
     surface_projector::{
         project_macro_surfaces_from_expanded_text, project_macro_surfaces_from_source_type_name,
@@ -152,7 +152,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         exported_name: &str,
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
-        cache: &mut crate::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedElements>;
 
@@ -162,7 +162,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         span: verter_span::Span,
         expanded: bool,
         tracked_deps: &mut BTreeSet<String>,
-        cache: &mut crate::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock>;
 
@@ -205,7 +205,7 @@ where
     let mut resolved_type_registry = Vec::new();
     let mut resolved_type_registry_meta = Vec::new();
     let mut seen_registry_names = FxHashSet::default();
-    let mut cache = crate::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = FxHashSet::default();
     let mut tracked_deps = BTreeSet::new();
 
@@ -422,7 +422,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::declaration_metadata::ResolvedExportTarget;
+    use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
     use verter_semantic::analysis::type_eval::DeclarationId;
     use verter_semantic::analysis::types::{
         AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, ResolvedLocalType,
@@ -440,7 +440,7 @@ mod tests {
         source: String,
     }
 
-    impl crate::DeclarationMetadataResolver for TestHost {
+    impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
         fn resolve_export_target(
             &self,
             _dep_canonical: &str,
@@ -514,7 +514,7 @@ mod tests {
             _exported_name: &str,
             _tracked_deps: &mut BTreeSet<String>,
             _resolution_deps: &mut BTreeSet<String>,
-            _cache: &mut crate::ExternalTypeBodyCache,
+            _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
             _visiting: &mut FxHashSet<(String, String)>,
         ) -> Option<ResolvedElements> {
             None
@@ -526,7 +526,7 @@ mod tests {
             _span: Span,
             _expanded: bool,
             _tracked_deps: &mut BTreeSet<String>,
-            _cache: &mut crate::ExternalTypeBodyCache,
+            _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
             _visiting: &mut FxHashSet<(String, String)>,
         ) -> Option<ResolvedJsdocBlock> {
             None

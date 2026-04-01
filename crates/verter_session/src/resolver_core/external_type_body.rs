@@ -12,7 +12,7 @@ pub struct ExternalTypeBodyCache {
     resolved: FxHashMap<(String, String), Option<ResolvedElements>>,
     source_analysis:
         FxHashMap<(String, verter_semantic::analysis::Hash16), AnalyzedExternalTypeSource>,
-    barrel_states: FxHashMap<String, crate::BarrelResolutionState>,
+    barrel_states: FxHashMap<String, crate::resolver_core::BarrelResolutionState>,
 }
 
 impl ExternalTypeBodyCache {
@@ -73,14 +73,17 @@ impl ExternalTypeBodyCache {
         }
     }
 
-    pub fn barrel_state(&self, barrel_canonical: &str) -> Option<&crate::BarrelResolutionState> {
+    pub fn barrel_state(
+        &self,
+        barrel_canonical: &str,
+    ) -> Option<&crate::resolver_core::BarrelResolutionState> {
         self.barrel_states.get(barrel_canonical)
     }
 
     pub fn store_barrel_state(
         &mut self,
         barrel_canonical: &str,
-        state: crate::BarrelResolutionState,
+        state: crate::resolver_core::BarrelResolutionState,
     ) {
         self.barrel_states
             .insert(barrel_canonical.to_string(), state);

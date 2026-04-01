@@ -1,9 +1,9 @@
 use super::*;
 use crate::meta::MetaProject;
+use crate::resolver_core::ComponentMetaRequestHost;
 use crate::types::{HostConfig, ResolverMode};
 use crate::VerterHost;
 use std::sync::Arc;
-use verter_resolver::ComponentMetaRequestHost;
 
 // ===========================================================================
 // Test helpers
@@ -53,7 +53,7 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
 
 fn resolved_imported_alias_body(
     host: &VerterHost,
-    alias: &verter_resolver::ImportedTypeAlias,
+    alias: &crate::resolver_core::ImportedTypeAlias,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
     let view = host.resolver_store_view();
     host.resolve_shallow_symbol_dependency_alias_in_view(

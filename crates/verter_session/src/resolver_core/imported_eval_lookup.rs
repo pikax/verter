@@ -7,7 +7,9 @@ use verter_semantic::analysis::type_eval::{
 use verter_semantic::analysis::type_expr::{FunctionExpr, TypeExpr};
 use verter_semantic::analysis::types::{AnalyzedImport, ImportBindingKind};
 
-use crate::{resolve_type_declaration, DeclarationMetadataResolver, ResolvedExportTarget};
+use crate::resolver_core::{
+    resolve_type_declaration, DeclarationMetadataResolver, ResolvedExportTarget,
+};
 
 #[derive(Debug, Clone)]
 pub struct ImportedTypeAliasResolveRequest {

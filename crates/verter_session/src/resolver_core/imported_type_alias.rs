@@ -9,7 +9,7 @@ use verter_semantic::analysis::type_expr::{
     PrimitiveName, TypeExpr, TypeParam,
 };
 
-use crate::{ImportedSymbolDependency, ImportedTypeAliasResolveRequest};
+use crate::resolver_core::{ImportedSymbolDependency, ImportedTypeAliasResolveRequest};
 
 struct PreparedLocalDeclBody {
     body: TypeExpr,

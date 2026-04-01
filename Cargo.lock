@@ -3637,7 +3637,7 @@ dependencies = [
  "serde",
  "verter_actions",
  "verter_diagnostics",
- "verter_resolver",
+ "verter_protocol",
  "verter_semantic",
  "verter_session",
  "verter_span",
@@ -3717,7 +3717,6 @@ dependencies = [
  "verter_diagnostics",
  "verter_ffi",
  "verter_protocol",
- "verter_resolver",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
@@ -3761,26 +3760,8 @@ dependencies = [
  "protoc-bin-vendored",
  "serde",
  "serde_json",
- "verter_ffi",
  "verter_semantic",
  "verter_span",
-]
-
-[[package]]
-name = "verter_resolver"
-version = "0.0.1-beta.1"
-dependencies = [
- "hotpath",
- "oxc_allocator",
- "oxc_parser",
- "oxc_span",
- "parking_lot",
- "rustc-hash 2.1.1",
- "verter_compiler",
- "verter_semantic",
- "verter_span",
- "verter_type_runtime",
- "verter_workspace",
 ]
 
 [[package]]
@@ -3839,10 +3820,10 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "verter_compiler",
- "verter_resolver",
  "verter_scheduler",
  "verter_semantic",
  "verter_span",
+ "verter_type_runtime",
  "verter_workspace",
  "web-time",
  "xxhash-rust",

@@ -11,7 +11,7 @@
 
 use verter_span::Span;
 
-use crate::type_expansion::TypeExpansionError;
+use crate::resolver_core::type_expansion::TypeExpansionError;
 
 // ---------------------------------------------------------------------------
 // Host Trait

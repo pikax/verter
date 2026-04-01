@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use prost::Message;
-use verter_ffi::graph::{
+use crate::graph::{
     GraphBuilder, GraphFunctionParam, GraphNode, GraphObjectMember, GraphTupleElement,
 };
-use verter_ffi::types::*;
+use crate::types::*;
+use prost::Message;
 use verter_semantic::analysis::type_expr::{
     empty_type_args, ObjectExpr, ObjectMember as TypeObjectMember, ObjectProperty, PrimitiveName,
     TypeExpr,
@@ -1433,6 +1433,9 @@ mod tests {
     use prost::Message;
 
     use super::{build_test_payload, ComponentMetaPayload};
+    use crate::graph::GraphBuilder;
+    use crate::types::FfiComponentMetaFlags;
+    use verter_semantic::analysis::type_expr::TypeExpr;
 
     #[test]
     fn component_meta_payload_roundtrips_recursive_graph() {
@@ -1479,6 +1482,32 @@ mod tests {
                 .unwrap_or_default(),
             0,
             "graph nodes should be present"
+        );
+    }
+
+    #[test]
+    fn protocol_owns_component_meta_schema_modules() {
+        let mut builder = GraphBuilder::new();
+        let node_id = builder.node_id(&TypeExpr::named("TreeNode"));
+        let flags = FfiComponentMetaFlags {
+            async_setup: false,
+            has_reactive_state: false,
+            has_computed: false,
+            has_watchers: false,
+            has_lifecycle_hooks: false,
+            has_provide: false,
+            has_inject: false,
+            has_inherit_attrs_false: false,
+            has_store_usage: false,
+        };
+
+        assert_eq!(
+            node_id, 1,
+            "protocol graph builder should remain locally usable"
+        );
+        assert!(
+            !flags.async_setup,
+            "protocol should compile the component-meta flag DTOs directly"
         );
     }
 }

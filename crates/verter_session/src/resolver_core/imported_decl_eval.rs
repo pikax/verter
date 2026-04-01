@@ -11,7 +11,9 @@ use verter_semantic::analysis::type_expr::{
 };
 use verter_semantic::analysis::{AnalyzedBinding, AnalyzedImport, AnalyzedMacro, MacroTypeDep};
 
-use crate::{choose_preferred_imported_type_body, ImportedEvalInputs, ImportedEvalOwnerSnapshot};
+use crate::resolver_core::{
+    choose_preferred_imported_type_body, ImportedEvalInputs, ImportedEvalOwnerSnapshot,
+};
 
 #[derive(Debug, Clone)]
 pub struct PreparedImportedDeclContext {
@@ -310,7 +312,7 @@ mod tests {
         evaluate_imported_decl_with_owner_env, materialize_imported_decl_with_owner_env,
         CachedEvaluatedImportedDecl, ImportedDeclEvalResolver, PreparedImportedDeclContext,
     };
-    use crate::{ImportedEvalInputs, ImportedEvalOverflow};
+    use crate::resolver_core::{ImportedEvalInputs, ImportedEvalOverflow};
     use rustc_hash::FxHashSet;
     use std::cell::RefCell;
     use std::collections::BTreeSet;
@@ -466,7 +468,7 @@ mod tests {
                     ["/src/dep.ts".to_string()].into_iter(),
                 ),
                 overflow: None,
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             cached: RefCell::new(std::collections::BTreeMap::new()),
             build_inputs_calls: RefCell::new(0),
@@ -519,7 +521,7 @@ mod tests {
                 overflow: Some(ImportedEvalOverflow {
                     message: "overflow".to_string(),
                 }),
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             cached: RefCell::new(std::collections::BTreeMap::new()),
             build_inputs_calls: RefCell::new(0),
@@ -578,7 +580,7 @@ mod tests {
                 type_aliases: Vec::new(),
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             cached: RefCell::new(std::collections::BTreeMap::new()),
             build_inputs_calls: RefCell::new(0),
@@ -683,7 +685,7 @@ mod tests {
                 type_aliases: Vec::new(),
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             cached: RefCell::new(std::collections::BTreeMap::new()),
             build_inputs_calls: RefCell::new(0),
@@ -756,7 +758,7 @@ mod tests {
                     ["/src/dep.ts".to_string()].into_iter(),
                 ),
                 overflow: None,
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             cached: RefCell::new(std::collections::BTreeMap::new()),
             build_inputs_calls: RefCell::new(0),
@@ -905,7 +907,7 @@ mod tests {
                 type_aliases: Vec::new(),
                 canonical_dependencies: BTreeSet::new(),
                 overflow: None,
-                stats: crate::ImportedEvalStats::default(),
+                stats: crate::resolver_core::ImportedEvalStats::default(),
             },
             cached: RefCell::new(std::collections::BTreeMap::new()),
             build_inputs_calls: RefCell::new(0),

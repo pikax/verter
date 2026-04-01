@@ -1,12 +1,12 @@
 use super::*;
-use std::collections::BTreeSet;
-use std::rc::Rc;
-use std::sync::Arc;
-use verter_resolver::{
+use crate::resolver_core::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
     should_attempt_owner_env_resolution, ImportedEvalCollectorResolver, ImportedEvalLookupResolver,
     ImportedEvalSourceMergeResolver,
 };
+use std::collections::BTreeSet;
+use std::rc::Rc;
+use std::sync::Arc;
 use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use verter_workspace::WorkspaceAccess;
 
@@ -64,7 +64,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
 
 fn resolved_imported_alias_body(
     host: &VerterHost,
-    alias: &verter_resolver::ImportedTypeAlias,
+    alias: &crate::resolver_core::ImportedTypeAlias,
 ) -> TypeExpr {
     let view = host.resolver_store_view();
     host.resolve_shallow_symbol_dependency_alias_in_view(
@@ -1738,7 +1738,7 @@ defineProps<Props>()
         Some(&view),
     );
     let mut deps = BTreeSet::new();
-    let evaluated = verter_resolver::evaluate_imported_decl_with_owner_env(
+    let evaluated = crate::resolver_core::evaluate_imported_decl_with_owner_env(
         &mut resolver,
         "/workspace/node_modules/vue-router/dist/index-typed.d.ts",
         "RouteLocationRaw",
@@ -1943,10 +1943,10 @@ defineProps<Props>()
     let mut resolver = HostImportedEvalResolver::new(&host, "/workspace/src/Link.vue", Some(&view));
     let mut deps = BTreeSet::new();
     let mut budget =
-        verter_resolver::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
-    let alias = verter_resolver::ImportedEvalCollectorResolver::collect_imported_type_alias(
+        crate::resolver_core::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
+    let alias = crate::resolver_core::ImportedEvalCollectorResolver::collect_imported_type_alias(
         &mut resolver,
-        verter_resolver::ImportedTypeAliasResolveRequest {
+        crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/workspace/src/Link.vue".to_string(),
             import_source: "vue-router".to_string(),
             local_name: "RouteLocationRaw".to_string(),
@@ -2420,7 +2420,7 @@ defineProps<Props>()
         &dep_resolutions,
         Some(&view),
     );
-    let evaluated = verter_resolver::evaluate_imported_decl_with_owner_env(
+    let evaluated = crate::resolver_core::evaluate_imported_decl_with_owner_env(
         &mut resolver,
         "/workspace/node_modules/pkg/dist/shared.d.ts",
         "Alpha",
@@ -3571,10 +3571,10 @@ defineProps<Props>()
     let mut resolver = HostImportedEvalResolver::new(&host, "/workspace/src/Link.vue", Some(&view));
     let mut deps = BTreeSet::new();
     let mut budget =
-        verter_resolver::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
-    let alias = verter_resolver::ImportedEvalCollectorResolver::collect_imported_type_alias(
+        crate::resolver_core::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
+    let alias = crate::resolver_core::ImportedEvalCollectorResolver::collect_imported_type_alias(
         &mut resolver,
-        verter_resolver::ImportedTypeAliasResolveRequest {
+        crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/workspace/src/Link.vue".to_string(),
             import_source: "vue-router".to_string(),
             local_name: "RouterLinkProps".to_string(),
@@ -4335,10 +4335,11 @@ fn collect_imported_type_alias_reuses_host_cached_prepared_alias_across_resolver
     let view = host.resolver_store_view();
     let mut resolver_a = HostImportedEvalResolver::new(&host, "/src/ConsumerA.ts", Some(&view));
     let mut deps_a = BTreeSet::new();
-    let mut budget_a = verter_resolver::ImportedEvalTraversalBudget::new("/src/ConsumerA.ts", 16);
+    let mut budget_a =
+        crate::resolver_core::ImportedEvalTraversalBudget::new("/src/ConsumerA.ts", 16);
     let alias_a = ImportedEvalCollectorResolver::collect_imported_type_alias(
         &mut resolver_a,
-        verter_resolver::ImportedTypeAliasResolveRequest {
+        crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/src/ConsumerA.ts".to_string(),
             import_source: "./types".to_string(),
             local_name: "LocalPropsA".to_string(),
@@ -4368,10 +4369,11 @@ fn collect_imported_type_alias_reuses_host_cached_prepared_alias_across_resolver
 
     let mut resolver_b = HostImportedEvalResolver::new(&host, "/src/ConsumerB.ts", Some(&view));
     let mut deps_b = BTreeSet::new();
-    let mut budget_b = verter_resolver::ImportedEvalTraversalBudget::new("/src/ConsumerB.ts", 16);
+    let mut budget_b =
+        crate::resolver_core::ImportedEvalTraversalBudget::new("/src/ConsumerB.ts", 16);
     let alias_b = ImportedEvalCollectorResolver::collect_imported_type_alias(
         &mut resolver_b,
-        verter_resolver::ImportedTypeAliasResolveRequest {
+        crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/src/ConsumerB.ts".to_string(),
             import_source: "./types".to_string(),
             local_name: "LocalPropsB".to_string(),
@@ -4412,11 +4414,11 @@ fn collect_imported_type_alias_does_not_reresolve_already_normalized_root() {
     let view = host.resolver_store_view();
     let mut resolver = HostImportedEvalResolver::new(&host, "/src/Consumer.ts", Some(&view));
     let mut deps = BTreeSet::new();
-    let mut budget = verter_resolver::ImportedEvalTraversalBudget::new("/src/Consumer.ts", 16);
+    let mut budget = crate::resolver_core::ImportedEvalTraversalBudget::new("/src/Consumer.ts", 16);
 
     let alias = ImportedEvalCollectorResolver::collect_imported_type_alias(
         &mut resolver,
-        verter_resolver::ImportedTypeAliasResolveRequest {
+        crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/src/Consumer.ts".to_string(),
             import_source: "./types".to_string(),
             local_name: "LocalProps".to_string(),
@@ -7967,7 +7969,7 @@ export interface ChipProps {
     ws.reset_reads();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
 
     let resolved = host

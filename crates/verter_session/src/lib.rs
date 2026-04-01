@@ -63,6 +63,7 @@ mod id;
 mod meta;
 pub mod meta_resolve;
 mod parse;
+pub mod resolver_core;
 mod resolver_store;
 #[cfg(feature = "scheduler")]
 pub mod scheduler_shim;
@@ -80,6 +81,9 @@ pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
 // without adding verter_compiler as a direct dependency.
+pub use crate::resolver_core::{
+    query_artifact, type_expansion, type_expansion_host, type_text_parser,
+};
 pub use verter_compiler::compile::CompileTarget;
 
 use std::collections::BTreeSet;
@@ -169,7 +173,7 @@ fn next_host_instance_id() -> u64 {
 /// scattered across `VerterHost`.
 pub(crate) struct HostResolverState {
     /// Unified sub-node resolver runtime (symbol + fallthrough subsystems).
-    pub runtime: verter_resolver::resolver_runtime::UnifiedResolverRuntime<
+    pub runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime<
         crate::meta_resolve::ResolvedComponentMetaState,
         crate::types::FallthroughResolution,
     >,
@@ -178,7 +182,7 @@ pub(crate) struct HostResolverState {
 impl HostResolverState {
     fn new() -> Self {
         Self {
-            runtime: verter_resolver::resolver_runtime::UnifiedResolverRuntime::new(),
+            runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(),
         }
     }
 
@@ -212,11 +216,11 @@ pub(crate) struct ImportedDependencyCacheEntry {
         rustc_hash::FxHashMap<String, Arc<rustc_hash::FxHashSet<String>>>,
     pub resolved_type_roots: rustc_hash::FxHashMap<String, ImportedTypeRootCacheEntry>,
     pub resolved_type_declarations:
-        rustc_hash::FxHashMap<String, verter_resolver::ResolvedTypeDeclaration>,
+        rustc_hash::FxHashMap<String, crate::resolver_core::ResolvedTypeDeclaration>,
     pub prepared_type_aliases:
-        rustc_hash::FxHashMap<String, verter_resolver::CachedPreparedImportedTypeAlias>,
+        rustc_hash::FxHashMap<String, crate::resolver_core::CachedPreparedImportedTypeAlias>,
     pub evaluated_type_decls:
-        rustc_hash::FxHashMap<String, verter_resolver::CachedEvaluatedImportedDecl>,
+        rustc_hash::FxHashMap<String, crate::resolver_core::CachedEvaluatedImportedDecl>,
     pub dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
 }
 
@@ -471,10 +475,7 @@ impl VerterHost {
         #[cfg(not(feature = "scheduler"))]
         let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
             let files = self.files.read();
-            files
-                .get(canonical_id)
-                .and_then(|f| f.script_analysis.as_ref())
-                .map(|a| a.as_ref().clone())
+            files.get(canonical_id).map(|f| f.script_analysis.clone())
         };
         let surface = analysis.map(|a| verter_semantic::extract::extract_component_surface(&a));
 
@@ -520,10 +521,7 @@ impl VerterHost {
         #[cfg(not(feature = "scheduler"))]
         let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
             let files = self.files.read();
-            files
-                .get(canonical_id)
-                .and_then(|f| f.script_analysis.as_ref())
-                .map(|a| a.as_ref().clone())
+            files.get(canonical_id).map(|f| f.script_analysis.clone())
         };
 
         let bindings = analysis.map(|a| verter_semantic::extract::extract_bindings(&a));
@@ -568,10 +566,7 @@ impl VerterHost {
                     verter_semantic::analysis::ScriptAnalysisSnapshot,
                 > = {
                     let files = self.files.read();
-                    files
-                        .get(canonical_id)
-                        .and_then(|f| f.script_analysis.as_ref())
-                        .map(|a| a.as_ref().clone())
+                    files.get(canonical_id).map(|f| f.script_analysis.clone())
                 };
                 let graph = analysis
                     .map(|a| verter_semantic::extract::extract_import_graph(&a))
@@ -588,18 +583,13 @@ impl VerterHost {
         // Extract boundary edges from template analysis
         let boundary_edges = {
             #[cfg(feature = "scheduler")]
-            let template = self.scheduler_script_analysis(canonical_id).and_then(|_| {
-                // Template analysis is in FileAnalysisSnapshot, not ScriptAnalysisSnapshot.
-                // For now, return empty — will be populated when template analysis
-                // is accessible through the scheduler.
-                None::<verter_semantic::analysis::TemplateAnalysisSnapshot>
-            });
+            let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = None;
             #[cfg(not(feature = "scheduler"))]
             let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = {
                 let files = self.files.read();
                 files
                     .get(canonical_id)
-                    .and_then(|f| f.template.as_ref())
+                    .and_then(|f| f.template_analysis.as_ref())
                     .map(|t| t.as_ref().clone())
             };
             template
@@ -706,7 +696,7 @@ impl VerterHost {
 
     pub fn resolver_runtime(
         &self,
-    ) -> &verter_resolver::resolver_runtime::UnifiedResolverRuntime<
+    ) -> &crate::resolver_core::resolver_runtime::UnifiedResolverRuntime<
         crate::meta_resolve::ResolvedComponentMetaState,
         crate::types::FallthroughResolution,
     > {

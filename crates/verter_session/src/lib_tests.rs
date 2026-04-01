@@ -227,6 +227,79 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
     }
 }
 
+/// @ai-generated - Semantic DB queries should read the current stored script and template analysis.
+#[test]
+fn semantic_queries_use_current_analysis_snapshots() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let src = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const count = 1\n",
+        "defineProps<{ msg: string }>()\n",
+        "</script>\n",
+        "<template><div>{{ count }}</div></template>\n"
+    );
+
+    let _ = upsert_vue(&host, "Comp.vue", src);
+
+    let surface = host.semantic_component_surface("Comp.vue");
+    assert!(
+        surface.is_complete(),
+        "component surface query should complete"
+    );
+    let declared_surface = surface
+        .value
+        .as_ref()
+        .expect("component surface should exist for a script-setup SFC");
+    assert!(
+        declared_surface
+            .declared
+            .props
+            .iter()
+            .any(|prop| prop.name == "msg"),
+        "defineProps should contribute declared props"
+    );
+    assert!(
+        declared_surface
+            .declared
+            .props
+            .iter()
+            .all(|prop| prop.name != "missing"),
+        "unrelated props must not appear in the declared surface"
+    );
+
+    let bindings = host.semantic_bindings("Comp.vue");
+    assert!(bindings.is_complete(), "bindings query should complete");
+    let bindings = bindings
+        .value
+        .as_ref()
+        .expect("bindings should exist for a script block");
+    assert!(
+        bindings.iter().any(|(binding, _)| binding.name == "count"),
+        "script bindings should include top-level declarations"
+    );
+    assert!(
+        bindings
+            .iter()
+            .all(|(binding, _)| binding.name != "missing"),
+        "bindings query must not synthesize unrelated declarations"
+    );
+
+    let snapshot = host.semantic_snapshot("Comp.vue");
+    assert!(snapshot.is_complete(), "semantic snapshot should complete");
+    assert!(
+        snapshot.value.component_surface.is_some(),
+        "semantic snapshot should include the component surface"
+    );
+    assert!(
+        snapshot.value.find_binding("count").is_some(),
+        "semantic snapshot should include extracted bindings"
+    );
+    assert!(
+        snapshot.value.find_binding("missing").is_none(),
+        "semantic snapshot must not report missing bindings as present"
+    );
+}
+
 /// @ai-generated - build_upsert_result: first insert returns all nodes as changed
 #[test]
 fn build_upsert_result_first_insert() {

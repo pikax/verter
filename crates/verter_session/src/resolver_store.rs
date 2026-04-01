@@ -1,8 +1,8 @@
+use crate::resolver_core::StoreView;
 use crate::types::Hash16;
 use crate::VerterHost;
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
-use verter_resolver::StoreView;
 
 #[cfg(not(feature = "scheduler"))]
 use crate::shared::read_lock;
@@ -11,19 +11,19 @@ const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct HostStoreView {
-    compat_token: verter_resolver::StoreViewCompatToken,
+    compat_token: crate::resolver_core::StoreViewCompatToken,
     mutation_epoch: u64,
     whole_hashes: FxHashMap<String, Hash16>,
     dependency_resolutions:
         FxHashMap<String, FxHashMap<String, crate::types::DependencyResolution>>,
-    derived_hashes: FxHashMap<(String, verter_resolver::DerivedFactKind), Hash16>,
+    derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
     barrel_generations: FxHashMap<String, u64>,
 }
 
 impl Default for HostStoreView {
     fn default() -> Self {
         Self {
-            compat_token: verter_resolver::StoreViewCompatToken(0),
+            compat_token: crate::resolver_core::StoreViewCompatToken(0),
             mutation_epoch: 0,
             whole_hashes: FxHashMap::default(),
             dependency_resolutions: FxHashMap::default(),
@@ -80,7 +80,7 @@ impl HostStoreView {
                         view.derived_hashes.insert(
                             (
                                 canonical_id.clone(),
-                                verter_resolver::DerivedFactKind::ExactResolution,
+                                crate::resolver_core::DerivedFactKind::ExactResolution,
                             ),
                             hash_dependency_resolutions(&entry.dependency_resolutions),
                         );
@@ -90,7 +90,7 @@ impl HostStoreView {
                         view.derived_hashes.insert(
                             (
                                 canonical_id.clone(),
-                                verter_resolver::DerivedFactKind::ExportRegistry,
+                                crate::resolver_core::DerivedFactKind::ExportRegistry,
                             ),
                             registry.source_hash,
                         );
@@ -100,7 +100,7 @@ impl HostStoreView {
                         view.derived_hashes.insert(
                             (
                                 canonical_id.clone(),
-                                verter_resolver::DerivedFactKind::BarrelSurface,
+                                crate::resolver_core::DerivedFactKind::BarrelSurface,
                             ),
                             surface.source_hash,
                         );
@@ -112,7 +112,7 @@ impl HostStoreView {
                         view.derived_hashes.insert(
                             (
                                 canonical_id.clone(),
-                                verter_resolver::DerivedFactKind::Route,
+                                crate::resolver_core::DerivedFactKind::Route,
                             ),
                             hash_import_route_cache(&entry.import_route_cache),
                         );
@@ -135,7 +135,7 @@ impl HostStoreView {
                     view.derived_hashes.insert(
                         (
                             canonical_id.clone(),
-                            verter_resolver::DerivedFactKind::ExactResolution,
+                            crate::resolver_core::DerivedFactKind::ExactResolution,
                         ),
                         hash_dependency_resolutions(&entry.dependency_resolutions),
                     );
@@ -145,7 +145,7 @@ impl HostStoreView {
                     view.derived_hashes.insert(
                         (
                             canonical_id.clone(),
-                            verter_resolver::DerivedFactKind::ExportRegistry,
+                            crate::resolver_core::DerivedFactKind::ExportRegistry,
                         ),
                         registry.source_hash,
                     );
@@ -155,7 +155,7 @@ impl HostStoreView {
                     view.derived_hashes.insert(
                         (
                             canonical_id.clone(),
-                            verter_resolver::DerivedFactKind::BarrelSurface,
+                            crate::resolver_core::DerivedFactKind::BarrelSurface,
                         ),
                         surface.source_hash,
                     );
@@ -167,7 +167,7 @@ impl HostStoreView {
                     view.derived_hashes.insert(
                         (
                             canonical_id.clone(),
-                            verter_resolver::DerivedFactKind::Route,
+                            crate::resolver_core::DerivedFactKind::Route,
                         ),
                         hash_import_route_cache(&entry.import_route_cache),
                     );
@@ -204,7 +204,7 @@ impl HostStoreView {
                 view.derived_hashes.insert(
                     (
                         canonical_id.clone(),
-                        verter_resolver::DerivedFactKind::ExactResolution,
+                        crate::resolver_core::DerivedFactKind::ExactResolution,
                     ),
                     hash_dependency_resolutions(&entry.dependency_resolutions),
                 );
@@ -265,7 +265,7 @@ impl HostStoreView {
     }
 
     pub(crate) fn accepts_whole_hash(&self, canonical_id: &str, hash: Hash16) -> bool {
-        self.validates(&verter_resolver::FactVersionRef::FileWholeHash {
+        self.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
             hash,
         })
@@ -282,7 +282,7 @@ impl HostStoreView {
     pub(crate) fn derived_hash(
         &self,
         canonical_id: &str,
-        kind: verter_resolver::DerivedFactKind,
+        kind: crate::resolver_core::DerivedFactKind,
     ) -> Option<Hash16> {
         self.derived_hashes
             .get(&(canonical_id.to_string(), kind))
@@ -312,7 +312,7 @@ impl HostStoreView {
 
     pub(crate) fn invalid_fact_details(
         &self,
-        facts: &[verter_resolver::FactVersionRef],
+        facts: &[crate::resolver_core::FactVersionRef],
         limit: usize,
     ) -> Vec<String> {
         facts
@@ -322,9 +322,9 @@ impl HostStoreView {
             .collect()
     }
 
-    fn describe_invalid_fact(&self, fact: &verter_resolver::FactVersionRef) -> Option<String> {
+    fn describe_invalid_fact(&self, fact: &crate::resolver_core::FactVersionRef) -> Option<String> {
         match fact {
-            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, hash } => {
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
                 match self.whole_hashes.get(canonical_id) {
                     Some(current) if current == hash => None,
                     Some(current) => Some(format!(
@@ -337,7 +337,7 @@ impl HostStoreView {
                     )),
                 }
             }
-            verter_resolver::FactVersionRef::BarrelGeneration {
+            crate::resolver_core::FactVersionRef::BarrelGeneration {
                 canonical_id,
                 generation,
             } => match self.barrel_generations.get(canonical_id) {
@@ -351,13 +351,13 @@ impl HostStoreView {
                     canonical_id, generation
                 )),
             },
-            verter_resolver::FactVersionRef::DerivedFactHash {
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id,
                 kind,
                 hash,
             } => {
                 let current = match kind {
-                    verter_resolver::DerivedFactKind::DirectSource => {
+                    crate::resolver_core::DerivedFactKind::DirectSource => {
                         self.whole_hashes.get(canonical_id)
                     }
                     _ => self.derived_hashes.get(&(canonical_id.clone(), *kind)),
@@ -455,15 +455,15 @@ impl HostStoreView {
             self.derived_hashes.insert(
                 (
                     canonical_id.to_string(),
-                    verter_resolver::DerivedFactKind::ExactResolution,
+                    crate::resolver_core::DerivedFactKind::ExactResolution,
                 ),
                 exact_hash,
             );
         }
     }
 
-    fn compute_compat_token(&self) -> verter_resolver::StoreViewCompatToken {
-        verter_resolver::StoreViewCompatToken(self.mutation_epoch)
+    fn compute_compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
+        crate::resolver_core::StoreViewCompatToken(self.mutation_epoch)
     }
 }
 
@@ -561,30 +561,30 @@ fn resolve_request_kind_rank(kind: verter_workspace::ResolveRequestKind) -> u8 {
     }
 }
 
-impl verter_resolver::StoreView for HostStoreView {
-    fn compat_token(&self) -> verter_resolver::StoreViewCompatToken {
+impl crate::resolver_core::StoreView for HostStoreView {
+    fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
         self.compat_token
     }
 
-    fn validates(&self, fact: &verter_resolver::FactVersionRef) -> bool {
+    fn validates(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
         match fact {
-            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, hash } => self
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => self
                 .whole_hashes
                 .get(canonical_id)
                 .is_some_and(|current| current == hash),
-            verter_resolver::FactVersionRef::BarrelGeneration {
+            crate::resolver_core::FactVersionRef::BarrelGeneration {
                 canonical_id,
                 generation,
             } => self
                 .barrel_generations
                 .get(canonical_id)
                 .is_some_and(|current| current == generation),
-            verter_resolver::FactVersionRef::DerivedFactHash {
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id,
                 kind,
                 hash,
             } => match kind {
-                verter_resolver::DerivedFactKind::DirectSource => self
+                crate::resolver_core::DerivedFactKind::DirectSource => self
                     .whole_hashes
                     .get(canonical_id)
                     .is_some_and(|current| current == hash),
@@ -597,7 +597,7 @@ impl verter_resolver::StoreView for HostStoreView {
     }
 }
 
-impl verter_resolver::ResolverStore for VerterHost {
+impl crate::resolver_core::ResolverStore for VerterHost {
     type View = HostStoreView;
 
     fn snapshot_view(&self) -> Self::View {

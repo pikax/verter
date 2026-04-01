@@ -23,16 +23,16 @@ use crate::host_manage::{
     collect_type_expr_symbol_refs, component_meta_debug, component_meta_debug_enabled,
     component_meta_trace_event, component_meta_trace_scope, HostImportedEvalResolver,
 };
+use crate::resolver_core::{
+    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost,
+    ImportedEvalLookup, RequestSource, SingleflightRole,
+};
 use crate::resolver_store::HostStoreView;
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
-use verter_resolver::{
-    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost,
-    ImportedEvalLookup, RequestSource, SingleflightRole,
-};
 use verter_semantic::analysis::type_eval::EvalLookup;
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
@@ -67,7 +67,11 @@ impl ComponentMetaRequestHost for VerterHost {
     type Resolution = ResolvedComponentMetaState;
     type CapturedInputs = CapturedComponentMetaInputs;
 
-    fn cache_key(&self, canonical: &str, mode: Self::Mode) -> verter_resolver::ResolutionNodeKey {
+    fn cache_key(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+    ) -> crate::resolver_core::ResolutionNodeKey {
         resolved_meta_cache_key(canonical, mode)
     }
 
@@ -187,15 +191,15 @@ impl ComponentMetaRequestHost for VerterHost {
 }
 
 /// Native declaration kind for the resolved pre-expansion type.
-pub type ResolvedDeclarationKind = verter_resolver::ResolvedDeclarationKind;
+pub type ResolvedDeclarationKind = crate::resolver_core::ResolvedDeclarationKind;
 
 /// Native pre-expansion declaration metadata retained by the shared resolver.
-pub type ResolvedTypeDeclaration = verter_resolver::ResolvedTypeDeclaration;
-pub type ResolvedTypeRegistryMeta = verter_resolver::ResolvedTypeRegistryMeta;
-pub type ResolvedMacroMeta = verter_resolver::ResolvedMacroMeta;
-pub type ResolvedNativeProp = verter_resolver::ResolvedNativeProp;
-pub type ResolvedJsdocBlock = verter_resolver::ResolvedJsdocBlock;
-pub type ResolvedJsdocTag = verter_resolver::ResolvedJsdocTag;
+pub type ResolvedTypeDeclaration = crate::resolver_core::ResolvedTypeDeclaration;
+pub type ResolvedTypeRegistryMeta = crate::resolver_core::ResolvedTypeRegistryMeta;
+pub type ResolvedMacroMeta = crate::resolver_core::ResolvedMacroMeta;
+pub type ResolvedNativeProp = crate::resolver_core::ResolvedNativeProp;
+pub type ResolvedJsdocBlock = crate::resolver_core::ResolvedJsdocBlock;
+pub type ResolvedJsdocTag = crate::resolver_core::ResolvedJsdocTag;
 
 /// Host-owned sidecar result for component-meta / analysis enrichment.
 ///
@@ -224,7 +228,7 @@ pub struct ResolvedComponentMetaState {
     /// a redundant second `imported_eval_inputs()` call in the fallthrough path.
     pub cached_eval_inputs: Option<Arc<crate::host_manage::ImportedEvalInputs>>,
     /// Semantic fact versions consumed while producing this resolved state.
-    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
+    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
 }
 
 fn collect_expanded_slot_binding_param_types<'a>(
@@ -593,7 +597,7 @@ impl VerterHost {
                 snapshot.script_flags,
             ),
         );
-        let parts = verter_resolver::resolve_component_meta_parts(
+        let parts = crate::resolver_core::resolve_component_meta_parts(
             &HostComponentMetaResolver {
                 host: self,
                 store_view,
@@ -1198,7 +1202,7 @@ impl VerterHost {
         canonical: &str,
         mode: ResolverMode,
         state: &ResolvedComponentMetaState,
-        fact_versions: &[verter_resolver::FactVersionRef],
+        fact_versions: &[crate::resolver_core::FactVersionRef],
     ) {
         component_meta_trace_event!(
             "store_cached_component_meta_result",
@@ -1254,7 +1258,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
-    ) -> Vec<verter_resolver::FactVersionRef> {
+    ) -> Vec<crate::resolver_core::FactVersionRef> {
         self.current_dependency_fact_versions_in_view(canonical, tracked_deps, None)
     }
 
@@ -1263,7 +1267,7 @@ impl VerterHost {
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Vec<verter_resolver::FactVersionRef> {
+    ) -> Vec<crate::resolver_core::FactVersionRef> {
         let mut facts = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
 
@@ -1283,26 +1287,26 @@ impl VerterHost {
     #[cfg(test)]
     pub(crate) fn fact_versions_match(
         &self,
-        fact_versions: &[verter_resolver::FactVersionRef],
+        fact_versions: &[crate::resolver_core::FactVersionRef],
     ) -> bool {
         let view = self.resolver_store_view();
         fact_versions
             .iter()
-            .all(|fact| verter_resolver::StoreView::validates(&view, fact))
+            .all(|fact| crate::resolver_core::StoreView::validates(&view, fact))
     }
 
     fn append_dependency_fact_versions_in_view(
         &self,
         canonical: &str,
-        facts: &mut Vec<verter_resolver::FactVersionRef>,
-        seen: &mut rustc_hash::FxHashSet<verter_resolver::FactVersionRef>,
+        facts: &mut Vec<crate::resolver_core::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         if let Some(hash) = store_view
             .and_then(|view| view.whole_hash(canonical))
             .or_else(|| self.get_whole_hash(canonical))
         {
-            let file_fact = verter_resolver::FactVersionRef::FileWholeHash {
+            let file_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_string(),
                 hash,
             };
@@ -1312,16 +1316,16 @@ impl VerterHost {
         }
 
         for kind in [
-            verter_resolver::DerivedFactKind::ExportRegistry,
-            verter_resolver::DerivedFactKind::Route,
-            verter_resolver::DerivedFactKind::BarrelSurface,
-            verter_resolver::DerivedFactKind::ExactResolution,
+            crate::resolver_core::DerivedFactKind::ExportRegistry,
+            crate::resolver_core::DerivedFactKind::Route,
+            crate::resolver_core::DerivedFactKind::BarrelSurface,
+            crate::resolver_core::DerivedFactKind::ExactResolution,
         ] {
             if let Some(hash) = store_view
                 .and_then(|view| view.derived_hash(canonical, kind))
                 .or_else(|| self.current_derived_fact_hash(canonical, kind))
             {
-                let fact = verter_resolver::FactVersionRef::DerivedFactHash {
+                let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
                     canonical_id: canonical.to_string(),
                     kind,
                     hash,
@@ -1336,7 +1340,7 @@ impl VerterHost {
             .and_then(|view| view.barrel_generation(canonical))
             .or_else(|| self.current_barrel_generation(canonical))
         {
-            let fact = verter_resolver::FactVersionRef::BarrelGeneration {
+            let fact = crate::resolver_core::FactVersionRef::BarrelGeneration {
                 canonical_id: canonical.to_string(),
                 generation,
             };
@@ -1349,11 +1353,13 @@ impl VerterHost {
     fn current_derived_fact_hash(
         &self,
         canonical_id: &str,
-        kind: verter_resolver::DerivedFactKind,
+        kind: crate::resolver_core::DerivedFactKind,
     ) -> Option<Hash16> {
         match kind {
-            verter_resolver::DerivedFactKind::DirectSource => self.get_whole_hash(canonical_id),
-            verter_resolver::DerivedFactKind::ExportRegistry => {
+            crate::resolver_core::DerivedFactKind::DirectSource => {
+                self.get_whole_hash(canonical_id)
+            }
+            crate::resolver_core::DerivedFactKind::ExportRegistry => {
                 #[cfg(feature = "scheduler")]
                 {
                     self.compile_cache.get(canonical_id).and_then(|cc| {
@@ -1370,7 +1376,7 @@ impl VerterHost {
                         .map(|registry| registry.source_hash)
                 }
             }
-            verter_resolver::DerivedFactKind::BarrelSurface => {
+            crate::resolver_core::DerivedFactKind::BarrelSurface => {
                 #[cfg(feature = "scheduler")]
                 {
                     self.compile_cache.get(canonical_id).and_then(|cc| {
@@ -1387,7 +1393,7 @@ impl VerterHost {
                         .map(|surface| surface.source_hash)
                 }
             }
-            verter_resolver::DerivedFactKind::Route => {
+            crate::resolver_core::DerivedFactKind::Route => {
                 #[cfg(feature = "scheduler")]
                 {
                     self.compile_cache.get(canonical_id).and_then(|cc| {
@@ -1409,7 +1415,7 @@ impl VerterHost {
                         })
                 }
             }
-            verter_resolver::DerivedFactKind::ExactResolution => self
+            crate::resolver_core::DerivedFactKind::ExactResolution => self
                 .dependency_resolutions_for_eval_in_view(canonical_id, None)
                 .and_then(|resolutions| {
                     (!resolutions.is_empty())
@@ -1619,7 +1625,10 @@ fn materialize_component_meta_registry_decl_body(
     }
 
     choose_preferred_component_meta_registry_candidate(
-        verter_resolver::choose_preferred_imported_type_body(Some(evaluated), Some(materialized)),
+        crate::resolver_core::choose_preferred_imported_type_body(
+            Some(evaluated),
+            Some(materialized),
+        ),
         Some(decl.body.clone()),
     )
     .unwrap_or_else(|| decl.body.clone())
@@ -1644,7 +1653,7 @@ fn choose_preferred_component_meta_registry_candidate(
                 },
             )
         }
-        (left, right) => verter_resolver::choose_preferred_imported_type_body(left, right),
+        (left, right) => crate::resolver_core::choose_preferred_imported_type_body(left, right),
     }
 }
 
@@ -1763,7 +1772,7 @@ fn materialize_imported_component_meta_registry_decl_body_in_view(
     host: &VerterHost,
     canonical_id: &str,
     decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    _symbol_dependencies: &[verter_resolver::ImportedSymbolDependency],
+    _symbol_dependencies: &[crate::resolver_core::ImportedSymbolDependency],
     store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
     let Some(snapshot) = host
@@ -2488,11 +2497,11 @@ fn collect_component_meta_registry_refs(
 fn resolved_meta_cache_key(
     canonical: &str,
     mode: ResolverMode,
-) -> verter_resolver::ResolutionNodeKey {
-    verter_resolver::ResolutionNodeKey {
+) -> crate::resolver_core::ResolutionNodeKey {
+    crate::resolver_core::ResolutionNodeKey {
         symbol_id: canonical.to_string(),
-        node_kind: verter_resolver::ResolutionNodeKind::Assemble,
-        traversal_lens: verter_resolver::TraversalLens::StructuralObject,
+        node_kind: crate::resolver_core::ResolutionNodeKind::Assemble,
+        traversal_lens: crate::resolver_core::TraversalLens::StructuralObject,
         member_path_hash: 0,
         type_args_hash: 0,
         behavior_flags: match mode {
@@ -2507,22 +2516,24 @@ struct HostComponentMetaResolver<'a> {
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
-impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<'_> {
+impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_> {
     fn resolve_export_target(
         &self,
         dep_canonical: &str,
         requested_name: &str,
-    ) -> Option<verter_resolver::ResolvedExportTarget> {
+    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
         self.host
             .resolve_named_type_export_target_in_view(
                 dep_canonical,
                 requested_name,
                 self.store_view,
             )
-            .map(|(canonical, name)| verter_resolver::ResolvedExportTarget {
-                source_canonical_id: (canonical != dep_canonical).then_some(canonical),
-                source_name: name,
-            })
+            .map(
+                |(canonical, name)| crate::resolver_core::ResolvedExportTarget {
+                    source_canonical_id: (canonical != dep_canonical).then_some(canonical),
+                    source_name: name,
+                },
+            )
     }
 
     fn get_export_span_follow_reexports(
@@ -2607,30 +2618,30 @@ impl verter_resolver::DeclarationMetadataResolver for HostComponentMetaResolver<
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_resolver::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
         let analysis = self
             .host
             .external_type_analysis_in_view(canonical_source, self.store_view)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
-                verter_resolver::ResolvedDeclarationKind::TypeAlias
+                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
-                verter_resolver::ResolvedDeclarationKind::Interface
+                crate::resolver_core::ResolvedDeclarationKind::Interface
             }
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
-                verter_resolver::ResolvedDeclarationKind::Class
+                crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };
-        Some(verter_resolver::ResolvedLocalTypeSymbolMetadata {
+        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata {
             kind,
             span: symbol.span,
         })
     }
 }
 
-impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_> {
+impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolver<'_> {
     type Snapshot = FileAnalysisSnapshot;
     type EvalContext = CapturedComponentMetaInputs;
     type ImportedInputs = crate::host_manage::ImportedEvalInputs;
@@ -2753,7 +2764,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         exported_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         self.host
@@ -2782,7 +2793,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         span: verter_span::Span,
         expanded: bool,
         tracked_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         resolve_jsdoc_block(
@@ -2815,7 +2826,7 @@ impl verter_resolver::ComponentMetaResolverHost for HostComponentMetaResolver<'_
         &self,
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
-    ) -> Vec<verter_resolver::FactVersionRef> {
+    ) -> Vec<crate::resolver_core::FactVersionRef> {
         self.host
             .current_dependency_fact_versions_in_view(canonical, tracked_deps, self.store_view)
     }
@@ -2838,14 +2849,18 @@ pub(crate) fn resolve_type_declaration_in_view(
         host,
         store_view: Some(current_view),
     };
-    let key = verter_resolver::symbol_resolver::declaration_node_key(dep_canonical, requested_name);
-    let mut ctx = verter_resolver::symbol_resolver::ResolveContext::new();
+    let key =
+        crate::resolver_core::symbol_resolver::declaration_node_key(dep_canonical, requested_name);
+    let mut ctx = crate::resolver_core::symbol_resolver::ResolveContext::new();
     let result = host
         .resolver_runtime()
         .symbol
         .resolve_node(key, current_view, &mut ctx, |_| {
-            let declaration =
-                verter_resolver::resolve_type_declaration(&resolver, dep_canonical, requested_name);
+            let declaration = crate::resolver_core::resolve_type_declaration(
+                &resolver,
+                dep_canonical,
+                requested_name,
+            );
             let mut tracked_deps = std::collections::BTreeSet::new();
             if !declaration.canonical_source.is_empty()
                 && declaration.canonical_source != dep_canonical
@@ -2853,8 +2868,10 @@ pub(crate) fn resolve_type_declaration_in_view(
                 tracked_deps.insert(declaration.canonical_source.clone());
             }
 
-            verter_resolver::symbol_resolver::SymbolNodeResult {
-                value: verter_resolver::symbol_resolver::SymbolNodeValue::Declaration(declaration),
+            crate::resolver_core::symbol_resolver::SymbolNodeResult {
+                value: crate::resolver_core::symbol_resolver::SymbolNodeValue::Declaration(
+                    declaration,
+                ),
                 facts: host.current_dependency_fact_versions_in_view(
                     dep_canonical,
                     &tracked_deps,
@@ -2865,7 +2882,9 @@ pub(crate) fn resolve_type_declaration_in_view(
         });
 
     match result.value {
-        verter_resolver::symbol_resolver::SymbolNodeValue::Declaration(declaration) => declaration,
+        crate::resolver_core::symbol_resolver::SymbolNodeValue::Declaration(declaration) => {
+            declaration
+        }
         _ => unreachable!("declaration resolution must return a declaration node result"),
     }
 }
@@ -2886,7 +2905,7 @@ fn resolve_jsdoc_block(
     span: verter_span::Span,
     mode: ResolverMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    cache: &mut verter_resolver::ExternalTypeBodyCache,
+    cache: &mut crate::resolver_core::ExternalTypeBodyCache,
     visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     kind: verter_workspace::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -2929,7 +2948,7 @@ fn map_jsdoc_tag(
     canonical_source: &str,
     mode: ResolverMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    _cache: &mut verter_resolver::ExternalTypeBodyCache,
+    _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
     _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     _kind: verter_workspace::ResolveRequestKind,
     store_view: Option<&crate::resolver_store::HostStoreView>,

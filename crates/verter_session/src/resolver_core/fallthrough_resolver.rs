@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::{
+use crate::resolver_core::{
     symbol_resolver::ResolveContext, FactVersionRef, FallthroughNodeKey, FallthroughNodeKind,
     ResolverCounters, ResolverDiagnostic, SingleflightGroup, StableExecutionValue, StoreView,
     ValidatedFactCache,
@@ -258,7 +258,7 @@ impl FallthroughResolverState {
 
         match result {
             Ok(flight) => {
-                if flight.role == crate::SingleflightRole::Follower {
+                if flight.role == crate::resolver_core::SingleflightRole::Follower {
                     self.counters.record_singleflight_coalesce();
                 }
                 if flight.forked_lane {
@@ -342,7 +342,7 @@ pub fn branch_union_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::StoreViewCompatToken;
+    use crate::resolver_core::StoreViewCompatToken;
     use rustc_hash::FxHashSet;
 
     #[derive(Debug)]
@@ -428,10 +428,10 @@ mod tests {
     fn cross_subsystem_visiting_sets_are_independent() {
         let mut ctx = ResolveContext::new();
 
-        let symbol_key = crate::ResolutionNodeKey {
+        let symbol_key = crate::resolver_core::ResolutionNodeKey {
             symbol_id: "/src/types.ts#Props".to_string(),
-            node_kind: crate::ResolutionNodeKind::SymbolExpand,
-            traversal_lens: crate::TraversalLens::StructuralObject,
+            node_kind: crate::resolver_core::ResolutionNodeKind::SymbolExpand,
+            traversal_lens: crate::resolver_core::TraversalLens::StructuralObject,
             member_path_hash: 0,
             type_args_hash: 0,
             behavior_flags: 0,

@@ -1,4 +1,4 @@
-use crate::{
+use crate::resolver_core::{
     CollectedImportedTypeAlias, DeclarationMetadataResolver, ImportedEvalOverflow,
     ImportedEvalSource, ImportedEvalStats, ImportedTypeAlias, ImportedTypeAliasResolveRequest,
 };
@@ -160,7 +160,7 @@ pub trait ImportedEvalSourceMergeResolver {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> crate::ResolvedTypeDeclaration;
+    ) -> crate::resolver_core::ResolvedTypeDeclaration;
 
     fn resolve_imported_type_root(
         &self,
@@ -560,7 +560,7 @@ pub fn build_imported_eval_inputs<R: ImportedEvalOwnerResolver>(
     owner_env: &EvalEnv,
     additional_required_import_names: Option<&FxHashSet<String>>,
     budget: &mut ImportedEvalTraversalBudget,
-) -> crate::ImportedEvalInputs {
+) -> crate::resolver_core::ImportedEvalInputs {
     let mut seen = FxHashSet::default();
     let mut inputs = Vec::new();
     let mut type_aliases = Vec::new();
@@ -607,7 +607,7 @@ pub fn build_imported_eval_inputs<R: ImportedEvalOwnerResolver>(
     stats.prepare_imported_type_alias_failures =
         resolver.prepare_imported_type_alias_failure_count();
 
-    crate::ImportedEvalInputs {
+    crate::resolver_core::ImportedEvalInputs {
         sources: inputs,
         type_aliases,
         canonical_dependencies,
@@ -626,7 +626,7 @@ pub fn build_imported_eval_inputs_with_owner_context<R: ImportedEvalOwnerContext
     owner_env_override: Option<&EvalEnv>,
     additional_required_import_names: Option<&FxHashSet<String>>,
     budget: &mut ImportedEvalTraversalBudget,
-) -> crate::ImportedEvalInputs {
+) -> crate::resolver_core::ImportedEvalInputs {
     let owner_eval_source = owner_eval_source
         .map(str::to_string)
         .unwrap_or_else(|| resolver.load_owner_eval_source(owner_canonical_id, owner_snapshot));
@@ -660,7 +660,7 @@ mod tests {
         ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver, ImportedEvalOwnerResolver,
         ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver, ImportedEvalTraversalBudget,
     };
-    use crate::{
+    use crate::resolver_core::{
         CollectedImportedTypeAlias, DeclarationMetadataResolver, ImportedEvalSource,
         ImportedEvalStats, ImportedSymbolDependency, ImportedTypeAlias,
         ImportedTypeAliasResolveRequest, ResolvedDeclarationKind, ResolvedExportTarget,

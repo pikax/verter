@@ -1203,7 +1203,7 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
         };
     }
     if let Some(backend) = input.type_expansion_backend {
-        use verter_resolver::type_expansion::TypeExpansionBackend;
+        use verter_session::type_expansion::TypeExpansionBackend;
         out.type_expansion_backend = match backend.to_lowercase().as_str() {
             "verter" => TypeExpansionBackend::Verter,
             "tsserver" => TypeExpansionBackend::Tsserver,

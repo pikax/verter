@@ -4,7 +4,7 @@
 //! implement for file sync and type queries on generated artifacts.
 //!
 //! This crate exposes backend sessions, NOT semantic expanders. The semantic
-//! expansion API (`TypeExpander`) lives in `verter_resolver`.
+//! expansion API (`TypeExpander`) lives in `verter_session::resolver_core`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -146,7 +146,7 @@ pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BackendErr
 /// A running TypeScript backend session (tsserver or TSGO).
 ///
 /// Exposes backend sessions, not semantic expanders.
-/// The semantic expansion API (`TypeExpander`) lives in `verter_resolver` and
+/// The semantic expansion API (`TypeExpander`) lives in `verter_session::resolver_core` and
 /// consumes this trait.
 pub trait GeneratedQueryBackend: Send + Sync {
     /// Sync a generated file into the backend session.

@@ -4,7 +4,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_compiler::utils::oxc::vue::resolve_type::{extract_export_surface, ResolvedElements};
 use verter_workspace::ResolveRequestKind;
 
-use crate::{ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16};
+use crate::resolver_core::{
+    ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16,
+};
 
 #[derive(Debug, Clone)]
 pub struct BarrelResolutionState {
@@ -362,7 +364,9 @@ fn scan_barrel_export_surface_recursive<R: BarrelResolutionResolver>(
 #[cfg(test)]
 mod tests {
     use super::{resolve_type_through_barrel, BarrelResolutionResolver, BarrelResolutionState};
-    use crate::{ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16};
+    use crate::resolver_core::{
+        ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16,
+    };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::BTreeSet;

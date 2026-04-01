@@ -14,13 +14,15 @@ use std::sync::Arc;
 use verter_type_runtime::TypeProvider;
 
 #[cfg(feature = "type-runtime")]
-use crate::type_expansion::{
+use crate::resolver_core::type_expansion::{
     ExpanderFuture, TypeExpander, TypeExpansionError, TypeExpansionRequest, TypeExpansionResult,
 };
 #[cfg(feature = "type-runtime")]
-use crate::type_expansion_host::TypeExpansionHost;
+use crate::resolver_core::type_expansion_host::TypeExpansionHost;
 #[cfg(feature = "type-runtime")]
-use crate::type_expansion_tsserver::{build_minimal_artifact, parse_hover_to_expansion};
+use crate::resolver_core::type_expansion_tsserver::{
+    build_minimal_artifact, parse_hover_to_expansion,
+};
 
 /// TSGO-backed `TypeExpander`.
 ///
@@ -67,7 +69,7 @@ impl<H: TypeExpansionHost + Send + Sync + 'static> TypeExpander for TsgoTypeExpa
                 .await
                 .map_err(|_| {
                     TypeExpansionError::BackendFailure(
-                        crate::type_expansion::BackendFailureKind::Unavailable,
+                        crate::resolver_core::type_expansion::BackendFailureKind::Unavailable,
                     )
                 })?;
 
@@ -77,7 +79,7 @@ impl<H: TypeExpansionHost + Send + Sync + 'static> TypeExpander for TsgoTypeExpa
                 .await
                 .map_err(|_| {
                     TypeExpansionError::BackendFailure(
-                        crate::type_expansion::BackendFailureKind::TimedOut,
+                        crate::resolver_core::type_expansion::BackendFailureKind::TimedOut,
                     )
                 })?;
 

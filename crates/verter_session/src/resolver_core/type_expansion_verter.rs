@@ -12,11 +12,11 @@ use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 #[cfg(test)]
 use verter_span::Span;
 
-use crate::type_expansion::{
+use crate::resolver_core::type_expansion::{
     ExpandedMember, ExpanderFuture, ExpansionCompleteness, TypeExpander, TypeExpansionError,
     TypeExpansionRequest, TypeExpansionResult,
 };
-use crate::ResolvedMacroMeta;
+use crate::resolver_core::ResolvedMacroMeta;
 
 // ---------------------------------------------------------------------------
 // VerterComponentMetaProvider trait
@@ -111,7 +111,7 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
         let type_expr = prop
             .type_annotation
             .as_deref()
-            .map(crate::type_text_parser::parse_type_text)
+            .map(crate::resolver_core::type_text_parser::parse_type_text)
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
         members.push(ExpandedMember {
             name: prop.name.clone(),
@@ -126,7 +126,7 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
         let type_expr = emit
             .payload_type
             .as_deref()
-            .map(crate::type_text_parser::parse_type_text)
+            .map(crate::resolver_core::type_text_parser::parse_type_text)
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
         members.push(ExpandedMember {
             name: emit.name.clone(),
@@ -179,7 +179,7 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ResolvedTypeDeclaration;
+    use crate::resolver_core::ResolvedTypeDeclaration;
     use verter_semantic::analysis::types::AnalyzedMacroKind;
 
     fn make_resolved_macro() -> ResolvedMacroMeta {
@@ -194,7 +194,7 @@ mod tests {
                 resolved_name: "ButtonProps".to_string(),
                 canonical_source: "/src/types.ts".to_string(),
                 span: Span::new(10, 50),
-                kind: crate::ResolvedDeclarationKind::Interface,
+                kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
                 text: None,
             },
             native_props: vec![],

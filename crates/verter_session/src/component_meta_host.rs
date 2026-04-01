@@ -11,15 +11,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_resolver::type_expansion::{
+use crate::resolver_core::type_expansion::{
     ExpansionCompleteness, TypeExpansionBackend, TypeExpansionError, TypeExpansionRequest,
     TypeExpansionResult,
 };
-use verter_resolver::type_expansion_host::{
+use crate::resolver_core::type_expansion_host::{
     ScriptLang, SfcBlockSpan, SfcStructure, SourceSnapshot, TypeExpansionHost,
     TypeExpansionSnapshot,
 };
-use verter_resolver::{
+use crate::resolver_core::{
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry,
 };
@@ -708,7 +708,9 @@ impl ComponentMetaSession {
 // VerterComponentMetaProvider implementation
 // ---------------------------------------------------------------------------
 
-impl verter_resolver::type_expansion_verter::VerterComponentMetaProvider for ComponentMetaHost {
+impl crate::resolver_core::type_expansion_verter::VerterComponentMetaProvider
+    for ComponentMetaHost
+{
     fn get_component_meta(
         &self,
         canonical_id: &str,
@@ -913,7 +915,7 @@ fn build_external_component_types(
         let request = TypeExpansionRequest {
             canonical_id: synthetic_canonical.clone(),
             span: type_span,
-            profile: verter_resolver::type_expansion::ExpansionProfile::ComponentMeta,
+            profile: crate::resolver_core::type_expansion::ExpansionProfile::ComponentMeta,
         };
         let _trace = component_meta_trace_scope!(
             "component_meta_external_macro",
@@ -1015,7 +1017,7 @@ fn collect_external_slot_binding_fields(
 
 fn type_expansion_members(
     expansion: &TypeExpansionResult,
-) -> Vec<verter_resolver::type_expansion::ExpandedMember> {
+) -> Vec<crate::resolver_core::type_expansion::ExpandedMember> {
     if !expansion.members.is_empty() {
         return expansion.members.clone();
     }
@@ -1026,7 +1028,7 @@ fn type_expansion_members(
             .iter()
             .filter_map(|member| match member {
                 ObjectMember::Property(property) => {
-                    Some(verter_resolver::type_expansion::ExpandedMember {
+                    Some(crate::resolver_core::type_expansion::ExpandedMember {
                         name: property.name.clone(),
                         type_expr: property.ty.clone(),
                         raw_type: None,
@@ -1197,7 +1199,7 @@ fn merged_emit_fields(
 
 fn expanded_emit_field_from_source(
     field: &verter_semantic::analysis::types::AnalyzedEmitField,
-    member: Option<&verter_resolver::type_expansion::ExpandedMember>,
+    member: Option<&crate::resolver_core::type_expansion::ExpandedMember>,
     completeness: AnalysisExpansionCompleteness,
     diagnostics: &[ExpansionDiagnostic],
 ) -> ExpandedField {
@@ -1226,7 +1228,7 @@ fn expanded_emit_field_from_source(
     }
 
     let source_type = source_payload
-        .map(verter_resolver::type_text_parser::parse_type_text)
+        .map(crate::resolver_core::type_text_parser::parse_type_text)
         .unwrap_or_else(|| TypeExpr::Unknown {
             raw: "unknown".to_string(),
         });
@@ -1244,7 +1246,7 @@ fn expanded_emit_field_from_source(
 }
 
 fn source_emit_payload_beats_backend_member(
-    member: &verter_resolver::type_expansion::ExpandedMember,
+    member: &crate::resolver_core::type_expansion::ExpandedMember,
     source_payload: &str,
 ) -> bool {
     let source_inner = strip_event_tuple_wrapper(source_payload)
@@ -1651,7 +1653,7 @@ mod tests {
                     members: members
                         .into_iter()
                         .map(|(name, type_expr, optional)| {
-                            verter_resolver::type_expansion::ExpandedMember {
+                            crate::resolver_core::type_expansion::ExpandedMember {
                                 name: name.to_string(),
                                 type_expr,
                                 raw_type: None,
@@ -1692,7 +1694,7 @@ mod tests {
                 members: members
                     .into_iter()
                     .map(|(name, type_expr, optional)| {
-                        verter_resolver::type_expansion::ExpandedMember {
+                        crate::resolver_core::type_expansion::ExpandedMember {
                             name: name.to_string(),
                             type_expr,
                             raw_type: None,

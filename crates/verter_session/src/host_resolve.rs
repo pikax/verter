@@ -25,17 +25,17 @@ use std::time::Instant;
 #[cfg(feature = "session_metrics")]
 use web_time::Instant;
 
-use oxc_allocator::Allocator;
-use verter_compiler::compile::CodegenOptions;
-use verter_compiler::compile::{
-    compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
-};
-use verter_resolver::{
+use crate::resolver_core::{
     resolve_external_type_request,
     resolve_type_through_barrel as resolve_type_through_barrel_via_resolver,
     BarrelResolutionResolver, BarrelResolutionState, ExportRegistryView, ExternalTypeBodyResolver,
     ExternalTypeRequestResolver, ExternalTypeResolvedCacheEntry, ExternalTypeRouteEntry,
     RegistryExportEntry, RegistryResolvedTarget, RegistryRouteResolver,
+};
+use oxc_allocator::Allocator;
+use verter_compiler::compile::CodegenOptions;
+use verter_compiler::compile::{
+    compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
 
 #[cfg(not(feature = "scheduler"))]
@@ -52,7 +52,7 @@ use crate::VerterHost;
 type ResolvedExternalTypes =
     rustc_hash::FxHashMap<String, verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>;
 
-type ExternalTypeCache = verter_resolver::ExternalTypeBodyCache;
+type ExternalTypeCache = crate::resolver_core::ExternalTypeBodyCache;
 
 fn external_type_debug_enabled() -> bool {
     std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
@@ -89,7 +89,7 @@ struct HostRegistryRouteResolver<'a> {
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
-impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCollector<'_> {
+impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCollector<'_> {
     type Error = crate::types::ExternalTypeResolveError;
 
     fn resolve_external_macro_type(
@@ -125,7 +125,7 @@ impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCo
         dep: &verter_semantic::analysis::MacroTypeDep,
         import_span: Option<verter_span::Span>,
         error: &Self::Error,
-    ) -> verter_resolver::ExternalMacroTypeDiagnostic {
+    ) -> crate::resolver_core::ExternalMacroTypeDiagnostic {
         let (code, message) = match error {
             crate::types::ExternalTypeResolveError::MissingRootDependency => (
                 "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
@@ -158,7 +158,7 @@ impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCo
             ),
         };
 
-        verter_resolver::ExternalMacroTypeDiagnostic {
+        crate::resolver_core::ExternalMacroTypeDiagnostic {
             code,
             message,
             span: import_span,
@@ -166,7 +166,7 @@ impl verter_resolver::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCo
     }
 }
 
-impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolver<'_> {
+impl crate::resolver_core::ExternalTypeGraphResolver for ViewExternalTypeGraphResolver<'_> {
     type Error = crate::types::ExternalTypeResolveError;
 
     fn max_external_type_resolve_steps(&self) -> usize {
@@ -211,7 +211,7 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         )
     }
 
-    fn source_hash(&self, dep_canonical: &str) -> verter_resolver::ResolverHash16 {
+    fn source_hash(&self, dep_canonical: &str) -> crate::resolver_core::ResolverHash16 {
         self.store_view
             .whole_hash(dep_canonical)
             .unwrap_or_else(|| self.host.get_whole_hash(dep_canonical).unwrap_or_default())
@@ -403,7 +403,7 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         dep_canonical: &str,
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<verter_resolver::ExternalTypeResolvedCacheEntry> {
+    ) -> Option<crate::resolver_core::ExternalTypeResolvedCacheEntry> {
         let effective_canonical = self
             .host
             .resolve_eval_dependency_canonical_in_view(dep_canonical, Some(self.store_view))
@@ -429,7 +429,7 @@ impl verter_resolver::ExternalTypeGraphResolver for ViewExternalTypeGraphResolve
         };
         let host_cache = self.host.resolved_type_cache.lock();
         let entry = host_cache.get(&key)?;
-        Some(verter_resolver::ExternalTypeResolvedCacheEntry {
+        Some(crate::resolver_core::ExternalTypeResolvedCacheEntry {
             resolved: entry.resolved.clone(),
             tracked_deps: entry.tracked_deps.clone(),
         })
@@ -638,7 +638,7 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         required_root_dep: bool,
         kind: verter_workspace::ResolveRequestKind,
@@ -671,7 +671,7 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
         wildcard_sources: &[String],
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         kind: verter_workspace::ResolveRequestKind,
         use_host_cache: bool,
@@ -741,7 +741,7 @@ impl BarrelResolutionResolver for ViewExternalTypeResolver<'_> {
         }
     }
 
-    fn source_hash(&self, canonical: &str) -> verter_resolver::ResolverHash16 {
+    fn source_hash(&self, canonical: &str) -> crate::resolver_core::ResolverHash16 {
         self.store_view
             .and_then(|view| view.whole_hash(canonical))
             .unwrap_or_else(|| self.host.get_whole_hash(canonical).unwrap_or_default())
@@ -780,7 +780,7 @@ impl BarrelResolutionResolver for ViewExternalTypeResolver<'_> {
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         required_root_dep: bool,
         kind: verter_workspace::ResolveRequestKind,
@@ -961,7 +961,7 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         required_root_dep: bool,
         kind: verter_workspace::ResolveRequestKind,
@@ -994,7 +994,7 @@ impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
         wildcard_sources: &[String],
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut verter_resolver::ExternalTypeBodyCache,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         kind: verter_workspace::ResolveRequestKind,
         use_host_cache: bool,
@@ -1121,18 +1121,18 @@ impl ExternalTypeRequestResolver for HostLiveExternalTypeRequestResolver<'_> {
         }
     }
 
-    fn whole_hash(&self, canonical: &str) -> verter_resolver::ResolverHash16 {
+    fn whole_hash(&self, canonical: &str) -> crate::resolver_core::ResolverHash16 {
         self.host.get_whole_hash(canonical).unwrap_or_default()
     }
 
-    fn compute_source_hash(&self, source: &str) -> verter_resolver::ResolverHash16 {
+    fn compute_source_hash(&self, source: &str) -> crate::resolver_core::ResolverHash16 {
         crate::hash::hash_16(source.as_bytes())
     }
 
     fn lookup_resolved_type_cache(
         &self,
         dep_canonical: &str,
-        dep_source_hash: verter_resolver::ResolverHash16,
+        dep_source_hash: crate::resolver_core::ResolverHash16,
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
     ) -> Option<ExternalTypeResolvedCacheEntry> {
@@ -1180,13 +1180,13 @@ impl ExternalTypeRequestResolver for HostLiveExternalTypeRequestResolver<'_> {
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
         visited: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<verter_resolver::RegistryRoute> {
+    ) -> Option<crate::resolver_core::RegistryRoute> {
         #[cfg(feature = "scheduler")]
         {
             let route = self
                 .host
                 .resolve_type_via_registry(canonical, type_name, kind, visited);
-            Some(verter_resolver::RegistryRoute {
+            Some(crate::resolver_core::RegistryRoute {
                 target: route.target.map(|target| RegistryResolvedTarget {
                     final_canonical_id: target.final_canonical_id,
                     exported_name: target.exported_name,
@@ -1214,7 +1214,7 @@ impl ExternalTypeRequestResolver for HostLiveExternalTypeRequestResolver<'_> {
     fn store_resolved_type_cache(
         &self,
         dep_canonical: &str,
-        dep_source_hash: verter_resolver::ResolverHash16,
+        dep_source_hash: crate::resolver_core::ResolverHash16,
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
         resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
@@ -1940,7 +1940,7 @@ impl VerterHost {
                 host: self,
                 store_view: view,
             };
-            verter_resolver::resolve_external_type_from_graph(
+            crate::resolver_core::resolve_external_type_from_graph(
                 &resolver,
                 owner_canonical,
                 import_source,
@@ -2281,7 +2281,7 @@ impl VerterHost {
             host: self,
             store_view,
         };
-        let route = verter_resolver::resolve_type_via_registry(
+        let route = crate::resolver_core::resolve_type_via_registry(
             &resolver, canonical, type_name, kind, visited,
         );
 
@@ -2483,7 +2483,7 @@ impl VerterHost {
         Vec<HostDiagnostic>,
         std::collections::BTreeSet<String>,
     ) {
-        let collected = verter_resolver::collect_external_macro_types(
+        let collected = crate::resolver_core::collect_external_macro_types(
             &HostExternalMacroTypeCollector { host: self },
             owner_canonical,
             macro_type_deps,

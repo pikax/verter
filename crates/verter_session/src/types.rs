@@ -135,7 +135,7 @@ pub struct HostConfig {
     /// statically resolvable call-site prop types.
     pub generic_root_propagation: bool,
     /// Type expansion backend: which backend resolves macro type parameters.
-    pub type_expansion_backend: verter_resolver::type_expansion::TypeExpansionBackend,
+    pub type_expansion_backend: crate::resolver_core::type_expansion::TypeExpansionBackend,
 }
 
 impl HostConfig {
@@ -176,7 +176,8 @@ impl Default for HostConfig {
             analysis_level: AnalysisLevel::Full,
             analysis_scope: None,
             generic_root_propagation: false,
-            type_expansion_backend: verter_resolver::type_expansion::TypeExpansionBackend::Verter,
+            type_expansion_backend:
+                crate::resolver_core::type_expansion::TypeExpansionBackend::Verter,
         }
     }
 }
@@ -1548,13 +1549,13 @@ pub(crate) struct ResolvedTypeCacheEntry {
 /// produced the cached state.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedComponentMetaCacheEntry {
-    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
+    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     pub state: Arc<crate::meta_resolve::ResolvedComponentMetaState>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedFallthroughEntry {
-    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
+    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     pub generic_root_propagation: bool,
     pub resolution: Arc<FallthroughResolution>,
 }
@@ -1872,7 +1873,7 @@ pub struct FallthroughResolution {
     /// Branch-structured inherited surface.
     pub fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface,
     /// Semantic fact versions consumed while producing this resolution.
-    pub fact_versions: Vec<verter_resolver::FactVersionRef>,
+    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
 }
 
 /// Serializable point-in-time snapshot of [`MetaProvenance`] counters.

@@ -4,7 +4,7 @@ use rustc_hash::FxHashSet;
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 use verter_workspace::ResolveRequestKind;
 
-use crate::{
+use crate::resolver_core::{
     resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
     RegistryResolvedTarget, RegistryRoute, ResolverHash16,
 };
@@ -414,7 +414,7 @@ mod tests {
         resolve_external_type_request, ExternalTypeBodyCache, ExternalTypeBodyResolver,
         ExternalTypeRequestResolver, ExternalTypeResolvedCacheEntry, ExternalTypeRouteEntry,
     };
-    use crate::{RegistryResolvedTarget, RegistryRoute, ResolverHash16};
+    use crate::resolver_core::{RegistryResolvedTarget, RegistryRoute, ResolverHash16};
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::BTreeSet;

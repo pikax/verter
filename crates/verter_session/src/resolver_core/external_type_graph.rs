@@ -6,7 +6,7 @@ use verter_compiler::utils::oxc::vue::resolve_type::{
 };
 use verter_workspace::ResolveRequestKind;
 
-use crate::{
+use crate::resolver_core::{
     resolve_external_type_from_source_body, ExportRegistryView, ExternalTypeBodyCache,
     ExternalTypeBodyResolver, RegistryExportEntry, ResolverHash16,
 };
@@ -69,11 +69,18 @@ pub trait ExternalTypeGraphResolver {
         None
     }
 
-    fn cached_barrel_state(&self, _barrel_canonical: &str) -> Option<crate::BarrelResolutionState> {
+    fn cached_barrel_state(
+        &self,
+        _barrel_canonical: &str,
+    ) -> Option<crate::resolver_core::BarrelResolutionState> {
         None
     }
 
-    fn persist_barrel_state(&self, _barrel_canonical: &str, _state: &crate::BarrelResolutionState) {
+    fn persist_barrel_state(
+        &self,
+        _barrel_canonical: &str,
+        _state: &crate::resolver_core::BarrelResolutionState,
+    ) {
     }
 
     fn note_barrel_fact_reuse(&self) {}
@@ -88,7 +95,7 @@ pub trait ExternalTypeGraphResolver {
         _dep_canonical: &str,
         _type_name: &str,
         _kind: ResolveRequestKind,
-    ) -> Option<crate::ExternalTypeResolvedCacheEntry> {
+    ) -> Option<crate::resolver_core::ExternalTypeResolvedCacheEntry> {
         None
     }
 
@@ -416,7 +423,7 @@ fn resolve_type_through_barrel_from_graph<R: ExternalTypeGraphResolver>(
         resolver.note_barrel_fact_reuse();
         cache.store_barrel_state(barrel_canonical, state.clone());
     }
-    let mut state = valid_barrel.unwrap_or_else(|| crate::BarrelResolutionState {
+    let mut state = valid_barrel.unwrap_or_else(|| crate::resolver_core::BarrelResolutionState {
         export_map: FxHashMap::default(),
         source_hash: barrel_source_hash,
         wildcard_sources: wildcard_sources.to_vec(),
@@ -499,7 +506,7 @@ fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>
     root_specifier: &str,
     current_canonical: &str,
     type_name: &str,
-    state: &mut crate::BarrelResolutionState,
+    state: &mut crate::resolver_core::BarrelResolutionState,
     visited: &mut FxHashSet<String>,
     kind: ResolveRequestKind,
     profile_hash: Option<u64>,
@@ -575,7 +582,9 @@ fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>
 #[cfg(test)]
 mod tests {
     use super::{resolve_external_type_from_graph, ExternalTypeGraphResolver};
-    use crate::{ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16};
+    use crate::resolver_core::{
+        ExportRegistryView, ExternalTypeBodyCache, RegistryExportEntry, ResolverHash16,
+    };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::BTreeSet;

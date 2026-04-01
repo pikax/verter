@@ -8,7 +8,7 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::{
+use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, symbol_resolver::SymbolResolverState,
     FactVersionRef, FallthroughNodeKey, ResolutionNodeKey, ResolverCounters, SingleflightGroup,
     StableExecutionValue, StoreView, ValidatedFactCache,
@@ -131,7 +131,7 @@ where
     }
 
     /// Take a snapshot of the current counter values.
-    pub fn counter_snapshot(&self) -> crate::ResolverCountersSnapshot {
+    pub fn counter_snapshot(&self) -> crate::resolver_core::ResolverCountersSnapshot {
         self.counters.snapshot()
     }
 

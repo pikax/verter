@@ -20,16 +20,16 @@ use std::sync::Arc;
 use verter_type_runtime::{HoverInfo, TypeProvider};
 
 #[cfg(feature = "type-runtime")]
-use crate::query_artifact::GeneratedQueryArtifact;
+use crate::resolver_core::query_artifact::GeneratedQueryArtifact;
 #[cfg(feature = "type-runtime")]
-use crate::type_expansion::{
+use crate::resolver_core::type_expansion::{
     ExpandedMember, ExpanderFuture, ExpansionCompleteness, TypeExpander, TypeExpansionError,
     TypeExpansionRequest, TypeExpansionResult,
 };
 #[cfg(feature = "type-runtime")]
-use crate::type_expansion_host::TypeExpansionHost;
+use crate::resolver_core::type_expansion_host::TypeExpansionHost;
 #[cfg(feature = "type-runtime")]
-use crate::type_text_parser;
+use crate::resolver_core::type_text_parser;
 
 /// tsserver-backed `TypeExpander`.
 ///
@@ -84,7 +84,7 @@ impl<H: TypeExpansionHost + Send + Sync + 'static> TypeExpander for TsserverType
                 .await
                 .map_err(|_| {
                     TypeExpansionError::BackendFailure(
-                        crate::type_expansion::BackendFailureKind::Unavailable,
+                        crate::resolver_core::type_expansion::BackendFailureKind::Unavailable,
                     )
                 })?;
 
@@ -95,7 +95,7 @@ impl<H: TypeExpansionHost + Send + Sync + 'static> TypeExpander for TsserverType
                 .await
                 .map_err(|_| {
                     TypeExpansionError::BackendFailure(
-                        crate::type_expansion::BackendFailureKind::TimedOut,
+                        crate::resolver_core::type_expansion::BackendFailureKind::TimedOut,
                     )
                 })?;
 
@@ -206,10 +206,10 @@ pub(crate) fn extract_members_from_type(
 pub(crate) fn build_minimal_artifact(
     canonical_id: &str,
     source: &str,
-    snapshot: &crate::type_expansion_host::TypeExpansionSnapshot,
+    snapshot: &crate::resolver_core::type_expansion_host::TypeExpansionSnapshot,
     request: &TypeExpansionRequest,
 ) -> Result<GeneratedQueryArtifact, TypeExpansionError> {
-    use crate::query_artifact::{ArtifactId, ArtifactProfile, QuerySpanMapping};
+    use crate::resolver_core::query_artifact::{ArtifactId, ArtifactProfile, QuerySpanMapping};
 
     let profile = ArtifactProfile::from(request.profile);
     let mut generated = String::new();

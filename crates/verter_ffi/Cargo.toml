@@ -18,6 +18,6 @@ verter_session = { path = "../verter_session", version = "0.0.1-beta.1", default
 verter_semantic = { path = "../verter_semantic" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
-verter_resolver = { path = "../verter_resolver" }
+verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
 serde = { workspace = true }

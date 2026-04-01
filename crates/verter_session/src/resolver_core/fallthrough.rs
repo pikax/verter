@@ -11,7 +11,7 @@ use verter_semantic::analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntri
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::types::AnalyzedImport;
 
-use crate::{FactVersionRef, FallthroughNodeKey, FallthroughNodeKind};
+use crate::resolver_core::{FactVersionRef, FallthroughNodeKey, FallthroughNodeKind};
 
 pub trait FallthroughResolutionView {
     fn accepted_props(&self) -> &[AcceptedPropAnalysis];
@@ -1262,7 +1262,7 @@ mod tests {
         accepted_props: Vec<AcceptedPropAnalysis>,
         accepted_events: Vec<AcceptedEventAnalysis>,
         fallthrough_surface: FallthroughSurface,
-        fact_versions: Vec<crate::FactVersionRef>,
+        fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     }
 
     impl FallthroughResolutionView for TestResolution {
@@ -1278,7 +1278,7 @@ mod tests {
             &self.fallthrough_surface
         }
 
-        fn fact_versions(&self) -> &[crate::FactVersionRef] {
+        fn fact_versions(&self) -> &[crate::resolver_core::FactVersionRef] {
             &self.fact_versions
         }
     }
@@ -1314,8 +1314,8 @@ mod tests {
         fn current_dependency_fact_versions(
             &self,
             canonical_id: &str,
-        ) -> Vec<crate::FactVersionRef> {
-            vec![crate::FactVersionRef::FileWholeHash {
+        ) -> Vec<crate::resolver_core::FactVersionRef> {
+            vec![crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),
                 hash: [1; 16],
             }]
@@ -1493,7 +1493,7 @@ mod tests {
                         status: BranchStatus::Resolved,
                     }],
                 },
-                fact_versions: vec![crate::FactVersionRef::FileWholeHash {
+                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
                     canonical_id: "/Child.vue".to_string(),
                     hash: [2; 16],
                 }],
@@ -1726,7 +1726,7 @@ mod tests {
                 fallthrough_surface: FallthroughSurface::None {
                     reason: verter_semantic::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
                 },
-                fact_versions: vec![crate::FactVersionRef::FileWholeHash {
+                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
                     canonical_id: "/Child.vue".to_string(),
                     hash: [3; 16],
                 }],

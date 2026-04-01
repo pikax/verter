@@ -10,21 +10,21 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
-use verter_resolver::query_artifact::{
-    ArtifactId, ArtifactProfile as ResolverArtifactProfile, GeneratedQueryArtifact,
-    QuerySpanMapping,
-};
-use verter_resolver::type_expansion::{
-    BackendFailureKind, ExpandedMember, ExpansionCompleteness, ExpansionProfile,
-    TypeExpansionBackend, TypeExpansionError, TypeExpansionRequest, TypeExpansionResult,
-};
-use verter_resolver::type_expansion_host::TypeExpansionSnapshot;
-use verter_resolver::type_text_parser;
 use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 use verter_session::component_meta_host::{
     ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
     ComponentMetaTraceCursor, ComponentMetaTypeExpander,
 };
+use verter_session::query_artifact::{
+    ArtifactId, ArtifactProfile as ResolverArtifactProfile, GeneratedQueryArtifact,
+    QuerySpanMapping,
+};
+use verter_session::type_expansion::{
+    BackendFailureKind, ExpandedMember, ExpansionCompleteness, ExpansionProfile,
+    TypeExpansionBackend, TypeExpansionError, TypeExpansionRequest, TypeExpansionResult,
+};
+use verter_session::type_expansion_host::TypeExpansionSnapshot;
+use verter_session::type_text_parser;
 use verter_type_runtime::tsgo::{find_tsgo_binary, TsgoTypeProvider};
 use verter_type_runtime::tsserver::TsserverTypeProvider;
 use verter_type_runtime::{
@@ -1784,13 +1784,13 @@ mod tests {
         let script_open_end = source.find('>').expect("script setup open tag") + 1;
         let script_close = source.find("</script>").expect("script setup close tag");
         TypeExpansionSnapshot {
-            source: verter_resolver::type_expansion_host::SourceSnapshot {
+            source: verter_session::type_expansion_host::SourceSnapshot {
                 text: source.to_string(),
-                lang: verter_resolver::type_expansion_host::ScriptLang::Ts,
+                lang: verter_session::type_expansion_host::ScriptLang::Ts,
             },
-            sfc_structure: verter_resolver::type_expansion_host::SfcStructure {
+            sfc_structure: verter_session::type_expansion_host::SfcStructure {
                 script: None,
-                script_setup: Some(verter_resolver::type_expansion_host::SfcBlockSpan {
+                script_setup: Some(verter_session::type_expansion_host::SfcBlockSpan {
                     content: verter_span::Span::new(script_open_end as u32, script_close as u32),
                 }),
                 template: None,

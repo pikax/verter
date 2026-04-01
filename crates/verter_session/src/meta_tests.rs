@@ -1,9 +1,9 @@
 use super::*;
+use crate::resolver_core::{ResolverStore, StoreView};
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use verter_resolver::{ResolverStore, StoreView};
 use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
 use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 
@@ -74,7 +74,7 @@ fn evaluated_define_props_type<'a>(types: &'a ExpandedComponentTypes, name: &str
 
 fn resolved_imported_alias_body(
     host: &VerterHost,
-    alias: &verter_resolver::ImportedTypeAlias,
+    alias: &crate::resolver_core::ImportedTypeAlias,
 ) -> TypeExpr {
     let view = host.resolver_store_view();
     host.resolve_shallow_symbol_dependency_alias_in_view(
@@ -269,7 +269,7 @@ fn clear_legacy_cached_fallthrough_state(project: &MetaProject, canonical: &str)
 
 #[cfg(feature = "scheduler")]
 fn clear_runtime_top_level_fallthrough_node(project: &MetaProject, canonical: &str) {
-    let key = verter_resolver::fallthrough_cache_key(
+    let key = crate::resolver_core::fallthrough_cache_key(
         canonical,
         project.host().config.generic_root_propagation,
         None,
@@ -283,7 +283,7 @@ fn clear_runtime_top_level_fallthrough_node(project: &MetaProject, canonical: &s
 
 #[cfg(feature = "scheduler")]
 fn clear_runtime_root_follow_node(project: &MetaProject, canonical: &str) {
-    let key = verter_resolver::fallthrough_resolver::root_follow_key(
+    let key = crate::resolver_core::fallthrough_resolver::root_follow_key(
         canonical,
         0,
         project.host().config.generic_root_propagation,
@@ -391,36 +391,36 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     };
 
     assert!(project.host().fact_versions_match(&[
-        verter_resolver::FactVersionRef::DerivedFactHash {
+        crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
             hash: [1; 16],
         },
-        verter_resolver::FactVersionRef::DerivedFactHash {
+        crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::Route,
+            kind: crate::resolver_core::DerivedFactKind::Route,
             hash: route_hash,
         },
-        verter_resolver::FactVersionRef::DerivedFactHash {
+        crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::BarrelSurface,
+            kind: crate::resolver_core::DerivedFactKind::BarrelSurface,
             hash: [2; 16],
         },
-        verter_resolver::FactVersionRef::DerivedFactHash {
+        crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::ExactResolution,
+            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
             hash: exact_hash,
         },
-        verter_resolver::FactVersionRef::BarrelGeneration {
+        crate::resolver_core::FactVersionRef::BarrelGeneration {
             canonical_id: "/index.ts".to_string(),
             generation: 7,
         },
     ]));
 
     assert!(!project.host().fact_versions_match(&[
-        verter_resolver::FactVersionRef::DerivedFactHash {
+        crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
             hash: [9; 16],
         },
     ]));
@@ -439,7 +439,7 @@ fn snapshot_view_is_stale_but_coherent_after_host_changes() {
         .expect("whole hash should exist before mutation");
     let before_view = project.host().snapshot_view();
     let before_epoch = before_view.mutation_epoch();
-    let fact = verter_resolver::FactVersionRef::FileWholeHash {
+    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
         canonical_id: "/types.ts".to_string(),
         hash: before_hash,
     };
@@ -501,7 +501,7 @@ fn store_view_compat_token_matches_snapshot_epoch() {
 
     assert_eq!(
         view.compat_token(),
-        verter_resolver::StoreViewCompatToken(view.mutation_epoch()),
+        crate::resolver_core::StoreViewCompatToken(view.mutation_epoch()),
         "v1 store-view compatibility must be exact snapshot epoch equality"
     );
 }
@@ -623,22 +623,22 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         .current_dependency_fact_versions("/index.ts", &std::collections::BTreeSet::new());
 
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::FileWholeHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: "/index.ts".to_string(),
             hash: whole_hash,
         })
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
             hash: [3; 16],
         })
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::Route,
+            kind: crate::resolver_core::DerivedFactKind::Route,
             hash: {
                 let entry = project
                     .host()
@@ -650,16 +650,16 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         })
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::BarrelSurface,
+            kind: crate::resolver_core::DerivedFactKind::BarrelSurface,
             hash: [4; 16],
         })
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::ExactResolution,
+            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
             hash: {
                 let entry = project
                     .host()
@@ -671,7 +671,7 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         })
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::BarrelGeneration {
+        facts.contains(&crate::resolver_core::FactVersionRef::BarrelGeneration {
             canonical_id: "/index.ts".to_string(),
             generation: 11,
         })
@@ -740,23 +740,23 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
         .current_dependency_fact_versions("/index.ts", &std::collections::BTreeSet::new());
 
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::FileWholeHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: "/index.ts".to_string(),
             hash: whole_hash,
         })
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::ExportRegistry,
+            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
             hash: [3; 16],
         }),
         "non-scheduler store views must track export-registry facts"
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::Route,
+            kind: crate::resolver_core::DerivedFactKind::Route,
             hash: {
                 let files = crate::shared::read_lock(&project.host().files);
                 let entry = files.get("/index.ts").expect("file entry should exist");
@@ -766,15 +766,15 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
         "non-scheduler store views must track import-route facts"
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::DerivedFactHash {
+        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: verter_resolver::DerivedFactKind::BarrelSurface,
+            kind: crate::resolver_core::DerivedFactKind::BarrelSurface,
             hash: [4; 16],
         }),
         "non-scheduler store views must track barrel-surface facts"
     );
     assert!(
-        facts.contains(&verter_resolver::FactVersionRef::BarrelGeneration {
+        facts.contains(&crate::resolver_core::FactVersionRef::BarrelGeneration {
             canonical_id: "/index.ts".to_string(),
             generation: 11,
         }),
@@ -1698,7 +1698,7 @@ import Child from './Child.vue'
         .host()
         .resolve_fallthrough_surface("/App.vue")
         .expect("fallthrough resolve should succeed");
-    let key = verter_resolver::fallthrough_cache_key(
+    let key = crate::resolver_core::fallthrough_cache_key(
         "/App.vue",
         project.host().config.generic_root_propagation,
         None,
@@ -11783,7 +11783,7 @@ import Child from './Child.vue'
     assert!(
         cached.fact_versions.iter().any(|fact| matches!(
             fact,
-            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, .. }
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/Child.vue"
         )),
         "cached fallthrough facts should include the child component file"
@@ -11791,7 +11791,7 @@ import Child from './Child.vue'
     assert!(
         cached.fact_versions.iter().any(|fact| matches!(
             fact,
-            verter_resolver::FactVersionRef::FileWholeHash { canonical_id, .. }
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/types.ts"
         )),
         "cached fallthrough facts should include transitive child component-meta deps"

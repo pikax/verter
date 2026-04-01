@@ -14,7 +14,7 @@
 
 use verter_span::Span;
 
-use crate::type_expansion::ExpansionProfile;
+use crate::resolver_core::type_expansion::ExpansionProfile;
 
 // ---------------------------------------------------------------------------
 // Artifact Profile

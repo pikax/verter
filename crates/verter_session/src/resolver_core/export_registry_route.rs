@@ -1,7 +1,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_workspace::ResolveRequestKind;
 
-use crate::ResolverHash16;
+use crate::resolver_core::ResolverHash16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryExportEntry {

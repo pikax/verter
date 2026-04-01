@@ -10,7 +10,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 
-use crate::{
+use crate::resolver_core::{
     FactVersionRef, ResolutionNodeKey, ResolutionNodeKind, ResolvedTypeDeclaration,
     ResolverCounters, ResolverDiagnostic, SingleflightGroup, StableExecutionValue, StoreView,
     TraversalLens, ValidatedFactCache,
@@ -143,7 +143,7 @@ impl SymbolResolverState {
 
         match result {
             Ok(flight) => {
-                if flight.role == crate::SingleflightRole::Follower {
+                if flight.role == crate::resolver_core::SingleflightRole::Follower {
                     self.counters.record_singleflight_coalesce();
                 }
                 if flight.forked_lane {
@@ -162,7 +162,7 @@ impl SymbolResolverState {
 
 pub struct ResolveContext {
     pub visiting: FxHashSet<ResolutionNodeKey>,
-    pub fallthrough_visiting: FxHashSet<crate::FallthroughNodeKey>,
+    pub fallthrough_visiting: FxHashSet<crate::resolver_core::FallthroughNodeKey>,
     pub collected_facts: Vec<FactVersionRef>,
     pub collected_diagnostics: Vec<ResolverDiagnostic>,
 }
@@ -274,7 +274,7 @@ pub fn assemble_node_key(canonical_id: &str, behavior_flags: u32) -> ResolutionN
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::StoreViewCompatToken;
+    use crate::resolver_core::StoreViewCompatToken;
 
     #[derive(Debug)]
     struct TestView {
@@ -617,9 +617,9 @@ mod tests {
 
         let sym_key =
             type_shape_node_key("/src/types.ts", "Props", TraversalLens::StructuralObject);
-        let ft_key = crate::FallthroughNodeKey {
+        let ft_key = crate::resolver_core::FallthroughNodeKey {
             canonical_component_id: "/src/App.vue".to_string(),
-            node_kind: crate::FallthroughNodeKind::ComponentRootFollow,
+            node_kind: crate::resolver_core::FallthroughNodeKind::ComponentRootFollow,
             override_fingerprint: 0,
             behavior_flags: 0,
             branch_selector: None,
@@ -635,9 +635,9 @@ mod tests {
 
         assert!(!ctx
             .fallthrough_visiting
-            .contains(&crate::FallthroughNodeKey {
+            .contains(&crate::resolver_core::FallthroughNodeKey {
                 canonical_component_id: "/src/types.ts".to_string(),
-                node_kind: crate::FallthroughNodeKind::ComponentRootFollow,
+                node_kind: crate::resolver_core::FallthroughNodeKind::ComponentRootFollow,
                 override_fingerprint: 0,
                 behavior_flags: 0,
                 branch_selector: None,

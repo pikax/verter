@@ -1,4 +1,4 @@
-use crate::{
+use crate::resolver_core::{
     run_stable_request, RequestRunResult, ResolutionNodeKey, SingleflightGroup,
     StableExecutionValue, StableRequestExecutor, StoreView,
 };

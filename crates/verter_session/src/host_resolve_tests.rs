@@ -1699,7 +1699,7 @@ export interface Props {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(
@@ -1754,7 +1754,7 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -1785,7 +1785,7 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -1850,7 +1850,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -1874,7 +1874,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -1945,7 +1945,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -1973,7 +1973,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -2049,7 +2049,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(
@@ -2132,7 +2132,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files_in_view(
@@ -2216,7 +2216,7 @@ defineProps<FirstProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
         .resolve_external_type_from_loaded_files(
@@ -2246,7 +2246,7 @@ defineProps<FirstProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
         .resolve_external_type_from_loaded_files(
@@ -2335,7 +2335,7 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let err = host
         .resolve_external_type_from_loaded_files(
@@ -2420,7 +2420,7 @@ export interface ButtonProps {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(
@@ -2613,7 +2613,7 @@ defineProps<ButtonProps>()
     let view = host.resolver_store_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
 
     let link_props = host
@@ -3543,7 +3543,7 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = verter_resolver::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
         .resolve_external_type_from_loaded_files(

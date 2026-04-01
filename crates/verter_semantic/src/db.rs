@@ -26,10 +26,44 @@ struct FileSemantic {
     revision: RevisionMarker,
     /// Cached component surface (if this file is a Vue SFC).
     component_surface: Option<ComponentSurface>,
+    /// True once the component surface has been computed for this revision.
+    component_surface_cached: bool,
     /// Cached binding declarations with reactivity facts.
     bindings: Option<Vec<(BindingDeclaration, ReactivityFact)>>,
+    /// True once bindings have been computed for this revision.
+    bindings_cached: bool,
     /// Cached import graph for cross-file symbol resolution.
     import_graph: Option<FileImportGraph>,
+    /// True once the import graph has been computed for this revision.
+    import_graph_cached: bool,
+}
+
+impl FileSemantic {
+    fn new(revision: RevisionMarker) -> Self {
+        Self {
+            revision,
+            component_surface: None,
+            component_surface_cached: false,
+            bindings: None,
+            bindings_cached: false,
+            import_graph: None,
+            import_graph_cached: false,
+        }
+    }
+
+    fn reset_for_revision(&mut self, revision: RevisionMarker) {
+        if self.revision == revision {
+            return;
+        }
+
+        self.revision = revision;
+        self.component_surface = None;
+        self.component_surface_cached = false;
+        self.bindings = None;
+        self.bindings_cached = false;
+        self.import_graph = None;
+        self.import_graph_cached = false;
+    }
 }
 
 /// The semantic database.
@@ -57,10 +91,16 @@ impl SemanticDb {
         current_revision: RevisionMarker,
     ) -> QueryResult<Option<ComponentSurface>> {
         match self.files.get(&file_ref.file_id) {
-            Some(entry) if entry.revision == current_revision => {
+            Some(entry) if entry.revision == current_revision && entry.component_surface_cached => {
                 QueryResult::complete(entry.component_surface.clone(), current_revision)
             }
-            Some(entry) if current_revision.is_newer_than(&entry.revision) => {
+            Some(entry) if entry.revision == current_revision => {
+                QueryResult::unavailable(None, current_revision, vec![])
+            }
+            Some(entry)
+                if current_revision.is_newer_than(&entry.revision)
+                    && entry.component_surface_cached =>
+            {
                 // Stale cache — return what we have as partial
                 QueryResult::partial(entry.component_surface.clone(), current_revision, vec![])
             }
@@ -75,14 +115,13 @@ impl SemanticDb {
         revision: RevisionMarker,
         surface: ComponentSurface,
     ) {
-        let entry = self.files.entry(file_id).or_insert_with(|| FileSemantic {
-            revision,
-            component_surface: None,
-            bindings: None,
-            import_graph: None,
-        });
-        entry.revision = revision;
+        let entry = self
+            .files
+            .entry(file_id)
+            .or_insert_with(|| FileSemantic::new(revision));
+        entry.reset_for_revision(revision);
         entry.component_surface = Some(surface);
+        entry.component_surface_cached = true;
     }
 
     /// Query binding facts for a file.
@@ -92,10 +131,15 @@ impl SemanticDb {
         current_revision: RevisionMarker,
     ) -> QueryResult<Option<Vec<(BindingDeclaration, ReactivityFact)>>> {
         match self.files.get(&file_ref.file_id) {
-            Some(entry) if entry.revision == current_revision => {
+            Some(entry) if entry.revision == current_revision && entry.bindings_cached => {
                 QueryResult::complete(entry.bindings.clone(), current_revision)
             }
-            Some(entry) if current_revision.is_newer_than(&entry.revision) => {
+            Some(entry) if entry.revision == current_revision => {
+                QueryResult::unavailable(None, current_revision, vec![])
+            }
+            Some(entry)
+                if current_revision.is_newer_than(&entry.revision) && entry.bindings_cached =>
+            {
                 QueryResult::partial(entry.bindings.clone(), current_revision, vec![])
             }
             _ => QueryResult::unavailable(None, current_revision, vec![]),
@@ -109,14 +153,13 @@ impl SemanticDb {
         revision: RevisionMarker,
         bindings: Vec<(BindingDeclaration, ReactivityFact)>,
     ) {
-        let entry = self.files.entry(file_id).or_insert_with(|| FileSemantic {
-            revision,
-            component_surface: None,
-            bindings: None,
-            import_graph: None,
-        });
-        entry.revision = revision;
+        let entry = self
+            .files
+            .entry(file_id)
+            .or_insert_with(|| FileSemantic::new(revision));
+        entry.reset_for_revision(revision);
         entry.bindings = Some(bindings);
+        entry.bindings_cached = true;
     }
 
     /// Query the import graph for a file.
@@ -126,10 +169,15 @@ impl SemanticDb {
         current_revision: RevisionMarker,
     ) -> QueryResult<Option<FileImportGraph>> {
         match self.files.get(&file_ref.file_id) {
-            Some(entry) if entry.revision == current_revision => {
+            Some(entry) if entry.revision == current_revision && entry.import_graph_cached => {
                 QueryResult::complete(entry.import_graph.clone(), current_revision)
             }
-            Some(entry) if current_revision.is_newer_than(&entry.revision) => {
+            Some(entry) if entry.revision == current_revision => {
+                QueryResult::unavailable(None, current_revision, vec![])
+            }
+            Some(entry)
+                if current_revision.is_newer_than(&entry.revision) && entry.import_graph_cached =>
+            {
                 QueryResult::partial(entry.import_graph.clone(), current_revision, vec![])
             }
             _ => QueryResult::unavailable(None, current_revision, vec![]),
@@ -143,14 +191,13 @@ impl SemanticDb {
         revision: RevisionMarker,
         graph: FileImportGraph,
     ) {
-        let entry = self.files.entry(file_id).or_insert_with(|| FileSemantic {
-            revision,
-            component_surface: None,
-            bindings: None,
-            import_graph: None,
-        });
-        entry.revision = revision;
+        let entry = self
+            .files
+            .entry(file_id)
+            .or_insert_with(|| FileSemantic::new(revision));
+        entry.reset_for_revision(revision);
         entry.import_graph = Some(graph);
+        entry.import_graph_cached = true;
     }
 
     /// Resolve a component's surface by following an import from a parent file.
@@ -527,9 +574,47 @@ mod tests {
         let s_result = db.component_surface(&FileRef::new("app.vue"), rev);
 
         assert!(s_result.is_complete());
-        // Bindings were not set, but the file entry exists with None bindings
-        assert!(b_result.is_complete()); // complete with None value
+        // Bindings have not been computed yet, even though the file entry exists.
+        assert_eq!(b_result.completeness, Completeness::Unavailable);
         assert!(b_result.value.is_none());
+    }
+
+    #[test]
+    fn updating_one_fact_for_new_revision_invalidates_other_fact_cache() {
+        use crate::facts::binding::{BindingDeclaration, BindingKind};
+
+        let mut db = SemanticDb::new();
+        let rev1 = make_revision(1);
+        let rev2 = make_revision(2);
+
+        db.set_bindings(
+            "app.vue".into(),
+            rev1,
+            vec![(
+                BindingDeclaration {
+                    name: "count".into(),
+                    kind: BindingKind::Const,
+                    span: Span::new(0, 5),
+                    usages: vec![],
+                },
+                ReactivityFact::non_reactive(),
+            )],
+        );
+
+        db.set_component_surface("app.vue".into(), rev2, ComponentSurface::default());
+
+        let bindings = db.bindings(&FileRef::new("app.vue"), rev2);
+        assert_eq!(bindings.completeness, Completeness::Unavailable);
+        assert!(
+            bindings.value.is_none(),
+            "old bindings must not be treated as current"
+        );
+
+        let surface = db.component_surface(&FileRef::new("app.vue"), rev2);
+        assert!(
+            surface.is_complete(),
+            "updated surface should remain cached"
+        );
     }
 
     #[test]
@@ -806,8 +891,8 @@ mod tests {
 
         // A→B resolves to B's file entry (not C — single hop only)
         let result = db.resolve_imported_component_surface("/a.vue", "B", rev);
-        // B has a file entry (from import_graph) but no surface → Complete(None)
-        assert!(result.is_complete());
+        // B has a file entry (from import_graph) but no surface cache for this revision.
+        assert_eq!(result.completeness, Completeness::Unavailable);
         assert!(result.value.is_none(), "B has no component surface cached");
 
         // But B→C works (C has cached surface)

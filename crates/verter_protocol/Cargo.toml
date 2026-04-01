@@ -15,7 +15,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_semantic = { path = "../verter_semantic" }
-verter_ffi = { path = "../verter_ffi" }
 
 [build-dependencies]
 prost-build = "0.14.1"

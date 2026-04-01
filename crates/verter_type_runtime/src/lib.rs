@@ -10,8 +10,8 @@
 //! - Backend-specific query helpers
 //!
 //! It does NOT own:
-//! - Semantic expansion request/result types (→ `verter_resolver`)
-//! - SFC-origin request contracts (→ `verter_resolver`)
+//! - Semantic expansion request/result types (→ `verter_session::resolver_core`)
+//! - SFC-origin request contracts (→ `verter_session::resolver_core`)
 //! - Editor restart policy (→ `verter_lsp`)
 //! - Background workspace sync policy (→ `verter_lsp`)
 //! - Merged diagnostics strategy (→ `verter_lsp`)
@@ -19,11 +19,11 @@
 //! # Dependency Direction
 //!
 //! ```text
-//! verter_resolver ──→ verter_type_runtime (for backend-backed expansion)
+//! verter_session::resolver_core ──→ verter_type_runtime (for backend-backed expansion)
 //! verter_lsp ────────→ verter_type_runtime (for sessions + orchestration)
 //! ```
 //!
-//! `verter_type_runtime` does NOT depend on `verter_resolver` or `verter_session`.
+//! `verter_type_runtime` does NOT depend on `verter_session::resolver_core` or `verter_session`.
 
 pub mod backend;
 pub mod codec;

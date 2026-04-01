@@ -11,11 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
-use crate::resolver_store::HostStoreView;
-use crate::shared::{read_lock, write_lock};
-use crate::types::*;
-use crate::VerterHost;
-use verter_resolver::{
+use crate::resolver_core::{
     build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
     build_owner_eval_env_with_inputs, collect_dynamic_root_candidates_from_type,
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
@@ -39,6 +35,10 @@ use verter_resolver::{
     ImportedTypeAliasResolver, OwnerEvalEnvAssembler, PreparedImportedDeclContext, RequestSource,
     ResolvedConsumedBindings, ResolvedExportTarget, SingleflightRole, StoreView,
 };
+use crate::resolver_store::HostStoreView;
+use crate::shared::{read_lock, write_lock};
+use crate::types::*;
+use crate::VerterHost;
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -388,7 +388,7 @@ impl FallthroughResolutionView for crate::types::FallthroughResolution {
         &self.fallthrough_surface
     }
 
-    fn fact_versions(&self) -> &[verter_resolver::FactVersionRef] {
+    fn fact_versions(&self) -> &[crate::resolver_core::FactVersionRef] {
         &self.fact_versions
     }
 }
@@ -441,10 +441,10 @@ impl FallthroughRequestHost for VerterHost {
             }
         }
 
-        let root_follow_key = verter_resolver::fallthrough_resolver::root_follow_key(
+        let root_follow_key = crate::resolver_core::fallthrough_resolver::root_follow_key(
             canonical_id,
             prop_type_overrides
-                .map(verter_resolver::hash_prop_type_overrides)
+                .map(crate::resolver_core::hash_prop_type_overrides)
                 .unwrap_or_default(),
             self.config.generic_root_propagation,
         );
@@ -538,7 +538,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
         let (project_anchor, cache_generation) =
             self.host.project_intrinsic_cache_anchor(canonical_id);
-        let cache_key = verter_resolver::fallthrough_resolver::intrinsic_surface_key(
+        let cache_key = crate::resolver_core::fallthrough_resolver::intrinsic_surface_key(
             &project_anchor,
             cache_generation,
             tag,
@@ -589,7 +589,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     fn current_dependency_fact_versions(
         &self,
         canonical_id: &str,
-    ) -> Vec<verter_resolver::FactVersionRef> {
+    ) -> Vec<crate::resolver_core::FactVersionRef> {
         self.host.current_dependency_fact_versions_in_view(
             canonical_id,
             &std::collections::BTreeSet::new(),
@@ -605,10 +605,10 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         >,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<Self::ChildResolution> {
-        let cache_key = verter_resolver::fallthrough_resolver::child_surface_key(
+        let cache_key = crate::resolver_core::fallthrough_resolver::child_surface_key(
             canonical_id,
             prop_type_overrides
-                .map(verter_resolver::hash_prop_type_overrides)
+                .map(crate::resolver_core::hash_prop_type_overrides)
                 .unwrap_or_default(),
         );
 
@@ -659,8 +659,10 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         has_unknown_spread: bool,
         eval_env: &mut Option<Self::EvalEnv>,
     ) -> ResolvedConsumedBindings {
-        let cache_key =
-            verter_resolver::fallthrough_resolver::consumed_bindings_key(canonical_id, branch_key);
+        let cache_key = crate::resolver_core::fallthrough_resolver::consumed_bindings_key(
+            canonical_id,
+            branch_key,
+        );
 
         if let Some(view) = self.store_view {
             if let Some(node) = self
@@ -829,17 +831,17 @@ fn log_snapshot_debug(
     ));
 }
 
-pub type ImportedEvalInputs = verter_resolver::ImportedEvalInputs;
-pub(crate) type ImportedEvalSource = verter_resolver::ImportedEvalSource;
-pub(crate) type ImportedTypeAlias = verter_resolver::ImportedTypeAlias;
-pub(crate) type ComputedEvaluatedTypes = verter_resolver::ComputedEvaluatedTypes;
+pub type ImportedEvalInputs = crate::resolver_core::ImportedEvalInputs;
+pub(crate) type ImportedEvalSource = crate::resolver_core::ImportedEvalSource;
+pub(crate) type ImportedTypeAlias = crate::resolver_core::ImportedTypeAlias;
+pub(crate) type ComputedEvaluatedTypes = crate::resolver_core::ComputedEvaluatedTypes;
 
 pub(crate) struct HostImportedEvalResolver<'a> {
     host: &'a VerterHost,
     dep_resolutions: std::borrow::Cow<'a, rustc_hash::FxHashMap<String, DependencyResolution>>,
     alias_env_stack: rustc_hash::FxHashSet<String>,
     budget: ImportedEvalTraversalBudget,
-    external_type_cache: verter_resolver::ExternalTypeBodyCache,
+    external_type_cache: crate::resolver_core::ExternalTypeBodyCache,
     prepare_failure_count: u64,
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
@@ -874,7 +876,7 @@ impl<'a> HostImportedEvalResolver<'a> {
                 owner_canonical_id,
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
-            external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
+            external_type_cache: crate::resolver_core::ExternalTypeBodyCache::default(),
             prepare_failure_count: 0,
             store_view,
         }
@@ -896,7 +898,7 @@ impl<'a> HostImportedEvalResolver<'a> {
                 owner_canonical_id,
                 COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
             ),
-            external_type_cache: verter_resolver::ExternalTypeBodyCache::default(),
+            external_type_cache: crate::resolver_core::ExternalTypeBodyCache::default(),
             prepare_failure_count: 0,
             store_view,
         }
@@ -906,7 +908,7 @@ impl<'a> HostImportedEvalResolver<'a> {
         &self,
         canonical_id: &str,
         exported_name: &str,
-    ) -> Option<verter_resolver::CachedEvaluatedImportedDecl> {
+    ) -> Option<crate::resolver_core::CachedEvaluatedImportedDecl> {
         self.cached_dependency(canonical_id)
             .and_then(|dependency| dependency.evaluated_type_decls.get(exported_name).cloned())
             .or_else(|| {
@@ -922,7 +924,7 @@ impl<'a> HostImportedEvalResolver<'a> {
         &self,
         canonical_id: &str,
         exported_name: &str,
-        cached: verter_resolver::CachedEvaluatedImportedDecl,
+        cached: crate::resolver_core::CachedEvaluatedImportedDecl,
     ) {
         self.host.cache_evaluated_imported_decl(
             canonical_id,
@@ -995,7 +997,7 @@ impl<'a> HostImportedEvalResolver<'a> {
         &self,
         canonical_id: &str,
         exported_name: &str,
-    ) -> Option<verter_resolver::CachedPreparedImportedTypeAlias> {
+    ) -> Option<crate::resolver_core::CachedPreparedImportedTypeAlias> {
         self.host.clone_cached_prepared_imported_type_alias(
             canonical_id,
             exported_name,
@@ -1007,7 +1009,7 @@ impl<'a> HostImportedEvalResolver<'a> {
         &self,
         canonical_id: &str,
         exported_name: &str,
-        cached: verter_resolver::CachedPreparedImportedTypeAlias,
+        cached: crate::resolver_core::CachedPreparedImportedTypeAlias,
     ) {
         self.host.cache_prepared_imported_type_alias(
             canonical_id,
@@ -1414,23 +1416,23 @@ impl DeclarationMetadataResolver for HostImportedEvalResolver<'_> {
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_resolver::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
         let analysis = self
             .host
             .external_type_analysis_in_view(canonical_source, self.store_view)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
-                verter_resolver::ResolvedDeclarationKind::TypeAlias
+                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
-                verter_resolver::ResolvedDeclarationKind::Interface
+                crate::resolver_core::ResolvedDeclarationKind::Interface
             }
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
-                verter_resolver::ResolvedDeclarationKind::Class
+                crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };
-        Some(verter_resolver::ResolvedLocalTypeSymbolMetadata {
+        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata {
             kind,
             span: symbol.span,
         })
@@ -1455,7 +1457,7 @@ impl ImportedEvalLookupResolver for HostImportedEvalResolver<'_> {
         request: ImportedTypeAliasResolveRequest,
         discovered_dependencies: &mut std::collections::BTreeSet<String>,
     ) -> Option<verter_semantic::analysis::type_eval::TypeDeclInfo> {
-        verter_resolver::prepare_imported_type_alias(self, request, discovered_dependencies)
+        crate::resolver_core::prepare_imported_type_alias(self, request, discovered_dependencies)
             .map(|alias| alias.decl)
     }
 
@@ -1553,7 +1555,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
             self.store_view,
         ) {
             Ok(resolved) => Ok(resolved.map(|resolved| {
-                verter_resolver::resolved_elements_to_type_expr_via_type_text(&resolved)
+                crate::resolver_core::resolved_elements_to_type_expr_via_type_text(&resolved)
             })),
             Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
                 limit,
@@ -1622,7 +1624,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
         &self,
         source_canonical_id: &str,
         exported_name: &str,
-    ) -> Option<verter_resolver::CachedPreparedImportedTypeAlias> {
+    ) -> Option<crate::resolver_core::CachedPreparedImportedTypeAlias> {
         let cached = self.cached_prepared_type_alias(source_canonical_id, exported_name);
         if cached.is_some() {
             component_meta_trace_event!(
@@ -1637,7 +1639,7 @@ impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
         &self,
         source_canonical_id: &str,
         exported_name: &str,
-        cached: verter_resolver::CachedPreparedImportedTypeAlias,
+        cached: crate::resolver_core::CachedPreparedImportedTypeAlias,
     ) {
         self.cache_prepared_type_alias(source_canonical_id, exported_name, cached);
     }
@@ -1682,7 +1684,7 @@ impl ImportedEvalCollectorResolver for HostImportedEvalResolver<'_> {
             request.source_canonical_id.clone(),
             request.exported_name.clone(),
         );
-        let prepared = verter_resolver::prepare_imported_type_alias(
+        let prepared = crate::resolver_core::prepare_imported_type_alias(
             self,
             ImportedTypeAliasResolveRequest {
                 owner_canonical_id: request.owner_canonical_id.clone(),
@@ -1972,7 +1974,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         &self,
         source_canonical_id: &str,
         exported_name: &str,
-    ) -> Option<verter_resolver::CachedEvaluatedImportedDecl> {
+    ) -> Option<crate::resolver_core::CachedEvaluatedImportedDecl> {
         HostImportedEvalResolver::cached_evaluated_decl(self, source_canonical_id, exported_name)
     }
 
@@ -1980,7 +1982,7 @@ impl ImportedDeclEvalResolver for HostImportedEvalResolver<'_> {
         &self,
         source_canonical_id: &str,
         exported_name: &str,
-        cached: verter_resolver::CachedEvaluatedImportedDecl,
+        cached: crate::resolver_core::CachedEvaluatedImportedDecl,
     ) {
         HostImportedEvalResolver::cache_evaluated_decl(
             self,
@@ -2140,7 +2142,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> verter_resolver::ResolvedTypeDeclaration {
+    ) -> crate::resolver_core::ResolvedTypeDeclaration {
         self.host.resolve_imported_type_declaration_in_view(
             dep_canonical,
             imported_name,
@@ -2158,7 +2160,7 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
     }
 }
 
-type OwnerEvalEnvBuild = verter_resolver::OwnerEvalEnvBuild;
+type OwnerEvalEnvBuild = crate::resolver_core::OwnerEvalEnvBuild;
 
 struct HostOwnerEvalEnvAssembler<'a> {
     host: &'a VerterHost,
@@ -3418,7 +3420,7 @@ impl VerterHost {
         canonical_id: &str,
         exported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_resolver::CachedEvaluatedImportedDecl> {
+    ) -> Option<crate::resolver_core::CachedEvaluatedImportedDecl> {
         self.clone_current_imported_dependency_entry(canonical_id, store_view)?
             .evaluated_type_decls
             .get(exported_name)
@@ -3442,7 +3444,7 @@ impl VerterHost {
         canonical_id: &str,
         exported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_resolver::ResolvedTypeDeclaration> {
+    ) -> Option<crate::resolver_core::ResolvedTypeDeclaration> {
         self.clone_current_imported_dependency_entry(canonical_id, store_view)?
             .resolved_type_declarations
             .get(exported_name)
@@ -3454,7 +3456,7 @@ impl VerterHost {
         canonical_id: &str,
         exported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_resolver::CachedPreparedImportedTypeAlias> {
+    ) -> Option<crate::resolver_core::CachedPreparedImportedTypeAlias> {
         self.clone_current_imported_dependency_entry(canonical_id, store_view)?
             .prepared_type_aliases
             .get(exported_name)
@@ -4192,7 +4194,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> verter_resolver::ResolvedTypeDeclaration {
+    ) -> crate::resolver_core::ResolvedTypeDeclaration {
         let _trace = component_meta_trace_scope!(
             "resolve_imported_type_declaration",
             format!("canonical={} imported={}", dep_canonical, imported_name),
@@ -4343,7 +4345,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         exported_name: &str,
-        cached: verter_resolver::CachedEvaluatedImportedDecl,
+        cached: crate::resolver_core::CachedEvaluatedImportedDecl,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         if self
@@ -4401,7 +4403,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         exported_name: &str,
-        declaration: verter_resolver::ResolvedTypeDeclaration,
+        declaration: crate::resolver_core::ResolvedTypeDeclaration,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         if self
@@ -4428,7 +4430,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         exported_name: &str,
-        cached: verter_resolver::CachedPreparedImportedTypeAlias,
+        cached: crate::resolver_core::CachedPreparedImportedTypeAlias,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         if self
@@ -5942,7 +5944,7 @@ impl VerterHost {
             });
         }
 
-        let result = verter_resolver::run_fallthrough_request(
+        let result = crate::resolver_core::run_fallthrough_request(
             self,
             &self.resolver_runtime().top_level_fallthrough_singleflight,
             canonical_id,
@@ -6348,7 +6350,7 @@ impl VerterHost {
     ) -> Option<(
         String,
         String,
-        verter_resolver::CachedPreparedImportedTypeAlias,
+        crate::resolver_core::CachedPreparedImportedTypeAlias,
     )> {
         let mut visiting = rustc_hash::FxHashSet::default();
         self.resolve_shallow_symbol_dependency_alias_with_visiting_in_view(
@@ -6367,7 +6369,7 @@ impl VerterHost {
     ) -> Option<(
         String,
         String,
-        verter_resolver::CachedPreparedImportedTypeAlias,
+        crate::resolver_core::CachedPreparedImportedTypeAlias,
     )> {
         let (resolved_canonical_id, resolved_exported_name) =
             self.resolve_imported_type_root_in_view(canonical_id, exported_name, store_view);
@@ -6381,7 +6383,7 @@ impl VerterHost {
             let mut resolver =
                 HostImportedEvalResolver::new(self, resolved_canonical_id.as_str(), store_view);
             let mut canonical_dependencies = std::collections::BTreeSet::new();
-            let prepared = verter_resolver::prepare_imported_type_alias(
+            let prepared = crate::resolver_core::prepare_imported_type_alias(
                 &mut resolver,
                 ImportedTypeAliasResolveRequest {
                     owner_canonical_id: resolved_canonical_id.clone(),
@@ -6393,7 +6395,7 @@ impl VerterHost {
                 },
                 &mut canonical_dependencies,
             )?;
-            let cached = verter_resolver::CachedPreparedImportedTypeAlias {
+            let cached = crate::resolver_core::CachedPreparedImportedTypeAlias {
                 decl: prepared.decl,
                 canonical_dependencies,
                 symbol_dependencies: prepared.symbol_dependencies.clone(),
@@ -6420,7 +6422,7 @@ impl VerterHost {
     ) -> Option<(
         String,
         String,
-        verter_resolver::CachedPreparedImportedTypeAlias,
+        crate::resolver_core::CachedPreparedImportedTypeAlias,
     )> {
         let (resolved_canonical_id, resolved_exported_name, cached) = self
             .resolve_prepared_symbol_dependency_alias_in_view(
@@ -6458,7 +6460,7 @@ impl VerterHost {
                             &mut env,
                         )
                     });
-                if let Some(preferred) = verter_resolver::choose_preferred_imported_type_body(
+                if let Some(preferred) = crate::resolver_core::choose_preferred_imported_type_body(
                     evaluated,
                     Some(hydrated.decl.body.clone()),
                 ) {
@@ -6867,10 +6869,10 @@ impl VerterHost {
         );
         let resolution = Arc::new(result.clone());
         self.resolver_runtime().fallthrough.store_node(
-            verter_resolver::fallthrough_resolver::root_follow_key(
+            crate::resolver_core::fallthrough_resolver::root_follow_key(
                 canonical_id,
                 prop_type_overrides
-                    .map(verter_resolver::hash_prop_type_overrides)
+                    .map(crate::resolver_core::hash_prop_type_overrides)
                     .unwrap_or_default(),
                 self.config.generic_root_propagation,
             ),
@@ -6886,12 +6888,12 @@ impl VerterHost {
 
     fn extract_runtime_branch_results(
         result: &crate::types::FallthroughResolution,
-    ) -> Vec<verter_resolver::fallthrough_resolver::FallthroughBranchResult> {
+    ) -> Vec<crate::resolver_core::fallthrough_resolver::FallthroughBranchResult> {
         match &result.fallthrough_surface {
             verter_semantic::analysis::component_meta::FallthroughSurface::Branches { branches } => branches
                 .iter()
                 .map(
-                    |branch| verter_resolver::fallthrough_resolver::FallthroughBranchResult {
+                    |branch| crate::resolver_core::fallthrough_resolver::FallthroughBranchResult {
                         branch_key: branch.branch_key.clone(),
                         inherited_prop_names: branch
                             .props
@@ -6917,11 +6919,11 @@ impl VerterHost {
     fn build_runtime_fallthrough_node(
         &self,
         result: &crate::types::FallthroughResolution,
-    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+    ) -> crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
         let branches = Self::extract_runtime_branch_results(result);
-        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
-            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::BranchUnion(
-                verter_resolver::fallthrough_resolver::BranchUnionResult {
+        crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
+            value: crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::BranchUnion(
+                crate::resolver_core::fallthrough_resolver::BranchUnionResult {
                     accepted_props: result.accepted_props.clone(),
                     accepted_events: result.accepted_events.clone(),
                     accepted_surface_completeness: result.accepted_surface_completeness,
@@ -6941,11 +6943,11 @@ impl VerterHost {
     fn build_runtime_root_follow_node(
         &self,
         result: &crate::types::FallthroughResolution,
-    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+    ) -> crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
         let branches = Self::extract_runtime_branch_results(result);
-        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
-            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::RootFollow(
-                verter_resolver::fallthrough_resolver::RootFollowResult {
+        crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
+            value: crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::RootFollow(
+                crate::resolver_core::fallthrough_resolver::RootFollowResult {
                     accepted_props: result.accepted_props.clone(),
                     accepted_events: result.accepted_events.clone(),
                     accepted_surface_completeness: result.accepted_surface_completeness,
@@ -6965,10 +6967,10 @@ impl VerterHost {
     fn build_runtime_child_surface_node(
         &self,
         result: &crate::types::FallthroughResolution,
-    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
-        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
-            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::ChildSurfaceFollow(
-                verter_resolver::fallthrough_resolver::ChildSurfaceResult {
+    ) -> crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
+        crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
+            value: crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::ChildSurfaceFollow(
+                crate::resolver_core::fallthrough_resolver::ChildSurfaceResult {
                     accepted_props: result.accepted_props.clone(),
                     accepted_events: result.accepted_events.clone(),
                     accepted_surface_completeness: result.accepted_surface_completeness,
@@ -6997,7 +6999,7 @@ impl VerterHost {
     fn build_runtime_intrinsic_surface_node(
         &self,
         members: &[verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember],
-    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+    ) -> crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
         let mut attr_names = Vec::new();
         let mut event_names = Vec::new();
         for member in members {
@@ -7011,14 +7013,15 @@ impl VerterHost {
             }
         }
 
-        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
-            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
-                verter_resolver::fallthrough_resolver::IntrinsicSurfaceResult {
-                    members: members.to_vec(),
-                    attr_names,
-                    event_names,
-                },
-            ),
+        crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
+            value:
+                crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
+                    crate::resolver_core::fallthrough_resolver::IntrinsicSurfaceResult {
+                        members: members.to_vec(),
+                        attr_names,
+                        event_names,
+                    },
+                ),
             facts: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -7027,23 +7030,24 @@ impl VerterHost {
     fn build_runtime_consumed_bindings_node(
         &self,
         resolved: &ResolvedConsumedBindings,
-    ) -> verter_resolver::fallthrough_resolver::FallthroughNodeResult {
+    ) -> crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
         let mut consumed_names = resolved.bindings.attrs.clone();
         consumed_names.extend(resolved.bindings.listeners.iter().cloned());
         consumed_names.sort();
         consumed_names.dedup();
 
-        verter_resolver::fallthrough_resolver::FallthroughNodeResult {
-            value: verter_resolver::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
-                verter_resolver::fallthrough_resolver::ConsumedBindingsResult {
-                    attrs: resolved.bindings.attrs.clone(),
-                    listeners: resolved.bindings.listeners.clone(),
-                    has_dynamic_attr_name: resolved.bindings.has_dynamic_attr_name,
-                    has_dynamic_listener_name: resolved.bindings.has_dynamic_listener_name,
-                    partial_reasons: resolved.partial_reasons.clone(),
-                    consumed_names,
-                },
-            ),
+        crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
+            value:
+                crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
+                    crate::resolver_core::fallthrough_resolver::ConsumedBindingsResult {
+                        attrs: resolved.bindings.attrs.clone(),
+                        listeners: resolved.bindings.listeners.clone(),
+                        has_dynamic_attr_name: resolved.bindings.has_dynamic_attr_name,
+                        has_dynamic_listener_name: resolved.bindings.has_dynamic_listener_name,
+                        partial_reasons: resolved.partial_reasons.clone(),
+                        consumed_names,
+                    },
+                ),
             facts: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -7051,10 +7055,10 @@ impl VerterHost {
 
     fn runtime_child_node_to_resolution(
         &self,
-        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+        node: crate::resolver_core::fallthrough_resolver::FallthroughNodeResult,
     ) -> Option<crate::types::FallthroughResolution> {
         match node.value {
-            verter_resolver::fallthrough_resolver::FallthroughNodeValue::ChildSurfaceFollow(
+            crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::ChildSurfaceFollow(
                 child,
             ) => Some(crate::types::FallthroughResolution {
                 accepted_props: child.accepted_props,
@@ -7069,10 +7073,10 @@ impl VerterHost {
 
     fn runtime_branch_union_node_to_resolution(
         &self,
-        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+        node: crate::resolver_core::fallthrough_resolver::FallthroughNodeResult,
     ) -> Option<crate::types::FallthroughResolution> {
         match node.value {
-            verter_resolver::fallthrough_resolver::FallthroughNodeValue::BranchUnion(
+            crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::BranchUnion(
                 branch_union,
             ) => Some(crate::types::FallthroughResolution {
                 accepted_props: branch_union.accepted_props,
@@ -7087,10 +7091,10 @@ impl VerterHost {
 
     fn runtime_root_follow_node_to_resolution(
         &self,
-        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+        node: crate::resolver_core::fallthrough_resolver::FallthroughNodeResult,
     ) -> Option<crate::types::FallthroughResolution> {
         match node.value {
-            verter_resolver::fallthrough_resolver::FallthroughNodeValue::RootFollow(
+            crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::RootFollow(
                 root_follow,
             ) => Some(crate::types::FallthroughResolution {
                 accepted_props: root_follow.accepted_props,
@@ -7105,10 +7109,10 @@ impl VerterHost {
 
     fn runtime_intrinsic_node_to_members(
         &self,
-        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+        node: crate::resolver_core::fallthrough_resolver::FallthroughNodeResult,
     ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
         match node.value {
-            verter_resolver::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
+            crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
                 intrinsic,
             ) => Some(intrinsic.members),
             _ => None,
@@ -7117,10 +7121,10 @@ impl VerterHost {
 
     fn runtime_consumed_bindings_to_resolution(
         &self,
-        node: verter_resolver::fallthrough_resolver::FallthroughNodeResult,
+        node: crate::resolver_core::fallthrough_resolver::FallthroughNodeResult,
     ) -> Option<ResolvedConsumedBindings> {
         match node.value {
-            verter_resolver::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
+            crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
                 consumed,
             ) => Some(ResolvedConsumedBindings {
                 bindings: verter_semantic::analysis::component_meta::ConsumedRootBindings {
