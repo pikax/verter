@@ -19,6 +19,9 @@ function mockNativeSession(): NativeMetaSession {
     getComponentMeta() {
       return null;
     },
+    getResolvedComponentMeta() {
+      return null;
+    },
     getEffectiveSource() {
       return null;
     },

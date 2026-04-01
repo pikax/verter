@@ -209,6 +209,11 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
     pub external_type_analysis:
         Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
+    /// Canonical shallow type file state — the authoritative symbol/export
+    /// surface for this imported file.  Populated through the shared host
+    /// ensure-path and reused by component-meta, LSP, MCP, and other
+    /// host-backed consumers.
+    pub shallow_type_state: Option<Arc<crate::resolver_core::ShallowTypeFileState>>,
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
     pub eval_source: Option<Arc<str>>,
     pub env: Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>>,

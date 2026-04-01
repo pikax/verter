@@ -18,6 +18,7 @@ import {
   normalizePath as runtimeNormalizePath,
   shutdownMetaRuntime,
 } from "../runtime/index.js";
+import { resolvePath } from "../runtime/engine-key.js";
 import { array, func, literal, object, primitive, ref, tuple, union, unknown } from "../type-ir.js";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 
@@ -908,7 +909,7 @@ describe("ComponentMetaChecker", () => {
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
     expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
     expect(getDeclaredComponentMeta).toHaveBeenCalledWith(
-      runtimeNormalizePath(resolve("/tmp", "Single.vue")),
+      resolvePath("/tmp", "Single.vue"),
     );
     expect(getComponentMeta).not.toHaveBeenCalled();
   });
@@ -1184,9 +1185,7 @@ describe("ComponentMetaChecker", () => {
   });
 
   it("promotes lazy workspace files into the shared native project", async () => {
-    const canonicalId = resolve("/tmp", "Lazy.vue")
-      .replace(/\\/g, "/")
-      .replace(/^([A-Z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
+    const canonicalId = resolvePath("/tmp", "Lazy.vue");
     const ensureBaseFile = vi.fn(() => true);
     const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
@@ -1345,7 +1344,7 @@ defineEmits<{
     const meta = await checker.getComponentMeta(canonicalId);
 
     expect(getDeclaredComponentMeta).toHaveBeenCalledWith(
-      runtimeNormalizePath(resolve("/project", canonicalId)),
+      resolvePath("/project", canonicalId),
     );
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);

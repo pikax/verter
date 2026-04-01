@@ -47,7 +47,7 @@ export interface NativeMetaSession {
   /** Declared-surface native query for Volar-compatible callers. Returns a protobuf payload. */
   getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Full resolved native query with resolution sidecars. Returns a protobuf payload. */
-  getResolvedComponentMeta?(canonicalOrAlias: string): Buffer | null;
+  getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Provenance counters for observability. Returns JSON. */
   getProvenance(): string;
 }

@@ -2,7 +2,7 @@
  * @ai-generated - Verifies ProjectSession decodes binary component-meta payloads from the native session.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ProjectEngine } from "./project-engine.js";
 import { ProjectSession } from "./project-session.js";
@@ -150,5 +150,72 @@ describe("ProjectSession", () => {
     const native = session.getResolvedComponentMeta("/project/src/Button.vue") as any;
 
     expect(native?.props[0]?.name).toBe("resolvedLabel");
+  });
+
+  it("does not fall back to the plain native query when resolved metadata is unavailable", () => {
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+    });
+    const getComponentMeta = vi.fn(() => payload);
+    const nativeProject = {
+      upsertBase() {},
+      ensureLoaded() {
+        return false;
+      },
+      refreshBase() {
+        return false;
+      },
+      configureProjects() {},
+      openSession() {
+        throw new Error("not used");
+      },
+      clearCaches() {},
+      shutdown() {},
+      get isShutdown() {
+        return false;
+      },
+      get sessionCount() {
+        return 1;
+      },
+      baseFileIds() {
+        return [];
+      },
+    };
+    const nativeSession = {
+      upsert() {},
+      delete() {},
+      reset() {},
+      getEffectiveSource() {
+        return "<template />" as string | null;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+      get isClosed() {
+        return false;
+      },
+      get overlayGeneration() {
+        return 0;
+      },
+      getComponentMeta,
+      getDeclaredComponentMeta() {
+        return null;
+      },
+      getProvenance() {
+        return "{}";
+      },
+    };
+    const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+    const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+    expect(() => session.getResolvedComponentMeta("/project/src/Button.vue")).toThrow(
+      /resolved component-meta query/i,
+    );
+    expect(getComponentMeta).not.toHaveBeenCalled();
   });
 });

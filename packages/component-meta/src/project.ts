@@ -186,12 +186,16 @@ export class ComponentMetaSession {
       return undefined;
     }
 
-    const session = this._session as ProjectSession & {
-      getResolvedComponentMeta?: (canonicalId: string) => unknown | null;
-    };
-    const nativeMeta = session.getResolvedComponentMeta
-      ? session.getResolvedComponentMeta(abs)
-      : this._session.getComponentMeta(abs);
+    const getResolvedComponentMeta = (this._session as {
+      getResolvedComponentMeta?: ProjectSession["getResolvedComponentMeta"];
+    }).getResolvedComponentMeta;
+    if (typeof getResolvedComponentMeta !== "function") {
+      throw new Error(
+        "Resolved component-meta query is unavailable on the active native session",
+      );
+    }
+
+    const nativeMeta = getResolvedComponentMeta.call(this._session, abs);
     if (!nativeMeta) {
       return undefined;
     }

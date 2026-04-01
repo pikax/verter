@@ -144,16 +144,17 @@ export class ProjectSession {
 
   /**
    * Full native component-meta query with resolution sidecars.
-   *
-   * Falls back to `getComponentMeta()` when running against an older native
-   * session that does not expose the dedicated resolved query yet.
    */
   getResolvedComponentMeta(canonicalId: string): unknown | null {
     this.ensureOpen();
     this.engine.markActivity();
-    const payload = this._nativeSession.getResolvedComponentMeta
-      ? this._nativeSession.getResolvedComponentMeta(canonicalId)
-      : this._nativeSession.getComponentMeta(canonicalId);
+    const getResolvedComponentMeta = (this._nativeSession as { getResolvedComponentMeta?: typeof this._nativeSession.getResolvedComponentMeta }).getResolvedComponentMeta;
+    if (typeof getResolvedComponentMeta !== "function") {
+      throw new Error(
+        "Resolved component-meta query is unavailable on the active native session",
+      );
+    }
+    const payload = getResolvedComponentMeta.call(this._nativeSession, canonicalId);
     if (payload === null || payload === undefined) return null;
     return decodeComponentMetaPayload(payload);
   }

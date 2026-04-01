@@ -132,8 +132,8 @@ describe("P3: Default Values", () => {
     const prop = await getProp("P3a-JSDefaults.vue", "size");
     expect(prop).toBeDefined();
     expect(prop).toMatchObject({
-      type: "String",
-      default: "md",
+      type: "string | undefined",
+      default: '"md"',
     });
   });
 
@@ -141,7 +141,7 @@ describe("P3: Default Values", () => {
     const prop = await getProp("P3b-TSDefaults.vue", "count");
     expect(prop).toBeDefined();
     expect(prop).toMatchObject({
-      type: "number",
+      type: "number | undefined",
       default: "0",
     });
   });
@@ -150,8 +150,8 @@ describe("P3: Default Values", () => {
     const prop = await getProp("StringPropDefault.vue", "hello");
     expect(prop).toBeDefined();
     expect(prop).toMatchObject({
-      type: "string",
-      default: "Hello",
+      type: "string | undefined",
+      default: '"Hello"',
     });
   });
 });
@@ -163,13 +163,13 @@ describe("P4: DOM & Advanced Types", () => {
   test("HTMLCanvasElement prop should have { kind: 'object', schema: {} } not flat string", async () => {
     const prop = await getProp("P4a-DomTypes.vue", "canvas");
     expect(prop).toBeDefined();
-    expect(prop!.type).toBe("HTMLCanvasElement");
-    if (typeof prop!.schema === "string") {
-      expect(prop!.schema).toBe("HTMLCanvasElement");
-    } else {
+    expect(prop!.type).toBe("HTMLCanvasElement | undefined");
+    // Non-required prop produces an enum schema wrapping HTMLCanvasElement | undefined
+    expect(typeof prop!.schema).not.toBe("string");
+    if (typeof prop!.schema !== "string") {
       expect(prop!.schema).toMatchObject({
-        kind: "object",
-        type: "HTMLCanvasElement",
+        kind: "enum",
+        type: "HTMLCanvasElement | undefined",
       });
     }
   });

@@ -1,7 +1,6 @@
-import { resolve } from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ComponentMetaSession, evictComponentMetaSession, shutdownMetaRuntime } from "./project.js";
-import { createMetaRuntime, getMetaRuntime } from "./runtime/index.js";
+import { createMetaRuntime, getMetaRuntime, resolvePath } from "./runtime/index.js";
 import type { NativeMetaProject, NativeMetaSession } from "./runtime/index.js";
 
 function nativeMetaPayload(filePath: string) {
@@ -78,6 +77,13 @@ function createMockSession(baseFiles: Map<string, string>): NativeMetaSession {
     getComponentMeta(id: string) {
       const overlay = overlays.get(id);
       if (overlay === null) return null; // tombstoned
+      const source = overlay ?? baseFiles.get(id);
+      if (!source) return null;
+      return JSON.stringify(nativeMetaPayload(id));
+    },
+    getResolvedComponentMeta(id: string) {
+      const overlay = overlays.get(id);
+      if (overlay === null) return null;
       const source = overlay ?? baseFiles.get(id);
       if (!source) return null;
       return JSON.stringify(nativeMetaPayload(id));
@@ -613,6 +619,9 @@ describe("ComponentMetaSession public API", () => {
           },
         };
       },
+      getResolvedComponentMeta(id: string) {
+        return this.getComponentMeta(id);
+      },
       getEffectiveSource() {
         return `<script setup lang="ts">defineProps<Props>()</script>`;
       },
@@ -674,6 +683,33 @@ describe("ComponentMetaSession public API", () => {
     expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
     expect(compatMeta.props.map((prop) => prop.name)).toEqual(["label"]);
     expect(nativeMeta?.resolution?.mode).toBe("expanded");
+  });
+
+  it("does not downgrade native project queries when resolved metadata is unavailable", async () => {
+    const getComponentMeta = vi.fn(() => nativeMetaPayload("/test/Button.vue"));
+    const session = {
+      closed: false,
+      engine: { state: "active" as const, clearCaches() {} },
+      upsert() {},
+      delete() {},
+      getComponentMeta,
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    };
+    const project = new ComponentMetaSession(session as any, "/test");
+
+    await expect(project.getNativeComponentMeta("Button.vue")).rejects.toThrow(
+      /resolved component-meta query/i,
+    );
+    expect(getComponentMeta).not.toHaveBeenCalled();
   });
 
   it("keeps public-instance members off the public session API compat exposed surface", async () => {
@@ -777,6 +813,10 @@ describe("ComponentMetaSession public API", () => {
       .fn()
       .mockReturnValueOnce(nativeMetaPayload("/test/Button.vue"))
       .mockReturnValue(null);
+    const getResolvedComponentMeta = vi
+      .fn()
+      .mockReturnValueOnce(nativeMetaPayload("/test/Button.vue"))
+      .mockReturnValue(null);
     const session = {
       closed: false,
       engine: { state: "active" as const, clearCaches() {} },
@@ -784,6 +824,7 @@ describe("ComponentMetaSession public API", () => {
       delete() {},
       ensureBaseFile: vi.fn(() => true),
       getComponentMeta,
+      getResolvedComponentMeta,
       getEffectiveSource() {
         return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
       },
@@ -805,9 +846,7 @@ describe("ComponentMetaSession public API", () => {
   });
 
   it("promotes lazy disk-backed files into the shared native project instead of session overlays", async () => {
-    const canonicalId = resolve("/test", "Button.vue")
-      .replace(/\\/g, "/")
-      .replace(/^([A-Z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
+    const canonicalId = resolvePath("/test", "Button.vue");
     const ensureBaseFile = vi.fn(() => true);
     const upsert = vi.fn();
     const session = {

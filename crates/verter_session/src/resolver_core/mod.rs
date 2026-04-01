@@ -3,17 +3,14 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-mod barrel_resolution;
 mod component_meta;
 mod component_meta_request;
 mod declaration_metadata;
 mod eval_env_build;
 mod export_graph;
-mod export_registry_route;
 mod external_macro_types;
 mod external_type_body;
-mod external_type_graph;
-mod external_type_request;
+pub mod external_type_frontier;
 mod fallthrough;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
@@ -25,6 +22,7 @@ mod imported_type_alias;
 pub mod query_artifact;
 pub mod resolver_runtime;
 mod runtime_values;
+pub mod shallow_type_state;
 mod surface_projector;
 pub mod symbol_resolver;
 pub mod type_expansion;
@@ -35,9 +33,6 @@ pub mod type_expansion_verter;
 pub mod type_text_parser;
 
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
-pub use barrel_resolution::{
-    resolve_type_through_barrel, BarrelResolutionResolver, BarrelResolutionState,
-};
 pub use component_meta::{
     component_meta_resolved_macros, component_meta_type_registry, resolve_component_meta_parts,
     resolved_elements_to_type_expr_via_type_text, ComponentMetaEvalOutputs,
@@ -59,10 +54,6 @@ pub use export_graph::{
     resolve_exports_from_graph_best_effort, resolve_named_export_from_graph, ExportGraphFileKind,
     ExportGraphResolver, ExportSurface, ResolvedGraphExport,
 };
-pub use export_registry_route::{
-    resolve_type_via_registry, ExportRegistryView, RegistryExportEntry, RegistryResolvedTarget,
-    RegistryRoute, RegistryRouteResolver,
-};
 pub use external_macro_types::{
     collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,
     ExternalMacroTypeDiagnostic,
@@ -70,10 +61,9 @@ pub use external_macro_types::{
 pub use external_type_body::{
     resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
 };
-pub use external_type_graph::{resolve_external_type_from_graph, ExternalTypeGraphResolver};
-pub use external_type_request::{
-    resolve_external_type_request, ExternalTypeRequestResolver, ExternalTypeResolvedCacheEntry,
-    ExternalTypeRouteEntry,
+pub use external_type_frontier::{
+    ExternalTypeFrontier, FrontierHost, PendingExternalSymbol, ResolvedRouteProvenance,
+    ResolvedSymbol, ResolvedSymbolStatus, RouteKind,
 };
 pub use fallthrough::{
     append_component_candidate_branches, append_native_candidate_branch,
@@ -92,7 +82,7 @@ pub use imported_decl_eval::{
 pub use imported_eval_collect::{
     build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
     collect_imported_eval_inputs, imported_member_name_for_type_alias,
-    record_required_source_merge_inputs_recursive, required_type_alias_names_for_import_binding,
+    record_merge_inputs_from_frontier, required_type_alias_names_for_import_binding,
     ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver,
     ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
     ImportedEvalTraversalBudget,
@@ -113,6 +103,11 @@ pub use imported_type_alias::{
 };
 pub use runtime_values::{
     materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
+};
+pub use shallow_type_state::{
+    BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, LocalClosureResult,
+    LocalClosureStatus, ResolutionBudgets, ResolutionCounters, ShallowTypeFileState,
+    ShallowTypeSymbol,
 };
 pub use surface_projector::{
     extract_slot_info_from_type_text, project_macro_surfaces, ProjectedMacroSurfaces,

@@ -355,12 +355,12 @@ fn verter_tsc_diagnostics_e2e() {
 
     // OptionsApiErrors.vue — TS2322 in methods (string → number)
     assert_has_error(&diags, "OptionsApiErrors.vue", 2322);
-    assert_error_at(&diags, "OptionsApiErrors.vue", 18, 2322);
+    assert_error_at(&diags, "OptionsApiErrors.vue", 22, 2322);
 
     // OptionsApiAdvanced.vue — computed getter/setter, lifecycle hooks, methods
     // TS2322 in badAssign() (number → string)
     assert_has_error(&diags, "OptionsApiAdvanced.vue", 2322);
-    assert_error_at(&diags, "OptionsApiAdvanced.vue", 22, 2322);
+    assert_error_at(&diags, "OptionsApiAdvanced.vue", 26, 2322);
 
     // OptionsApiConsumer.vue — cross-component Options API prop checking
     // The IDE path generates defineComponent() exports that TS resolves prop types from.

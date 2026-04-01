@@ -141,7 +141,7 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
   });
 
-  it("uses one declared native query for Verter compat output and _verter", async () => {
+  it("uses one declared native query for explicit Verter compat output and _verter", async () => {
     const declaredMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
@@ -193,7 +193,7 @@ describe("ComponentMetaChecker session requirement", () => {
     };
     const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
     const getComponentMeta = vi.fn(() => {
-      throw new Error("full native query should not be used for default Verter compat");
+      throw new Error("full native query should not be used for explicit Verter compat");
     });
 
     const checker = new ComponentMetaChecker(
@@ -201,7 +201,7 @@ describe("ComponentMetaChecker session requirement", () => {
         upsert: vi.fn(),
       },
       "C:\\project",
-      {},
+      { typeExpansionBackend: "verter" },
       {
         closed: false,
         engine: { state: "active" as const },
@@ -240,7 +240,7 @@ describe("ComponentMetaChecker session requirement", () => {
     expect(meta._verter?.acceptedSurfaceCompleteness).toBe("exact");
   });
 
-  it("checks declared native metadata first, then retries once with the full native query on non-Verter backends", async () => {
+  it("checks declared native metadata first, then retries once with the full native query on tsserver backend", async () => {
     const declaredMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
@@ -341,7 +341,7 @@ describe("ComponentMetaChecker session requirement", () => {
     expect(meta.props.map((prop) => prop.name)).toEqual(["label", "collapsible"]);
   });
 
-  it("retries one full native query on non-Verter backends and keeps the richer result", async () => {
+  it("retries one full native query on tsserver backend and keeps the richer result", async () => {
     const partialMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,

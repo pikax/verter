@@ -12,7 +12,6 @@ pub struct ExternalTypeBodyCache {
     resolved: FxHashMap<(String, String), Option<ResolvedElements>>,
     source_analysis:
         FxHashMap<(String, verter_semantic::analysis::Hash16), AnalyzedExternalTypeSource>,
-    barrel_states: FxHashMap<String, crate::resolver_core::BarrelResolutionState>,
 }
 
 impl ExternalTypeBodyCache {
@@ -77,21 +76,6 @@ impl ExternalTypeBodyCache {
         }
     }
 
-    pub fn barrel_state(
-        &self,
-        barrel_canonical: &str,
-    ) -> Option<&crate::resolver_core::BarrelResolutionState> {
-        self.barrel_states.get(barrel_canonical)
-    }
-
-    pub fn store_barrel_state(
-        &mut self,
-        barrel_canonical: &str,
-        state: crate::resolver_core::BarrelResolutionState,
-    ) {
-        self.barrel_states
-            .insert(barrel_canonical.to_string(), state);
-    }
 }
 
 pub trait ExternalTypeBodyResolver {
@@ -165,22 +149,6 @@ pub trait ExternalTypeBodyResolver {
         depth: usize,
     ) -> Result<Option<ResolvedElements>, Self::Error>;
 
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_type_through_barrel(
-        &self,
-        barrel_canonical: &str,
-        type_name: &str,
-        wildcard_sources: &[String],
-        tracked_deps: &mut BTreeSet<String>,
-        resolution_deps: &mut BTreeSet<String>,
-        cache: &mut ExternalTypeBodyCache,
-        visiting: &mut FxHashSet<(String, String)>,
-        kind: ResolveRequestKind,
-        use_host_cache: bool,
-        profile_hash: Option<u64>,
-        depth: usize,
-        debug_enabled: bool,
-    ) -> Result<Option<ResolvedElements>, Self::Error>;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -264,36 +232,6 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
         ));
     }
 
-    let direct_reexport = extracted
-        .reexport_bindings
-        .iter()
-        .find(|binding| binding.local_name == type_name);
-    if let Some(target) = direct_reexport {
-        if resolver.debug_enabled() {
-            resolver.debug_log(format!(
-                "resolve_external_type direct-reexport dep={} type={} -> {}:{}",
-                dep_canonical, type_name, target.source, target.imported_name
-            ));
-        }
-        if let Some(resolved) = resolver.resolve_external_type_recursive(
-            dep_canonical,
-            &target.source,
-            &target.imported_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            false,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth + 1,
-        )? {
-            visiting.remove(&cache_key);
-            return Ok(Some(resolved));
-        }
-    }
-
     let mut companion_types = FxHashMap::default();
     let mut attempted_companion_requests = FxHashSet::default();
     for binding in &extracted.bindings {
@@ -339,7 +277,7 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
     }
 
     let used_local_symbol_cache = analysis.has_local_symbol_target(type_name);
-    let mut resolved = resolver.resolve_external_type_from_analysis(
+    let resolved = resolver.resolve_external_type_from_analysis(
         dep_canonical,
         type_name,
         effective_source,
@@ -360,24 +298,6 @@ pub fn resolve_external_type_from_source_body<R: ExternalTypeBodyResolver>(
             resolved.is_some(),
         ));
     }
-
-    if resolved.is_none() && !extracted.wildcard_reexport_sources.is_empty() {
-        resolved = resolver.resolve_type_through_barrel(
-            dep_canonical,
-            type_name,
-            &extracted.wildcard_reexport_sources,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-            resolver.debug_enabled(),
-        )?;
-    }
-
     visiting.remove(&cache_key);
     if resolver.debug_enabled() {
         resolver.debug_log(format!(
@@ -414,7 +334,6 @@ mod tests {
     #[derive(Default)]
     struct TestResolver {
         recursive_results: BTreeMap<(String, String, String), Option<ResolvedElements>>,
-        barrel_results: BTreeMap<(String, String), Option<ResolvedElements>>,
         required_import_names: BTreeMap<(String, String), FxHashSet<String>>,
         recursive_calls: RefCell<Vec<(String, String, String)>>,
         logs: RefCell<Vec<String>>,
@@ -505,28 +424,6 @@ mod tests {
                 .cloned()
                 .flatten())
         }
-
-        fn resolve_type_through_barrel(
-            &self,
-            barrel_canonical: &str,
-            type_name: &str,
-            _wildcard_sources: &[String],
-            _tracked_deps: &mut BTreeSet<String>,
-            _resolution_deps: &mut BTreeSet<String>,
-            _cache: &mut ExternalTypeBodyCache,
-            _visiting: &mut FxHashSet<(String, String)>,
-            _kind: ResolveRequestKind,
-            _use_host_cache: bool,
-            _profile_hash: Option<u64>,
-            _depth: usize,
-            _debug_enabled: bool,
-        ) -> Result<Option<ResolvedElements>, Self::Error> {
-            Ok(self
-                .barrel_results
-                .get(&(barrel_canonical.to_string(), type_name.to_string()))
-                .cloned()
-                .flatten())
-        }
     }
 
     fn empty_elements() -> ResolvedElements {
@@ -539,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_external_type_from_source_body_follows_direct_reexport() {
+    fn resolve_external_type_from_source_body_does_not_follow_direct_reexport_route() {
         let mut resolver = TestResolver::default();
         resolver.recursive_results.insert(
             (
@@ -569,9 +466,51 @@ mod tests {
             None,
             0,
         )
-        .expect("direct reexport resolution should succeed");
+        .expect("direct reexport body evaluation should succeed");
 
-        assert!(actual.is_some());
+        assert!(
+            actual.is_none(),
+            "body evaluation should not resolve direct reexports on its own"
+        );
+        assert!(
+            resolver.recursive_calls.borrow().is_empty(),
+            "body evaluation should not recurse through direct reexports"
+        );
+    }
+
+    #[test]
+    fn resolve_external_type_from_source_body_does_not_scan_wildcard_barrels() {
+        let resolver = TestResolver::default();
+
+        let mut tracked = BTreeSet::new();
+        let mut resolution = BTreeSet::new();
+        let mut cache = ExternalTypeBodyCache::default();
+        let mut visiting = FxHashSet::default();
+
+        let actual = resolve_external_type_from_source_body(
+            &resolver,
+            "/src/types.ts",
+            "Props",
+            "export * from './inner'",
+            &mut tracked,
+            &mut resolution,
+            &mut cache,
+            &mut visiting,
+            ResolveRequestKind::TypeImport,
+            true,
+            None,
+            0,
+        )
+        .expect("wildcard barrel body evaluation should succeed");
+
+        assert!(
+            actual.is_none(),
+            "body evaluation should not scan wildcard barrels on its own"
+        );
+        assert!(
+            resolver.recursive_calls.borrow().is_empty(),
+            "body evaluation should not recurse when wildcard exports are present"
+        );
     }
 
     #[test]

@@ -154,6 +154,10 @@ assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl
 3. Register in `packages/core/src/v5/process/script/plugins/index.ts`
 4. Add tests
 
+### Frontier Engine Tests (`crates/verter_session/src/frontier_tests.rs`)
+
+26 behavioral invariant tests for `ExternalTypeFrontier` and `ShallowTypeFileState`. Uses `MockHost` (in-memory `FrontierHost` impl) for isolated testing. Covers: diamond dedup, barrel ordering (declared-order wildcard precedence), same-file local closure, cycle termination, warm cache reuse, budget enforcement, export routing (direct > alias > wildcard), and store-view consistency. Run with `cargo test --package verter_session frontier_tests`.
+
 ### Testing Strategy
 
 - **Unit tests**: Test individual plugins with minimal SFC snippets

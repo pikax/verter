@@ -2158,6 +2158,34 @@ impl ImportedEvalSourceMergeResolver for HostImportedEvalResolver<'_> {
         self.host
             .resolve_imported_type_root_in_view(dep_canonical, imported_name, self.store_view)
     }
+
+    fn run_frontier_for_merge_roots(
+        &mut self,
+        roots: &[(String, String)],
+    ) -> Option<crate::resolver_core::ExternalTypeFrontier> {
+        if roots.is_empty() {
+            return None;
+        }
+
+        let adapter = crate::host_resolve::HostFrontierAdapter {
+            host: self.host,
+            store_view: self.store_view,
+        };
+
+        let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
+        frontier.seed(roots.iter().map(|(canonical_id, exported_name)| {
+            crate::resolver_core::PendingExternalSymbol {
+                canonical_id: canonical_id.clone(),
+                exported_name: exported_name.clone(),
+            }
+        }));
+
+        if frontier.run(&adapter).is_err() {
+            return None;
+        }
+
+        Some(frontier)
+    }
 }
 
 type OwnerEvalEnvBuild = crate::resolver_core::OwnerEvalEnvBuild;
@@ -3851,6 +3879,64 @@ impl VerterHost {
         Some(analysis)
     }
 
+    /// Get or build the canonical shallow type file state for an imported
+    /// dependency.  The state is populated through the shared host ensure-path
+    /// and cached on the `ImportedDependencyCacheEntry`.
+    ///
+    /// Consumed by the frontier engine (production cache-warming pass in
+    /// `resolve_external_type_from_loaded_files_in_view`) and integration tests.
+    pub(crate) fn shallow_type_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Arc<crate::resolver_core::ShallowTypeFileState>> {
+        let resolved_canonical_id = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+
+        // Fast path: check if already cached
+        if let Some(entry) =
+            self.clone_current_imported_dependency_entry(resolved_canonical_id.as_str(), store_view)
+        {
+            if let Some(ref state) = entry.shallow_type_state {
+                return Some(Arc::clone(state));
+            }
+        }
+
+        // Ensure shallow state is built and cached
+        let entry = self.ensure_shallow_imported_dependency_state_in_view(
+            resolved_canonical_id.as_str(),
+            store_view,
+        )?;
+
+        // Build shallow type state from available data if not yet present
+        if let Some(ref state) = entry.shallow_type_state {
+            return Some(Arc::clone(state));
+        }
+
+        // Build from analysis + env if available
+        let analysis = entry.external_type_analysis.clone()?;
+        let state = Arc::new(crate::resolver_core::ShallowTypeFileState::from_analysis(
+            entry.whole_hash,
+            analysis,
+            entry.env.as_deref(),
+        ));
+
+        // Cache the built state
+        let workspace_generation = self.ws().content_generation();
+        let mut cache = self.imported_dependency_cache.lock();
+        if let Some(cached) = cache.get_mut(resolved_canonical_id.as_str()) {
+            if cached.workspace_generation == workspace_generation
+                && cached.whole_hash == entry.whole_hash
+                && cached.shallow_type_state.is_none()
+            {
+                Arc::make_mut(cached).shallow_type_state = Some(Arc::clone(&state));
+            }
+        }
+
+        Some(state)
+    }
+
     pub(crate) fn resolve_external_type_from_cached_dependency_state_in_view(
         &self,
         dep_canonical: &str,
@@ -4013,66 +4099,6 @@ impl VerterHost {
             );
         }
         target
-    }
-
-    pub(crate) fn resolve_named_type_target_from_analysis_in_view(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-        visited: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<(String, String)> {
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
-            .unwrap_or_else(|| dep_canonical.to_string());
-        let visit_key = (normalized_canonical.clone(), requested_name.to_string());
-        if !visited.insert(visit_key) {
-            return None;
-        }
-
-        let analysis =
-            self.external_type_analysis_in_view(normalized_canonical.as_str(), store_view)?;
-
-        if let Some((import_source, imported_name)) =
-            analysis.direct_reexport_target(requested_name)
-        {
-            let next_canonical = self.resolve_type_dependency_canonical_in_view(
-                normalized_canonical.as_str(),
-                import_source,
-                store_view,
-            )?;
-            return self
-                .resolve_named_type_target_from_analysis_in_view(
-                    &next_canonical,
-                    imported_name,
-                    store_view,
-                    visited,
-                )
-                .or_else(|| Some((next_canonical, imported_name.to_string())));
-        }
-
-        let target_name = analysis.local_symbol_target_name(requested_name);
-        if let Some((import_source, imported_name)) =
-            analysis.local_import_symbol_target(target_name.as_str())
-        {
-            let next_canonical = self.resolve_type_dependency_canonical_in_view(
-                normalized_canonical.as_str(),
-                import_source,
-                store_view,
-            )?;
-            return self
-                .resolve_named_type_target_from_analysis_in_view(
-                    &next_canonical,
-                    imported_name,
-                    store_view,
-                    visited,
-                )
-                .or_else(|| Some((next_canonical, imported_name.to_string())));
-        }
-
-        analysis
-            .local_type_symbol(target_name.as_str())
-            .map(|_| (normalized_canonical, target_name))
     }
 
     pub(crate) fn resolve_imported_dependency_canonical_in_view(
@@ -4272,6 +4298,9 @@ impl VerterHost {
                     && entry.external_type_analysis.is_some()
                 {
                     cached_entry.external_type_analysis = entry.external_type_analysis.clone();
+                }
+                if cached_entry.shallow_type_state.is_none() && entry.shallow_type_state.is_some() {
+                    cached_entry.shallow_type_state = entry.shallow_type_state.clone();
                 }
                 if cached_entry.snapshot.is_none() && entry.snapshot.is_some() {
                     cached_entry.snapshot = entry.snapshot.clone();
@@ -4521,6 +4550,7 @@ impl VerterHost {
                 script_analysis: None,
                 export_signatures: None,
                 external_type_analysis: None,
+                shallow_type_state: None,
                 snapshot: None,
                 eval_source: None,
                 env: None,
@@ -4559,7 +4589,12 @@ impl VerterHost {
                 cached_parse,
                 script_analysis,
                 export_signatures,
-                external_type_analysis,
+                external_type_analysis: external_type_analysis.clone(),
+                shallow_type_state: external_type_analysis.map(|eta| {
+                    Arc::new(crate::resolver_core::ShallowTypeFileState::from_analysis(
+                        whole_hash, eta, None,
+                    ))
+                }),
                 snapshot: None,
                 eval_source,
                 env: None,
@@ -4603,7 +4638,14 @@ impl VerterHost {
                 export_signatures: snapshot
                     .as_ref()
                     .map(|snapshot| Arc::clone(&snapshot.export_signatures)),
-                external_type_analysis,
+                external_type_analysis: external_type_analysis.clone(),
+                shallow_type_state: external_type_analysis.map(|eta| {
+                    Arc::new(crate::resolver_core::ShallowTypeFileState::from_analysis(
+                        whole_hash,
+                        eta,
+                        env.as_deref(),
+                    ))
+                }),
                 snapshot,
                 eval_source,
                 env,

@@ -162,6 +162,22 @@ pub trait ImportedEvalSourceMergeResolver {
         imported_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration;
 
+    /// Run the BFS frontier engine for a set of merge roots to pre-warm
+    /// caches before the recursive merge-input loop.
+    ///
+    /// `roots` is a slice of `(canonical_id, exported_name)` pairs
+    /// representing the reached merge roots that will be walked.
+    ///
+    /// The default implementation returns `None`, meaning the frontier
+    /// pass was unavailable. Callers must surface overflow instead of
+    /// silently falling back to recursive merge-root discovery.
+    fn run_frontier_for_merge_roots(
+        &mut self,
+        _roots: &[(String, String)],
+    ) -> Option<crate::resolver_core::ExternalTypeFrontier> {
+        None
+    }
+
     fn resolve_imported_type_root(
         &self,
         dep_canonical: &str,
@@ -368,7 +384,7 @@ fn collect_imported_eval_inputs_lazy<R: ImportedEvalCollectorResolver>(
     inputs: &mut Vec<ImportedEvalSource>,
     type_aliases: &mut Vec<ImportedTypeAlias>,
     canonical_dependencies: &mut BTreeSet<String>,
-    visited_type_roots: &mut FxHashSet<(String, String)>,
+    _visited_type_roots: &mut FxHashSet<(String, String)>,
     budget: &mut ImportedEvalTraversalBudget,
     stats: &mut ImportedEvalStats,
 ) {
@@ -486,21 +502,21 @@ fn collect_imported_eval_inputs_lazy<R: ImportedEvalCollectorResolver>(
         }
     }
 
-    for (merge_root_canonical, merge_root_exported) in reached_merge_roots {
-        if budget.is_exhausted() {
-            break;
+    if !reached_merge_roots.is_empty() && !budget.is_exhausted() {
+        if let Some(frontier) = resolver.run_frontier_for_merge_roots(&reached_merge_roots) {
+            record_merge_inputs_from_frontier(
+                resolver,
+                &frontier,
+                seen_sources,
+                inputs,
+                canonical_dependencies,
+            );
+        } else {
+            budget.set_overflow(format!(
+                "component-meta merge-root frontier unavailable while resolving merge inputs for '{}'",
+                owner_canonical_id,
+            ));
         }
-        record_required_source_merge_inputs_recursive(
-            resolver,
-            &merge_root_canonical,
-            &merge_root_exported,
-            seen_sources,
-            inputs,
-            canonical_dependencies,
-            visited_type_roots,
-            budget,
-            stats,
-        );
     }
 
     for pending_alias in pending_aliases {
@@ -650,6 +666,34 @@ pub fn build_imported_eval_inputs_with_owner_context<R: ImportedEvalOwnerContext
     )
 }
 
+/// Frontier-aware merge root collection.
+///
+/// Instead of recursively walking the import graph per merge root, this
+/// function uses a pre-computed frontier to discover which canonical files
+/// participate in the merge. It then iterates over those files to record
+/// eval input sources.
+///
+/// The frontier must have already been run (seeded with the merge roots
+/// and executed via `frontier.run(host)`).
+pub fn record_merge_inputs_from_frontier<R: ImportedEvalSourceMergeResolver>(
+    resolver: &mut R,
+    frontier: &crate::resolver_core::ExternalTypeFrontier,
+    seen_sources: &mut FxHashSet<String>,
+    inputs: &mut Vec<ImportedEvalSource>,
+    canonical_dependencies: &mut BTreeSet<String>,
+) {
+    // Record all canonical files the frontier touched as dependencies
+    for canonical_id in frontier.touched_canonical_ids() {
+        canonical_dependencies.insert(canonical_id.clone());
+        resolver.record_eval_input_source(
+            &canonical_id,
+            seen_sources,
+            inputs,
+            canonical_dependencies,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -737,6 +781,8 @@ mod tests {
         imported_root_lookups: Cell<usize>,
         declaration_lookups: Cell<usize>,
         prepare_failure_count: Cell<u64>,
+        prebuilt_frontier: Option<crate::resolver_core::ExternalTypeFrontier>,
+        frontier_was_consulted: Cell<bool>,
     }
 
     impl DeclarationMetadataResolver for TestCollectorResolver {
@@ -864,6 +910,14 @@ mod tests {
                 .get(&(dep_canonical.to_string(), imported_name.to_string()))
                 .cloned()
                 .unwrap_or_else(|| (dep_canonical.to_string(), imported_name.to_string()))
+        }
+
+        fn run_frontier_for_merge_roots(
+            &mut self,
+            _roots: &[(String, String)],
+        ) -> Option<crate::resolver_core::ExternalTypeFrontier> {
+            self.frontier_was_consulted.set(true);
+            self.prebuilt_frontier.take()
         }
     }
 
@@ -1936,5 +1990,143 @@ export interface Props extends Local {}"#
         assert_eq!(inputs.len(), 2);
         assert!(canonical_dependencies.contains("/src/dep.ts"));
         assert!(canonical_dependencies.contains("/src/real.ts"));
+    }
+
+    #[test]
+    fn frontier_pre_warming_records_merge_inputs_without_recursive_root_walk() {
+        // Build a resolver that provides a frontier for the merge roots.
+        // The frontier has pre-resolved /src/types.ts and /src/dep.ts,
+        // so record_merge_inputs_from_frontier should register those files
+        // as eval input sources before the recursive loop runs.
+        let imports = vec![analyzed_import(
+            "./dep",
+            vec![binding("Props", ImportBindingKind::Named, None, true)],
+            true,
+        )];
+        let required_import_names = FxHashSet::from_iter(["Props".to_string()].into_iter());
+        let mut resolver = TestCollectorResolver::default();
+        resolver
+            .import_targets
+            .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
+        resolver.source_texts.insert(
+            "/src/dep.ts".to_string(),
+            "export interface Props { label: string }".to_string(),
+        );
+
+        // Build a frontier that touches /src/dep.ts (simulating pre-warming)
+        let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
+        // Manually insert a resolved entry so touched_canonical_ids returns /src/dep.ts
+        frontier.resolved.insert(
+            ("/src/dep.ts".to_string(), "Props".to_string()),
+            crate::resolver_core::ResolvedSymbol {
+                canonical_id: "/src/dep.ts".to_string(),
+                exported_name: "Props".to_string(),
+                status: crate::resolver_core::ResolvedSymbolStatus::Resolved,
+                body: None,
+                type_parameters: Vec::new(),
+                unresolved_external: Vec::new(),
+                route_provenance: None,
+            },
+        );
+        resolver.prebuilt_frontier = Some(frontier);
+
+        let mut seen_sources = FxHashSet::default();
+        let mut inputs = Vec::new();
+        let mut type_aliases = Vec::new();
+        let mut canonical_dependencies = BTreeSet::new();
+        let mut visited_type_roots = FxHashSet::default();
+        let mut budget = ImportedEvalTraversalBudget::new("/src/App.vue", 8);
+        let mut stats = ImportedEvalStats::default();
+
+        collect_imported_eval_inputs(
+            &mut resolver,
+            "/src/App.vue",
+            &imports,
+            &required_import_names,
+            &mut seen_sources,
+            &mut inputs,
+            &mut type_aliases,
+            &mut canonical_dependencies,
+            &mut visited_type_roots,
+            &mut budget,
+            &mut stats,
+        );
+
+        // The frontier should have registered /src/dep.ts as an eval source
+        assert!(
+            canonical_dependencies.contains("/src/dep.ts"),
+            "frontier pre-warming should register canonical dependency"
+        );
+        assert!(
+            resolver.frontier_was_consulted.get(),
+            "resolver's run_frontier_for_merge_roots should have been called"
+        );
+        assert!(
+            visited_type_roots.is_empty(),
+            "successful frontier merge-root collection should skip the recursive root walk"
+        );
+    }
+
+    #[test]
+    fn missing_frontier_does_not_fall_back_to_recursive_merge_walk() {
+        let imports = vec![analyzed_import(
+            "./dep",
+            vec![binding("Props", ImportBindingKind::Named, None, true)],
+            true,
+        )];
+        let required_import_names = FxHashSet::from_iter(["Props".to_string()].into_iter());
+        let mut resolver = TestCollectorResolver::default();
+        resolver
+            .import_targets
+            .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());
+        resolver.source_texts.insert(
+            "/src/dep.ts".to_string(),
+            "export interface Props { label: string }".to_string(),
+        );
+
+        let mut seen_sources = FxHashSet::default();
+        let mut inputs = Vec::new();
+        let mut type_aliases = Vec::new();
+        let mut canonical_dependencies = BTreeSet::new();
+        let mut visited_type_roots = FxHashSet::default();
+        let mut budget = ImportedEvalTraversalBudget::new("/src/App.vue", 8);
+        let mut stats = ImportedEvalStats::default();
+
+        collect_imported_eval_inputs(
+            &mut resolver,
+            "/src/App.vue",
+            &imports,
+            &required_import_names,
+            &mut seen_sources,
+            &mut inputs,
+            &mut type_aliases,
+            &mut canonical_dependencies,
+            &mut visited_type_roots,
+            &mut budget,
+            &mut stats,
+        );
+
+        assert!(
+            resolver.frontier_was_consulted.get(),
+            "merge-root collection should consult the frontier path first"
+        );
+        assert!(
+            budget.is_exhausted(),
+            "missing frontier state should surface overflow instead of silently downgrading"
+        );
+        assert!(
+            budget.overflow().is_some_and(|overflow| overflow
+                .message
+                .contains("frontier")),
+            "overflow message should explain that merge-root frontier collection failed"
+        );
+        assert!(
+            visited_type_roots.is_empty(),
+            "missing frontier state must not fall back to the recursive merge-root walk"
+        );
+        assert!(
+            inputs.is_empty(),
+            "missing frontier state must not record recursive merge inputs"
+        );
     }
 }

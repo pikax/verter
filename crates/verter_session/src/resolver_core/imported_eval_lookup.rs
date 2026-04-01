@@ -90,6 +90,12 @@ pub struct ImportedEvalLookup<'a, R> {
     type_decl_cache: FxHashMap<String, Option<TypeDeclInfo>>,
     type_root_cache: FxHashMap<String, Option<(String, String)>>,
     value_decl_cache: FxHashMap<Vec<String>, Option<ValueDeclInfo>>,
+    /// Optional pre-resolved eval env from a frontier-based resolution.
+    /// When set, `resolve_type_decl` checks this env first before falling
+    /// back to the recursive resolver path. This allows the builder to
+    /// operate cache-only when the frontier has pre-populated all needed
+    /// type declarations.
+    pre_resolved_env: Option<EvalEnv>,
 }
 
 impl<'a, R> ImportedEvalLookup<'a, R> {
@@ -106,6 +112,36 @@ impl<'a, R> ImportedEvalLookup<'a, R> {
             type_decl_cache: FxHashMap::default(),
             type_root_cache: FxHashMap::default(),
             value_decl_cache: FxHashMap::default(),
+            pre_resolved_env: None,
+        }
+    }
+
+    /// Create a lookup with a pre-resolved eval env from frontier-based
+    /// resolution. The env is checked first for type declarations,
+    /// avoiding the recursive `resolve_imported_type_root` call.
+    ///
+    /// This constructor is available for callers that have already
+    /// resolved type state from the frontier engine. When a frontier
+    /// has been run, its resolved symbols can be materialized into an
+    /// `EvalEnv` and passed here so that `resolve_imported_type`
+    /// lookups hit the pre-resolved env before falling back to the
+    /// recursive import-graph walker. Production wiring will happen
+    /// when callers start building envs from frontier results.
+    pub fn with_pre_resolved_env(
+        resolver: &'a mut R,
+        owner_canonical_id: &'a str,
+        imports: &'a [AnalyzedImport],
+        env: EvalEnv,
+    ) -> Self {
+        Self {
+            resolver,
+            owner_canonical_id,
+            imports,
+            discovered_dependencies: BTreeSet::new(),
+            type_decl_cache: FxHashMap::default(),
+            type_root_cache: FxHashMap::default(),
+            value_decl_cache: FxHashMap::default(),
+            pre_resolved_env: Some(env),
         }
     }
 
@@ -243,6 +279,17 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
             return cached.clone();
         }
 
+        // Fast path: check pre-resolved env from frontier
+        if let Some(ref env) = self.pre_resolved_env {
+            if let Some(decl) = env.type_symbols.get(name) {
+                let result = Some(decl.clone());
+                self.type_decl_cache
+                    .insert(name.to_string(), result.clone());
+                return result;
+            }
+        }
+
+        // Standard path: resolve through import bindings + resolver
         let resolved = self.resolve_type_lookup_target(name).and_then(|target| {
             let (source_canonical_id, exported_name) = self
                 .type_root_cache

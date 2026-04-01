@@ -420,6 +420,8 @@ External types for macros like `defineProps<ExternalType>()` are pre-resolved by
 
 The Rust compiler never does file I/O — all external resolution is the host's responsibility.
 
+**Shallow type state and frontier engine:** Cross-file type resolution is converging on `ShallowTypeFileState` (authoritative shallow symbol/export surface per imported file, keyed by `(canonical_id, whole_hash)`) and `ExternalTypeFrontier` (single BFS engine for cross-file type deepening, level-by-level with dedup and export routing). Local closure runs same-file deps iteratively without crossing import boundaries. Three budget domains (local_closure=500, frontier=2000, builder=5000) act as safety rails with structured failure. The frontier now backs shared shallow-state reuse and merge-root traversal; final external-type body production still falls through the legacy resolver stack in the current branch. See `resolver_core/shallow_type_state.rs`, `resolver_core/external_type_frontier.rs`, and `host_resolve.rs` (`HostFrontierAdapter`).
+
 **Resolver ownership rule:** host-backed component-meta and analysis must share one cross-file resolver. Do not build separate resolver logic for script-setup macros, Options API metadata, compat wrappers, or consumer-specific adapters.
 
 **Resolver modes:**
@@ -648,6 +650,10 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_scheduler/src/executor.rs`                                                   | StageExecutor trait: host plugs in parse/analysis/compile              |
 | `crates/verter_scheduler/src/edges.rs`                                                      | EdgeManager: ReverseIndex + BlockerRegistry (DashMap-sharded)          |
 | `crates/verter_scheduler/src/queue.rs`                                                      | JobIndex: priority queue with aging, dedup, cancel                     |
+| `crates/verter_session/src/resolver_core/shallow_type_state.rs`                                | ShallowTypeFileState, ExportTarget, ResolutionBudgets, local_closure() |
+| `crates/verter_session/src/resolver_core/external_type_frontier.rs`                            | ExternalTypeFrontier, FrontierHost trait, BFS cross-file type deepen   |
+| `crates/verter_session/src/host_resolve.rs`                                                    | HostFrontierAdapter, resolve_external_type_from_loaded_files_in_view() |
+| `crates/verter_session/src/frontier_tests.rs`                                                  | 26 behavioral invariant tests for frontier engine                      |
 | `crates/verter_session/src/lib.rs`                                                             | Host entry: compile, cache, upsert, dependency tracking                |
 | `crates/verter_session/src/host_executor.rs`                                                   | HostStageExecutor: real parse pipeline for scheduler                   |
 | `crates/verter_session/src/scheduler_shim.rs`                                                  | SchedulerBackedWorkspace: migration shim                               |

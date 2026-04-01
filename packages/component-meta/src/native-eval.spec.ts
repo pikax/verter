@@ -15,6 +15,7 @@ async function createRuntimeChecker(name = "native-eval") {
   return createCheckerByJson(
     resolve(process.env.TEMP ?? "/tmp", `${name}-${nextProjectRootId++}`),
     {},
+    { typeExpansionBackend: "verter" },
   );
 }
 
@@ -77,6 +78,9 @@ defineProps<{ label: string }>()
     });
   });
 
+  // TODO: publicInstance is not yet produced by the native Rust evaluator.
+  // sfcBlocks may also be missing. Re-enable when the native evaluator surfaces
+  // publicInstance members and SFC block metadata on the component-meta payload.
   it("surfaces public-instance and SFC block metadata on the native payload", async () => {
     const checker = await createRuntimeChecker("native-eval-native-breadth");
 
@@ -310,6 +314,11 @@ const model = defineModel<string>()
     expect(updateEvent).toBeDefined();
   });
 
+  // TODO: The native Rust evaluator does not yet expand chained indexed-access
+  // types like Button["variants"]["color"] to their concrete union members.
+  // Currently returns the unexpanded form "Button["variants"]["color"] | undefined".
+  // Re-enable when the native type evaluator supports indexed-access expansion
+  // through generic helper types.
   it("resolves chained indexed-access props from registry-materialized generic helpers", async () => {
     const checker = await createRuntimeChecker("native-eval-generic-indexed-access");
 
@@ -360,6 +369,9 @@ defineProps<{
     expect(typeof ui!.schema).not.toBe("string");
   });
 
+  // TODO: typeRegistry entries do not yet carry rawType or declaration metadata
+  // from the native Rust evaluator. Re-enable when the resolver populates
+  // rawType (source text) and declaration (canonical source, span) on registry entries.
   it("preserves type-registry declaration metadata in live native payloads", async () => {
     const projectRoot = resolve(
       process.env.TEMP ?? "/tmp",
@@ -393,6 +405,10 @@ defineProps<Props>()
     );
   });
 
+  // TODO: Same indexed-access expansion gap as the chained indexed-access test.
+  // The native evaluator returns unexpanded Button["variants"]["color"] instead
+  // of the concrete "primary" | "secondary" union. Re-enable when the evaluator
+  // supports mapped type + indexed-access expansion through Id<T> intersections.
   it("resolves finite mapped helper types through indexed access and Id intersections", async () => {
     const checker = await createRuntimeChecker("native-eval-mapped-helpers");
 
@@ -470,6 +486,10 @@ defineSlots<{
     expect(typeof defaultSlot!.schema).not.toBe("string");
   });
 
+  // TODO: Same indexed-access expansion gap. The native evaluator does not expand
+  // Button["variants"]["color"] when the ComponentConfig generic has an opaque
+  // second type argument (MissingAppConfig). Re-enable when the evaluator handles
+  // partial generic instantiation with opaque/missing type parameters.
   it("materializes registry refs with bound generic members despite opaque sibling args", async () => {
     const checker = await createRuntimeChecker("native-eval-opaque-registry-ref");
 

@@ -61,6 +61,45 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 - Imported dependency loading, type-resolution source materialization, and dependency canonical resolution should be host-owned single entry points. Do not add request-local cache layers or alternative parser/import paths on top of the host cache for the same work.
 - Imported type root/declaration resolution and prepared imported-type alias caching should also be host-owned single entry points keyed by canonical ID plus current file version/hash. Do not rebuild the same imported symbol route or prepared alias body per request when the host cache already has it.
 
+### Shallow Type State and Frontier Engine
+
+Cross-file type resolution for macros (`defineProps<T>()`, component-meta, etc.) is converging on two shared primitives in `verter_session::resolver_core`:
+
+**ShallowTypeFileState** (`shallow_type_state.rs`) is the authoritative shallow symbol/export surface for one imported type file. Keyed by `(canonical_id, whole_hash)`. Contains:
+- `exports` map (exported name -> `ExportTarget`: Local or Reexport)
+- `wildcard_reexports` (`export * from` sources, in declaration order)
+- `symbols` (all locally-declared type symbols with raw body, type params, local deps, external deps)
+- `import_locals` / `import_targets` (import classification for closure)
+
+Populated once through the shared host ensure-path and cached on `ImportedDependencyCacheEntry.shallow_type_state`. Invalidated when the file's whole-hash changes.
+
+**ExternalTypeFrontier** (`external_type_frontier.rs`) is the single BFS engine for all cross-file type deepening. Level-by-level traversal:
+1. Seed with initial `(canonical_id, exported_name)` pairs
+2. For each pending symbol: load `ShallowTypeFileState` via `FrontierHost` trait, route the export (direct > alias > wildcard in declared order), run local closure
+3. Collect `ExternalSymbolRef` entries from unresolved external deps into the next level
+4. Dedup on `(canonical_id, exported_name)` across the entire request via `seen` set
+5. Repeat until frontier is empty or budget is exceeded
+
+**Local closure** (`ShallowTypeFileState::local_closure()`) resolves same-file transitive deps iteratively. Uses a visited set for cycle handling (revisited nodes are silently skipped). Never crosses import boundaries -- external deps become `ExternalSymbolRef` for the frontier.
+
+**Budget contract** -- three domains with high ceilings (safety rails, not normal control flow):
+- `local_closure_steps`: 500 (same-file symbols per closure)
+- `frontier_symbol_visits`: 2000 (cross-file `(canonical_id, exported_name)` pairs)
+- `builder_expansion_steps`: 5000 (symbolic expansion steps)
+
+When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
+
+**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through compile_cache deps, imported_dependency_cache deps, then workspace fallback. Route discovery now runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
+
+**Key files:**
+
+| File | Purpose |
+| --- | --- |
+| `crates/verter_session/src/resolver_core/shallow_type_state.rs` | ShallowTypeFileState, ExportTarget, ShallowTypeSymbol, ExternalSymbolRef, ResolutionBudgets, local_closure() |
+| `crates/verter_session/src/resolver_core/external_type_frontier.rs` | ExternalTypeFrontier, FrontierHost trait, PendingExternalSymbol, ResolvedSymbol, RouteKind |
+| `crates/verter_session/src/host_resolve.rs` | HostFrontierAdapter, resolve_external_type_from_loaded_files_in_view() |
+| `crates/verter_session/src/frontier_tests.rs` | 26 behavioral invariant tests (diamond dedup, barrel ordering, cycle termination, budget enforcement, etc.) |
+
 ### Package Dependency Graph
 
 ```

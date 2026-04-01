@@ -1411,6 +1411,7 @@ pub enum ExternalTypeResolveError {
 /// as it is progressively discovered. Each type lookup through the barrel extends
 /// the state until `fully_resolved` is true, at which point absent types can be
 /// reported immediately without rescanning.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct BarrelResolutionState {
     /// Map: exported public name → (wildcard source specifier, canonical source ID).
@@ -1441,6 +1442,7 @@ pub(crate) struct BarrelResolutionState {
 ///
 /// Represents a single named export's structural routing information.
 /// Does NOT store resolved type payloads.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum ExportEntry {
     /// The name is directly exported by this file — either a local declaration
@@ -1460,6 +1462,7 @@ pub(crate) enum ExportEntry {
 ///
 /// Purely structural: maps exported names to their routing information.
 /// Never stores resolved type payloads — those stay in `resolved_type_cache`.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct FileExportRegistry {
     /// Whole-file source hash when this registry was built.
@@ -1470,21 +1473,6 @@ pub(crate) struct FileExportRegistry {
     /// Wildcard re-export edges: source specifiers from `export * from`.
     /// Preserves source declaration order for deterministic BFS resolution.
     pub wildcard_edges: Vec<String>,
-}
-
-/// Result of a registry-based type route lookup.
-///
-/// Contains both the resolved target and the traversal metadata needed
-/// for import-route-cache freshness validation.
-#[derive(Debug, Clone)]
-pub(crate) struct RegistryRoute {
-    /// The final defining file. `None` means the type was not found.
-    pub target: Option<NormalizedTypeTarget>,
-    /// Canonical IDs of all files traversed during route discovery.
-    pub tracked_deps: Vec<String>,
-    /// Every file whose registry content determined the route, with its hash.
-    #[allow(dead_code)]
-    pub route_hashes: Vec<(String, Hash16)>,
 }
 
 /// Normalized target of an import type route.

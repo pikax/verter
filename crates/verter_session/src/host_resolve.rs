@@ -26,11 +26,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use crate::resolver_core::{
-    resolve_external_type_request,
-    resolve_type_through_barrel as resolve_type_through_barrel_via_resolver,
-    BarrelResolutionResolver, BarrelResolutionState, ExportRegistryView, ExternalTypeBodyResolver,
-    ExternalTypeRequestResolver, ExternalTypeResolvedCacheEntry, ExternalTypeRouteEntry,
-    RegistryExportEntry, RegistryResolvedTarget, RegistryRouteResolver,
+    ExternalTypeBodyResolver,
 };
 use oxc_allocator::Allocator;
 use verter_compiler::compile::CodegenOptions;
@@ -53,6 +49,7 @@ type ResolvedExternalTypes =
     rustc_hash::FxHashMap<String, verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>;
 
 type ExternalTypeCache = crate::resolver_core::ExternalTypeBodyCache;
+type FrontierTargetResult = (Option<(String, String)>, rustc_hash::FxHashSet<String>, bool);
 
 fn external_type_debug_enabled() -> bool {
     std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
@@ -70,23 +67,8 @@ struct ViewExternalTypeResolver<'a> {
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
-struct ViewExternalTypeGraphResolver<'a> {
-    host: &'a VerterHost,
-    store_view: &'a crate::resolver_store::HostStoreView,
-}
-
 struct HostExternalMacroTypeCollector<'a> {
     host: &'a VerterHost,
-}
-
-struct HostLiveExternalTypeRequestResolver<'a> {
-    host: &'a VerterHost,
-}
-
-#[cfg(feature = "scheduler")]
-struct HostRegistryRouteResolver<'a> {
-    host: &'a VerterHost,
-    store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
 impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCollector<'_> {
@@ -166,397 +148,6 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
     }
 }
 
-impl crate::resolver_core::ExternalTypeGraphResolver for ViewExternalTypeGraphResolver<'_> {
-    type Error = crate::types::ExternalTypeResolveError;
-
-    fn max_external_type_resolve_steps(&self) -> usize {
-        crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS
-    }
-
-    fn max_external_type_resolve_depth(&self) -> usize {
-        crate::types::MAX_RESOLVE_DEPTH
-    }
-
-    fn missing_root_dependency(&self) -> Self::Error {
-        crate::types::ExternalTypeResolveError::MissingRootDependency
-    }
-
-    fn depth_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
-        crate::types::ExternalTypeResolveError::DepthLimitExceeded {
-            limit: crate::types::MAX_RESOLVE_DEPTH,
-            type_name: type_name.to_string(),
-            last_dep: last_dep.to_string(),
-        }
-    }
-
-    fn step_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
-        crate::types::ExternalTypeResolveError::StepLimitExceeded {
-            limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-            type_name: type_name.to_string(),
-            last_dep: last_dep.to_string(),
-        }
-    }
-
-    fn resolve_dependency_canonical(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<String> {
-        self.host.resolve_loaded_dependency_canonical_in_view(
-            owner_canonical,
-            import_source,
-            kind,
-            Some(self.store_view),
-        )
-    }
-
-    fn source_hash(&self, dep_canonical: &str) -> crate::resolver_core::ResolverHash16 {
-        self.store_view
-            .whole_hash(dep_canonical)
-            .unwrap_or_else(|| self.host.get_whole_hash(dep_canonical).unwrap_or_default())
-    }
-
-    fn read_source_for_type_resolution(
-        &self,
-        dep_canonical: &str,
-        profile_hash: Option<u64>,
-    ) -> Option<String> {
-        self.host.read_dep_source_for_type_resolution_in_view(
-            dep_canonical,
-            profile_hash,
-            Some(self.store_view),
-        )
-    }
-
-    fn required_import_names_for_type(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        _effective_source: &str,
-        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-    ) -> rustc_hash::FxHashSet<String> {
-        self.host.required_import_names_for_exported_type_in_view(
-            dep_canonical,
-            type_name,
-            Some(self.store_view),
-        )
-    }
-
-    fn resolve_named_export_target(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        _kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<(String, String)> {
-        self.host.resolve_named_type_export_target_in_view(
-            dep_canonical,
-            type_name,
-            Some(self.store_view),
-        )
-    }
-
-    fn resolve_external_type_from_analysis(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        _effective_source: &str,
-        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-        imported_companions: &rustc_hash::FxHashMap<
-            String,
-            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
-        >,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
-        self.host
-            .resolve_external_type_from_cached_dependency_state_in_view(
-                dep_canonical,
-                type_name,
-                imported_companions,
-                Some(self.store_view),
-            )
-    }
-
-    fn debug_enabled(&self) -> bool {
-        external_type_debug_enabled()
-    }
-
-    fn debug_log(&self, message: String) {
-        external_type_debug(message);
-    }
-
-    fn cached_source_analysis(
-        &self,
-        dep_canonical: &str,
-        _effective_source: &str,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-        self.host
-            .external_type_analysis_in_view(dep_canonical, Some(self.store_view))
-            .map(|analysis| (*analysis).clone())
-    }
-
-    fn cached_barrel_state(&self, barrel_canonical: &str) -> Option<BarrelResolutionState> {
-        #[cfg(feature = "scheduler")]
-        {
-            let state = self
-                .host
-                .compile_cache
-                .get(barrel_canonical)
-                .and_then(|cc| cc.barrel_export_surface.clone())?;
-
-            if !self.host.store_view_allows_current_whole_hash(
-                barrel_canonical,
-                state.source_hash,
-                Some(self.store_view),
-            ) {
-                return None;
-            }
-            if !state.scanned_sources.iter().all(|(canonical, hash)| {
-                self.host.store_view_allows_current_whole_hash(
-                    canonical,
-                    *hash,
-                    Some(self.store_view),
-                )
-            }) {
-                return None;
-            }
-
-            Some(BarrelResolutionState {
-                export_map: state.export_map,
-                source_hash: state.source_hash,
-                wildcard_sources: state.wildcard_sources,
-                scanned_sources: state.scanned_sources,
-                tracked_deps: state.tracked_deps,
-                fully_resolved: state.fully_resolved,
-                generation: state.generation,
-            })
-        }
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let _ = barrel_canonical;
-            None
-        }
-    }
-
-    fn persist_barrel_state(&self, barrel_canonical: &str, state: &BarrelResolutionState) {
-        if self.host.current_store_view_epoch() != self.store_view.mutation_epoch() {
-            return;
-        }
-
-        self.host.persist_barrel_state(
-            barrel_canonical,
-            &crate::types::BarrelResolutionState {
-                export_map: state.export_map.clone(),
-                source_hash: state.source_hash,
-                wildcard_sources: state.wildcard_sources.clone(),
-                scanned_sources: state.scanned_sources.clone(),
-                tracked_deps: state.tracked_deps.clone(),
-                fully_resolved: state.fully_resolved,
-                generation: state.generation,
-            },
-            false,
-        );
-    }
-
-    fn note_barrel_fact_reuse(&self) {
-        self.host
-            .provenance
-            .resolver_barrel_fact_reuse
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn ensure_export_registry(&self, canonical: &str) -> Option<ExportRegistryView> {
-        let registry = self
-            .host
-            .ensure_export_registry_in_view(canonical, Some(self.store_view))?;
-        if !self.host.store_view_allows_current_whole_hash(
-            canonical,
-            registry.source_hash,
-            Some(self.store_view),
-        ) {
-            return None;
-        }
-        Some(ExportRegistryView {
-            source_hash: registry.source_hash,
-            named: registry
-                .named
-                .into_iter()
-                .map(|(name, entry)| {
-                    let entry = match entry {
-                        crate::types::ExportEntry::Defined => RegistryExportEntry::Defined,
-                        crate::types::ExportEntry::Alias {
-                            source_specifier,
-                            original_name,
-                        } => RegistryExportEntry::Alias {
-                            source_specifier,
-                            original_name,
-                        },
-                    };
-                    (name, entry)
-                })
-                .collect(),
-            wildcard_edges: registry.wildcard_edges,
-        })
-    }
-
-    fn lookup_resolved_type_cache(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<crate::resolver_core::ExternalTypeResolvedCacheEntry> {
-        let effective_canonical = self
-            .host
-            .resolve_eval_dependency_canonical_in_view(dep_canonical, Some(self.store_view))
-            .unwrap_or_else(|| dep_canonical.to_string());
-        let source_hash = self
-            .store_view
-            .whole_hash(&effective_canonical)
-            .or_else(|| self.host.get_whole_hash(&effective_canonical))
-            .or_else(|| {
-                self.host
-                    .read_dep_source_for_type_resolution_in_view(
-                        &effective_canonical,
-                        None,
-                        Some(self.store_view),
-                    )
-                    .map(|source| crate::hash::hash_16(source.as_bytes()))
-            })?;
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: effective_canonical,
-            dep_source_hash: source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: kind,
-        };
-        let host_cache = self.host.resolved_type_cache.lock();
-        let entry = host_cache.get(&key)?;
-        Some(crate::resolver_core::ExternalTypeResolvedCacheEntry {
-            resolved: entry.resolved.clone(),
-            tracked_deps: entry.tracked_deps.clone(),
-        })
-    }
-
-    fn note_resolved_type_cache_hit(&self) {
-        self.host
-            .provenance
-            .resolved_external_type_cache_hits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn note_resolved_type(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        resolved: Option<&verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-        tracked_deps: &[String],
-    ) {
-        let effective_canonical = self
-            .host
-            .resolve_eval_dependency_canonical_in_view(dep_canonical, Some(self.store_view))
-            .unwrap_or_else(|| dep_canonical.to_string());
-        let source_hash = self
-            .store_view
-            .whole_hash(&effective_canonical)
-            .or_else(|| self.host.get_whole_hash(&effective_canonical))
-            .or_else(|| {
-                self.host
-                    .read_dep_source_for_type_resolution_in_view(
-                        &effective_canonical,
-                        None,
-                        Some(self.store_view),
-                    )
-                    .map(|source| crate::hash::hash_16(source.as_bytes()))
-            })
-            .unwrap_or_default();
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: effective_canonical,
-            dep_source_hash: source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: verter_workspace::ResolveRequestKind::TypeImport,
-        };
-        let mut host_cache = self.host.resolved_type_cache.lock();
-        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-            host_cache.clear();
-        }
-        self.host
-            .provenance
-            .resolved_external_type_cache_misses
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        host_cache.insert(
-            key,
-            crate::types::ResolvedTypeCacheEntry {
-                resolved: resolved.cloned(),
-                tracked_deps: tracked_deps.to_vec(),
-            },
-        );
-    }
-}
-
-#[cfg(feature = "scheduler")]
-impl RegistryRouteResolver for HostRegistryRouteResolver<'_> {
-    fn ensure_export_registry(&self, canonical: &str) -> Option<ExportRegistryView> {
-        let registry = self
-            .host
-            .ensure_export_registry_in_view(canonical, self.store_view)?;
-        if !self.host.store_view_allows_current_whole_hash(
-            canonical,
-            registry.source_hash,
-            self.store_view,
-        ) {
-            return None;
-        }
-        Some(ExportRegistryView {
-            source_hash: registry.source_hash,
-            named: registry
-                .named
-                .into_iter()
-                .map(|(name, entry)| {
-                    let entry = match entry {
-                        crate::types::ExportEntry::Defined => RegistryExportEntry::Defined,
-                        crate::types::ExportEntry::Alias {
-                            source_specifier,
-                            original_name,
-                        } => RegistryExportEntry::Alias {
-                            source_specifier,
-                            original_name,
-                        },
-                    };
-                    (name, entry)
-                })
-                .collect(),
-            wildcard_edges: registry.wildcard_edges,
-        })
-    }
-
-    fn resolve_loaded_dependency_canonical(
-        &self,
-        canonical: &str,
-        source_specifier: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<String> {
-        if kind == verter_workspace::ResolveRequestKind::TypeImport {
-            return self.host.resolve_type_dependency_canonical_shallow_in_view(
-                canonical,
-                source_specifier,
-                self.store_view,
-            );
-        }
-
-        self.host.resolve_loaded_dependency_canonical_in_view(
-            canonical,
-            source_specifier,
-            kind,
-            self.store_view,
-        )
-    }
-
-    fn note_barrel_fact_reuse(&self) {
-        self.host
-            .provenance
-            .resolver_barrel_fact_reuse
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
     type Error = crate::types::ExternalTypeResolveError;
 
@@ -627,150 +218,8 @@ impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
                 dep_canonical,
                 type_name,
                 imported_companions,
-                None,
-            )
-    }
-
-    fn resolve_external_type_recursive(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        type_name: &str,
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-        required_root_dep: bool,
-        kind: verter_workspace::ResolveRequestKind,
-        use_host_cache: bool,
-        profile_hash: Option<u64>,
-        depth: usize,
-    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
-    {
-        self.host.resolve_external_type_from_loaded_files_in_view(
-            owner_canonical,
-            import_source,
-            type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            required_root_dep,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-            self.store_view,
-        )
-    }
-
-    fn resolve_type_through_barrel(
-        &self,
-        barrel_canonical: &str,
-        type_name: &str,
-        wildcard_sources: &[String],
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-        kind: verter_workspace::ResolveRequestKind,
-        use_host_cache: bool,
-        profile_hash: Option<u64>,
-        depth: usize,
-        debug_enabled: bool,
-    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
-    {
-        let _ = debug_enabled;
-        resolve_type_through_barrel_via_resolver(
-            self,
-            barrel_canonical,
-            type_name,
-            wildcard_sources,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-        )
-    }
-}
-
-impl BarrelResolutionResolver for ViewExternalTypeResolver<'_> {
-    type Error = crate::types::ExternalTypeResolveError;
-
-    fn cached_barrel_state(&self, barrel_canonical: &str) -> Option<BarrelResolutionState> {
-        #[cfg(feature = "scheduler")]
-        {
-            let state = self
-                .host
-                .compile_cache
-                .get(barrel_canonical)
-                .and_then(|cc| cc.barrel_export_surface.clone())?;
-
-            if !self.host.store_view_allows_current_whole_hash(
-                barrel_canonical,
-                state.source_hash,
                 self.store_view,
-            ) {
-                return None;
-            }
-            if !state.scanned_sources.iter().all(|(canonical, hash)| {
-                self.host
-                    .store_view_allows_current_whole_hash(canonical, *hash, self.store_view)
-            }) {
-                return None;
-            }
-
-            Some(BarrelResolutionState {
-                export_map: state.export_map,
-                source_hash: state.source_hash,
-                wildcard_sources: state.wildcard_sources,
-                scanned_sources: state.scanned_sources,
-                tracked_deps: state.tracked_deps,
-                fully_resolved: state.fully_resolved,
-                generation: state.generation,
-            })
-        }
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let _ = barrel_canonical;
-            None
-        }
-    }
-
-    fn source_hash(&self, canonical: &str) -> crate::resolver_core::ResolverHash16 {
-        self.store_view
-            .and_then(|view| view.whole_hash(canonical))
-            .unwrap_or_else(|| self.host.get_whole_hash(canonical).unwrap_or_default())
-    }
-
-    fn resolve_dependency_canonical(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<String> {
-        self.host.resolve_loaded_dependency_canonical_in_view(
-            owner_canonical,
-            import_source,
-            kind,
-            self.store_view,
-        )
-    }
-
-    fn read_source_for_type_resolution(
-        &self,
-        canonical: &str,
-        profile_hash: Option<u64>,
-    ) -> Option<String> {
-        self.host.read_dep_source_for_type_resolution_in_view(
-            canonical,
-            profile_hash,
-            self.store_view,
-        )
+            )
     }
 
     fn resolve_external_type_recursive(
@@ -804,472 +253,6 @@ impl BarrelResolutionResolver for ViewExternalTypeResolver<'_> {
             depth,
             self.store_view,
         )
-    }
-
-    fn persist_barrel_state(
-        &self,
-        barrel_canonical: &str,
-        state: &BarrelResolutionState,
-        replace_existing: bool,
-    ) {
-        if let Some(view) = self.store_view {
-            if self.host.current_store_view_epoch() != view.mutation_epoch() {
-                return;
-            }
-        }
-
-        self.host.persist_barrel_state(
-            barrel_canonical,
-            &crate::types::BarrelResolutionState {
-                export_map: state.export_map.clone(),
-                source_hash: state.source_hash,
-                wildcard_sources: state.wildcard_sources.clone(),
-                scanned_sources: state.scanned_sources.clone(),
-                tracked_deps: state.tracked_deps.clone(),
-                fully_resolved: state.fully_resolved,
-                generation: state.generation,
-            },
-            replace_existing,
-        );
-    }
-
-    fn note_barrel_fact_reuse(&self) {
-        self.host
-            .provenance
-            .resolver_barrel_fact_reuse
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn debug_enabled(&self) -> bool {
-        external_type_debug_enabled()
-    }
-
-    fn debug_log(&self, message: String) {
-        external_type_debug(message);
-    }
-
-    fn ensure_export_registry(&self, canonical: &str) -> Option<ExportRegistryView> {
-        let registry = self
-            .host
-            .ensure_export_registry_in_view(canonical, self.store_view)?;
-        if !self.host.store_view_allows_current_whole_hash(
-            canonical,
-            registry.source_hash,
-            self.store_view,
-        ) {
-            return None;
-        }
-        Some(ExportRegistryView {
-            source_hash: registry.source_hash,
-            named: registry
-                .named
-                .into_iter()
-                .map(|(name, entry)| {
-                    let entry = match entry {
-                        crate::types::ExportEntry::Defined => RegistryExportEntry::Defined,
-                        crate::types::ExportEntry::Alias {
-                            source_specifier,
-                            original_name,
-                        } => RegistryExportEntry::Alias {
-                            source_specifier,
-                            original_name,
-                        },
-                    };
-                    (name, entry)
-                })
-                .collect(),
-            wildcard_edges: registry.wildcard_edges,
-        })
-    }
-}
-
-impl ExternalTypeBodyResolver for HostLiveExternalTypeRequestResolver<'_> {
-    type Error = crate::types::ExternalTypeResolveError;
-
-    fn max_external_type_resolve_steps(&self) -> usize {
-        crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS
-    }
-
-    fn step_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
-        crate::types::ExternalTypeResolveError::StepLimitExceeded {
-            limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-            type_name: type_name.to_string(),
-            last_dep: last_dep.to_string(),
-        }
-    }
-
-    fn debug_enabled(&self) -> bool {
-        external_type_debug_enabled()
-    }
-
-    fn debug_log(&self, message: String) {
-        external_type_debug(message);
-    }
-
-    fn cached_source_analysis(
-        &self,
-        dep_canonical: &str,
-        _effective_source: &str,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-        self.host
-            .external_type_analysis_in_view(dep_canonical, None)
-            .map(|analysis| (*analysis).clone())
-    }
-
-    fn required_import_names_for_type(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        _effective_source: &str,
-        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-    ) -> rustc_hash::FxHashSet<String> {
-        self.host
-            .required_import_names_for_exported_type_in_view(dep_canonical, type_name, None)
-    }
-
-    fn note_cycle_detected(&self) {
-        self.host
-            .provenance
-            .resolver_cycle_detections
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn resolve_external_type_from_analysis(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        _effective_source: &str,
-        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-        imported_companions: &rustc_hash::FxHashMap<
-            String,
-            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
-        >,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
-        self.host
-            .resolve_external_type_from_cached_dependency_state_in_view(
-                dep_canonical,
-                type_name,
-                imported_companions,
-                None,
-            )
-    }
-
-    fn resolve_external_type_recursive(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        type_name: &str,
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-        required_root_dep: bool,
-        kind: verter_workspace::ResolveRequestKind,
-        use_host_cache: bool,
-        profile_hash: Option<u64>,
-        depth: usize,
-    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
-    {
-        resolve_external_type_request(
-            self,
-            owner_canonical,
-            import_source,
-            type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            required_root_dep,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-        )
-    }
-
-    fn resolve_type_through_barrel(
-        &self,
-        barrel_canonical: &str,
-        type_name: &str,
-        wildcard_sources: &[String],
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-        kind: verter_workspace::ResolveRequestKind,
-        use_host_cache: bool,
-        profile_hash: Option<u64>,
-        depth: usize,
-        debug_enabled: bool,
-    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
-    {
-        let _ = debug_enabled;
-        let resolver = ViewExternalTypeResolver {
-            host: self.host,
-            store_view: None,
-        };
-        resolve_type_through_barrel_via_resolver(
-            &resolver,
-            barrel_canonical,
-            type_name,
-            wildcard_sources,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-        )
-    }
-}
-
-impl ExternalTypeRequestResolver for HostLiveExternalTypeRequestResolver<'_> {
-    fn max_external_type_resolve_depth(&self) -> usize {
-        crate::types::MAX_RESOLVE_DEPTH
-    }
-
-    fn missing_root_dependency(&self) -> Self::Error {
-        crate::types::ExternalTypeResolveError::MissingRootDependency
-    }
-
-    fn depth_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
-        crate::types::ExternalTypeResolveError::DepthLimitExceeded {
-            limit: crate::types::MAX_RESOLVE_DEPTH,
-            type_name: type_name.to_string(),
-            last_dep: last_dep.to_string(),
-        }
-    }
-
-    fn resolve_loaded_dependency_canonical(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<String> {
-        self.host.resolve_loaded_dependency_canonical_in_view(
-            owner_canonical,
-            import_source,
-            kind,
-            None,
-        )
-    }
-
-    fn lookup_route_cache(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<ExternalTypeRouteEntry> {
-        #[cfg(feature = "scheduler")]
-        {
-            let route_key = (import_source.to_string(), type_name.to_string(), kind);
-            let route_entry = self
-                .host
-                .compile_cache
-                .get(owner_canonical)
-                .and_then(|cc| cc.import_route_cache.get(&route_key).cloned())?;
-
-            let owner_hash = self
-                .host
-                .get_whole_hash(owner_canonical)
-                .unwrap_or_default();
-            let fresh = route_entry.owner_hash == owner_hash
-                && route_entry.route_hashes.iter().all(|(canonical, hash)| {
-                    self.host.get_whole_hash(canonical).unwrap_or_default() == *hash
-                });
-            if !fresh {
-                return None;
-            }
-
-            let neg_fresh = route_entry
-                .negative_barrel_gen
-                .as_ref()
-                .map(|(barrel_canonical, generation)| {
-                    self.host
-                        .compile_cache
-                        .get(barrel_canonical)
-                        .and_then(|cc| {
-                            cc.barrel_export_surface
-                                .as_ref()
-                                .map(|surface| surface.generation == *generation)
-                        })
-                        .unwrap_or(false)
-                })
-                .unwrap_or(true);
-            if route_entry.target.is_none() && !neg_fresh {
-                return None;
-            }
-
-            Some(ExternalTypeRouteEntry {
-                owner_hash: route_entry.owner_hash,
-                target: route_entry.target.map(|target| RegistryResolvedTarget {
-                    final_canonical_id: target.final_canonical_id,
-                    exported_name: target.exported_name,
-                }),
-                tracked_deps: route_entry.tracked_deps,
-                route_hashes: route_entry.route_hashes,
-                negative_barrel_generation: route_entry.negative_barrel_gen,
-            })
-        }
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let _ = (owner_canonical, import_source, type_name, kind);
-            None
-        }
-    }
-
-    fn whole_hash(&self, canonical: &str) -> crate::resolver_core::ResolverHash16 {
-        self.host.get_whole_hash(canonical).unwrap_or_default()
-    }
-
-    fn compute_source_hash(&self, source: &str) -> crate::resolver_core::ResolverHash16 {
-        crate::hash::hash_16(source.as_bytes())
-    }
-
-    fn lookup_resolved_type_cache(
-        &self,
-        dep_canonical: &str,
-        dep_source_hash: crate::resolver_core::ResolverHash16,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<ExternalTypeResolvedCacheEntry> {
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: dep_canonical.to_string(),
-            dep_source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: kind,
-        };
-        self.host
-            .resolved_type_cache
-            .lock()
-            .get(&key)
-            .cloned()
-            .map(|entry| ExternalTypeResolvedCacheEntry {
-                resolved: entry.resolved,
-                tracked_deps: entry.tracked_deps,
-            })
-    }
-
-    fn note_resolved_type_cache_hit(&self) {
-        self.host
-            .provenance
-            .resolved_external_type_cache_hits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn note_resolved_type_cache_miss(&self) {
-        self.host
-            .provenance
-            .resolved_external_type_cache_misses
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn note_route_fact_reuse(&self) {
-        self.host
-            .provenance
-            .resolver_route_fact_reuse
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn resolve_type_via_registry(
-        &self,
-        canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        visited: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<crate::resolver_core::RegistryRoute> {
-        #[cfg(feature = "scheduler")]
-        {
-            let route = self
-                .host
-                .resolve_type_via_registry(canonical, type_name, kind, visited);
-            Some(crate::resolver_core::RegistryRoute {
-                target: route.target.map(|target| RegistryResolvedTarget {
-                    final_canonical_id: target.final_canonical_id,
-                    exported_name: target.exported_name,
-                }),
-                tracked_deps: route.tracked_deps,
-                route_hashes: route.route_hashes,
-            })
-        }
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let _ = (canonical, type_name, kind, visited);
-            None
-        }
-    }
-
-    fn read_source_for_type_resolution(
-        &self,
-        dep_canonical: &str,
-        profile_hash: Option<u64>,
-    ) -> Option<String> {
-        self.host
-            .read_dep_source_for_type_resolution(dep_canonical, profile_hash)
-    }
-
-    fn store_resolved_type_cache(
-        &self,
-        dep_canonical: &str,
-        dep_source_hash: crate::resolver_core::ResolverHash16,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-        tracked_deps: Vec<String>,
-    ) {
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: dep_canonical.to_string(),
-            dep_source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: kind,
-        };
-        let mut host_cache = self.host.resolved_type_cache.lock();
-        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-            host_cache.clear();
-        }
-        host_cache.insert(
-            key,
-            crate::types::ResolvedTypeCacheEntry {
-                resolved,
-                tracked_deps,
-            },
-        );
-    }
-
-    fn store_route_cache(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        entry: ExternalTypeRouteEntry,
-    ) {
-        #[cfg(feature = "scheduler")]
-        {
-            let route_key = (import_source.to_string(), type_name.to_string(), kind);
-            let route_entry = crate::types::ImportTypeRouteEntry {
-                owner_hash: entry.owner_hash,
-                target: entry
-                    .target
-                    .map(|target| crate::types::NormalizedTypeTarget {
-                        final_canonical_id: target.final_canonical_id,
-                        exported_name: target.exported_name,
-                    }),
-                tracked_deps: entry.tracked_deps,
-                route_hashes: entry.route_hashes,
-                negative_barrel_gen: entry.negative_barrel_generation,
-            };
-            if let Some(mut cc) = self.host.compile_cache.get_mut(owner_canonical) {
-                cc.import_route_cache.insert(route_key, route_entry);
-            }
-        }
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let _ = (owner_canonical, import_source, type_name, kind, entry);
-        }
     }
 }
 
@@ -1932,47 +915,242 @@ impl VerterHost {
                 use_host_cache,
             ),
         );
+
+        if depth >= crate::types::MAX_RESOLVE_DEPTH {
+            return Err(crate::types::ExternalTypeResolveError::DepthLimitExceeded {
+                limit: crate::types::MAX_RESOLVE_DEPTH,
+                type_name: type_name.to_string(),
+                last_dep: owner_canonical.to_string(),
+            });
+        }
+
+        let Some(dep_canonical) = self.resolve_loaded_dependency_canonical_in_view(
+            owner_canonical,
+            import_source,
+            kind,
+            store_view,
+        ) else {
+            return if required_root_dep {
+                Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
+            } else {
+                Ok(None)
+            };
+        };
+
+        tracked_deps.insert(dep_canonical.clone());
+        resolution_deps.insert(dep_canonical.clone());
+
+        let cache_key = (dep_canonical.clone(), type_name.to_string());
+        if let Some(cached) = cache.get(&cache_key) {
+            return Ok(cached.clone());
+        }
+
+        let mut effective_target = None;
+        if use_host_cache && profile_hash.is_none() && store_view.is_none() {
+            if let Some(route_entry) =
+                self.lookup_import_type_route_cache(owner_canonical, import_source, type_name, kind)
+            {
+                self.provenance
+                    .resolver_route_fact_reuse
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                for dep in &route_entry.tracked_deps {
+                    tracked_deps.insert(dep.clone());
+                    resolution_deps.insert(dep.clone());
+                }
+
+                if let Some(target) = route_entry.target {
+                    if let Some(entry) = self.lookup_resolved_external_type_cache_in_view(
+                        target.final_canonical_id.as_str(),
+                        target.exported_name.as_str(),
+                        kind,
+                        store_view,
+                    ) {
+                        self.provenance
+                            .resolved_external_type_cache_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        for dep in &entry.tracked_deps {
+                            tracked_deps.insert(dep.clone());
+                            resolution_deps.insert(dep.clone());
+                        }
+                        let resolved = entry.resolved.clone();
+                        cache.insert(cache_key.clone(), resolved.clone());
+                        cache.insert(
+                            (target.final_canonical_id, target.exported_name),
+                            resolved.clone(),
+                        );
+                        return Ok(resolved);
+                    }
+
+                    self.provenance
+                        .resolved_external_type_cache_misses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    effective_target = Some((target.final_canonical_id, target.exported_name));
+                } else {
+                    cache.insert(cache_key.clone(), None);
+                    return Ok(None);
+                }
+            }
+        }
+
+        if effective_target.is_none() {
+            let (target, touched_ids, had_route_cycle) =
+                self.resolve_external_type_target_via_frontier_in_view(
+                    dep_canonical.as_str(),
+                    type_name,
+                    store_view,
+                )?;
+
+            for touched_id in touched_ids {
+                tracked_deps.insert(touched_id.clone());
+                resolution_deps.insert(touched_id);
+            }
+
+            let Some(target) = target else {
+                if self
+                    .current_eval_state_in_view(dep_canonical.as_str(), store_view)
+                    .is_none()
+                {
+                    return if required_root_dep {
+                        Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
+                    } else {
+                        Ok(None)
+                    };
+                }
+
+                if had_route_cycle {
+                    self.provenance
+                        .resolver_cycle_detections
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                cache.insert(cache_key.clone(), None);
+                if depth == 0 && use_host_cache && profile_hash.is_none() && store_view.is_none() {
+                    self.store_import_type_route_cache(
+                        owner_canonical,
+                        import_source,
+                        type_name,
+                        kind,
+                        None,
+                        resolution_deps,
+                    );
+                }
+                return Ok(None);
+            };
+            effective_target = Some(target);
+        }
+
+        let (effective_dep_canonical, effective_type_name) =
+            effective_target.expect("effective target should exist before body resolution");
+        tracked_deps.insert(effective_dep_canonical.clone());
+        resolution_deps.insert(effective_dep_canonical.clone());
+
+        if use_host_cache {
+            if let Some(entry) = self.lookup_resolved_external_type_cache_in_view(
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                kind,
+                store_view,
+            ) {
+                self.provenance
+                    .resolved_external_type_cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                for dep in &entry.tracked_deps {
+                    tracked_deps.insert(dep.clone());
+                    resolution_deps.insert(dep.clone());
+                }
+                let resolved = entry.resolved.clone();
+                cache.insert(cache_key.clone(), resolved.clone());
+                cache.insert(
+                    (
+                        effective_dep_canonical.clone(),
+                        effective_type_name.clone(),
+                    ),
+                    resolved.clone(),
+                );
+                return Ok(resolved);
+            }
+
+            if profile_hash.is_none() {
+                self.provenance
+                    .resolved_external_type_cache_misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        let Some(effective_source) = self.read_dep_source_for_type_resolution_in_view(
+            effective_dep_canonical.as_str(),
+            profile_hash,
+            store_view,
+        ) else {
+            if effective_dep_canonical.ends_with(".vue") {
+                cache.insert(cache_key.clone(), None);
+                return Ok(None);
+            }
+            return if required_root_dep {
+                Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
+            } else {
+                Ok(None)
+            };
+        };
+
+        let resolver = ViewExternalTypeResolver {
+            host: self,
+            store_view,
+        };
+        let resolved = crate::resolver_core::resolve_external_type_from_source_body(
+            &resolver,
+            effective_dep_canonical.as_str(),
+            effective_type_name.as_str(),
+            &effective_source,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            visiting,
+            kind,
+            use_host_cache,
+            profile_hash,
+            depth,
+        )?;
+
+        if use_host_cache && profile_hash.is_none() {
+            self.store_resolved_external_type_cache_in_view(
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                kind,
+                resolved.clone(),
+                resolution_deps.iter().cloned().collect(),
+                store_view,
+            );
+        }
+
+        cache.insert(cache_key.clone(), resolved.clone());
+        cache.insert(
+            (
+                effective_dep_canonical.clone(),
+                effective_type_name.clone(),
+            ),
+            resolved.clone(),
+        );
+
+        if depth == 0 && use_host_cache && profile_hash.is_none() && store_view.is_none() {
+            self.store_import_type_route_cache(
+                owner_canonical,
+                import_source,
+                type_name,
+                kind,
+                resolved.as_ref().map(|_| crate::types::NormalizedTypeTarget {
+                    final_canonical_id: effective_dep_canonical.clone(),
+                    exported_name: effective_type_name.clone(),
+                }),
+                resolution_deps,
+            );
+        }
+
         let tracked_before = tracked_deps.len();
         let resolution_before = resolution_deps.len();
         let cache_before = cache.len();
-        let result = if let Some(view) = store_view {
-            let resolver = ViewExternalTypeGraphResolver {
-                host: self,
-                store_view: view,
-            };
-            crate::resolver_core::resolve_external_type_from_graph(
-                &resolver,
-                owner_canonical,
-                import_source,
-                type_name,
-                tracked_deps,
-                resolution_deps,
-                cache,
-                visiting,
-                required_root_dep,
-                kind,
-                use_host_cache,
-                profile_hash,
-                depth,
-            )
-        } else {
-            let resolver = HostLiveExternalTypeRequestResolver { host: self };
-            resolve_external_type_request(
-                &resolver,
-                owner_canonical,
-                import_source,
-                type_name,
-                tracked_deps,
-                resolution_deps,
-                cache,
-                visiting,
-                required_root_dep,
-                kind,
-                use_host_cache,
-                profile_hash,
-                depth,
-            )
-        };
+        let result = Ok(resolved);
         component_meta_trace_event!(
             "resolve_external_type_from_loaded_files_result",
             format!(
@@ -2003,65 +1181,193 @@ impl VerterHost {
         result
     }
 
-    #[cfg(feature = "scheduler")]
-    fn persist_barrel_state(
+    fn current_type_resolution_hash_in_view(
         &self,
-        barrel_canonical: &str,
-        state: &crate::types::BarrelResolutionState,
-        replace_existing: bool,
+        canonical: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<crate::resolver_core::ResolverHash16> {
+        store_view
+            .and_then(|view| view.whole_hash(canonical))
+            .or_else(|| self.get_whole_hash(canonical))
+            .or_else(|| {
+                self.read_dep_source_for_type_resolution_in_view(canonical, None, store_view)
+                    .map(|source| crate::hash::hash_16(source.as_bytes()))
+            })
+    }
+
+    fn lookup_resolved_external_type_cache_in_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        kind: verter_workspace::ResolveRequestKind,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<crate::types::ResolvedTypeCacheEntry> {
+        let dep_source_hash = self.current_type_resolution_hash_in_view(dep_canonical, store_view)?;
+        let key = crate::types::ResolvedTypeCacheKey {
+            dep_canonical_id: dep_canonical.to_string(),
+            dep_source_hash,
+            type_name: type_name.to_string(),
+            resolve_kind: kind,
+        };
+        self.resolved_type_cache.lock().get(&key).cloned()
+    }
+
+    fn store_resolved_external_type_cache_in_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        kind: verter_workspace::ResolveRequestKind,
+        resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        tracked_deps: Vec<String>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
-        if let Some(mut cc) = self.compile_cache.get_mut(barrel_canonical) {
-            match cc.barrel_export_surface.as_mut() {
-                Some(existing)
-                    if !replace_existing && existing.source_hash == state.source_hash =>
-                {
-                    let prior_exports = existing.export_map.len();
-                    let prior_scanned = existing.scanned_sources.len();
-                    let prior_fully_resolved = existing.fully_resolved;
+        let Some(dep_source_hash) =
+            self.current_type_resolution_hash_in_view(dep_canonical, store_view)
+        else {
+            return;
+        };
 
-                    for (name, value) in &state.export_map {
-                        existing
-                            .export_map
-                            .entry(name.clone())
-                            .or_insert_with(|| value.clone());
-                    }
-                    for (child, hash) in &state.scanned_sources {
-                        existing
-                            .scanned_sources
-                            .entry(child.clone())
-                            .or_insert(*hash);
-                    }
-                    existing
-                        .tracked_deps
-                        .extend(state.tracked_deps.iter().cloned());
-                    existing.fully_resolved |= state.fully_resolved;
-
-                    if existing.export_map.len() != prior_exports
-                        || existing.scanned_sources.len() != prior_scanned
-                        || existing.fully_resolved != prior_fully_resolved
-                    {
-                        existing.generation = existing.generation.saturating_add(1);
-                    }
-                }
-                Some(existing) => {
-                    let mut next = state.clone();
-                    next.generation = existing.generation.saturating_add(1);
-                    cc.barrel_export_surface = Some(next);
-                }
-                None => {
-                    cc.barrel_export_surface = Some(state.clone());
-                }
-            }
+        let key = crate::types::ResolvedTypeCacheKey {
+            dep_canonical_id: dep_canonical.to_string(),
+            dep_source_hash,
+            type_name: type_name.to_string(),
+            resolve_kind: kind,
+        };
+        let mut host_cache = self.resolved_type_cache.lock();
+        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
+            host_cache.clear();
         }
+        host_cache.insert(
+            key,
+            crate::types::ResolvedTypeCacheEntry {
+                resolved,
+                tracked_deps,
+            },
+        );
+    }
+
+    #[cfg(feature = "scheduler")]
+    fn lookup_import_type_route_cache(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        kind: verter_workspace::ResolveRequestKind,
+    ) -> Option<crate::types::ImportTypeRouteEntry> {
+        let route_key = (import_source.to_string(), type_name.to_string(), kind);
+        let route_entry = self
+            .compile_cache
+            .get(owner_canonical)
+            .and_then(|cc| cc.import_route_cache.get(&route_key).cloned())?;
+
+        let owner_hash = self.get_whole_hash(owner_canonical).unwrap_or_default();
+        let fresh = route_entry.owner_hash == owner_hash
+            && route_entry.route_hashes.iter().all(|(canonical, hash)| {
+                self.get_whole_hash(canonical).unwrap_or_default() == *hash
+            });
+        if !fresh {
+            return None;
+        }
+
+        let neg_fresh = route_entry
+            .negative_barrel_gen
+            .as_ref()
+            .map(|(barrel_canonical, generation)| {
+                self.compile_cache
+                    .get(barrel_canonical)
+                    .and_then(|cc| {
+                        cc.barrel_export_surface
+                            .as_ref()
+                            .map(|surface| surface.generation == *generation)
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true);
+        if route_entry.target.is_none() && !neg_fresh {
+            return None;
+        }
+
+        Some(route_entry)
     }
 
     #[cfg(not(feature = "scheduler"))]
-    fn persist_barrel_state(
+    fn lookup_import_type_route_cache(
         &self,
-        _barrel_canonical: &str,
-        _state: &crate::types::BarrelResolutionState,
-        _replace_existing: bool,
+        _owner_canonical: &str,
+        _import_source: &str,
+        _type_name: &str,
+        _kind: verter_workspace::ResolveRequestKind,
+    ) -> Option<crate::types::ImportTypeRouteEntry> {
+        None
+    }
+
+    fn store_import_type_route_cache(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        kind: verter_workspace::ResolveRequestKind,
+        target: Option<crate::types::NormalizedTypeTarget>,
+        resolution_deps: &std::collections::BTreeSet<String>,
     ) {
+        #[cfg(feature = "scheduler")]
+        {
+            let route_key = (import_source.to_string(), type_name.to_string(), kind);
+            let route_entry = crate::types::ImportTypeRouteEntry {
+                owner_hash: self.get_whole_hash(owner_canonical).unwrap_or_default(),
+                target,
+                tracked_deps: resolution_deps.iter().cloned().collect(),
+                route_hashes: resolution_deps
+                    .iter()
+                    .filter_map(|dep| {
+                        self.get_whole_hash(dep).map(|hash| (dep.clone(), hash))
+                    })
+                    .collect(),
+                negative_barrel_gen: None,
+            };
+            if let Some(mut cc) = self.compile_cache.get_mut(owner_canonical) {
+                cc.import_route_cache.insert(route_key, route_entry);
+            }
+        }
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let _ = (owner_canonical, import_source, type_name, kind, target, resolution_deps);
+        }
+    }
+
+    fn resolve_external_type_target_via_frontier_in_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Result<FrontierTargetResult, crate::types::ExternalTypeResolveError> {
+        let adapter = HostFrontierAdapter {
+            host: self,
+            store_view,
+        };
+        let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
+        frontier.seed(std::iter::once(
+            crate::resolver_core::PendingExternalSymbol {
+                canonical_id: dep_canonical.to_string(),
+                exported_name: type_name.to_string(),
+            },
+        ));
+        if let Err(failure) = frontier.run(&adapter) {
+            return Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
+                limit: failure.limit,
+                type_name: type_name.to_string(),
+                last_dep: failure.context,
+            });
+        }
+
+        let target = frontier.final_target_for(&adapter, dep_canonical, type_name);
+        let had_route_cycle = target.is_none()
+            && frontier
+                .get_resolved(dep_canonical, type_name)
+                .and_then(|resolved| resolved.route_provenance.as_ref())
+                .is_some();
+
+        Ok((target, frontier.touched_canonical_ids(), had_route_cycle))
     }
 
     /// Ensure the export registry is populated for a file.
@@ -2070,6 +1376,7 @@ impl VerterHost {
     /// registry from `HostAnalysisData.export_signatures` (no OXC parsing).
     /// For files only on disk, reads the file and extracts export signatures
     /// (one parse, cached for all future lookups).
+    #[cfg(test)]
     #[cfg(not(feature = "scheduler"))]
     pub(crate) fn ensure_export_registry_in_view(
         &self,
@@ -2111,6 +1418,7 @@ impl VerterHost {
     /// registry from `HostAnalysisData.export_signatures` (no OXC parsing).
     /// For files only on disk, reads the file and extracts export signatures
     /// (one parse, cached for all future lookups).
+    #[cfg(test)]
     #[cfg(feature = "scheduler")]
     pub(crate) fn ensure_export_registry_in_view(
         &self,
@@ -2188,6 +1496,7 @@ impl VerterHost {
     }
 
     /// Build a `FileExportRegistry` from export signatures.
+    #[cfg(test)]
     fn build_export_registry(
         sigs: &[verter_semantic::analysis::ExportSignature],
         source_hash: Hash16,
@@ -2224,6 +1533,7 @@ impl VerterHost {
         }
     }
 
+    #[cfg(test)]
     fn build_export_registry_from_external_type_analysis(
         analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
         source_hash: Hash16,
@@ -2252,51 +1562,6 @@ impl VerterHost {
         }
     }
 
-    /// Resolve a type name through the export registry using BFS.
-    ///
-    /// Named exports are checked first (authoritative). If not found, BFS
-    /// through wildcard edges in source declaration order. Returns a
-    /// `RegistryRoute` with the target and traversal metadata.
-    #[cfg(feature = "scheduler")]
-    fn resolve_type_via_registry(
-        &self,
-        canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        visited: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> crate::types::RegistryRoute {
-        self.resolve_type_via_registry_in_view(canonical, type_name, kind, visited, None)
-    }
-
-    #[cfg(feature = "scheduler")]
-    fn resolve_type_via_registry_in_view(
-        &self,
-        canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        visited: &mut rustc_hash::FxHashSet<(String, String)>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> crate::types::RegistryRoute {
-        let resolver = HostRegistryRouteResolver {
-            host: self,
-            store_view,
-        };
-        let route = crate::resolver_core::resolve_type_via_registry(
-            &resolver, canonical, type_name, kind, visited,
-        );
-
-        crate::types::RegistryRoute {
-            target: route
-                .target
-                .map(|target| crate::types::NormalizedTypeTarget {
-                    final_canonical_id: target.final_canonical_id,
-                    exported_name: target.exported_name,
-                }),
-            tracked_deps: route.tracked_deps,
-            route_hashes: route.route_hashes,
-        }
-    }
-
     pub(crate) fn resolve_named_type_export_target_in_view(
         &self,
         dep_canonical: &str,
@@ -2306,89 +1571,29 @@ impl VerterHost {
         let normalized_canonical = self
             .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
-        let analysis_can_resolve_direct_target = self
-            .external_type_analysis_in_view(normalized_canonical.as_str(), store_view)
-            .map(|analysis| {
-                let target_name = analysis.local_symbol_target_name(requested_name);
-                analysis.direct_reexport_target(requested_name).is_some()
-                    || analysis
-                        .local_import_symbol_target(target_name.as_str())
-                        .is_some()
-                    || analysis.local_type_symbol(target_name.as_str()).is_some()
-            })
-            .unwrap_or(false);
-        if analysis_can_resolve_direct_target {
-            let mut visited = rustc_hash::FxHashSet::default();
-            if let Some((canonical, resolved_name)) = self
-                .resolve_named_type_target_from_analysis_in_view(
-                    dep_canonical,
-                    requested_name,
-                    store_view,
-                    &mut visited,
-                )
-            {
-                let _ = self.ensure_shallow_imported_dependency_state_in_view(
-                    canonical.as_str(),
-                    store_view,
-                );
-                component_meta_trace_event!(
-                    "resolve_named_type_export_target_in_view_result",
-                    format!(
-                        "owner={} requested={} source=analysis target={} exported={}",
-                        dep_canonical, requested_name, canonical, resolved_name
-                    ),
-                );
-                return Some((canonical, resolved_name));
-            }
-        }
-
-        #[cfg(feature = "scheduler")]
-        {
-            let mut visited = rustc_hash::FxHashSet::default();
-            let route = self.resolve_type_via_registry_in_view(
-                dep_canonical,
-                requested_name,
-                verter_workspace::ResolveRequestKind::TypeImport,
-                &mut visited,
-                store_view,
-            );
-            if let Some(target) = route.target {
-                let _ = self.ensure_shallow_imported_dependency_state_in_view(
-                    target.final_canonical_id.as_str(),
-                    store_view,
-                );
-                component_meta_trace_event!(
-                    "resolve_named_type_export_target_in_view_result",
-                    format!(
-                        "owner={} requested={} source=registry target={} exported={}",
-                        dep_canonical,
-                        requested_name,
-                        target.final_canonical_id,
-                        target.exported_name
-                    ),
-                );
-                return Some((target.final_canonical_id, target.exported_name));
-            }
-        }
-
-        let resolved = self.resolve_named_export_in_view(
-            dep_canonical,
-            requested_name,
-            Some(true),
+        let _ = self.ensure_shallow_imported_dependency_state_in_view(
+            normalized_canonical.as_str(),
             store_view,
-        )?;
-        let result = (
-            resolved
-                .source_canonical_id
-                .unwrap_or_else(|| dep_canonical.to_string()),
-            resolved.source_name,
         );
-        let _ =
-            self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
+
+        let (result, _, _) = self
+            .resolve_external_type_target_via_frontier_in_view(
+                normalized_canonical.as_str(),
+                requested_name,
+                store_view,
+            )
+            .ok()?;
+        let result = result.map(|(canonical, exported_name)| {
+            let canonical = self
+                .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
+                .unwrap_or(canonical);
+            (canonical, exported_name)
+        })?;
+        let _ = self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
         component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
             format!(
-                "owner={} requested={} source=export-span target={} exported={}",
+                "owner={} requested={} source=frontier target={} exported={}",
                 dep_canonical, requested_name, result.0, result.1
             ),
         );
@@ -2401,6 +1606,7 @@ impl VerterHost {
     /// On the WASM path, tries `self.files` first.
     /// Both fall back to reading from the VFS workspace.
     /// For Vue SFCs, extracts only `<script>` / `<script setup>` content.
+    #[cfg(test)]
     pub(crate) fn read_dep_source_for_type_resolution(
         &self,
         dep_canonical: &str,
@@ -3984,6 +3190,63 @@ fn find_next_known_root_block(bytes: &[u8], from: usize) -> Option<usize> {
     .min()
 }
 
+// ---------------------------------------------------------------------------
+// FrontierHost implementation for VerterHost
+// ---------------------------------------------------------------------------
+
+/// Adapter connecting the frontier engine to the real host.
+///
+/// Wraps a `VerterHost` reference with an optional `HostStoreView` for
+/// snapshot-consistent resolution.
+///
+/// Consumed by component-meta resolution (Phase 4+) and frontier integration tests.
+pub(crate) struct HostFrontierAdapter<'a> {
+    pub host: &'a VerterHost,
+    pub store_view: Option<&'a crate::resolver_store::HostStoreView>,
+}
+
+impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
+    fn ensure_shallow_state(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<crate::resolver_core::ShallowTypeFileState>> {
+        let canonical = self
+            .host
+            .resolve_eval_dependency_canonical_in_view(canonical_id, self.store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+
+        if let Some(entry) = self
+            .host
+            .clone_current_imported_dependency_entry(canonical.as_str(), self.store_view)
+        {
+            if let Some(ref state) = entry.shallow_type_state {
+                if state.has_wildcard_reexports() {
+                    self.host
+                        .provenance
+                        .resolver_barrel_fact_reuse
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                return Some(Arc::clone(state));
+            }
+        }
+
+        self.host
+            .shallow_type_state_in_view(canonical.as_str(), self.store_view)
+    }
+
+    fn resolve_import_canonical(&self, from_canonical: &str, specifier: &str) -> Option<String> {
+        self.host.resolve_type_dependency_canonical_shallow_in_view(
+            from_canonical,
+            specifier,
+            self.store_view,
+        )
+    }
+}
+
 #[cfg(test)]
 #[path = "host_resolve_tests.rs"]
 mod host_resolve_tests;
+
+#[cfg(test)]
+#[path = "frontier_tests.rs"]
+mod frontier_tests;

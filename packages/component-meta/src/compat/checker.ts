@@ -1188,8 +1188,15 @@ export class ComponentMetaChecker {
   }
 
   private shouldRetryFullNativeMeta(): boolean {
-    const backend = this.options.typeExpansionBackend;
-    return backend === "tsserver" || backend === "auto";
+    switch (this.options.typeExpansionBackend ?? "verter") {
+      // Only TypeScript-backed modes intentionally re-ask for the richer
+      // full native surface. Verter stays on the native declared query.
+      case "tsserver":
+      case "auto":
+        return true;
+      default:
+        return false;
+    }
   }
 }
 
