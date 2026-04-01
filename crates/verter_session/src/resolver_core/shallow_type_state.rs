@@ -281,7 +281,13 @@ impl ShallowTypeFileState {
             for (name, decl) in &env.type_symbols {
                 let local_type_sym = analysis.local_type_symbol(name);
                 let (local_deps, external_deps) = if let Some(sym) = local_type_sym {
-                    classify_deps(sym, &import_locals, &import_targets)
+                    classify_deps(
+                        name,
+                        analysis.as_ref(),
+                        sym,
+                        &import_locals,
+                        &import_targets,
+                    )
                 } else {
                     (Vec::new(), Vec::new())
                 };
@@ -446,27 +452,54 @@ impl ShallowTypeFileState {
 
 /// Classify a symbol's structural dependencies into local vs external.
 fn classify_deps(
+    symbol_name: &str,
+    analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
     sym: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbol,
     import_locals: &FxHashSet<String>,
     import_targets: &FxHashMap<String, (String, String)>,
 ) -> (Vec<String>, Vec<ExternalSymbolRef>) {
-    let mut local = Vec::new();
-    let mut external = Vec::new();
+    let mut local = analysis
+        .local_symbol_dependency_names(symbol_name)
+        .into_iter()
+        .collect::<Vec<_>>();
+    local.sort();
 
-    for dep_name in &sym.structural_dependency_names {
-        if import_locals.contains(dep_name.as_str()) {
-            if let Some((source, imported)) = import_targets.get(dep_name.as_str()) {
+    let mut external = Vec::new();
+    let mut seen_external = FxHashSet::default();
+
+    for dep_name in sym
+        .dependency_names
+        .iter()
+        .chain(sym.structural_dependency_names.iter())
+    {
+        let root_name = dep_name.split('.').next().unwrap_or(dep_name.as_str());
+        if import_locals.contains(root_name) {
+            if let Some((source, imported)) = import_targets.get(root_name) {
+                let imported_name = if root_name == dep_name {
+                    imported.clone()
+                } else if let Some(suffix) = dep_name.strip_prefix(root_name) {
+                    format!("{imported}{suffix}")
+                } else {
+                    imported.clone()
+                };
+                if !seen_external.insert((source.clone(), imported_name.clone())) {
+                    continue;
+                }
                 external.push(ExternalSymbolRef {
                     local_name: dep_name.clone(),
                     source_specifier: source.clone(),
-                    imported_name: imported.clone(),
+                    imported_name,
                 });
             }
-        } else {
-            // Same-file dependency
-            local.push(dep_name.clone());
         }
     }
+
+    external.sort_by(|left, right| {
+        left.local_name
+            .cmp(&right.local_name)
+            .then_with(|| left.source_specifier.cmp(&right.source_specifier))
+            .then_with(|| left.imported_name.cmp(&right.imported_name))
+    });
 
     (local, external)
 }

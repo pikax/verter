@@ -178,6 +178,10 @@ pub trait ImportedEvalSourceMergeResolver {
         None
     }
 
+    fn merge_root_frontier_failure_message(&self) -> Option<String> {
+        None
+    }
+
     fn resolve_imported_type_root(
         &self,
         dep_canonical: &str,
@@ -512,10 +516,13 @@ fn collect_imported_eval_inputs_lazy<R: ImportedEvalCollectorResolver>(
                 canonical_dependencies,
             );
         } else {
-            budget.set_overflow(format!(
-                "component-meta merge-root frontier unavailable while resolving merge inputs for '{}'",
-                owner_canonical_id,
-            ));
+            let message = resolver.merge_root_frontier_failure_message().unwrap_or_else(|| {
+                format!(
+                    "component-meta merge-root frontier unavailable while resolving merge inputs for '{}'",
+                    owner_canonical_id,
+                )
+            });
+            budget.set_overflow(message);
         }
     }
 
@@ -783,6 +790,7 @@ mod tests {
         prepare_failure_count: Cell<u64>,
         prebuilt_frontier: Option<crate::resolver_core::ExternalTypeFrontier>,
         frontier_was_consulted: Cell<bool>,
+        disable_frontier_auto_build: bool,
     }
 
     impl DeclarationMetadataResolver for TestCollectorResolver {
@@ -914,10 +922,32 @@ mod tests {
 
         fn run_frontier_for_merge_roots(
             &mut self,
-            _roots: &[(String, String)],
+            roots: &[(String, String)],
         ) -> Option<crate::resolver_core::ExternalTypeFrontier> {
             self.frontier_was_consulted.set(true);
-            self.prebuilt_frontier.take()
+            if let Some(frontier) = self.prebuilt_frontier.take() {
+                return Some(frontier);
+            }
+            if self.disable_frontier_auto_build {
+                return None;
+            }
+
+            let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
+            for (canonical_id, exported_name) in roots {
+                frontier.resolved.insert(
+                    (canonical_id.clone(), exported_name.clone()),
+                    crate::resolver_core::ResolvedSymbol {
+                        canonical_id: canonical_id.clone(),
+                        exported_name: exported_name.clone(),
+                        status: crate::resolver_core::ResolvedSymbolStatus::Resolved,
+                        body: None,
+                        type_parameters: Vec::new(),
+                        unresolved_external: Vec::new(),
+                        route_provenance: None,
+                    },
+                );
+            }
+            Some(frontier)
         }
     }
 
@@ -2076,6 +2106,7 @@ export interface Props extends Local {}"#
         )];
         let required_import_names = FxHashSet::from_iter(["Props".to_string()].into_iter());
         let mut resolver = TestCollectorResolver::default();
+        resolver.disable_frontier_auto_build = true;
         resolver
             .import_targets
             .insert("/src/App.vue:./dep".to_string(), "/src/dep.ts".to_string());

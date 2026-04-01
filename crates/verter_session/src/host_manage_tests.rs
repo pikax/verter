@@ -279,6 +279,60 @@ fn empty_object() -> verter_semantic::analysis::type_expr::TypeExpr {
     ))
 }
 
+fn plain_type_param(name: &str) -> verter_semantic::analysis::type_expr::TypeParam {
+    verter_semantic::analysis::type_expr::TypeParam {
+        name: name.to_string(),
+        constraint: None,
+        default: None,
+    }
+}
+
+fn alias_decl(
+    name: &str,
+    type_parameters: Vec<verter_semantic::analysis::type_expr::TypeParam>,
+    body: verter_semantic::analysis::type_expr::TypeExpr,
+) -> verter_semantic::analysis::type_eval::TypeDeclInfo {
+    verter_semantic::analysis::type_eval::TypeDeclInfo {
+        name: name.to_string(),
+        declaration_id: 0,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+        type_parameters,
+        body,
+    }
+}
+
+fn indexed_access(
+    object: verter_semantic::analysis::type_expr::TypeExpr,
+    key: &str,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
+        object: Arc::new(object),
+        index: Arc::new(verter_semantic::analysis::type_expr::TypeExpr::Literal(
+            verter_semantic::analysis::type_expr::LiteralValue::String(key.to_string()),
+        )),
+    }
+}
+
+fn single_prop_object(
+    name: &str,
+    ty: verter_semantic::analysis::type_expr::TypeExpr,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr {
+            properties: vec![
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
+                        name: name.to_string(),
+                        ty,
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+            ],
+        },
+    ))
+}
+
 fn exact_dependency(specifier: &str, resolved: &str) -> DependencyResolution {
     DependencyResolution {
         specifier: specifier.to_string(),
@@ -1304,6 +1358,135 @@ fn owner_env_resolution_is_retained_for_empty_object_placeholders() {
     assert!(
         should_attempt_owner_env_resolution(&decl, Some(&resolved_body)),
         "empty-object placeholders must force a second pass when the declared alias is not actually {{}}"
+    );
+}
+
+#[test]
+fn collect_required_runtime_value_names_distinguishes_local_generic_instantiations() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Alias",
+        vec![plain_type_param("T")],
+        verter_semantic::analysis::type_expr::TypeExpr::named("T"),
+    ));
+    let decl = alias_decl(
+        "Props",
+        Vec::new(),
+        verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Alias",
+                vec![verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+                    verter_semantic::analysis::type_expr::ValueRef {
+                        path: vec!["foo".to_string()],
+                    },
+                )],
+            ),
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Alias",
+                vec![verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+                    verter_semantic::analysis::type_expr::ValueRef {
+                        path: vec!["bar".to_string()],
+                    },
+                )],
+            ),
+        ]),
+    );
+
+    let required = collect_required_runtime_value_names_for_type_decl(&decl, &env);
+
+    assert_eq!(
+        BTreeSet::from_iter(required),
+        BTreeSet::from(["bar".to_string(), "foo".to_string()]),
+        "runtime-value collection must key local memoization by substituted type arguments"
+    );
+}
+
+#[test]
+fn collect_required_import_names_distinguishes_local_member_instantiations() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Picker",
+        vec![plain_type_param("T")],
+        single_prop_object(
+            "value",
+            verter_semantic::analysis::type_expr::TypeExpr::named("T"),
+        ),
+    ));
+    let decl = alias_decl(
+        "Props",
+        Vec::new(),
+        verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+            indexed_access(
+                verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                    "Picker",
+                    vec![verter_semantic::analysis::type_expr::TypeExpr::named("Foo")],
+                ),
+                "value",
+            ),
+            indexed_access(
+                verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                    "Picker",
+                    vec![verter_semantic::analysis::type_expr::TypeExpr::named("Bar")],
+                ),
+                "value",
+            ),
+        ]),
+    );
+
+    let required = collect_required_import_names_for_type_decl(&decl, &env);
+
+    assert_eq!(
+        BTreeSet::from_iter(required),
+        BTreeSet::from(["Bar".to_string(), "Foo".to_string()]),
+        "surface import collection must memoize local member walks per instantiated local symbol"
+    );
+}
+
+#[test]
+fn collect_slot_import_names_distinguishes_local_member_instantiations() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Picker",
+        vec![plain_type_param("T")],
+        single_prop_object(
+            "value",
+            verter_semantic::analysis::type_expr::TypeExpr::named("T"),
+        ),
+    ));
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+        indexed_access(
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Picker",
+                vec![verter_semantic::analysis::type_expr::TypeExpr::named("Foo")],
+            ),
+            "value",
+        ),
+        indexed_access(
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Picker",
+                vec![verter_semantic::analysis::type_expr::TypeExpr::named("Bar")],
+            ),
+            "value",
+        ),
+    ]);
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut state = SlotImportCollectState::default();
+    let mut required = rustc_hash::FxHashSet::default();
+
+    collect_slot_eval_import_names_from_expr_with_mode(
+        &expr,
+        &env,
+        &rustc_hash::FxHashMap::default(),
+        &mut active_locals,
+        &mut state,
+        &mut required,
+        SlotImportWalkMode::Structural,
+    );
+
+    assert_eq!(
+        BTreeSet::from_iter(required),
+        BTreeSet::from(["Bar".to_string(), "Foo".to_string()]),
+        "slot import collection must memoize local member walks per instantiated local symbol and mode"
     );
 }
 

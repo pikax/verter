@@ -20,8 +20,8 @@
 //! ```
 
 use crate::host_manage::{
-    collect_type_expr_symbol_refs, component_meta_debug, component_meta_debug_enabled,
-    component_meta_trace_event, component_meta_trace_scope, HostImportedEvalResolver,
+    component_meta_debug, component_meta_debug_enabled, component_meta_trace_event,
+    component_meta_trace_scope, HostImportedEvalResolver,
 };
 use crate::resolver_core::{
     run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost,
@@ -745,9 +745,18 @@ impl VerterHost {
             &dep_resolutions,
             store_view,
         );
-        let mut lookup =
-            ImportedEvalLookup::new(&mut resolver, owner_canonical, snapshot.imports.as_slice());
-        let mut registry_eval_env: Option<verter_semantic::analysis::type_eval::EvalEnv> = None;
+        let mut registry_eval_env = self.base_eval_env_in_view(owner_canonical, store_view);
+        if let Some(inputs) = cached_eval_inputs {
+            if let Some(env) = registry_eval_env.as_mut() {
+                prune_package_imported_registry_aliases(env, inputs);
+            }
+        }
+        let mut lookup = ImportedEvalLookup::with_pre_resolved_env(
+            &mut resolver,
+            owner_canonical,
+            snapshot.imports.as_slice(),
+            registry_eval_env.clone().unwrap_or_default(),
+        );
 
         if let Some(inputs) = cached_eval_inputs {
             for alias in &inputs.type_aliases {
@@ -881,24 +890,16 @@ impl VerterHost {
                 .as_mut()
                 .and_then(|env| env.type_symbols.get(type_name.as_str()).cloned())
                 .or_else(|| lookup.resolve_type_decl(type_name.as_str()))
-                .or_else(|| {
-                    if registry_eval_env.is_none() {
-                        let mut env = self.build_component_meta_registry_eval_env_in_view(
-                            owner_canonical,
-                            snapshot,
-                            cached_eval_inputs,
-                            store_view,
-                        )?;
-                        if let Some(inputs) = cached_eval_inputs {
-                            prune_package_imported_registry_aliases(&mut env, inputs);
-                        }
-                        registry_eval_env = Some(env);
-                    }
-                    registry_eval_env
-                        .as_mut()
-                        .and_then(|env| env.type_symbols.get(type_name.as_str()).cloned())
-                })
                 .map(|decl| {
+                    if let Some(env) = registry_eval_env.as_mut() {
+                        self.hydrate_cache_only_lookup_env_for_expr_in_view(
+                            declaration_owner,
+                            &decl.body,
+                            env,
+                            store_view,
+                        );
+                        lookup.replace_pre_resolved_env(env.clone());
+                    }
                     materialize_component_meta_registry_decl_body(
                         &decl,
                         registry_eval_env.get_or_insert_with(
@@ -1649,6 +1650,12 @@ fn materialize_component_meta_registry_decl_body(
         lookup,
         COMPONENT_META_REGISTRY_MATERIALIZATION_DEPTH,
     );
+    if crate::host_manage::component_meta_debug_enabled() {
+        crate::host_manage::component_meta_debug(format!(
+            "REGISTRY_MATERIALIZE decl={} evaluated={:?} materialized={:?}",
+            decl.name, evaluated, materialized
+        ));
+    }
     for (name, previous) in saved {
         if let Some(previous) = previous {
             registry_eval_env.type_bindings.insert(name, previous);
@@ -1672,21 +1679,54 @@ fn choose_preferred_component_meta_registry_candidate(
     right: Option<verter_semantic::analysis::type_expr::TypeExpr>,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
     match (left, right) {
-        (Some(left), Some(right))
+        (Some(left), Some(right)) => {
+            let left_non_object = component_meta_registry_has_non_object_top_level_surface(&left);
+            let right_non_object = component_meta_registry_has_non_object_top_level_surface(&right);
+            if left_non_object != right_non_object {
+                return Some(if left_non_object { right } else { left });
+            }
+
             if component_meta_registry_indexed_ref_penalty(&left)
-                != component_meta_registry_indexed_ref_penalty(&right) =>
-        {
-            Some(
-                if component_meta_registry_indexed_ref_penalty(&left)
-                    < component_meta_registry_indexed_ref_penalty(&right)
-                {
-                    left
-                } else {
-                    right
-                },
-            )
+                != component_meta_registry_indexed_ref_penalty(&right)
+            {
+                return Some(
+                    if component_meta_registry_indexed_ref_penalty(&left)
+                        < component_meta_registry_indexed_ref_penalty(&right)
+                    {
+                        left
+                    } else {
+                        right
+                    },
+                );
+            }
+
+            crate::resolver_core::choose_preferred_imported_type_body(Some(left), Some(right))
         }
         (left, right) => crate::resolver_core::choose_preferred_imported_type_body(left, right),
+    }
+}
+
+fn component_meta_registry_has_non_object_top_level_surface(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => {
+            component_meta_registry_has_non_object_top_level_surface(inner)
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types
+                .iter()
+                .any(component_meta_registry_has_non_object_top_level_surface)
+                || types.iter().any(|ty| !matches!(ty, TypeExpr::Object(_)))
+        }
+        TypeExpr::Ref { .. }
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. } => true,
+        TypeExpr::Object(_) => false,
+        _ => false,
     }
 }
 
@@ -1904,12 +1944,26 @@ fn materialize_component_meta_registry_type(
                 .map(|ty| materialize_component_meta_registry_type(ty, env, lookup, next_depth))
                 .collect(),
         ),
-        TypeExpr::Intersection(types) => TypeExpr::Intersection(
-            types
-                .iter()
-                .map(|ty| materialize_component_meta_registry_type(ty, env, lookup, next_depth))
-                .collect(),
-        ),
+        TypeExpr::Intersection(types) => {
+            let materialized = materialize_component_meta_registry_non_structural_type(
+                expr,
+                env,
+                lookup,
+                remaining_depth,
+            );
+            if materialized != *expr {
+                materialized
+            } else {
+                TypeExpr::Intersection(
+                    types
+                        .iter()
+                        .map(|ty| {
+                            materialize_component_meta_registry_type(ty, env, lookup, next_depth)
+                        })
+                        .collect(),
+                )
+            }
+        }
         TypeExpr::Object(object) => {
             let properties = object
                 .properties
@@ -2005,6 +2059,18 @@ fn materialize_component_meta_registry_type(
                         lookup,
                         next_depth,
                     );
+                }
+            }
+
+            if !type_arguments.is_empty() {
+                let materialized = materialize_component_meta_registry_non_structural_type(
+                    expr,
+                    env,
+                    lookup,
+                    remaining_depth,
+                );
+                if materialized != *expr {
+                    return materialized;
                 }
             }
 
@@ -3100,46 +3166,30 @@ fn resolve_jsdoc_tag_type(
     };
 
     let snapshot = host.get_raw_analysis_snapshot_in_view(canonical_source, store_view)?;
+    tracked_deps.extend(
+        host.imported_symbol_dependencies_for_expr_in_view(canonical_source, &parsed, store_view)
+            .into_iter()
+            .map(|dependency| dependency.canonical_id),
+    );
     let mut owner_env = host
-        .base_eval_env_in_view(canonical_source, store_view)
+        .build_cache_only_lookup_env_for_expr_in_view(canonical_source, &parsed, store_view)
+        .or_else(|| host.base_eval_env_in_view(canonical_source, store_view))
         .unwrap_or_default();
     let dep_resolutions = host
         .dependency_resolutions_for_eval_in_view(canonical_source, store_view)
         .unwrap_or_default();
-    let mut referenced_names = std::collections::BTreeSet::new();
-    collect_type_expr_symbol_refs(&parsed, &mut referenced_names);
-    for referenced_name in referenced_names {
-        let root_name = referenced_name
-            .split('.')
-            .next()
-            .unwrap_or(referenced_name.as_str());
-        for import in snapshot.imports.iter() {
-            let Some(_binding) = import.bindings.iter().find(|binding| {
-                binding.name == root_name && (binding.is_type_only || import.is_type_only)
-            }) else {
-                continue;
-            };
-            let dep_canonical = dep_resolutions
-                .get(import.source.as_str())
-                .and_then(crate::types::DependencyResolution::effective_target)
-                .map(str::to_string)
-                .or_else(|| import.resolved_canonical_id.clone());
-            if let Some(dep_canonical) = dep_canonical {
-                let _ = host.ensure_shallow_imported_dependency_state_in_view(
-                    dep_canonical.as_str(),
-                    store_view,
-                );
-            }
-        }
-    }
     let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
         host,
         canonical_source,
         &dep_resolutions,
         store_view,
     );
-    let mut lookup =
-        ImportedEvalLookup::new(&mut resolver, canonical_source, snapshot.imports.as_slice());
+    let mut lookup = ImportedEvalLookup::with_pre_resolved_env(
+        &mut resolver,
+        canonical_source,
+        snapshot.imports.as_slice(),
+        owner_env.clone(),
+    );
     let resolved = verter_semantic::analysis::type_eval::evaluate_with_lookup(
         &parsed,
         &mut owner_env,

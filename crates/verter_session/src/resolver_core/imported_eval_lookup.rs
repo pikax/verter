@@ -96,6 +96,7 @@ pub struct ImportedEvalLookup<'a, R> {
     /// operate cache-only when the frontier has pre-populated all needed
     /// type declarations.
     pre_resolved_env: Option<EvalEnv>,
+    cache_only_on_miss: bool,
 }
 
 impl<'a, R> ImportedEvalLookup<'a, R> {
@@ -113,6 +114,7 @@ impl<'a, R> ImportedEvalLookup<'a, R> {
             type_root_cache: FxHashMap::default(),
             value_decl_cache: FxHashMap::default(),
             pre_resolved_env: None,
+            cache_only_on_miss: false,
         }
     }
 
@@ -142,11 +144,18 @@ impl<'a, R> ImportedEvalLookup<'a, R> {
             type_root_cache: FxHashMap::default(),
             value_decl_cache: FxHashMap::default(),
             pre_resolved_env: Some(env),
+            cache_only_on_miss: true,
         }
     }
 
     pub fn into_discovered_dependencies(self) -> BTreeSet<String> {
         self.discovered_dependencies
+    }
+
+    pub fn replace_pre_resolved_env(&mut self, env: EvalEnv) {
+        self.pre_resolved_env = Some(env);
+        self.cache_only_on_miss = true;
+        self.type_decl_cache.clear();
     }
 }
 
@@ -286,6 +295,10 @@ impl<R: ImportedEvalLookupResolver> EvalLookup for ImportedEvalLookup<'_, R> {
                 self.type_decl_cache
                     .insert(name.to_string(), result.clone());
                 return result;
+            }
+            if self.cache_only_on_miss {
+                self.type_decl_cache.insert(name.to_string(), None);
+                return None;
             }
         }
 
@@ -751,6 +764,28 @@ mod tests {
             *resolver.root_lookups.borrow(),
             1,
             "repeated root identity queries should stay inside the imported lookup cache",
+        );
+    }
+
+    #[test]
+    fn imported_eval_lookup_with_pre_resolved_env_stops_on_miss() {
+        let imports = vec![analyzed_import(
+            "./dep",
+            Some("/src/dep.ts"),
+            vec![binding("Types", ImportBindingKind::Namespace, None, true)],
+            true,
+        )];
+        let mut resolver = TestResolver::default();
+        let env = EvalEnv::new();
+        let mut lookup =
+            ImportedEvalLookup::with_pre_resolved_env(&mut resolver, "/src/App.vue", &imports, env);
+
+        let resolved = lookup.resolve_type_decl("Types.User");
+
+        assert!(resolved.is_none());
+        assert!(
+            resolver.type_requests.borrow().is_empty(),
+            "cache-only pre-resolved lookups must not reopen imported alias preparation on miss",
         );
     }
 }

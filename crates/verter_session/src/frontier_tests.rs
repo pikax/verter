@@ -1519,6 +1519,7 @@ defineProps<Props>()
     let adapter = crate::host_resolve::HostFrontierAdapter {
         host: &host,
         store_view: None,
+        materialize_symbols: true,
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
@@ -1577,6 +1578,7 @@ defineProps<Props>()
     let adapter = crate::host_resolve::HostFrontierAdapter {
         host: &host,
         store_view: None,
+        materialize_symbols: true,
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();

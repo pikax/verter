@@ -25,13 +25,6 @@ use std::time::Instant;
 #[cfg(feature = "session_metrics")]
 use web_time::Instant;
 
-use crate::resolver_core::ExternalTypeBodyResolver;
-use oxc_allocator::Allocator;
-use verter_compiler::compile::CodegenOptions;
-use verter_compiler::compile::{
-    compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
-};
-
 #[cfg(not(feature = "scheduler"))]
 use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
@@ -42,6 +35,14 @@ use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
+use oxc_allocator::Allocator;
+use verter_compiler::compile::CodegenOptions;
+use verter_compiler::compile::{
+    compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
+};
+use verter_compiler::utils::oxc::vue::resolve_type::{
+    imported_member_name_for_required_alias, required_import_alias_names_for_binding,
+};
 
 type ResolvedExternalTypes =
     rustc_hash::FxHashMap<String, verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>;
@@ -62,11 +63,6 @@ fn external_type_debug(message: impl AsRef<str>) {
     if external_type_debug_enabled() {
         eprintln!("[verter-meta] {}", message.as_ref());
     }
-}
-
-struct ViewExternalTypeResolver<'a> {
-    host: &'a VerterHost,
-    store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
 struct HostExternalMacroTypeCollector<'a> {
@@ -147,114 +143,6 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
             message,
             span: import_span,
         }
-    }
-}
-
-impl ExternalTypeBodyResolver for ViewExternalTypeResolver<'_> {
-    type Error = crate::types::ExternalTypeResolveError;
-
-    fn max_external_type_resolve_steps(&self) -> usize {
-        crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS
-    }
-
-    fn step_limit_exceeded(&self, type_name: &str, last_dep: &str) -> Self::Error {
-        crate::types::ExternalTypeResolveError::StepLimitExceeded {
-            limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-            type_name: type_name.to_string(),
-            last_dep: last_dep.to_string(),
-        }
-    }
-
-    fn debug_enabled(&self) -> bool {
-        external_type_debug_enabled()
-    }
-
-    fn debug_log(&self, message: String) {
-        external_type_debug(message);
-    }
-
-    fn cached_source_analysis(
-        &self,
-        dep_canonical: &str,
-        _effective_source: &str,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-        self.host
-            .external_type_analysis_in_view(dep_canonical, self.store_view)
-            .map(|analysis| (*analysis).clone())
-    }
-
-    fn required_import_names_for_type(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        _effective_source: &str,
-        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-    ) -> rustc_hash::FxHashSet<String> {
-        self.host.required_import_names_for_exported_type_in_view(
-            dep_canonical,
-            type_name,
-            self.store_view,
-        )
-    }
-
-    fn note_cycle_detected(&self) {
-        self.host
-            .provenance
-            .resolver_cycle_detections
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn resolve_external_type_from_analysis(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        _effective_source: &str,
-        _analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-        imported_companions: &rustc_hash::FxHashMap<
-            String,
-            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
-        >,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
-        self.host
-            .resolve_external_type_from_cached_dependency_state_in_view(
-                dep_canonical,
-                type_name,
-                imported_companions,
-                self.store_view,
-            )
-    }
-
-    fn resolve_external_type_recursive(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        type_name: &str,
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-        required_root_dep: bool,
-        kind: verter_workspace::ResolveRequestKind,
-        use_host_cache: bool,
-        profile_hash: Option<u64>,
-        depth: usize,
-    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
-    {
-        self.host.resolve_external_type_from_loaded_files_in_view(
-            owner_canonical,
-            import_source,
-            type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            required_root_dep,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-            self.store_view,
-        )
     }
 }
 
@@ -948,6 +836,7 @@ impl VerterHost {
         }
 
         let mut effective_target = None;
+        let mut frontier_for_materialization = None;
         if use_host_cache && profile_hash.is_none() && store_view.is_none() {
             if let Some(route_entry) =
                 self.lookup_import_type_route_cache(owner_canonical, import_source, type_name, kind)
@@ -996,12 +885,13 @@ impl VerterHost {
         }
 
         if effective_target.is_none() {
-            let (target, touched_ids, had_route_cycle) = self
-                .resolve_external_type_target_via_frontier_in_view(
+            let (frontier, target, had_route_cycle) = self
+                .run_external_type_frontier_closure_in_view(
                     dep_canonical.as_str(),
                     type_name,
                     store_view,
                 )?;
+            let touched_ids = frontier.touched_canonical_ids();
 
             for touched_id in touched_ids {
                 tracked_deps.insert(touched_id.clone());
@@ -1039,6 +929,7 @@ impl VerterHost {
                 }
                 return Ok(None);
             };
+            frontier_for_materialization = Some(frontier);
             effective_target = Some(target);
         }
 
@@ -1077,40 +968,72 @@ impl VerterHost {
             }
         }
 
-        let Some(effective_source) = self.read_dep_source_for_type_resolution_in_view(
-            effective_dep_canonical.as_str(),
-            profile_hash,
-            store_view,
-        ) else {
-            if effective_dep_canonical.ends_with(".vue") {
-                cache.insert(cache_key.clone(), None);
-                return Ok(None);
-            }
-            return if required_root_dep {
-                Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
-            } else {
-                Ok(None)
-            };
-        };
+        let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
+        if let Some(cached) = cache.get(&final_target_key).cloned() {
+            cache.insert(cache_key.clone(), cached.clone());
+            return Ok(cached);
+        }
 
-        let resolver = ViewExternalTypeResolver {
-            host: self,
-            store_view,
-        };
-        let resolved = crate::resolver_core::resolve_external_type_from_source_body(
-            &resolver,
-            effective_dep_canonical.as_str(),
-            effective_type_name.as_str(),
-            &effective_source,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            kind,
-            use_host_cache,
-            profile_hash,
-            depth,
-        )?;
+        if !visiting.insert(final_target_key.clone()) {
+            self.provenance
+                .resolver_cycle_detections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            external_type_debug(format!(
+                "resolve_external_type cycle dep={} type={}",
+                effective_dep_canonical, effective_type_name
+            ));
+            cache.insert(cache_key.clone(), None);
+            return Ok(None);
+        }
+
+        let resolved = (|| {
+            let (frontier, touched_ids, final_target) =
+                if let Some(frontier) = frontier_for_materialization.take() {
+                    (
+                        frontier,
+                        rustc_hash::FxHashSet::default(),
+                        (effective_dep_canonical.clone(), effective_type_name.clone()),
+                    )
+                } else {
+                    let (frontier, target, _had_route_cycle) = self
+                        .run_external_type_frontier_closure_in_view(
+                            effective_dep_canonical.as_str(),
+                            effective_type_name.as_str(),
+                            store_view,
+                        )?;
+                    let Some(target) = target else {
+                        return Ok(None);
+                    };
+                    let touched_ids = frontier.touched_canonical_ids();
+                    (frontier, touched_ids, target)
+                };
+
+            for touched_id in touched_ids {
+                tracked_deps.insert(touched_id.clone());
+                resolution_deps.insert(touched_id);
+            }
+
+            let (final_canonical, final_exported) = final_target;
+            Ok(self
+                .materialize_frontier_resolved_type_in_view(
+                    &frontier,
+                    final_canonical.as_str(),
+                    final_exported.as_str(),
+                    tracked_deps,
+                    resolution_deps,
+                    store_view,
+                )
+                .or_else(|| {
+                    self.resolve_external_type_from_cached_dependency_state_in_view(
+                        effective_dep_canonical.as_str(),
+                        effective_type_name.as_str(),
+                        &ResolvedExternalTypes::default(),
+                        store_view,
+                    )
+                }))
+        })();
+        visiting.remove(&final_target_key);
+        let resolved = resolved?;
 
         if use_host_cache && profile_hash.is_none() {
             self.store_resolved_external_type_cache_in_view(
@@ -1348,6 +1271,7 @@ impl VerterHost {
         let adapter = HostFrontierAdapter {
             host: self,
             store_view,
+            materialize_symbols: false,
         };
         let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
         frontier.seed(std::iter::once(
@@ -1363,15 +1287,305 @@ impl VerterHost {
                 last_dep: failure.context,
             });
         }
-
         let target = frontier.final_target_for(&adapter, dep_canonical, type_name);
         let had_route_cycle = target.is_none()
             && frontier
                 .get_resolved(dep_canonical, type_name)
                 .and_then(|resolved| resolved.route_provenance.as_ref())
                 .is_some();
-
         Ok((target, frontier.touched_canonical_ids(), had_route_cycle))
+    }
+
+    fn run_external_type_frontier_closure_in_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Result<
+        (
+            crate::resolver_core::ExternalTypeFrontier,
+            Option<(String, String)>,
+            bool,
+        ),
+        crate::types::ExternalTypeResolveError,
+    > {
+        let adapter = HostFrontierAdapter {
+            host: self,
+            store_view,
+            materialize_symbols: false,
+        };
+        let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
+        let mut inspected_symbols = rustc_hash::FxHashSet::default();
+        let mut requested_symbols = rustc_hash::FxHashSet::default();
+        frontier.seed(std::iter::once(
+            crate::resolver_core::PendingExternalSymbol {
+                canonical_id: dep_canonical.to_string(),
+                exported_name: type_name.to_string(),
+            },
+        ));
+        requested_symbols.insert((dep_canonical.to_string(), type_name.to_string()));
+
+        loop {
+            if let Err(failure) = frontier.run(&adapter) {
+                return Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
+                    limit: failure.limit,
+                    type_name: type_name.to_string(),
+                    last_dep: failure.context,
+                });
+            }
+
+            let target = frontier.final_target_for(&adapter, dep_canonical, type_name);
+            let had_route_cycle = target.is_none()
+                && frontier
+                    .get_resolved(dep_canonical, type_name)
+                    .and_then(|resolved| resolved.route_provenance.as_ref())
+                    .is_some();
+            if target.is_none() {
+                return Ok((frontier, None, had_route_cycle));
+            }
+
+            let companion_seeds = self.collect_frontier_companion_seeds_in_view(
+                &frontier,
+                &adapter,
+                store_view,
+                &mut inspected_symbols,
+                &requested_symbols,
+            );
+            if crate::host_manage::component_meta_debug_enabled() {
+                crate::host_manage::component_meta_debug(format!(
+                    "frontier_closure source={} exported={} resolved={} new_companions={}",
+                    dep_canonical,
+                    type_name,
+                    frontier.resolved_count(),
+                    companion_seeds.len(),
+                ));
+            }
+            if companion_seeds.is_empty() {
+                return Ok((frontier, target, had_route_cycle));
+            }
+
+            for seed in &companion_seeds {
+                requested_symbols.insert((seed.canonical_id.clone(), seed.exported_name.clone()));
+            }
+            frontier.seed(companion_seeds);
+        }
+    }
+
+    fn collect_frontier_companion_seeds_in_view(
+        &self,
+        frontier: &crate::resolver_core::ExternalTypeFrontier,
+        adapter: &HostFrontierAdapter<'_>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        inspected_symbols: &mut rustc_hash::FxHashSet<(String, String)>,
+        requested_symbols: &rustc_hash::FxHashSet<(String, String)>,
+    ) -> Vec<crate::resolver_core::PendingExternalSymbol> {
+        let mut seeds = Vec::new();
+
+        for (requested_canonical_id, requested_exported_name) in requested_symbols.iter() {
+            let Some((canonical_id, exported_name)) =
+                frontier.final_target_for(adapter, requested_canonical_id, requested_exported_name)
+            else {
+                continue;
+            };
+            if !inspected_symbols.insert((canonical_id.clone(), exported_name.clone())) {
+                continue;
+            }
+
+            let Some(analysis) = self.external_type_analysis_in_view(&canonical_id, store_view)
+            else {
+                continue;
+            };
+            let required_import_names = self.required_import_names_for_exported_type_in_view(
+                &canonical_id,
+                &exported_name,
+                store_view,
+            );
+            let mut attempted_requests = rustc_hash::FxHashSet::default();
+            for binding in &analysis.extracted.bindings {
+                let required_aliases =
+                    required_import_alias_names_for_binding(binding, &required_import_names);
+                for required_alias in required_aliases {
+                    let Some(imported_name) =
+                        imported_member_name_for_required_alias(binding, &required_alias)
+                    else {
+                        continue;
+                    };
+                    let request_key = (
+                        required_alias.clone(),
+                        binding.source.clone(),
+                        imported_name.clone(),
+                    );
+                    if !attempted_requests.insert(request_key) {
+                        continue;
+                    }
+
+                    let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
+                        &canonical_id,
+                        &binding.source,
+                        store_view,
+                    ) else {
+                        continue;
+                    };
+                    let (resolved_canonical, resolved_name) = self
+                        .resolve_imported_type_root_in_view(
+                            dep_canonical.as_str(),
+                            imported_name.as_str(),
+                            store_view,
+                        );
+                    let (target_canonical, target_name) = frontier
+                        .final_target_for(adapter, &resolved_canonical, &resolved_name)
+                        .unwrap_or((resolved_canonical, resolved_name));
+                    seeds.push(crate::resolver_core::PendingExternalSymbol {
+                        canonical_id: target_canonical,
+                        exported_name: target_name,
+                    });
+                }
+            }
+        }
+
+        seeds
+    }
+
+    fn materialize_frontier_resolved_type_in_view(
+        &self,
+        frontier: &crate::resolver_core::ExternalTypeFrontier,
+        canonical_id: &str,
+        exported_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+        let adapter = HostFrontierAdapter {
+            host: self,
+            store_view,
+            materialize_symbols: true,
+        };
+        let mut memo = rustc_hash::FxHashMap::default();
+        let mut active = rustc_hash::FxHashSet::default();
+        self.materialize_frontier_resolved_type_with_memo_in_view(
+            frontier,
+            &adapter,
+            canonical_id,
+            exported_name,
+            tracked_deps,
+            resolution_deps,
+            store_view,
+            &mut memo,
+            &mut active,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_frontier_resolved_type_with_memo_in_view(
+        &self,
+        frontier: &crate::resolver_core::ExternalTypeFrontier,
+        adapter: &HostFrontierAdapter<'_>,
+        canonical_id: &str,
+        exported_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        memo: &mut rustc_hash::FxHashMap<
+            (String, String),
+            Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        >,
+        active: &mut rustc_hash::FxHashSet<(String, String)>,
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+        let cache_key = (canonical_id.to_string(), exported_name.to_string());
+        if let Some(cached) = memo.get(&cache_key) {
+            return cached.clone();
+        }
+        if !active.insert(cache_key.clone()) {
+            self.provenance
+                .resolver_cycle_detections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        }
+
+        tracked_deps.insert(canonical_id.to_string());
+        resolution_deps.insert(canonical_id.to_string());
+
+        let resolved = (|| {
+            let analysis = self.external_type_analysis_in_view(canonical_id, store_view)?;
+            let required_import_names = self.required_import_names_for_exported_type_in_view(
+                canonical_id,
+                exported_name,
+                store_view,
+            );
+            let mut companion_types = ResolvedExternalTypes::default();
+            let mut attempted_requests = rustc_hash::FxHashSet::default();
+
+            for binding in &analysis.extracted.bindings {
+                let required_aliases =
+                    required_import_alias_names_for_binding(binding, &required_import_names);
+                for required_alias in required_aliases {
+                    let Some(imported_name) =
+                        imported_member_name_for_required_alias(binding, &required_alias)
+                    else {
+                        continue;
+                    };
+                    let request_key = (
+                        required_alias.clone(),
+                        binding.source.clone(),
+                        imported_name.clone(),
+                    );
+                    if !attempted_requests.insert(request_key) {
+                        continue;
+                    }
+
+                    let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
+                        canonical_id,
+                        &binding.source,
+                        store_view,
+                    ) else {
+                        continue;
+                    };
+                    let (resolved_canonical, resolved_name) = self
+                        .resolve_imported_type_root_in_view(
+                            dep_canonical.as_str(),
+                            imported_name.as_str(),
+                            store_view,
+                        );
+                    let (target_canonical, target_name) = frontier
+                        .final_target_for(adapter, &resolved_canonical, &resolved_name)
+                        .unwrap_or((resolved_canonical, resolved_name));
+                    if frontier
+                        .get_resolved(&target_canonical, &target_name)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    if let Some(companion) = self
+                        .materialize_frontier_resolved_type_with_memo_in_view(
+                            frontier,
+                            adapter,
+                            &target_canonical,
+                            &target_name,
+                            tracked_deps,
+                            resolution_deps,
+                            store_view,
+                            memo,
+                            active,
+                        )
+                    {
+                        tracked_deps.insert(target_canonical.clone());
+                        resolution_deps.insert(target_canonical.clone());
+                        companion_types.entry(required_alias).or_insert(companion);
+                    }
+                }
+            }
+
+            self.resolve_external_type_from_cached_dependency_state_in_view(
+                canonical_id,
+                exported_name,
+                &companion_types,
+                store_view,
+            )
+        })();
+
+        active.remove(&cache_key);
+        memo.insert(cache_key, resolved.clone());
+        resolved
     }
 
     /// Ensure the export registry is populated for a file.
@@ -1595,6 +1809,7 @@ impl VerterHost {
         })?;
         let _ =
             self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
+        let _ = self.ensure_export_registry_in_view(result.0.as_str(), store_view);
         component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
             format!(
@@ -3208,6 +3423,7 @@ fn find_next_known_root_block(bytes: &[u8], from: usize) -> Option<usize> {
 pub(crate) struct HostFrontierAdapter<'a> {
     pub host: &'a VerterHost,
     pub store_view: Option<&'a crate::resolver_store::HostStoreView>,
+    pub materialize_symbols: bool,
 }
 
 impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
@@ -3220,23 +3436,50 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             .resolve_eval_dependency_canonical_in_view(canonical_id, self.store_view)
             .unwrap_or_else(|| canonical_id.to_string());
 
+        if !self.materialize_symbols {
+            if let Some(entry) = self
+                .host
+                .clone_current_imported_dependency_entry(canonical.as_str(), self.store_view)
+            {
+                if let Some(ref state) = entry.shallow_type_state {
+                    if state.has_wildcard_reexports() {
+                        self.host
+                            .provenance
+                            .resolver_barrel_fact_reuse
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Some(Arc::clone(state));
+                }
+            }
+
+            return self
+                .host
+                .ensure_shallow_imported_dependency_state_in_view(
+                    canonical.as_str(),
+                    self.store_view,
+                )
+                .and_then(|entry| entry.shallow_type_state.clone());
+        }
+
         if let Some(entry) = self
             .host
             .clone_current_imported_dependency_entry(canonical.as_str(), self.store_view)
         {
             if let Some(ref state) = entry.shallow_type_state {
-                if state.has_wildcard_reexports() {
-                    self.host
-                        .provenance
-                        .resolver_barrel_fact_reuse
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if !state.symbols.is_empty() {
+                    if state.has_wildcard_reexports() {
+                        self.host
+                            .provenance
+                            .resolver_barrel_fact_reuse
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Some(Arc::clone(state));
                 }
-                return Some(Arc::clone(state));
             }
         }
 
         self.host
-            .shallow_type_state_in_view(canonical.as_str(), self.store_view)
+            .symbol_shallow_type_state_in_view(canonical.as_str(), self.store_view)
     }
 
     fn resolve_import_canonical(&self, from_canonical: &str, specifier: &str) -> Option<String> {
