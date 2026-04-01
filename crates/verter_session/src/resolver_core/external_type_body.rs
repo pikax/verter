@@ -75,7 +75,6 @@ impl ExternalTypeBodyCache {
             }
         }
     }
-
 }
 
 pub trait ExternalTypeBodyResolver {
@@ -148,7 +147,6 @@ pub trait ExternalTypeBodyResolver {
         profile_hash: Option<u64>,
         depth: usize,
     ) -> Result<Option<ResolvedElements>, Self::Error>;
-
 }
 
 #[allow(clippy::too_many_arguments)]

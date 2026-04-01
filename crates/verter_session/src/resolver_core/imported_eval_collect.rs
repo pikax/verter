@@ -2115,9 +2115,9 @@ export interface Props extends Local {}"#
             "missing frontier state should surface overflow instead of silently downgrading"
         );
         assert!(
-            budget.overflow().is_some_and(|overflow| overflow
-                .message
-                .contains("frontier")),
+            budget
+                .overflow()
+                .is_some_and(|overflow| overflow.message.contains("frontier")),
             "overflow message should explain that merge-root frontier collection failed"
         );
         assert!(

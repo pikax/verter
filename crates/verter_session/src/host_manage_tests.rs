@@ -8169,7 +8169,8 @@ fn resolve_shallow_symbol_dependency_alias_skips_raw_snapshot_fallback_for_sourc
 }
 
 #[test]
-fn resolve_shallow_symbol_dependency_alias_caches_hydrated_recursive_aliases() {
+fn resolve_shallow_symbol_dependency_alias_keeps_same_file_recursive_support_symbols_out_of_prepared_alias_cache(
+) {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -8193,18 +8194,14 @@ export type ClassNameArray = ClassNameValue[]
         .prepared_type_aliases
         .get("ClassNameValue")
         .expect("resolved root should populate the prepared alias cache");
-    let cached_array = cached
-        .prepared_type_aliases
-        .get("ClassNameArray")
-        .expect("recursive dependency should populate the prepared alias cache");
 
     assert!(
         !cached_value.requires_source_merge,
         "once a recursive alias has been hydrated through the shallow env, later passes should reuse that cached result instead of rebuilding it",
     );
     assert!(
-        !cached_array.requires_source_merge,
-        "recursive support aliases should also be frozen after the first shallow hydration pass",
+        !cached.prepared_type_aliases.contains_key("ClassNameArray"),
+        "same-file recursive support aliases should stay in the base eval env/local closure path instead of being re-prepared as imported aliases",
     );
 }
 
@@ -8622,6 +8619,13 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
         ws.read_count("/src/types.ts"),
         1,
         "same-file shallow helper hydration should stay within the already loaded source",
+    );
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("types dependency should remain cached after shallow env construction");
+    assert!(
+        !cached.prepared_type_aliases.contains_key("LinkProps"),
+        "same-file support symbols should stay in base eval env/local-closure state instead of becoming prepared imported aliases",
     );
 }
 

@@ -356,7 +356,8 @@ impl ExternalTypeFrontier {
         match target {
             ExportTarget::Local { symbol_name } => {
                 if state.is_import_local(symbol_name) {
-                    if let Some((source_specifier, imported_name)) = state.import_target(symbol_name)
+                    if let Some((source_specifier, imported_name)) =
+                        state.import_target(symbol_name)
                     {
                         if let Some(target_canonical) =
                             host.resolve_import_canonical(&pending.canonical_id, source_specifier)
@@ -393,7 +394,12 @@ impl ExternalTypeFrontier {
 
                 let (body, type_parameters) = state
                     .symbol(symbol_name)
-                    .map(|symbol| (Some(symbol.raw_body.clone()), symbol.type_parameters.clone()))
+                    .map(|symbol| {
+                        (
+                            Some(symbol.raw_body.clone()),
+                            symbol.type_parameters.clone(),
+                        )
+                    })
                     .unwrap_or_else(|| (None, Vec::new()));
 
                 // Run local closure
@@ -538,8 +544,7 @@ impl ExternalTypeFrontier {
                 continue;
             }
 
-            if let Some(target) =
-                self.final_target_from(host, &target_canonical, &current.1, seen)
+            if let Some(target) = self.final_target_from(host, &target_canonical, &current.1, seen)
             {
                 return Some(target);
             }
@@ -956,9 +961,7 @@ mod tests {
         let mut host = MockHost::new();
         host.add_file(
             "/src/types.ts",
-            make_state(
-                "import type { Dep } from './dep'\nexport interface Props { label: Dep }",
-            ),
+            make_state("import type { Dep } from './dep'\nexport interface Props { label: Dep }"),
         );
         host.add_file(
             "/src/dep.ts",

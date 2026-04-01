@@ -1593,3 +1593,486 @@ defineProps<Props>()
     );
 }
 
+// ===========================================================================
+// Hang isolation tests — reproduce Accordion hang with minimal fixtures
+// ===========================================================================
+
+/// Test 1: Resolve a complex union type (simulating Vue's `Component`) from
+/// a large declaration file. This tests whether `imported_symbol_dependencies`
+/// hangs when processing a type with many references.
+#[test]
+fn resolve_complex_union_type_does_not_hang() {
+    let host = strict_host();
+
+    // Simulate a large declaration file with a complex union type
+    upsert_non_sfc(
+        &host,
+        "/src/runtime-core.d.ts",
+        r#"
+export interface FunctionalComponent<P = {}> { (props: P): any }
+export interface ComponentOptions<D = any> { data?: () => D; computed?: Record<string, () => any> }
+export type DefineComponent<P = any, B = any> = { new (): { $props: P } }
+export type ConcreteComponent = FunctionalComponent | ComponentOptions
+export type Component<P = any> = ConcreteComponent | DefineComponent<P> | string
+export interface VNode<T = any> { type: Component; props: T }
+export interface PrimitiveProps { asChild?: boolean }
+"#,
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Component } from './runtime-core'
+defineProps<{ comp: Component }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    set_dep(
+        &host,
+        "/src/Consumer.vue",
+        "./runtime-core",
+        "/src/runtime-core.d.ts",
+    );
+
+    // This must not hang — if it returns within the test timeout, the test passes
+    let result = resolve_type(&host, "/src/Consumer.vue", "./runtime-core", "Component");
+    // Component is a complex union, resolution may or may not produce props
+    let _ = result;
+}
+
+/// Test 2: Resolve a type that extends an imported type which itself has
+/// symbol_dependencies pointing to other types in the same file.
+/// Simulates AccordionRootProps extends PrimitiveProps.
+#[test]
+fn resolve_type_extending_imported_with_deps_does_not_hang() {
+    let host = strict_host();
+
+    // File with inter-dependent types (simulating reka-ui's index3.d.ts pattern)
+    upsert_non_sfc(
+        &host,
+        "/src/lib-types.d.ts",
+        r#"
+export interface PrimitiveProps { asChild?: boolean }
+export interface SingleOrMultipleProps<T = string> { type?: 'single' | 'multiple'; value?: T }
+export interface AccordionRootProps<T = string | string[]> extends PrimitiveProps, SingleOrMultipleProps<T> {
+    collapsible?: boolean
+    disabled?: boolean
+}
+export interface AccordionRootEmits { 'update:modelValue': [value: string | string[]] }
+"#,
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { AccordionRootProps, AccordionRootEmits } from './lib-types'
+defineProps<AccordionRootProps>()
+defineEmits<AccordionRootEmits>()
+</script>
+<template><div /></template>"#,
+    );
+
+    set_dep(
+        &host,
+        "/src/Consumer.vue",
+        "./lib-types",
+        "/src/lib-types.d.ts",
+    );
+
+    let result = resolve_type(
+        &host,
+        "/src/Consumer.vue",
+        "./lib-types",
+        "AccordionRootProps",
+    );
+    assert!(result.is_some(), "AccordionRootProps should resolve");
+}
+
+/// Test 3: Simulate the full Accordion pattern — a type from file A that
+/// has symbol_dependencies pointing to types in file B (runtime-core),
+/// where file B has a complex `Component` type.
+#[test]
+fn accordion_pattern_type_with_component_dep_does_not_hang() {
+    let host = strict_host();
+
+    // Simulate @vue/runtime-core with Component type
+    upsert_non_sfc(
+        &host,
+        "/node_modules/@vue/runtime-core.d.ts",
+        r#"
+export interface FunctionalComponent<P = {}> { (props: P): any }
+export interface ComponentOptions<D = any> { data?: () => D }
+export type DefineComponent<P = any> = { new (): { $props: P } }
+export type ConcreteComponent = FunctionalComponent | ComponentOptions
+export type Component = ConcreteComponent | DefineComponent | string
+export interface VNode<T = any> { type: Component; props: T }
+"#,
+    );
+
+    // Simulate reka-ui types that import from runtime-core
+    upsert_non_sfc(
+        &host,
+        "/node_modules/reka-ui/types.d.ts",
+        r#"
+import type { Component } from '@vue/runtime-core'
+export interface PrimitiveProps { asChild?: boolean; as?: Component }
+export interface SingleOrMultipleProps<T = string> { type?: 'single' | 'multiple'; value?: T }
+export interface AccordionRootProps extends PrimitiveProps, SingleOrMultipleProps {
+    collapsible?: boolean
+    disabled?: boolean
+    defaultValue?: string
+}
+export interface AccordionRootEmits { 'update:modelValue': [value: string | string[]] }
+"#,
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Accordion.vue",
+        r#"<script setup lang="ts">
+import type { AccordionRootProps, AccordionRootEmits } from 'reka-ui'
+defineProps<AccordionRootProps>()
+defineEmits<AccordionRootEmits>()
+</script>
+<template><div /></template>"#,
+    );
+
+    set_dep(
+        &host,
+        "/src/Accordion.vue",
+        "reka-ui",
+        "/node_modules/reka-ui/types.d.ts",
+    );
+    set_dep(
+        &host,
+        "/node_modules/reka-ui/types.d.ts",
+        "@vue/runtime-core",
+        "/node_modules/@vue/runtime-core.d.ts",
+    );
+
+    // This must not hang
+    let result = resolve_type(&host, "/src/Accordion.vue", "reka-ui", "AccordionRootProps");
+    assert!(
+        result.is_some(),
+        "AccordionRootProps should resolve through reka-ui -> runtime-core chain"
+    );
+}
+
+/// Test 4a: Scale test — a type file with many inter-dependent types
+/// simulating reka-ui's index3.d.ts (1000+ types). Tests whether
+/// imported_symbol_dependencies hangs at scale.
+#[test]
+fn large_declaration_file_with_many_interdependent_types_does_not_hang() {
+    let host = strict_host();
+
+    // Generate a large declaration file with ~200 inter-dependent types
+    let mut source = String::new();
+    source.push_str("export interface BaseProps { asChild?: boolean }\n");
+    source.push_str("export type Component = FunctionalComponent | DefineComponent | string\n");
+    source.push_str("export interface FunctionalComponent<P = {}> { (props: P): any }\n");
+    source.push_str("export type DefineComponent<P = any> = { new (): { $props: P } }\n");
+    for i in 0..200 {
+        source.push_str(&format!(
+            "export interface Widget{}Props extends BaseProps {{ label{}: string; comp{}: Component }}\n",
+            i, i, i,
+        ));
+    }
+    // One type that extends a Widget which references Component
+    source.push_str(
+        "export interface AccordionRootProps extends Widget0Props, Widget1Props { collapsible?: boolean }\n",
+    );
+
+    upsert_non_sfc(&host, "/src/lib.d.ts", &source);
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { AccordionRootProps } from './lib'
+defineProps<AccordionRootProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    set_dep(&host, "/src/Consumer.vue", "./lib", "/src/lib.d.ts");
+
+    let result = resolve_type(&host, "/src/Consumer.vue", "./lib", "AccordionRootProps");
+    assert!(
+        result.is_some(),
+        "AccordionRootProps should resolve from large file"
+    );
+}
+
+/// Test 4b: Scale test for component-meta with cross-file deps.
+/// A large lib file with 200 types, where the root type has a dep
+/// pointing to another large file.
+#[test]
+fn large_cross_file_deps_component_meta_does_not_hang() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+
+    // Large "runtime" file with 200 types
+    let mut runtime_source = String::new();
+    runtime_source.push_str("export interface FunctionalComponent<P = {}> { (props: P): any }\n");
+    runtime_source.push_str("export type DefineComponent<P = any> = { new (): { $props: P } }\n");
+    runtime_source
+        .push_str("export type Component = FunctionalComponent | DefineComponent | string\n");
+    for i in 0..200 {
+        runtime_source.push_str(&format!(
+            "export interface RuntimeType{} {{ value{}: string }}\n",
+            i, i,
+        ));
+    }
+    upsert_non_sfc(&host, "/node_modules/runtime/types.d.ts", &runtime_source);
+
+    // Library file that imports from runtime
+    let mut lib_source = String::new();
+    lib_source.push_str("import type { Component } from 'runtime'\n");
+    lib_source.push_str("export interface PrimitiveProps { asChild?: boolean; as?: Component }\n");
+    for i in 0..50 {
+        lib_source.push_str(&format!(
+            "export interface LibType{} extends PrimitiveProps {{ extra{}: number }}\n",
+            i, i,
+        ));
+    }
+    lib_source.push_str(
+        "export interface AccordionRootProps extends PrimitiveProps { collapsible?: boolean }\n",
+    );
+    lib_source
+        .push_str("export interface AccordionRootEmits { 'update:modelValue': [value: string] }\n");
+    upsert_non_sfc(&host, "/node_modules/lib/types.d.ts", &lib_source);
+
+    upsert_vue(
+        &host,
+        "/src/Accordion.vue",
+        r#"<script setup lang="ts">
+import type { AccordionRootProps, AccordionRootEmits } from 'lib'
+defineProps<AccordionRootProps>()
+defineEmits<AccordionRootEmits>()
+</script>
+<template><div /></template>"#,
+    );
+
+    set_dep(
+        &host,
+        "/src/Accordion.vue",
+        "lib",
+        "/node_modules/lib/types.d.ts",
+    );
+    set_dep(
+        &host,
+        "/node_modules/lib/types.d.ts",
+        "runtime",
+        "/node_modules/runtime/types.d.ts",
+    );
+
+    let meta =
+        host.resolve_component_meta("/src/Accordion.vue", crate::types::ResolverMode::Expanded);
+    assert!(
+        meta.is_some(),
+        "large cross-file component-meta should resolve"
+    );
+}
+
+/// Test 4c: Deeply nested generics simulating Vue's runtime-core types.
+/// `CreateComponentPublicInstanceWithMixins` has 25+ type parameters.
+#[test]
+fn deeply_nested_generics_component_meta_does_not_hang() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+
+    // Simulate Vue's deeply generic runtime-core.d.ts types
+    upsert_non_sfc(
+        &host,
+        "/node_modules/vue-runtime/types.d.ts",
+        r#"
+type Data = Record<string, unknown>
+type ComputedOptions = Record<string, () => any>
+type MethodOptions = Record<string, (...args: any[]) => any>
+type EmitsOptions = Record<string, ((...args: any[]) => any) | null>
+interface ComponentOptionsMixin {}
+type IntersectionMixin<T> = T extends ComponentOptionsMixin ? T : never
+type UnwrapMixinsType<T, Type extends string> = T extends Record<Type, any> ? T[Type] : {}
+type EnsureNonVoid<T> = T extends void ? {} : T
+interface ComponentInjectOptions {}
+interface SlotsType {}
+type Prettify<T> = { [K in keyof T]: T[K] } & {}
+type ExtractPropTypes<T> = { [K in keyof T]: T[K] extends { type: infer V } ? V : T[K] }
+
+interface ComponentOptionsBase<
+    P, B, D, C extends ComputedOptions, M extends MethodOptions,
+    Mixin extends ComponentOptionsMixin, Extends extends ComponentOptionsMixin,
+    E extends EmitsOptions, S = string, Defaults = {}
+> {
+    data?: () => D
+    computed?: C
+    methods?: M
+    emits?: E
+}
+
+export type ComponentPublicInstance<
+    P = {}, B = {}, D = {}, C extends ComputedOptions = {},
+    M extends MethodOptions = {}, E extends EmitsOptions = {},
+    PublicProps = P, Defaults = {}, MakeDefaultsOptional extends boolean = false,
+    Options = ComponentOptionsBase<P, B, D, C, M, ComponentOptionsMixin, ComponentOptionsMixin, E>
+> = {
+    $props: Prettify<PublicProps>
+    $data: D
+    $options: Options
+} & P & B & D
+
+export type CreateComponentPublicInstanceWithMixins<
+    P = {}, B = {}, D = {}, C extends ComputedOptions = {},
+    M extends MethodOptions = {}, Mixin extends ComponentOptionsMixin = ComponentOptionsMixin,
+    Extends extends ComponentOptionsMixin = ComponentOptionsMixin,
+    E extends EmitsOptions = {}, PublicProps = P, Defaults = {},
+    MakeDefaultsOptional extends boolean = false,
+    I extends ComponentInjectOptions = {}, S extends SlotsType = {},
+    PublicMixin = IntersectionMixin<Mixin> & IntersectionMixin<Extends>,
+    PublicP = UnwrapMixinsType<PublicMixin, 'P'> & EnsureNonVoid<P>,
+    PublicB = UnwrapMixinsType<PublicMixin, 'B'> & EnsureNonVoid<B>,
+    PublicD = UnwrapMixinsType<PublicMixin, 'D'> & EnsureNonVoid<D>,
+    PublicC extends ComputedOptions = UnwrapMixinsType<PublicMixin, 'C'> & EnsureNonVoid<C>,
+    PublicM extends MethodOptions = UnwrapMixinsType<PublicMixin, 'M'> & EnsureNonVoid<M>,
+    PublicDefaults = UnwrapMixinsType<PublicMixin, 'Defaults'> & EnsureNonVoid<Defaults>
+> = ComponentPublicInstance<PublicP, PublicB, PublicD, PublicC, PublicM, E, PublicProps, PublicDefaults, MakeDefaultsOptional>
+
+export type DefineComponent<
+    PropsOrPropOptions = {}, RawBindings = {}, D = {}, C extends ComputedOptions = {},
+    M extends MethodOptions = {}, Mixin extends ComponentOptionsMixin = ComponentOptionsMixin,
+    Extends extends ComponentOptionsMixin = ComponentOptionsMixin,
+    E extends EmitsOptions = {}, EE extends string = string
+> = {
+    new (...args: any[]): CreateComponentPublicInstanceWithMixins<
+        Readonly<PropsOrPropOptions>, RawBindings, D, C, M, Mixin, Extends, E
+    >
+}
+
+export interface FunctionalComponent<P = {}> {
+    (props: P): any
+    displayName?: string
+}
+
+export type ConcreteComponent<P = Data> = ComponentOptionsBase<P, any, any, any, any, any, any, any> | FunctionalComponent<P>
+export type Component<P = any> = ConcreteComponent<P> | DefineComponent<P> | string
+"#,
+    );
+
+    // Library types importing Component
+    upsert_non_sfc(
+        &host,
+        "/node_modules/lib/types.d.ts",
+        r#"
+import type { Component } from 'vue-runtime'
+export interface PrimitiveProps { asChild?: boolean; as?: Component }
+export interface AccordionRootProps extends PrimitiveProps {
+    collapsible?: boolean
+    disabled?: boolean
+}
+"#,
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Accordion.vue",
+        r#"<script setup lang="ts">
+import type { AccordionRootProps } from 'lib'
+defineProps<AccordionRootProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    set_dep(
+        &host,
+        "/src/Accordion.vue",
+        "lib",
+        "/node_modules/lib/types.d.ts",
+    );
+    set_dep(
+        &host,
+        "/node_modules/lib/types.d.ts",
+        "vue-runtime",
+        "/node_modules/vue-runtime/types.d.ts",
+    );
+
+    let meta =
+        host.resolve_component_meta("/src/Accordion.vue", crate::types::ResolverMode::Expanded);
+    assert!(meta.is_some(), "deeply generic Accordion should resolve");
+}
+
+/// Test 4: Component-meta resolution (Expanded mode) for the Accordion
+/// pattern. This is the full pipeline that was hanging.
+#[test]
+fn accordion_pattern_component_meta_expanded_does_not_hang() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+
+    upsert_non_sfc(
+        &host,
+        "/node_modules/@vue/runtime-core.d.ts",
+        r#"
+export interface FunctionalComponent<P = {}> { (props: P): any }
+export interface ComponentOptions<D = any> { data?: () => D }
+export type DefineComponent<P = any> = { new (): { $props: P } }
+export type ConcreteComponent = FunctionalComponent | ComponentOptions
+export type Component = ConcreteComponent | DefineComponent | string
+"#,
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/node_modules/reka-ui/types.d.ts",
+        r#"
+import type { Component } from '@vue/runtime-core'
+export interface PrimitiveProps { asChild?: boolean; as?: Component }
+export interface AccordionRootProps extends PrimitiveProps {
+    collapsible?: boolean
+    disabled?: boolean
+}
+export interface AccordionRootEmits { 'update:modelValue': [value: string | string[]] }
+"#,
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Accordion.vue",
+        r#"<script setup lang="ts">
+import type { AccordionRootProps, AccordionRootEmits } from 'reka-ui'
+defineProps<AccordionRootProps>()
+defineEmits<AccordionRootEmits>()
+</script>
+<template><div /></template>"#,
+    );
+
+    set_dep(
+        &host,
+        "/src/Accordion.vue",
+        "reka-ui",
+        "/node_modules/reka-ui/types.d.ts",
+    );
+    set_dep(
+        &host,
+        "/node_modules/reka-ui/types.d.ts",
+        "@vue/runtime-core",
+        "/node_modules/@vue/runtime-core.d.ts",
+    );
+
+    // Full component-meta resolution — this is the path that hangs on real nuxt-ui
+    let meta =
+        host.resolve_component_meta("/src/Accordion.vue", crate::types::ResolverMode::Expanded);
+    assert!(meta.is_some(), "Accordion component-meta should resolve");
+    let state = meta.unwrap();
+    assert!(
+        state.evaluated_types.is_some(),
+        "should produce evaluated types"
+    );
+}

@@ -25,9 +25,7 @@ use std::time::Instant;
 #[cfg(feature = "session_metrics")]
 use web_time::Instant;
 
-use crate::resolver_core::{
-    ExternalTypeBodyResolver,
-};
+use crate::resolver_core::ExternalTypeBodyResolver;
 use oxc_allocator::Allocator;
 use verter_compiler::compile::CodegenOptions;
 use verter_compiler::compile::{
@@ -49,7 +47,11 @@ type ResolvedExternalTypes =
     rustc_hash::FxHashMap<String, verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>;
 
 type ExternalTypeCache = crate::resolver_core::ExternalTypeBodyCache;
-type FrontierTargetResult = (Option<(String, String)>, rustc_hash::FxHashSet<String>, bool);
+type FrontierTargetResult = (
+    Option<(String, String)>,
+    rustc_hash::FxHashSet<String>,
+    bool,
+);
 
 fn external_type_debug_enabled() -> bool {
     std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
@@ -994,8 +996,8 @@ impl VerterHost {
         }
 
         if effective_target.is_none() {
-            let (target, touched_ids, had_route_cycle) =
-                self.resolve_external_type_target_via_frontier_in_view(
+            let (target, touched_ids, had_route_cycle) = self
+                .resolve_external_type_target_via_frontier_in_view(
                     dep_canonical.as_str(),
                     type_name,
                     store_view,
@@ -1062,10 +1064,7 @@ impl VerterHost {
                 let resolved = entry.resolved.clone();
                 cache.insert(cache_key.clone(), resolved.clone());
                 cache.insert(
-                    (
-                        effective_dep_canonical.clone(),
-                        effective_type_name.clone(),
-                    ),
+                    (effective_dep_canonical.clone(), effective_type_name.clone()),
                     resolved.clone(),
                 );
                 return Ok(resolved);
@@ -1126,10 +1125,7 @@ impl VerterHost {
 
         cache.insert(cache_key.clone(), resolved.clone());
         cache.insert(
-            (
-                effective_dep_canonical.clone(),
-                effective_type_name.clone(),
-            ),
+            (effective_dep_canonical.clone(), effective_type_name.clone()),
             resolved.clone(),
         );
 
@@ -1139,10 +1135,12 @@ impl VerterHost {
                 import_source,
                 type_name,
                 kind,
-                resolved.as_ref().map(|_| crate::types::NormalizedTypeTarget {
-                    final_canonical_id: effective_dep_canonical.clone(),
-                    exported_name: effective_type_name.clone(),
-                }),
+                resolved
+                    .as_ref()
+                    .map(|_| crate::types::NormalizedTypeTarget {
+                        final_canonical_id: effective_dep_canonical.clone(),
+                        exported_name: effective_type_name.clone(),
+                    }),
                 resolution_deps,
             );
         }
@@ -1202,7 +1200,8 @@ impl VerterHost {
         kind: verter_workspace::ResolveRequestKind,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<crate::types::ResolvedTypeCacheEntry> {
-        let dep_source_hash = self.current_type_resolution_hash_in_view(dep_canonical, store_view)?;
+        let dep_source_hash =
+            self.current_type_resolution_hash_in_view(dep_canonical, store_view)?;
         let key = crate::types::ResolvedTypeCacheKey {
             dep_canonical_id: dep_canonical.to_string(),
             dep_source_hash,
@@ -1319,9 +1318,7 @@ impl VerterHost {
                 tracked_deps: resolution_deps.iter().cloned().collect(),
                 route_hashes: resolution_deps
                     .iter()
-                    .filter_map(|dep| {
-                        self.get_whole_hash(dep).map(|hash| (dep.clone(), hash))
-                    })
+                    .filter_map(|dep| self.get_whole_hash(dep).map(|hash| (dep.clone(), hash)))
                     .collect(),
                 negative_barrel_gen: None,
             };
@@ -1331,7 +1328,14 @@ impl VerterHost {
         }
         #[cfg(not(feature = "scheduler"))]
         {
-            let _ = (owner_canonical, import_source, type_name, kind, target, resolution_deps);
+            let _ = (
+                owner_canonical,
+                import_source,
+                type_name,
+                kind,
+                target,
+                resolution_deps,
+            );
         }
     }
 
@@ -1589,7 +1593,8 @@ impl VerterHost {
                 .unwrap_or(canonical);
             (canonical, exported_name)
         })?;
-        let _ = self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
+        let _ =
+            self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
         component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
             format!(
