@@ -11,4 +11,5 @@ pub mod corender;
 pub mod css;
 pub mod reactivity;
 pub mod route;
+pub mod runtime_schema;
 pub mod symbol;

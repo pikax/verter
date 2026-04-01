@@ -682,6 +682,27 @@ impl VerterHost {
     /// Called when the VFS reports a file change, a provider restarts,
     /// or project config changes. This clears the semantic DB cache for
     /// the given file, forcing re-extraction on the next query.
+    /// Get the runtime schema for a component via stable ref.
+    ///
+    /// Returns a target-neutral schema suitable for generating runtime
+    /// validators (Zod, io-ts) or documentation.
+    pub fn component_runtime_schema(
+        &self,
+        component_ref: &verter_semantic::refs::ComponentRef,
+    ) -> verter_semantic::query::QueryResult<
+        Option<verter_semantic::facts::runtime_schema::ComponentRuntimeSchema>,
+    > {
+        use verter_semantic::facts::runtime_schema::extract_runtime_schema;
+        use verter_semantic::query::QueryResult;
+
+        let revision = self.semantic_revision();
+        let surface_result = self.semantic_component_surface(&component_ref.file_id);
+
+        let schema = surface_result.value.map(|s| extract_runtime_schema(&s));
+
+        QueryResult::complete(schema, revision)
+    }
+
     pub fn semantic_invalidate(&self, canonical_id: &str) {
         self.semantic_db.lock().invalidate(canonical_id);
     }

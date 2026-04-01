@@ -6,6 +6,7 @@ export * from "./request";
 export * from "./statistics";
 export * from "./analysis";
 export * from "./routes";
+export * from "./generated";
 
 export type PatchClient<T> = OmitNotification<OmitRequest<T>> & NotificationTyped & RequestTyped;
 

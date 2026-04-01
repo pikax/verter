@@ -173,3 +173,14 @@ export {
   shutdownMetaRuntime,
 } from "./project.js";
 export type { ComponentMetaSessionConfig, TypeExpansionBackend } from "./project.js";
+
+// Semantic pipeline types (from verter_protocol via @verter/language-shared)
+export type {
+  ComponentRuntimeSchema,
+  RuntimePropSchema,
+  RuntimeModelSchema,
+  RuntimeEventSchema,
+  RuntimeSlotSchema,
+  ComponentSurfaceDto,
+  QueryResultDto,
+} from "./semantic-bridge.js";
