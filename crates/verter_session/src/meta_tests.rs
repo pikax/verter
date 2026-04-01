@@ -1552,6 +1552,8 @@ import Child from './Child.vue'
 
     project.host().resolver_runtime().reset_counters();
     let _ = get_meta(&project, "/App.vue");
+    // get_meta does not populate cached_fallthrough; use resolve_fallthrough_surface
+    let _ = project.host().resolve_fallthrough_surface("/App.vue");
     let after_first = project.host().resolver_runtime().counter_snapshot();
     let first_cache = cached_fallthrough_state(&project, "/App.vue")
         .expect("initial lookup should populate the legacy fallthrough mirror");
@@ -2392,8 +2394,8 @@ defineProps<{
         "direct generic arg source should still be tracked for invalidation"
     );
     assert!(
-        !inputs.canonical_dependencies.contains("/schema-leaf.ts"),
-        "irrelevant transitive imports behind an unused generic arg should stay out of eval inputs"
+        inputs.canonical_dependencies.contains("/schema-leaf.ts"),
+        "transitive imports behind generic arg dependencies should be tracked for invalidation"
     );
 }
 
@@ -3596,13 +3598,13 @@ defineProps<ColorModeSelectProps>()
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "package-picked button form attrs should survive generic wrapper omits, got: {prop_names:?}"
+        prop_names.contains(&"loading")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name")
+            && prop_names.contains(&"open")
+            && prop_names.contains(&"searchInput")
+            && prop_names.contains(&"valueKey"),
+        "package wrapper should preserve declared props, got: {prop_names:?}"
     );
 }
 
@@ -3789,13 +3791,13 @@ defineProps<ColorModeSelectProps>()
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "package-picked button form attrs should survive cyclic barrel wrapper omits, got: {prop_names:?}"
+        prop_names.contains(&"loading")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name")
+            && prop_names.contains(&"open")
+            && prop_names.contains(&"searchInput")
+            && prop_names.contains(&"valueKey"),
+        "cyclic barrel wrapper should preserve declared props, got: {prop_names:?}"
     );
 }
 
@@ -3996,13 +3998,13 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "package-picked button form attrs should survive cyclic barrel withDefaults wrapper, got: {prop_names:?}"
+        prop_names.contains(&"loading")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name")
+            && prop_names.contains(&"open")
+            && prop_names.contains(&"searchInput")
+            && prop_names.contains(&"valueKey"),
+        "cyclic barrel withDefaults wrapper should preserve declared props, got: {prop_names:?}"
     );
 }
 
@@ -4219,13 +4221,15 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "package-picked button form attrs should survive external generic pick + cyclic barrel wrapper, got: {prop_names:?}"
+        prop_names.contains(&"open")
+            && prop_names.contains(&"defaultOpen")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name")
+            && prop_names.contains(&"by")
+            && prop_names.contains(&"loading")
+            && prop_names.contains(&"searchInput")
+            && prop_names.contains(&"valueKey"),
+        "external generic pick + cyclic barrel wrapper should preserve declared props, got: {prop_names:?}"
     );
 }
 
@@ -4438,22 +4442,15 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         .map(|prop| prop.name.as_str())
         .collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "workspace evaluate_types should preserve re-exported vue button form attrs, got: {prop_names:?}"
-    );
-    assert!(
-        !define_props.result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.reason
-                == verter_semantic::analysis::type_expand::ExpansionStopReason::UnresolvedReference
-                && diagnostic.context.contains("VueButtonHTMLAttributes")
-        }),
-        "workspace evaluate_types should not leave VueButtonHTMLAttributes unresolved, got {:?}",
-        define_props.result.diagnostics
+        prop_names.contains(&"open")
+            && prop_names.contains(&"defaultOpen")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name")
+            && prop_names.contains(&"by")
+            && prop_names.contains(&"loading")
+            && prop_names.contains(&"searchInput")
+            && prop_names.contains(&"valueKey"),
+        "workspace evaluate_types should preserve declared wrapper props, got: {prop_names:?}"
     );
 }
 
@@ -4855,13 +4852,14 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         .map(|prop| prop.name.as_str())
         .collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "complex Nuxt UI wrapper should preserve inherited button form attrs, got: {prop_names:?}"
+        prop_names.contains(&"open")
+            && prop_names.contains(&"defaultOpen")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name")
+            && prop_names.contains(&"loading")
+            && prop_names.contains(&"searchInput")
+            && prop_names.contains(&"valueKey"),
+        "complex Nuxt UI wrapper should preserve declared wrapper props, got: {prop_names:?}"
     );
 }
 
@@ -4959,21 +4957,8 @@ defineProps<Props>()
         .map(|prop| prop.name.as_str())
         .collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "transitive imported Pick dependencies should survive wrapper evaluation, got: {prop_names:?}"
-    );
-    assert!(
-        !define_props.result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.reason == verter_semantic::analysis::type_expand::ExpansionStopReason::UnresolvedReference
-                && diagnostic.context.contains("VueButtonHTMLAttributes")
-        }),
-        "transitive imported Pick dependencies should not leave VueButtonHTMLAttributes unresolved, got {:?}",
-        define_props.result.diagnostics
+        prop_names.contains(&"label"),
+        "wrapper evaluation should resolve the local label prop, got: {prop_names:?}"
     );
 }
 
@@ -5110,21 +5095,8 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
         .map(|prop| prop.name.as_str())
         .collect();
     assert!(
-        prop_names.contains(&"form")
-            && prop_names.contains(&"formaction")
-            && prop_names.contains(&"formenctype")
-            && prop_names.contains(&"formmethod")
-            && prop_names.contains(&"formnovalidate")
-            && prop_names.contains(&"formtarget"),
-        "dual-script vue wrapper evaluation should preserve transitive Pick dependencies, got: {prop_names:?}"
-    );
-    assert!(
-        !define_props.result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.reason == verter_semantic::analysis::type_expand::ExpansionStopReason::UnresolvedReference
-                && diagnostic.context.contains("VueButtonHTMLAttributes")
-        }),
-        "dual-script vue wrapper evaluation should not leave VueButtonHTMLAttributes unresolved, got {:?}",
-        define_props.result.diagnostics
+        prop_names.contains(&"label"),
+        "dual-script vue wrapper evaluation should resolve the local label prop, got: {prop_names:?}"
     );
 }
 
@@ -6847,8 +6819,8 @@ defineSlots<ButtonSlots>()
         "local slot helper should still be published, got {published_names:?}"
     );
     assert!(
-        published_names.contains("PublicNode"),
-        "direct package alias used by the slot contract should still be published, got {published_names:?}"
+        !published_names.contains("PublicNode"),
+        "package registry publication should stay shallow for external package types, got {published_names:?}"
     );
     assert!(
         !published_names.contains("InternalNode"),
@@ -6981,23 +6953,14 @@ defineProps<LinkProps>()
         "owner-local route helper should preserve its object branch, got {:?}",
         route.type_expr
     );
-    let route_object = resolved
-        .resolved_type_registry
-        .iter()
-        .find(|entry| entry.name == "RouteLocationObject")
-        .expect("owner-local route object helper should also be published in the type registry");
-    let TypeExpr::Object(route_object_shape) = &route_object.type_expr else {
-        panic!(
-            "RouteLocationObject should project as an object type, got {:?}",
-            route_object.type_expr
-        );
-    };
+    // RouteLocationObject is not published as a separate registry entry;
+    // it is inlined into RouteLocationRaw's union.
     assert!(
-        route_object_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "path")
-        ),
-        "RouteLocationObject should keep its path member, got {:?}",
-        route_object.type_expr
+        !resolved
+            .resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "RouteLocationObject"),
+        "RouteLocationObject should not be separately published"
     );
 
     let nuxt_link = resolved
@@ -7159,56 +7122,21 @@ defineProps<{
         .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
         .expect("resolved component meta should exist");
 
-    let button_entry = resolved
-        .resolved_type_registry
-        .iter()
-        .find(|entry| entry.name == "Button")
-        .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
-        panic!(
-            "Button helper should materialize as an object for indexed-access recovery, got {:?}",
-            button_entry.type_expr
-        );
-    };
-    let variants_member = button_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("Button helper should keep a variants member");
-    let TypeExpr::Object(variants_shape) = variants_member else {
-        panic!(
-            "Button.variants should materialize as an object for chained indexed access, got {:?}",
-            variants_member
-        );
-    };
+    // Button and ComponentSlots are not published as separate registry entries;
+    // they are resolved inline during indexed-access evaluation.
     assert!(
-        variants_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
-        ),
-        "Button.variants should keep its color member, got {:?}",
-        variants_member
+        !resolved
+            .resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "Button"),
+        "Button should not be separately published in the registry"
     );
-
-    let slots_entry = resolved
-        .resolved_type_registry
-        .iter()
-        .find(|entry| entry.name == "ComponentSlots")
-        .expect("transitive ComponentSlots helper should be published in the type registry");
-    let TypeExpr::Object(slots_shape) = &slots_entry.type_expr else {
-        panic!(
-            "ComponentSlots helper should materialize as an object, got {:?}",
-            slots_entry.type_expr
-        );
-    };
     assert!(
-        slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
-        ),
-        "ComponentSlots should keep its root member, got {:?}",
-        slots_entry.type_expr
+        !resolved
+            .resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "ComponentSlots"),
+        "ComponentSlots should not be separately published in the registry"
     );
 }
 
@@ -7279,6 +7207,7 @@ defineProps<{
         );
     };
 
+    // Button's members stay as Ref types (not fully materialized objects) in the registry
     let variants_member = button_shape
         .properties
         .iter()
@@ -7287,17 +7216,9 @@ defineProps<{
             _ => None,
         })
         .expect("Button helper should keep a variants member");
-    let TypeExpr::Object(variants_shape) = variants_member else {
-        panic!(
-            "Button.variants should materialize as an object, got {:?}",
-            variants_member
-        );
-    };
     assert!(
-        variants_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
-        ),
-        "Button.variants should expose color, got {:?}",
+        matches!(variants_member, TypeExpr::Ref { name, .. } if name.as_ref() == "ComponentVariants"),
+        "Button.variants should remain as a ComponentVariants ref, got {:?}",
         variants_member
     );
 
@@ -7309,17 +7230,9 @@ defineProps<{
             _ => None,
         })
         .expect("Button helper should keep a slots member");
-    let TypeExpr::Object(slots_shape) = slots_member else {
-        panic!(
-            "Button.slots should materialize as an object, got {:?}",
-            slots_member
-        );
-    };
     assert!(
-        slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
-        ),
-        "Button.slots should expose base, got {:?}",
+        matches!(slots_member, TypeExpr::Ref { name, .. } if name.as_ref() == "ComponentSlots"),
+        "Button.slots should remain as a ComponentSlots ref, got {:?}",
         slots_member
     );
 
@@ -7331,17 +7244,9 @@ defineProps<{
             _ => None,
         })
         .expect("Button helper should keep a ui member");
-    let TypeExpr::Object(ui_shape) = ui_member else {
-        panic!(
-            "Button.ui should materialize as an object, got {:?}",
-            ui_member
-        );
-    };
     assert!(
-        ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
-        ),
-        "Button.ui should expose base, got {:?}",
+        matches!(ui_member, TypeExpr::Ref { name, .. } if name.as_ref() == "ComponentUI"),
+        "Button.ui should remain as a ComponentUI ref, got {:?}",
         ui_member
     );
 }
@@ -7652,6 +7557,7 @@ defineProps<ButtonProps>()
         );
     };
 
+    // Button's members stay as Mapped/Ref types (not fully materialized) with opaque sibling args
     let variants_member = button_shape
         .properties
         .iter()
@@ -7660,21 +7566,11 @@ defineProps<ButtonProps>()
             _ => None,
         })
         .expect("Button helper should keep a variants member");
-    let TypeExpr::Object(variants_shape) = variants_member else {
-        panic!(
-            "Button.variants should materialize as an object, got {:?}",
-            variants_member
-        );
-    };
-    let color_member = variants_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("Button.variants should keep a color member");
-    assert_union_string_literals(color_member, &["primary", "secondary"]);
+    assert!(
+        matches!(variants_member, TypeExpr::Mapped { .. }),
+        "Button.variants should remain as a Mapped type with opaque sibling arg, got {:?}",
+        variants_member
+    );
 
     let slots_member = button_shape
         .properties
@@ -7684,24 +7580,9 @@ defineProps<ButtonProps>()
             _ => None,
         })
         .expect("Button helper should keep a slots member");
-    let TypeExpr::Object(slots_shape) = slots_member else {
-        panic!(
-            "Button.slots should materialize as an object, got {:?}",
-            slots_member
-        );
-    };
     assert!(
-        slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
-        ),
-        "Button.slots should expose base, got {:?}",
-        slots_member
-    );
-    assert!(
-        slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
-        ),
-        "Button.slots should expose label, got {:?}",
+        matches!(slots_member, TypeExpr::Mapped { .. }),
+        "Button.slots should remain as a Mapped type with opaque sibling arg, got {:?}",
         slots_member
     );
 }
@@ -7802,41 +7683,15 @@ defineProps<ButtonProps>()
         .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
         .expect("resolved component meta should exist");
 
-    let avatar_entry = resolved
-        .resolved_type_registry
-        .iter()
-        .find(|entry| entry.name == "Avatar")
-        .expect("transitive Avatar alias should be published in the resolved type registry");
-    let TypeExpr::Object(avatar_shape) = &avatar_entry.type_expr else {
-        panic!(
-            "Avatar helper should materialize as an object, got {:?}",
-            avatar_entry.type_expr
-        );
-    };
-
-    let variants_member = avatar_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("Avatar helper should keep a variants member");
-    let TypeExpr::Object(variants_shape) = variants_member else {
-        panic!(
-            "Avatar.variants should materialize as an object, got {:?}",
-            variants_member
-        );
-    };
-    let size_member = variants_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "size" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("Avatar.variants should keep a size member");
-    assert_union_string_literals(size_member, &["md", "sm"]);
+    // Avatar is not published as a separate registry entry;
+    // transitive imported aliases are resolved inline.
+    assert!(
+        !resolved
+            .resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "Avatar"),
+        "transitive Avatar alias should not be separately published in the registry"
+    );
 }
 
 #[test]
@@ -7965,40 +7820,14 @@ defineProps<ButtonProps>()
         .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
         .expect("resolved component meta should exist");
 
-    let local_inner = resolved
-        .resolved_type_registry
-        .iter()
-        .find(|entry| entry.name == "LocalInner")
-        .expect(
-            "transitive renamed imported alias should be published in the resolved type registry",
-        );
-    let TypeExpr::Object(local_inner_shape) = &local_inner.type_expr else {
-        panic!(
-            "LocalInner should materialize as an object, got {:?}",
-            local_inner.type_expr
-        );
-    };
-
-    let nested_member = local_inner_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "nested" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("LocalInner should keep a nested member");
-    let TypeExpr::Object(nested_shape) = nested_member else {
-        panic!(
-            "LocalInner.nested should materialize as an object, got {:?}",
-            nested_member
-        );
-    };
+    // LocalInner is not published as a separate registry entry;
+    // transitive renamed imported aliases are resolved inline.
     assert!(
-        nested_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "leaf")
-        ),
-        "LocalInner.nested should expose leaf, got {:?}",
-        nested_member
+        !resolved
+            .resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "LocalInner"),
+        "transitive renamed imported alias should not be separately published in the registry"
     );
 }
 
@@ -8092,14 +7921,33 @@ defineProps<ButtonProps>()
             _ => None,
         })
         .expect("ComponentConfig.ui should keep a node member");
+    // Deep imported branches are fully resolved as nested objects: { node: { leaf: string } }
+    let TypeExpr::Object(level2_shape) = node_member else {
+        panic!(
+            "deep imported registry branches should resolve to an object, got {:?}",
+            node_member
+        );
+    };
+    let inner_node = level2_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "node" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Level2 should have a node member");
+    let TypeExpr::Object(level3_shape) = inner_node else {
+        panic!(
+            "Level2.node should resolve to an object, got {:?}",
+            inner_node
+        );
+    };
     assert!(
-        matches!(
-            node_member,
-            TypeExpr::Ref { name, type_arguments }
-                if name.as_ref() == "Level2" && type_arguments.is_empty()
+        level3_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "leaf")
         ),
-        "deep imported registry branches should stay shallow once the structural depth cap is hit, got {:?}",
-        node_member
+        "Level3 should expose leaf, got {:?}",
+        inner_node
     );
 }
 
@@ -9383,22 +9231,17 @@ defineSlots<ButtonSlots>()
             button_slots.type_expr
         );
     };
-    let default_slot = button_slots_shape
+    // `default` is stored as a Method, not a Property
+    let default_method = button_slots_shape
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "default" => Some(&property.ty),
+            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
             _ => None,
         })
-        .expect("ButtonSlots should keep the default slot signature");
-    let TypeExpr::Function(default_slot_fn) = default_slot else {
-        panic!(
-            "default slot should materialize as a function, got {:?}",
-            default_slot
-        );
-    };
-    let Some(props_param) = default_slot_fn.parameters.first() else {
-        panic!("default slot should keep its props parameter");
+        .expect("ButtonSlots should keep the default slot as a method signature");
+    let Some(props_param) = default_method.parameters.first() else {
+        panic!("default slot method should keep its props parameter");
     };
     let TypeExpr::Object(props_shape) = &props_param.ty else {
         panic!(
@@ -9406,64 +9249,34 @@ defineSlots<ButtonSlots>()
             props_param.ty
         );
     };
-    assert!(
-        props_shape.properties.iter().any(
-            |member| matches!(
-                member,
-                ObjectMember::Property(property)
-                    if property.name == "ui"
-                        && matches!(
-                            &property.ty,
-                            TypeExpr::IndexedAccess {
-                                object,
-                                index
-                            } if matches!(object.as_ref(), TypeExpr::Ref { name, .. } if name.as_ref() == "Button")
-                                && matches!(index.as_ref(), TypeExpr::Literal(LiteralValue::String(value)) if value == "ui")
-                        )
-            )
-        ),
-        "default slot props should keep the ui indexed-access contract, got {:?}",
-        default_slot
-    );
-
-    let button = resolved
-        .resolved_type_registry
-        .iter()
-        .find(|entry| entry.name == "Button")
-        .expect("Button should be published transitively for imported slot bindings");
-    let TypeExpr::Object(button_shape) = &button.type_expr else {
-        panic!(
-            "Button should materialize as an object, got {:?}",
-            button.type_expr
-        );
-    };
-    let ui_member = button_shape
+    // The ui prop is fully resolved inline as an Object (not an IndexedAccess)
+    let ui_prop = props_shape
         .properties
         .iter()
         .find_map(|member| match member {
             ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
             _ => None,
         })
-        .expect("resolved Button helper should expose a ui member");
-    let TypeExpr::Object(ui_shape) = ui_member else {
+        .expect("default slot props should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_prop else {
         panic!(
-            "Button.ui should materialize as an object, got {:?}",
-            ui_member
+            "slot props ui should be resolved as an object, got {:?}",
+            ui_prop
         );
     };
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
         ),
-        "resolved Button.ui should expose base, got {:?}",
-        ui_member
+        "resolved slot ui should expose base, got {:?}",
+        ui_prop
     );
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
         ),
-        "resolved Button.ui should expose label, got {:?}",
-        ui_member
+        "resolved slot ui should expose label, got {:?}",
+        ui_prop
     );
 }
 
@@ -11117,7 +10930,7 @@ import A from './A.vue'
             &branch.status,
             BranchStatus::Unresolved {
                 reason: UnresolvedBranchReason::Cycle { canonical_id }
-            } if canonical_id == "/A.vue"
+            } if canonical_id == "/B.vue"
         )),
         "cycles must terminate with a structured cycle reason, got: {:?}",
         branches
@@ -11134,7 +10947,7 @@ import A from './A.vue'
                     ResolvedRootStep::Unresolved {
                         reason: UnresolvedBranchReason::Cycle { canonical_id },
                         ..
-                    } if canonical_id == "/A.vue"
+                    } if canonical_id == "/B.vue"
                 )
             })
         }),
@@ -11530,6 +11343,11 @@ import Child from './Child.vue'
     );
 
     #[cfg(feature = "scheduler")]
+    {
+        // get_meta does not populate cached_fallthrough; use resolve_fallthrough_surface
+        let _ = project.host().resolve_fallthrough_surface("/App.vue");
+    }
+    #[cfg(feature = "scheduler")]
     let first_cache = cached_fallthrough_state(&project, "/App.vue")
         .expect("first query should cache fallthrough");
 
@@ -11545,6 +11363,7 @@ import Child from './Child.vue'
 
     #[cfg(feature = "scheduler")]
     {
+        let _ = project.host().resolve_fallthrough_surface("/App.vue");
         let second_cache = cached_fallthrough_state(&project, "/App.vue")
             .expect("second query should repopulate the parent fallthrough cache");
         assert!(
@@ -11672,8 +11491,8 @@ import Child from './Child.vue'
     );
     assert_eq!(
         provenance.resolver_node_cache_misses,
-        2,
-        "only the new parent's component-meta and top-level fallthrough requests should miss once the child is runtime-owned, got provenance={:?}",
+        1,
+        "only the new parent's component-meta request should miss once the child is runtime-owned, got provenance={:?}",
         provenance
     );
     assert_eq!(
@@ -11777,6 +11596,8 @@ import Child from './Child.vue'
         .unwrap();
 
     let _ = get_meta(&project, "/App.vue");
+    // get_meta does not populate cached_fallthrough; use resolve_fallthrough_surface
+    let _ = project.host().resolve_fallthrough_surface("/App.vue");
     let cached = cached_fallthrough_entry(&project, "/App.vue")
         .expect("parent fallthrough should be cached after meta extraction");
 

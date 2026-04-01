@@ -611,6 +611,8 @@ impl VerterHost {
         if let Some(evaluated_types) = parts.evaluated_types.as_mut() {
             enrich_missing_slot_bindings(&parts.resolved_macros, evaluated_types);
         }
+        let registry_before = parts.resolved_type_registry.len();
+        let append_start = std::time::Instant::now();
         self.append_component_meta_registry_entries(
             canonical,
             &snapshot,
@@ -619,6 +621,20 @@ impl VerterHost {
             parts.cached_eval_inputs.as_deref(),
             store_view,
         );
+        let append_elapsed = append_start.elapsed();
+        let registry_after = parts.resolved_type_registry.len();
+        if crate::host_manage::component_meta_debug_enabled() {
+            let dep_cache_size = self.imported_dependency_cache.lock().len();
+            crate::host_manage::component_meta_debug(format!(
+                "PROFILE owner={} registry_before={} registry_after={} registry_added={} dep_cache_entries={} append_ms={:.1}",
+                canonical,
+                registry_before,
+                registry_after,
+                registry_after - registry_before,
+                dep_cache_size,
+                append_elapsed.as_secs_f64() * 1000.0,
+            ));
+        }
         component_meta_trace_event!(
             "component_meta_parts",
             format!(
@@ -782,7 +798,11 @@ impl VerterHost {
             }
         }
 
+        let mut _loop_iterations: usize = 0;
+        let mut _loop_materializations: usize = 0;
+        let _loop_start = std::time::Instant::now();
         while let Some(pending) = referenced_names.pop_front() {
+            _loop_iterations += 1;
             let type_name = pending.name;
             if published_names.contains(&type_name) {
                 continue;
@@ -890,6 +910,7 @@ impl VerterHost {
             let Some(materialized) = materialized else {
                 continue;
             };
+            _loop_materializations += 1;
             upsert_component_meta_registry_entry(
                 resolved_type_registry,
                 resolved_type_registry_meta,
@@ -900,6 +921,18 @@ impl VerterHost {
                 materialized,
                 declaration,
             );
+        }
+        if crate::host_manage::component_meta_debug_enabled()
+            && (_loop_materializations > 0 || _loop_iterations > 0)
+        {
+            crate::host_manage::component_meta_debug(format!(
+                "REGISTRY_LOOP owner={} iterations={} materializations={} published={} loop_ms={:.1}",
+                owner_canonical,
+                _loop_iterations,
+                _loop_materializations,
+                published_names.len(),
+                _loop_start.elapsed().as_secs_f64() * 1000.0,
+            ));
         }
     }
 
@@ -1775,6 +1808,7 @@ fn materialize_imported_component_meta_registry_decl_body_in_view(
     _symbol_dependencies: &[crate::resolver_core::ImportedSymbolDependency],
     store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let _start = std::time::Instant::now();
     let Some(snapshot) = host
         .clone_current_imported_dependency_entry(canonical_id, store_view)
         .and_then(|dependency| dependency.snapshot.clone())
@@ -1790,7 +1824,19 @@ fn materialize_imported_component_meta_registry_decl_body_in_view(
         return decl.body.clone();
     };
     let mut lookup = verter_semantic::analysis::type_eval::NoopEvalLookup;
-    materialize_component_meta_registry_decl_body(decl, &mut env, &mut lookup)
+    let result = materialize_component_meta_registry_decl_body(decl, &mut env, &mut lookup);
+    if crate::host_manage::component_meta_debug_enabled() {
+        let elapsed = _start.elapsed();
+        if elapsed.as_millis() > 5 {
+            crate::host_manage::component_meta_debug(format!(
+                "MATERIALIZE_IMPORTED dep={} type_symbols={} ms={:.1}",
+                canonical_id,
+                env.type_symbols.len(),
+                elapsed.as_secs_f64() * 1000.0,
+            ));
+        }
+    }
+    result
 }
 
 fn materialize_component_meta_registry_type(
