@@ -40,7 +40,6 @@ impl From<ExpansionProfile> for ArtifactProfile {
 }
 
 /// Convert to the runtime crate's `ArtifactProfile` for backend sync.
-#[cfg(feature = "type-runtime")]
 impl From<ArtifactProfile> for verter_type_runtime::ArtifactProfile {
     fn from(profile: ArtifactProfile) -> Self {
         match profile {

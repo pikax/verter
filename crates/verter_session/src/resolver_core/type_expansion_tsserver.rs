@@ -13,22 +13,16 @@
 //! 7. Parse hover text → `TypeExpansionResult` via `type_text_parser`
 //! 8. Normalize `ExpansionCompleteness`
 
-#[cfg(feature = "type-runtime")]
 use std::sync::Arc;
 
-#[cfg(feature = "type-runtime")]
 use verter_type_runtime::{HoverInfo, TypeProvider};
 
-#[cfg(feature = "type-runtime")]
 use crate::resolver_core::query_artifact::GeneratedQueryArtifact;
-#[cfg(feature = "type-runtime")]
 use crate::resolver_core::type_expansion::{
     ExpandedMember, ExpanderFuture, ExpansionCompleteness, TypeExpander, TypeExpansionError,
     TypeExpansionRequest, TypeExpansionResult,
 };
-#[cfg(feature = "type-runtime")]
 use crate::resolver_core::type_expansion_host::TypeExpansionHost;
-#[cfg(feature = "type-runtime")]
 use crate::resolver_core::type_text_parser;
 
 /// tsserver-backed `TypeExpander`.
@@ -36,20 +30,17 @@ use crate::resolver_core::type_text_parser;
 /// Uses quickinfo (hover) at generated offsets to resolve types.
 /// The generated artifact is built from the SFC snapshot under the
 /// requested profile and synced to the tsserver process.
-#[cfg(feature = "type-runtime")]
 pub struct TsserverTypeExpander<H: TypeExpansionHost> {
     host: Arc<H>,
     provider: Arc<dyn TypeProvider>,
 }
 
-#[cfg(feature = "type-runtime")]
 impl<H: TypeExpansionHost> TsserverTypeExpander<H> {
     pub fn new(host: Arc<H>, provider: Arc<dyn TypeProvider>) -> Self {
         Self { host, provider }
     }
 }
 
-#[cfg(feature = "type-runtime")]
 impl<H: TypeExpansionHost + Send + Sync + 'static> TypeExpander for TsserverTypeExpander<H> {
     fn expand_type<'a>(
         &'a self,
@@ -109,7 +100,6 @@ impl<H: TypeExpansionHost + Send + Sync + 'static> TypeExpander for TsserverType
 }
 
 /// Parse a hover response into a `TypeExpansionResult`.
-#[cfg(feature = "type-runtime")]
 pub(crate) fn parse_hover_to_expansion(
     info: &HoverInfo,
 ) -> Result<TypeExpansionResult, TypeExpansionError> {
@@ -147,7 +137,6 @@ pub(crate) fn parse_hover_to_expansion(
 /// - `"type ButtonProps = { msg: string; count?: number }"` → `"{ msg: string; count?: number }"`
 /// - `"{ msg: string; count?: number }"` → `"{ msg: string; count?: number }"`
 /// - `"(property) msg: string"` → `"string"`
-#[cfg(feature = "type-runtime")]
 pub(crate) fn extract_type_from_hover(contents: &str) -> &str {
     // Skip "type Name = " prefix (match " = " to avoid false positives with comparison operators)
     if let Some(eq_pos) = contents.find(" = ") {
@@ -169,7 +158,6 @@ pub(crate) fn extract_type_from_hover(contents: &str) -> &str {
 }
 
 /// Extract members from an object type expression.
-#[cfg(feature = "type-runtime")]
 pub(crate) fn extract_members_from_type(
     type_expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Vec<ExpandedMember> {
@@ -202,7 +190,6 @@ pub(crate) fn extract_members_from_type(
 /// - Tracks SFC span → generated offset mappings
 ///
 /// For `Lsp` profile: same merge (full IDE codegen requires verter_compiler pipeline).
-#[cfg(feature = "type-runtime")]
 pub(crate) fn build_minimal_artifact(
     canonical_id: &str,
     source: &str,
@@ -265,7 +252,6 @@ pub(crate) fn build_minimal_artifact(
 
 /// Strip `export default { ... }` or `export default defineComponent({ ... })`
 /// from companion script content. Preserves everything else (imports, types, etc.).
-#[cfg(feature = "type-runtime")]
 fn strip_export_default(content: &str) -> String {
     // Find "export default" at the start of a line (possibly with leading whitespace)
     let mut result = String::with_capacity(content.len());
@@ -325,7 +311,7 @@ fn strip_export_default(content: &str) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, feature = "type-runtime"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

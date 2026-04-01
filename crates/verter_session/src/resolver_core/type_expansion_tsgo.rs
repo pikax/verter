@@ -7,19 +7,14 @@
 //! For component-meta in `Tsgo` mode, this is a first-class expansion path —
 //! the result comes directly from TSGO, not routed through `VerterTypeExpander`.
 
-#[cfg(feature = "type-runtime")]
 use std::sync::Arc;
 
-#[cfg(feature = "type-runtime")]
 use verter_type_runtime::TypeProvider;
 
-#[cfg(feature = "type-runtime")]
 use crate::resolver_core::type_expansion::{
     ExpanderFuture, TypeExpander, TypeExpansionError, TypeExpansionRequest, TypeExpansionResult,
 };
-#[cfg(feature = "type-runtime")]
 use crate::resolver_core::type_expansion_host::TypeExpansionHost;
-#[cfg(feature = "type-runtime")]
 use crate::resolver_core::type_expansion_tsserver::{
     build_minimal_artifact, parse_hover_to_expansion,
 };
@@ -27,20 +22,17 @@ use crate::resolver_core::type_expansion_tsserver::{
 /// TSGO-backed `TypeExpander`.
 ///
 /// Uses hover at generated offsets to resolve types via TSGO LSP JSON-RPC.
-#[cfg(feature = "type-runtime")]
 pub struct TsgoTypeExpander<H: TypeExpansionHost> {
     host: Arc<H>,
     provider: Arc<dyn TypeProvider>,
 }
 
-#[cfg(feature = "type-runtime")]
 impl<H: TypeExpansionHost> TsgoTypeExpander<H> {
     pub fn new(host: Arc<H>, provider: Arc<dyn TypeProvider>) -> Self {
         Self { host, provider }
     }
 }
 
-#[cfg(feature = "type-runtime")]
 impl<H: TypeExpansionHost + Send + Sync + 'static> TypeExpander for TsgoTypeExpander<H> {
     fn expand_type<'a>(
         &'a self,

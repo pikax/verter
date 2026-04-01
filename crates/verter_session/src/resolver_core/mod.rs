@@ -29,9 +29,7 @@ mod surface_projector;
 pub mod symbol_resolver;
 pub mod type_expansion;
 pub mod type_expansion_host;
-#[cfg(feature = "type-runtime")]
 pub mod type_expansion_tsgo;
-#[cfg(feature = "type-runtime")]
 pub mod type_expansion_tsserver;
 pub mod type_expansion_verter;
 pub mod type_text_parser;
