@@ -19,9 +19,8 @@ description: "Review .claude/feedback/ files and process them into actionable pl
    - `lsp` — `crates/verter_lsp/`
    - `compiler` — `crates/verter_compiler/`
    - `parser` — `crates/verter_parser/`
-   - `semantic` — `crates/verter_semantic/`
+   - `semantic` — `crates/verter_semantic/` (including `src/analysis/`)
    - `diagnostics` — `crates/verter_diagnostics/`
-   - `analysis` — `crates/verter_analysis/`
    - `vscode` — `packages/vue-vscode/`
    - `unplugin` — `packages/unplugin/`
    - `ts-core` — `packages/core/`

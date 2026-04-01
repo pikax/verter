@@ -11,7 +11,7 @@ use std::collections::HashSet;
 // Everything that was originally defined here is now in verter_workspace::resolver
 // and verter_workspace::types.  Downstream code (`verter_session`, `verter_lsp`,
 // `verter_napi`, `verter_wasm`) can keep importing via
-// `verter_analysis::project_resolver::*` unchanged.
+// `verter_semantic::analysis::project_resolver::*` unchanged.
 
 pub use verter_workspace::resolver::{
     build_known_file_index, collapse_path, is_absolute_specifier, is_relative_specifier,
@@ -26,8 +26,8 @@ pub use verter_workspace::types::{
 
 // ── Analysis-dependent functions ──
 //
-// These functions reference `crate::analysis::AnalyzedModuleReference` and so must
-// stay in `verter_analysis`.  They delegate to the verter_workspace path helpers.
+// These functions reference `crate::analysis::AnalyzedModuleReference` and so stay
+// in `verter_semantic::analysis`. They delegate to the verter_workspace path helpers.
 
 pub fn collect_resolvable_module_reference_specifiers(
     module_references: &[crate::analysis::AnalyzedModuleReference],

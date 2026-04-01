@@ -1,4 +1,4 @@
-//! Options API extraction for `verter_analysis`.
+//! Options API extraction for `verter_semantic::analysis`.
 //!
 //! Extracts structured information from `export default { ... }` and
 //! `export default defineComponent({ ... })` for cross-component type resolution.

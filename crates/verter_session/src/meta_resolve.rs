@@ -2768,6 +2768,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             snapshot,
             &dep_resolutions,
         ));
+        let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
         let computed_eval_types = if imported_inputs.overflow.is_some() {
             None
         } else {
@@ -2781,6 +2782,16 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                     self.store_view,
                 )
         };
+        if let Some(compute_eval_start) = compute_eval_start {
+            let elapsed = compute_eval_start.elapsed();
+            component_meta_debug(format!(
+                "EVAL_TYPES owner={} elapsed_ms={:.1} has_result={} overflow={}",
+                owner_canonical,
+                elapsed.as_secs_f64() * 1000.0,
+                computed_eval_types.is_some(),
+                imported_inputs.overflow.is_some(),
+            ));
+        }
         if let Some(computed) = computed_eval_types.as_ref() {
             tracked_dependencies.extend(computed.discovered_dependencies.iter().cloned());
         }

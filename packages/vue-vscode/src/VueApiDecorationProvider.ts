@@ -22,7 +22,7 @@ function categorize(api: string): VueApiCategory {
     return "lifecycle";
   }
   switch (api) {
-    // Lifecycle hooks (verter_analysis uses PascalCase enum names)
+    // Lifecycle hooks use PascalCase enum names in the semantic snapshot.
     case "OnMounted":
     case "OnUnmounted":
     case "OnBeforeMount":

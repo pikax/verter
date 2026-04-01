@@ -1,5 +1,5 @@
 /**
- * TypeScript interfaces mirroring the Rust analysis types from verter_analysis.
+ * TypeScript interfaces mirroring the Rust analysis types from verter_semantic.
  * All field names use camelCase to match serde(rename_all = "camelCase").
  * `spanStart`/`spanEnd` are always absolute source offsets in the boundary encoding
  * chosen by the transport (negotiated LSP encoding for the language server).

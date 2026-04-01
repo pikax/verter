@@ -20,8 +20,8 @@ use crate::resolver_core::type_expansion::TypeExpansionError;
 /// Provides coherent SFC snapshots for artifact construction.
 ///
 /// Implemented by the source-of-truth owner (e.g., `verter_session::VerterHost`).
-/// Defined in `verter_resolver` so the resolver can consume it without
-/// depending on `verter_session`.
+/// Defined in `verter_session::resolver_core` so the local resolver stack can
+/// consume it without introducing a second crate boundary.
 pub trait TypeExpansionHost: Send + Sync {
     /// Obtain a coherent snapshot of the SFC at the given canonical ID.
     ///

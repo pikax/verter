@@ -101,7 +101,7 @@ impl ImportBindingMap {
 /// Build a comprehensive script analysis from source content.
 ///
 /// Performs a single OXC parse and walks the AST to collect imports, bindings,
-/// macros, and cross-reference information. Lives in `verter_analysis` so it's
+/// macros, and cross-reference information. Lives in `verter_semantic::analysis` so it's
 /// reusable by `verter_compiler`, linters, and other tools.
 ///
 /// Note: Import path resolution (relative → absolute) happens in the caller

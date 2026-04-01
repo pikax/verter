@@ -6,10 +6,10 @@
 //!
 //! # Ownership boundary
 //!
-//! - All types in [`ComponentMetaInput`] are owned by `verter_analysis`
+//! - All types in [`ComponentMetaInput`] are owned by `verter_semantic::analysis`
 //! - The host constructs the input by projecting from its internal snapshots
 //! - [`ComponentMetaAnalysis`] is the analysis-domain result (no serde)
-//! - Conversion to FFI/binding DTOs happens at the `verter_ffi` boundary
+//! - Conversion to transport-facing DTOs happens via `verter_protocol` and its adapter layers
 
 use crate::analysis::type_expr::{PrimitiveName, TypeExpr};
 use crate::analysis::types::{
@@ -38,7 +38,7 @@ fn parse_annotation_or_unknown(raw: &str) -> TypeExpr {
 
 /// Input view for component-meta extraction.
 ///
-/// All fields reference existing `verter_analysis` types.
+/// All fields reference existing `verter_semantic::analysis` types.
 /// The host constructs this by projecting from its internal snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedMacroInput {

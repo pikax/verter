@@ -11,8 +11,9 @@ Verter is designed as one shared optimized codebase. Consumers should reuse the 
 
 - Put reusable parsing, analysis, type-resolution, caching, and import-following behavior in the shared owner crate.
 - `verter_session` is the shared host/session/cache boundary for host-backed consumers.
-- `verter_analysis` and `verter_compiler` own reusable semantics.
-- `verter_ffi` owns boundary DTOs shared by NAPI and WASM.
+- `verter_semantic` and `verter_compiler` own reusable semantics, lowering, and codegen.
+- `verter_session::resolver_core` owns the host-backed resolver stack and type-resolution orchestration.
+- `verter_protocol` owns transport-facing schema DTOs, while `verter_ffi` stays a thin native/WASM adapter layer.
 - Consumer packages and apps should stay adapter-oriented: thin wrappers, public API shaping, transport glue, and UX-specific behavior.
 
 When a bug or slowdown shows up in one product surface, prefer fixing it in the shared substrate so other consumers benefit automatically.
@@ -214,7 +215,7 @@ Only one provider runs at a time. Provider PID is sent to the extension via `$/v
 Request (stdio) → server.rs → Find document in host cache → Feature handler → Response (stdio)
 ```
 
-## CSS Analysis & Selector Matching (`crates/verter_analysis/src/`)
+## CSS Analysis & Selector Matching (`crates/verter_semantic/src/analysis/`)
 
 CSS analysis uses a lightweight byte-level scanner (no external CSS parser dependency). The scanner extracts selectors, classes, IDs, custom properties, and at-rules from `<style>` blocks.
 
@@ -432,7 +433,7 @@ The Rust compiler never does file I/O — all external resolution is the host's 
 
 **Caching rule:** when parsing a `.ts` / `.js` / declaration file for type resolution, cache discovered symbol name → canonical location mappings. Cache direct re-exports, barrelled exports, and any discovered `export *` hops as well, because repeated wildcard-barrel scanning is expensive.
 
-**Component-meta cache rule:** when changing `verter_session`, `verter_resolver`, `verter_analysis`, or `packages/component-meta` type paths, use cached lookup/eval state as the only source of truth after the cache-owning pass. Do not rewalk AST/source as a fallback to recover or expand types.
+**Component-meta cache rule:** when changing `verter_session`, `verter_session::resolver_core`, `verter_semantic`, or `packages/component-meta` type paths, use cached lookup/eval state as the only source of truth after the cache-owning pass. Do not rewalk AST/source as a fallback to recover or expand types.
 
 **Component-meta publication rule:** keep registry publication shallow and demand-driven. Publish and expand only the symbols required by the active metadata query; do not eagerly materialize unrelated owner-local or package-local helpers.
 
@@ -481,9 +482,9 @@ The `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation
 - Cross-file tools iterate all loaded files (no `ProjectIndex` exposed from host)
 - Scoring engine computes composite 0-100 quality scores from a11y, lint, template complexity, API surface, CSS health, and reactivity dimensions
 
-## verter_analysis — Static Analysis Types
+## verter_semantic::analysis — Static Analysis Types
 
-`verter_analysis` is independent from `verter_compiler`. The compilation crate produces `RawTemplateData` during compilation, which `verter_session` converts into `verter_analysis` types.
+`verter_semantic::analysis` is the shared static-analysis surface consumed by `verter_session`, diagnostics, and tooling. The compilation crate still owns lowering and codegen, while `verter_session` projects compiler and workspace state into these semantic snapshots.
 
 ### AnalysisScope
 
@@ -638,10 +639,10 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_compiler/src/ide/template/mod.rs` (`StrictSlotEntry`, `emit_strict_slot_checks`) | IDE: strict slot children type checking (`strictRenderSlot` calls)     |
 | `crates/verter_compiler/src/css/`                                                               | CSS preprocessing and style transformation                             |
 | `crates/verter_compiler/src/code_transform/code_transform.rs`                                   | Chunk-based deferred mutation engine                                   |
-| `crates/verter_analysis/src/lib.rs`                                                         | Static analysis entry: imports, exports, bindings                      |
-| `crates/verter_analysis/src/style.rs`                                                       | CSS scanner, selector parser, specificity computation                  |
-| `crates/verter_analysis/src/selector_match.rs`                                              | Three-valued CSS selector matching against template elements           |
-| `crates/verter_analysis/src/template.rs`                                                    | Template element analysis, component usage, dynamic class extraction   |
+| `crates/verter_semantic/src/lib.rs`                                                         | Semantic crate entry: queries, analysis, extractors                   |
+| `crates/verter_semantic/src/analysis/style.rs`                                              | CSS scanner, selector parser, specificity computation                  |
+| `crates/verter_semantic/src/analysis/selector_match.rs`                                     | Three-valued CSS selector matching against template elements           |
+| `crates/verter_semantic/src/analysis/template.rs`                                           | Template element analysis, component usage, dynamic class extraction   |
 | `crates/verter_scheduler/src/scheduler.rs`                                                  | Scheduler: DashMap of FileNodes, driver loop, stage dispatch           |
 | `crates/verter_scheduler/src/node.rs`                                                       | FileNode: ArcSwap snapshots, generation counter, pending requests      |
 | `crates/verter_scheduler/src/executor.rs`                                                   | StageExecutor trait: host plugs in parse/analysis/compile              |
@@ -650,7 +651,7 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_session/src/lib.rs`                                                             | Host entry: compile, cache, upsert, dependency tracking                |
 | `crates/verter_session/src/host_executor.rs`                                                   | HostStageExecutor: real parse pipeline for scheduler                   |
 | `crates/verter_session/src/scheduler_shim.rs`                                                  | SchedulerBackedWorkspace: migration shim                               |
-| `crates/verter_ffi/src/lib.rs`                                                              | FFI types shared between NAPI and WASM                                 |
+| `crates/verter_ffi/src/lib.rs`                                                              | Native/WASM adapter re-exporting protocol schema + conversion helpers   |
 | `packages/unplugin/src/index.ts`                                                            | Unplugin factory: `buildStart` (preCompile), `transform`, `load` hooks |
 | `packages/unplugin/src/core/types.ts`                                                       | `VerterPluginOptions`, `HmrStrategy`                                   |
 | `packages/unplugin/src/core/scanner.ts`                                                     | `scanVueFiles()` — async recursive directory walker for preCompile     |

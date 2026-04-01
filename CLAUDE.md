@@ -12,8 +12,9 @@ Verter is one shared optimized codebase, not separate semantic implementations p
 
 - Improvements should land in the lowest reusable owner crate that can correctly serve all consumers.
 - `verter_session` and shared workspace/VFS integration are the authority for host-backed loading, invalidation, dependency tracking, and cache reuse.
-- `verter_analysis` and `verter_compiler` own reusable semantics and type-resolution logic.
-- `verter_ffi` owns shared boundary DTOs between native bindings and WASM bindings.
+- `verter_semantic` and `verter_compiler` own reusable semantics, lowering, and codegen.
+- `verter_session::resolver_core` owns the host-backed resolver stack and type-resolution orchestration.
+- `verter_protocol` owns transport-facing schema DTOs, while `verter_ffi` remains the thin native/WASM adapter layer.
 - Consumer packages such as `@verter/component-meta`, the LSP, MCP, unplugin, and playground should consume the shared substrate rather than carrying their own semantic forks.
 
 Architectural consequence:
@@ -78,7 +79,7 @@ verter-vscode (VS Code extension)
 
 verter-mcp (MCP server binary, stdio + HTTP)
 ├── verter_session (file host + compilation)
-├── verter_analysis (static analysis snapshots)
+├── verter_semantic (static analysis snapshots)
 ├── verter_diagnostics (lint rules + DiagnosticSet)
 └── verter_actions (quick fixes + refactoring)
 
@@ -177,7 +178,7 @@ ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Com
 
 ### Fallthrough / Root Inheritance (CRITICAL)
 
-The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
+The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_semantic::analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
 
 **Public contract** (on `ComponentMetaAnalysis` / `FfiComponentMeta` / `ComponentMeta`):
 
@@ -205,7 +206,7 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 
 **Compat**: mapping-only. Flat Volar `props/events` stay on declared surfaces. Branch-structured inherited data is on `_verter`.
 
-**Key files**: `verter_analysis/src/component_meta.rs` (types + root extraction), `verter_analysis/src/html_intrinsics.rs` (native intrinsic catalog), `verter_session/src/host_manage.rs` (resolver + cache), `verter_ffi/src/types.rs` + `convert.rs` (FFI), `packages/component-meta/src/types.ts` (TS types).
+**Key files**: `verter_semantic/src/analysis/component_meta.rs` (types + root extraction), `verter_semantic/src/analysis/html_intrinsics.rs` (native intrinsic catalog), `verter_session/src/host_manage.rs` (resolver + cache), `verter_protocol/src/types.rs` + `verter_ffi/src/convert.rs` (schema + adapter conversion), `packages/component-meta/src/types.ts` (TS types).
 
 ### Component-Meta Native Vs Compat (CRITICAL)
 
@@ -216,7 +217,7 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Indexed-access members may be resolved/expanded when that improves real type fidelity. Targeted compat expansion such as `Alert['variants']['color']` → the concrete color union is acceptable; blanket ref flattening is not.
 - Compat `exposed` parity should be derived from a shared cached public-instance surface (for example a `ComponentPublicInstance` extraction owned by the host/public-instance path). Do not redefine native `exposed` to mean public-instance unless the public API is deliberately expanded.
 - Native-only extensions such as `models`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface` are part of Verter's official API. Benchmark them separately from Volar-surface parity instead of treating them as regressions.
-- Component-meta type recovery must stay cache-owned. When changing `verter_session`, `verter_resolver`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
+- Component-meta type recovery must stay cache-owned. When changing `verter_session`, `verter_session::resolver_core`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
 - Component-meta registry publication must stay shallow. Publish only the symbols demanded by the current query path, and do not eagerly materialize unrelated owner/package helpers just to populate the registry.
 - Component-meta companion/file-target selection must stay shallow too. Choosing between runtime and declaration companions may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to decide the target file.
 - Imported component-meta hydration must stay cache-owned too. Once shallow imported dependency state exists, later alias/registry/fallthrough resolver stages must read only from that cache-owned state and must not jump back to raw snapshot/source builders for imported files.
@@ -236,13 +237,13 @@ Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` gene
 
 ### Type Evaluator Sharing & Depth Limits
 
-`verter_analysis::type_eval` is the shared lightweight type evaluator used by analysis, host, and resolver surfaces. Its memory and caching invariants matter across the workspace.
+`verter_semantic::analysis::type_eval` is the shared lightweight type evaluator used by analysis, host, and resolver surfaces. Its memory and caching invariants matter across the workspace.
 
 - Recursive `TypeExpr` structure is Arc-backed (`Arc<TypeExpr>`, `Arc<[TypeExpr]>`, `Arc<ObjectExpr>`, `Arc<FunctionExpr>`) so clones stay shallow.
 - `EvalEnv.type_bindings` stores `Arc<TypeExpr>`, not owned `TypeExpr`, so generic instantiation does not re-copy bound subtrees.
 - `resolved_refs` caches `Arc<TypeExpr>` values keyed by stable declaration identity plus interned type arguments. Cache-hit callers may clone the outer `TypeExpr`, but child allocations must stay shared.
 - `max_ref_depth` is a safety valve for nested `evaluate_ref` chains only. When the limit is hit, return a symbolic `TypeExpr::Ref` built from the already-interned evaluated args. Do not cache that fallback result.
-- Structural-sharing regressions should be covered in dedicated evaluator tests and the Criterion pathological-graph bench in `crates/verter_analysis/benches/type_eval_bench.rs`.
+- Structural-sharing regressions should be covered in dedicated evaluator tests such as `crates/verter_semantic/src/analysis/type_eval_memory_tests.rs` and `crates/verter_semantic/src/analysis/type_eval_tests.rs`.
 
 ### IDE Script Error Recovery
 
