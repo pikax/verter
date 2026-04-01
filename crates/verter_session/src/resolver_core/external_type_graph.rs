@@ -500,7 +500,7 @@ fn resolve_type_through_barrel_from_graph<R: ExternalTypeGraphResolver>(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn scan_barrel_export_surface_recursive_from_graph<R: ExternalTypeGraphResolver>(
     resolver: &R,
     root_specifier: &str,

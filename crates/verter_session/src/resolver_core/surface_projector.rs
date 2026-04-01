@@ -275,9 +275,7 @@ fn extract_pick_slot_bindings(binding_type_text: &str) -> Option<Vec<AnalyzedSlo
     let mut bindings = Vec::new();
     for key in keys {
         let key = key.trim();
-        let Some(name) = extract_string_literal_name(key) else {
-            return None;
-        };
+        let name = extract_string_literal_name(key)?;
         bindings.push(AnalyzedSlotFieldBinding {
             name,
             type_annotation: Some(format!("{object}[{key}]")),
@@ -404,10 +402,7 @@ fn slice_source_span(source: Option<&str>, span: verter_span::Span) -> Option<St
 }
 
 fn trim_trailing_type_text(text: &str) -> String {
-    text.trim()
-        .trim_end_matches(|ch: char| ch == ';' || ch == ',')
-        .trim()
-        .to_string()
+    text.trim().trim_end_matches([';', ',']).trim().to_string()
 }
 
 fn find_top_level_char(text: &str, needle: char) -> Option<usize> {

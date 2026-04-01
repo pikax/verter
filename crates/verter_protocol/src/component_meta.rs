@@ -820,10 +820,7 @@ fn branch_status_to_proto(builder: &mut GraphBuilder, status: &FfiBranchStatus) 
         },
         FfiBranchStatus::PartiallyUnresolved { reasons } => BranchStatus {
             kind: proto::BranchStatusKind::PartiallyUnresolved as i32,
-            reasons: reasons
-                .iter()
-                .map(|reason| partial_branch_reason_to_proto(reason))
-                .collect(),
+            reasons: reasons.iter().map(partial_branch_reason_to_proto).collect(),
             reason: None,
         },
         FfiBranchStatus::Unresolved { reason } => BranchStatus {
@@ -1113,26 +1110,17 @@ fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
         }),
         GraphNode::Tuple { readonly, elements } => type_node::Kind::Tuple(TupleNode {
             readonly: *readonly,
-            elements: elements
-                .iter()
-                .map(|element| tuple_element_to_proto(element))
-                .collect(),
+            elements: elements.iter().map(tuple_element_to_proto).collect(),
         }),
         GraphNode::Object { members } => type_node::Kind::Object(ObjectNode {
-            members: members
-                .iter()
-                .map(|member| object_member_to_proto(member))
-                .collect(),
+            members: members.iter().map(object_member_to_proto).collect(),
         }),
         GraphNode::Function {
             parameters,
             return_type,
             type_parameters,
         } => type_node::Kind::Function(FunctionNode {
-            parameters: parameters
-                .iter()
-                .map(|parameter| function_parameter_to_proto(parameter))
-                .collect(),
+            parameters: parameters.iter().map(function_parameter_to_proto).collect(),
             return_type_node_id: *return_type,
             type_parameter_node_ids: type_parameters.clone(),
         }),

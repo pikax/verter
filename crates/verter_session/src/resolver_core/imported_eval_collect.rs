@@ -644,7 +644,7 @@ pub fn build_imported_eval_inputs_with_owner_context<R: ImportedEvalOwnerContext
         owner_canonical_id,
         owner_snapshot,
         owner_eval_source.as_str(),
-        &owner_env,
+        owner_env,
         additional_required_import_names,
         budget,
     )

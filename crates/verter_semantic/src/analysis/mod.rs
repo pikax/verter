@@ -20,7 +20,7 @@
 //!   Analyse CSS style blocks for selectors, specificity, and Vue-specific
 //!   features (`:deep`, `:global`, `v-bind()`).
 
-mod analysis;
+mod build;
 mod classify;
 pub mod component_meta;
 mod exports;
@@ -60,7 +60,7 @@ mod type_eval_memory_tests;
 #[path = "type_eval_build_tests.rs"]
 mod type_eval_build_tests;
 
-pub use analysis::{
+pub use build::{
     build_export_signatures, build_export_signatures_from_program, build_script_analysis,
     build_script_analysis_with_scope, build_script_analysis_with_scope_from_program,
 };

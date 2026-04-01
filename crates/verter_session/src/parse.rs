@@ -370,7 +370,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // Build style analyses for each style block (when style analysis flags are set)
     let style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis> =
         if analysis_scope.needs_style_analysis() {
-            build_style_analyses_from_parsed(&parsed, source, canonical_id)
+            build_style_analyses_from_parsed(parsed, source, canonical_id)
         } else {
             Vec::new()
         };
@@ -379,11 +379,11 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // script content even when full script analysis is disabled so barrel
     // re-export resolution can find `export type Foo = ...` in `.vue` files.
     let (export_signatures, export_panic_diag) =
-        build_export_signatures_from_parsed_with_diagnostic(&parsed, source);
+        build_export_signatures_from_parsed_with_diagnostic(parsed, source);
 
     // Build script analysis from script block contents (when script analysis flags are set)
     let (mut script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
-        build_script_analysis_from_parsed_with_diagnostic(&parsed, source)
+        build_script_analysis_from_parsed_with_diagnostic(parsed, source)
     } else {
         (
             verter_semantic::analysis::ScriptAnalysisSnapshot::default(),

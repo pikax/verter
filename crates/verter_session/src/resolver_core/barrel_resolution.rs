@@ -259,7 +259,7 @@ pub fn resolve_type_through_barrel<R: BarrelResolutionResolver>(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn scan_barrel_export_surface_recursive<R: BarrelResolutionResolver>(
     resolver: &R,

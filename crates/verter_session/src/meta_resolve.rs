@@ -324,7 +324,7 @@ fn enrich_missing_slot_bindings(
                         r#type: binding_type,
                         raw_type: None,
                         optional,
-                        completeness: entry.result.completeness.clone(),
+                        completeness: entry.result.completeness,
                         diagnostics: Vec::new(),
                     },
                 );

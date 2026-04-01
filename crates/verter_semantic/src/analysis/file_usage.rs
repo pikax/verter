@@ -479,7 +479,7 @@ mod tests {
     /// @ai-generated - Integration: build FileUsageInfoOwned from actual script analysis
     #[test]
     fn integration_from_script_analysis() {
-        use crate::analysis::analysis::build_script_analysis;
+        use crate::analysis::build::build_script_analysis;
         use oxc_allocator::Allocator;
         use oxc_span::SourceType;
 

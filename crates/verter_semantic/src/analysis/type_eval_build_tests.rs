@@ -758,7 +758,7 @@ export { RouteLocationRaw as Lt, St, vt }
 
 #[test]
 fn evaluate_macro_types_resolves_prop_annotations() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -807,7 +807,7 @@ defineProps<ButtonProps>()
 
 #[test]
 fn evaluate_macro_types_resolves_generic_utility() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -841,7 +841,7 @@ defineProps<Partial<Config>>()
 
 #[test]
 fn evaluate_macro_types_keeps_complex_prop_annotations() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -885,7 +885,7 @@ defineProps<{
 
 #[test]
 fn evaluate_macro_types_with_inline_props() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -914,7 +914,7 @@ defineProps<{ count: number; label?: string }>()
 
 #[test]
 fn evaluate_macro_types_synthesizes_define_props_from_typeof() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -935,7 +935,7 @@ defineProps<typeof config>()
 
 #[test]
 fn evaluate_macro_types_synthesizes_define_props_from_utility_heritage() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -959,7 +959,7 @@ defineProps<MyProps>()
 
 #[test]
 fn evaluate_macro_types_synthesizes_define_props_from_union_object_variants() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1010,7 +1010,7 @@ defineProps<Props>()
 
 #[test]
 fn evaluate_macro_types_synthesizes_define_props_from_mixed_intersection() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1035,7 +1035,7 @@ defineProps<Props>()
 
 #[test]
 fn evaluate_macro_types_keeps_vue_ignore_intersection_branch_for_meta() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1070,7 +1070,7 @@ defineProps<Props>()
 
 #[test]
 fn evaluate_macro_types_keeps_vue_ignore_interface_extends_for_meta() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1104,7 +1104,7 @@ defineProps<Props>()
 
 #[test]
 fn evaluate_macro_types_with_env_only_emits_local_bindings() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1146,7 +1146,7 @@ const localLabel: string = 'hello'
 
 #[test]
 fn expand_macro_types_with_lookup_resolves_external_define_props() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1194,7 +1194,7 @@ defineProps<RemoteProps>()
 
 #[test]
 fn evaluate_macro_types_skips_complex_slot_binding_types() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1228,7 +1228,7 @@ defineSlots<{
 
 #[test]
 fn expand_macro_types_with_lookup_keeps_define_slots_shape_when_slot_fields_are_missing() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1300,7 +1300,7 @@ defineSlots<RemoteSlots>()
 
 #[test]
 fn expand_macro_types_with_lookup_keeps_canonical_vue_vnode_slot_returns_symbolic() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1404,7 +1404,7 @@ defineSlots<RemoteSlots>()
 
 #[test]
 fn expand_macro_types_with_lookup_does_not_short_circuit_same_name_local_vnode_slot_returns() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let source = r#"
@@ -1504,7 +1504,7 @@ defineSlots<RemoteSlots>()
 
 #[test]
 fn expand_macro_types_with_lookup_materializes_imported_mapped_slot_binding_shapes() {
-    use super::analysis::build_script_analysis;
+    use super::build::build_script_analysis;
     use oxc_allocator::Allocator;
 
     let app_source = r#"

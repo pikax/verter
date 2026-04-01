@@ -67,6 +67,7 @@ fn type_runtime_trace_output_path() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn format_type_runtime_trace_line(
     event: TypeRuntimeTraceEvent,
     trace_id: u64,

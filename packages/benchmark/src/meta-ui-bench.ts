@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyDefaultBenchmarkTransforms,
@@ -21,7 +21,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "../../..");
 const require = createRequire(import.meta.url);
-const tsxLoaderPath = require.resolve("tsx");
+const tsxLoaderPath = pathToFileURL(require.resolve("tsx")).href;
 
 const JSON_MODE = process.argv.includes("--json");
 

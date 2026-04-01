@@ -5304,10 +5304,8 @@ impl VerterHost {
             format!("{dep_canonical}/index.tsx"),
         ]);
 
-        if !prefers_type_companion {
-            if read_candidate(dep_canonical) {
-                return Some(dep_canonical.to_string());
-            }
+        if !prefers_type_companion && read_candidate(dep_canonical) {
+            return Some(dep_canonical.to_string());
         }
 
         for candidate in candidates {
@@ -5316,10 +5314,8 @@ impl VerterHost {
             }
         }
 
-        if prefers_type_companion {
-            if read_candidate(dep_canonical) {
-                return Some(dep_canonical.to_string());
-            }
+        if prefers_type_companion && read_candidate(dep_canonical) {
+            return Some(dep_canonical.to_string());
         }
 
         None
@@ -6436,7 +6432,7 @@ impl VerterHost {
         );
         let inserted_visit = visiting.insert(visit_key.clone());
 
-        let result = (|| {
+        let result = {
             let mut hydrated = cached.clone();
             if hydrated.requires_source_merge {
                 let evaluated = self
@@ -6476,7 +6472,7 @@ impl VerterHost {
             }
 
             Some((resolved_canonical_id, resolved_exported_name, hydrated))
-        })();
+        };
 
         if inserted_visit {
             visiting.remove(&visit_key);

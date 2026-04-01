@@ -187,10 +187,8 @@ impl HostStoreView {
             .imported_dependency_cache
             .lock()
             .iter()
-            .filter_map(|(canonical_id, entry)| {
-                (entry.workspace_generation == workspace_generation)
-                    .then(|| (canonical_id.clone(), entry.clone()))
-            })
+            .filter(|&(_canonical_id, entry)| entry.workspace_generation == workspace_generation)
+            .map(|(canonical_id, entry)| (canonical_id.clone(), entry.clone()))
             .collect();
         for (canonical_id, entry) in imported_entries {
             view.whole_hashes

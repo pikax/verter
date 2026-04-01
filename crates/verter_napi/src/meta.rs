@@ -411,6 +411,7 @@ fn is_builtin_callable_member_name(name: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fill_missing_backend_member_types(
     backend: &dyn GeneratedQueryBackend,
     file_id: &GeneratedFileId,

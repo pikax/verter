@@ -1058,7 +1058,7 @@ fn semantic_type_cache_key<'ctx, 'a: 'ctx>(
     semantic_type_cache_key_with_active(ty, ctx, &mut Vec::new())
 }
 
-fn binding_name_from_span<'ctx>(source: &'ctx [u8], span: Span) -> Option<&'ctx str> {
+fn binding_name_from_span(source: &[u8], span: Span) -> Option<&str> {
     std::str::from_utf8(&source[span.start as usize..span.end as usize]).ok()
 }
 

@@ -32,8 +32,8 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
                 !binding.is_type_only
                     && !matches!(binding.kind, ImportBindingKind::Namespace)
                     && !owner_local_value_names.contains(&binding.name)
-                    && !required_binding_names
-                        .is_some_and(|required| !required.contains(&binding.name))
+                    && required_binding_names
+                        .is_none_or(|required| required.contains(&binding.name))
             })
             .collect();
         if requested_bindings.is_empty() {

@@ -2267,9 +2267,7 @@ fn extract_slot_bindings_from_pick_type(type_text: &str) -> Option<Vec<AnalyzedS
     let mut bindings = Vec::new();
     for key in keys {
         let key = key.trim();
-        let Some(name) = extract_type_string_literal_name(key) else {
-            return None;
-        };
+        let name = extract_type_string_literal_name(key)?;
         bindings.push(AnalyzedSlotFieldBinding {
             name,
             type_annotation: Some(format!("{object}[{key}]")),

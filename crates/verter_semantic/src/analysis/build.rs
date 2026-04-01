@@ -4028,5 +4028,5 @@ fn extract_return_object_keys(body: &FunctionBody<'_>, keys: &mut Vec<String>) {
 }
 
 #[cfg(test)]
-#[path = "analysis_tests.rs"]
-mod analysis_tests;
+#[path = "build_tests.rs"]
+mod build_tests;

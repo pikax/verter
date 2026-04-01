@@ -2617,13 +2617,12 @@ impl VerterHost {
                         kind: verter_workspace::ResolveRequestKind::TypeImport,
                     },
                 )
-                .map(|resolution| {
+                .inspect(|resolution| {
                     self.cache_dependency_resolution_result(
                         canonical_id,
                         &dep.import_source,
                         &resolution.source_id,
                     );
-                    resolution
                 })
                 .or_else(|| {
                     workspace
@@ -2635,13 +2634,12 @@ impl VerterHost {
                                 kind: verter_workspace::ResolveRequestKind::EsmImport,
                             },
                         )
-                        .map(|resolution| {
+                        .inspect(|resolution| {
                             self.cache_dependency_resolution_result(
                                 canonical_id,
                                 &dep.import_source,
                                 &resolution.source_id,
                             );
-                            resolution
                         })
                 })
                 .map(|resolution| resolution.source_id);

@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! # verter_session — In-memory virtual file host for Vue SFC compilation
 //!
 //! Manages the lifecycle of Vue Single File Components in a stateful,

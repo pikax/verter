@@ -20,6 +20,10 @@ impl ExternalTypeBodyCache {
         self.resolved.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.resolved.is_empty()
+    }
+
     pub fn get(&self, key: &(String, String)) -> Option<&Option<ResolvedElements>> {
         self.resolved.get(key)
     }
