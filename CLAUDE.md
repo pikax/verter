@@ -96,16 +96,15 @@ verter-mcp (MCP server binary, stdio + HTTP)
 crates/
   verter_parser/     # SFC parser: tokenization, template AST, shared types/utilities
   verter_compiler/   # SFC compiler: codegen (VDOM/Vapor/IDE), CodeTransform, source maps, style processing
-  verter_semantic/   # Semantic authority: revision-gated query engine, component surfaces, binding analysis, reactivity provenance, 7 analyzers
-  verter_analysis/   # Static analysis: imports, exports, bindings, type resolution (being migrated to verter_semantic)
-  verter_session/    # Top-level session API: composes workspace, parser, compiler, semantic, scheduler
+  verter_semantic/   # Semantic authority: analysis, query engine, component surfaces, binding analysis, reactivity provenance, 7 analyzers
+  verter_session/    # Top-level session API: composes workspace, parser, compiler, semantic, scheduler, resolver
   verter_workspace/  # Workspace layer: file access, import resolution, project ownership, tsconfig/vite config
   verter_scheduler/  # Async per-file scheduler: Source→Analysis→Artifact stages, priority queue, blocker registry
   verter_protocol/   # Single schema owner: protobuf transport + canonical DTOs for NAPI/WASM/LSP/MCP
   verter_diagnostics/ # Vue SFC diagnostic engine: ~186 lint rules, rule trait, visitor, DiagnosticSet
   verter_actions/    # Code actions engine: quick fixes, refactoring
   verter_lsp/        # Rust LSP server binary (stdio, launched by VS Code extension)
-  verter_ffi/        # FFI types: shared serializable structs for NAPI/WASM boundaries (being migrated to verter_protocol)
+  verter_ffi/        # FFI boundary types: re-exports from verter_protocol, conversion functions
   verter_bench/      # Benchmarks and comparison examples (Rust)
   verter_mcp/        # MCP server binary: analysis, diagnostics, scoring for AI agents
   verter_napi/       # Native Node.js bindings (NAPI-RS cdylib)

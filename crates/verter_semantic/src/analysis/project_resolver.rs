@@ -1,10 +1,8 @@
 //! Project resolver — re-exported from `verter_workspace::resolver`.
 //!
-//! All resolver types and the
-//! `ProjectResolver` (aliased as `NativeProjectResolver`) now live in
-//! `verter_workspace`. This module re-exports them for backward compatibility
-//! and adds analysis-dependent utility functions that reference
-//! `crate::analysis::AnalyzedModuleReference`.
+//! All resolver types and `ProjectResolver` live in `verter_workspace`.
+//! This module re-exports them and adds analysis-dependent utility
+//! functions that reference `AnalyzedModuleReference`.
 
 use std::collections::HashSet;
 

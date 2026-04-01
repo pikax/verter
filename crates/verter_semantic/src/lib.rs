@@ -23,7 +23,6 @@ pub mod db;
 pub mod extract;
 pub mod facts;
 pub mod input;
-pub mod migration;
 pub mod profile;
 pub mod query;
 pub mod refs;

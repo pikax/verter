@@ -971,7 +971,6 @@ const {{ pathToFileURL }} = require('url');
     None
 }
 
-/// Legacy function signature for backward compatibility during migration.
 /// Spawns Node.js to discover vite aliases (no dependency tracking).
 pub fn discover_vite_aliases(project_root: &Path, node_path: &str) -> Vec<(String, String)> {
     let config_path = match find_vite_config(project_root) {

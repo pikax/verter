@@ -43,7 +43,7 @@ impl VerterHost {
     /// On native (scheduler-backed): the scheduler is the sole parser. `upsert()`
     /// submits to the scheduler, waits for Source+Analysis to commit, then reads
     /// back the result and populates the compile cache. The `files` map is also
-    /// populated for backward compatibility during the migration.
+    /// populated for the WASM path (non-scheduler).
     pub fn upsert(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
         // Invalidate semantic cache for this file before re-parsing.
         if let Some(ref id) = req.canonical_id {
@@ -63,7 +63,7 @@ impl VerterHost {
 
     /// Scheduler-backed upsert: submits to scheduler (sole parser), waits for
     /// Source+Analysis to commit, reads back the result, populates compile_cache
-    /// and (transitionally) the `files` map.
+    /// and the compile_cache.
     #[cfg(feature = "scheduler")]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn upsert_via_scheduler(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
