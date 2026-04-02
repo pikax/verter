@@ -4241,6 +4241,10 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
                 }
 
                 if let Some(declaration) = &export_decl.declaration {
+                    record_local_export_symbol_targets_from_declaration(
+                        declaration,
+                        &mut result.local_export_symbol_targets,
+                    );
                     record_local_type_symbol_from_declaration(
                         declaration,
                         &mut result.local_type_symbols,
@@ -4492,6 +4496,54 @@ fn record_exported_local_type_names_from_declaration(
         Declaration::ClassDeclaration(class_decl) => {
             if let Some(id) = &class_decl.id {
                 exported_local_type_names.insert(id.name.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn record_local_export_symbol_targets_from_declaration(
+    declaration: &Declaration<'_>,
+    local_export_symbol_targets: &mut FxHashMap<String, String>,
+) {
+    match declaration {
+        Declaration::TSTypeAliasDeclaration(type_alias) => {
+            local_export_symbol_targets
+                .entry(type_alias.id.name.to_string())
+                .or_insert_with(|| type_alias.id.name.to_string());
+        }
+        Declaration::TSInterfaceDeclaration(interface) => {
+            local_export_symbol_targets
+                .entry(interface.id.name.to_string())
+                .or_insert_with(|| interface.id.name.to_string());
+        }
+        Declaration::TSEnumDeclaration(enum_decl) => {
+            local_export_symbol_targets
+                .entry(enum_decl.id.name.to_string())
+                .or_insert_with(|| enum_decl.id.name.to_string());
+        }
+        Declaration::ClassDeclaration(class_decl) => {
+            if let Some(id) = &class_decl.id {
+                local_export_symbol_targets
+                    .entry(id.name.to_string())
+                    .or_insert_with(|| id.name.to_string());
+            }
+        }
+        Declaration::FunctionDeclaration(function_decl) => {
+            if let Some(id) = &function_decl.id {
+                local_export_symbol_targets
+                    .entry(id.name.to_string())
+                    .or_insert_with(|| id.name.to_string());
+            }
+        }
+        Declaration::VariableDeclaration(variable_decl) => {
+            for declarator in &variable_decl.declarations {
+                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                    continue;
+                };
+                local_export_symbol_targets
+                    .entry(id.name.to_string())
+                    .or_insert_with(|| id.name.to_string());
             }
         }
         _ => {}

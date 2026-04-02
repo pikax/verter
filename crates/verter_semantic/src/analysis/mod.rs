@@ -42,19 +42,12 @@ pub mod type_eval_build;
 pub mod type_expand;
 pub mod type_expr;
 pub mod type_expr_lower;
+pub mod type_solver;
 pub mod types;
 
 #[cfg(test)]
 #[path = "type_expr_tests.rs"]
 mod type_expr_tests;
-
-#[cfg(test)]
-#[path = "type_eval_tests.rs"]
-mod type_eval_tests;
-
-#[cfg(test)]
-#[path = "type_eval_memory_tests.rs"]
-mod type_eval_memory_tests;
 
 #[cfg(test)]
 #[path = "type_eval_build_tests.rs"]

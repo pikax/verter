@@ -343,9 +343,10 @@ fn raw_prop_type_text(
     source: Option<&str>,
     prop: &verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp,
 ) -> Option<String> {
-    prop.type_span
-        .and_then(|span| slice_source_span(source, span))
-        .or_else(|| prop.type_text.clone())
+    prop.type_text.clone().or_else(|| {
+        prop.type_span
+            .and_then(|span| slice_source_span(source, span))
+    })
 }
 
 fn raw_emit_payload_text(
@@ -706,7 +707,7 @@ mod tests {
                 "type",
                 true,
                 ResolvedMemberVisibility::Public,
-                Some("SingleOrMultipleType | undefined"),
+                None,
                 verter_span::Span::new(prop_start, source.len() as u32 - 2),
                 verter_span::Span::new(prop_start, prop_start + 4),
                 verter_span::Span::new(
@@ -723,6 +724,38 @@ mod tests {
         assert_eq!(
             projected.props[0].type_annotation.as_deref(),
             Some("SingleOrMultipleType")
+        );
+    }
+
+    #[test]
+    fn project_define_props_prefers_pre_resolved_cross_file_type_text_over_source_span() {
+        let source = r#"export interface ButtonProps {
+  /**
+   * @defaultValue 'md'
+   */
+  size?: Button['variants']['size']
+}"#;
+        let type_start = source.find("'md'").unwrap() as u32;
+        let prop_start = source.find("size?").unwrap() as u32;
+        let elements = ResolvedElements {
+            props: vec![prop_with_type_span(
+                "size",
+                true,
+                ResolvedMemberVisibility::Public,
+                Some("Button['variants']['size']"),
+                verter_span::Span::new(prop_start, source.len() as u32 - 2),
+                verter_span::Span::new(prop_start, prop_start + 4),
+                verter_span::Span::new(type_start, type_start + 4),
+            )],
+            ..ResolvedElements::default()
+        };
+
+        let projected =
+            project_macro_surfaces(Some(source), AnalyzedMacroKind::DefineProps, &elements);
+
+        assert_eq!(
+            projected.props[0].type_annotation.as_deref(),
+            Some("Button['variants']['size']")
         );
     }
 

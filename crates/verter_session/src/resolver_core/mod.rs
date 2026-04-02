@@ -16,13 +16,14 @@ mod fallthrough_request;
 pub mod fallthrough_resolver;
 mod imported_decl_eval;
 mod imported_eval_collect;
-mod imported_eval_lookup;
 mod imported_eval_types;
 mod imported_type_alias;
+pub mod prepared_decl;
 pub mod query_artifact;
 pub mod resolver_runtime;
 mod runtime_values;
-pub mod shallow_type_state;
+pub mod shallow_file_state;
+pub mod solver_host;
 mod surface_projector;
 pub mod symbol_resolver;
 pub mod type_expansion;
@@ -75,24 +76,18 @@ pub use fallthrough::{
     ResolvedFallthroughSurface,
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
-pub use imported_decl_eval::{
-    evaluate_imported_decl_with_owner_env, materialize_imported_decl_with_owner_env,
-    CachedEvaluatedImportedDecl, ImportedDeclEvalResolver, PreparedImportedDeclContext,
-};
+pub use imported_decl_eval::PreparedImportedDeclContext;
 pub use imported_eval_collect::{
     build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
     collect_imported_eval_inputs, imported_member_name_for_type_alias,
     record_merge_inputs_from_frontier, required_type_alias_names_for_import_binding,
-    ImportedEvalBinding, ImportedEvalCollectorResolver, ImportedEvalOwnerContextResolver,
-    ImportedEvalOwnerResolver, ImportedEvalOwnerSnapshot, ImportedEvalSourceMergeResolver,
+    ImportedEvalBinding, ImportedEvalOwnerSnapshot, ImportedEvalResolver,
     ImportedEvalTraversalBudget,
-};
-pub use imported_eval_lookup::{
-    ImportedEvalLookup, ImportedEvalLookupResolver, ImportedTypeAliasResolveRequest,
 };
 pub use imported_eval_types::{
     CollectedImportedTypeAlias, ComputedEvaluatedTypes, ImportedEvalInputs, ImportedEvalOverflow,
     ImportedEvalSource, ImportedEvalStats, ImportedSymbolDependency, ImportedTypeAlias,
+    ImportedTypeAliasResolveRequest,
 };
 pub use imported_type_alias::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
@@ -101,14 +96,19 @@ pub use imported_type_alias::{
     ImportedTypeAliasPrepareError, ImportedTypeAliasResolver, PreparedImportedTypeAlias,
     PreparedLocalImportedTypeAlias,
 };
+pub use prepared_decl::{
+    build_prepared_type_decl_cache, build_prepared_value_decl_cache, prepare_exported_type_decl,
+    prepare_exported_value_decl, prepare_local_type_decl, prepare_local_value_decl,
+};
 pub use runtime_values::{
     materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
 };
-pub use shallow_type_state::{
+pub use shallow_file_state::{
     BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, LocalClosureResult,
-    LocalClosureStatus, ResolutionBudgets, ResolutionCounters, ShallowTypeFileState,
-    ShallowTypeSymbol,
+    LocalClosureStatus, ResolutionBudgets, ResolutionCounters, ShallowFileState, ShallowTypeSymbol,
+    ShallowTypeView, ShallowValueSymbol,
 };
+pub use solver_host::SessionSolverHost;
 pub use surface_projector::{
     extract_slot_info_from_type_text, project_macro_surfaces, ProjectedMacroSurfaces,
     ResolvedNativeProp,

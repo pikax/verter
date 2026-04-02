@@ -1,9 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use verter_semantic::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
-use verter_semantic::analysis::type_expand::{
-    expand_object_shape, ExpandedObjectShape, ExpansionBudget,
-};
+use verter_semantic::analysis::type_expand::{expand_object_shape, ExpandedObjectShape};
 use verter_semantic::analysis::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, ObjectExpr, ObjectMember, ObjectProperty,
     PrimitiveName, TypeExpr, TypeParam,
@@ -14,6 +12,18 @@ use crate::resolver_core::{ImportedSymbolDependency, ImportedTypeAliasResolveReq
 struct PreparedLocalDeclBody {
     body: TypeExpr,
     requires_source_merge: bool,
+}
+
+fn prepared_type_decl_to_decl_info(
+    prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+) -> TypeDeclInfo {
+    TypeDeclInfo {
+        name: prepared.root_identity.symbol_name.clone(),
+        declaration_id: 0,
+        kind: prepared.kind,
+        type_parameters: prepared.type_parameters.clone(),
+        body: prepared.body.clone(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,10 +58,19 @@ pub struct CachedPreparedImportedTypeAlias {
     pub canonical_dependencies: BTreeSet<String>,
     pub symbol_dependencies: Vec<ImportedSymbolDependency>,
     pub requires_source_merge: bool,
+    pub body_hydrated: bool,
 }
 
 pub trait ImportedTypeAliasResolver {
     fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>>;
+
+    fn prepared_type_decl(
+        &self,
+        _canonical_id: &str,
+        _exported_name: &str,
+    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
+        None
+    }
 
     fn budget_is_exhausted(&self) -> bool;
 
@@ -63,13 +82,6 @@ pub trait ImportedTypeAliasResolver {
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
     ) -> Result<Option<TypeExpr>, ImportedTypeAliasPrepareError>;
-
-    fn evaluate_imported_decl_with_owner_env(
-        &mut self,
-        source_canonical_id: &str,
-        exported_name: &str,
-        canonical_dependencies: &mut BTreeSet<String>,
-    ) -> Option<TypeExpr>;
 
     fn imported_symbol_dependencies(
         &self,
@@ -128,11 +140,19 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
     }
 
     let mut dep_env = resolver.dependency_eval_env(&resolved_source_canonical_id);
-    let mut decl = dep_env.as_ref().and_then(|env| {
-        env.type_symbols
-            .get(resolved_exported_name.as_str())
-            .cloned()
-    });
+    let mut decl = resolver
+        .prepared_type_decl(
+            &resolved_source_canonical_id,
+            resolved_exported_name.as_str(),
+        )
+        .map(|prepared| prepared_type_decl_to_decl_info(prepared.as_ref()))
+        .or_else(|| {
+            dep_env.as_ref().and_then(|env| {
+                env.type_symbols
+                    .get(resolved_exported_name.as_str())
+                    .cloned()
+            })
+        });
 
     if let Some(decl) = decl.as_ref() {
         canonical_dependencies.insert(resolved_source_canonical_id.clone());
@@ -144,7 +164,9 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
             &local_body.body,
         );
         decl.body = local_body.body;
-        let requires_source_merge = local_body.requires_source_merge;
+        let requires_source_merge = local_body.requires_source_merge
+            || contains_runtime_value_resolution_targets(&decl.body)
+            || has_same_file_support_symbols(&symbol_dependencies, &resolved_source_canonical_id);
         resolver.cache_prepared_imported_type_alias(
             &resolved_source_canonical_id,
             resolved_exported_name.as_str(),
@@ -153,6 +175,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
                 canonical_dependencies: canonical_dependencies.clone(),
                 symbol_dependencies: symbol_dependencies.clone(),
                 requires_source_merge,
+                body_hydrated: false,
             },
         );
         decl.name = request.local_name.clone();
@@ -192,22 +215,9 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         Err(ImportedTypeAliasPrepareError::Other) => None,
     };
 
-    let resolved_decl_body = match decl.as_ref() {
-        Some(decl) if should_attempt_owner_env_resolution(decl, resolved_body.as_ref()) => resolver
-            .evaluate_imported_decl_with_owner_env(
-                &resolved_source_canonical_id,
-                resolved_exported_name.as_str(),
-                canonical_dependencies,
-            ),
-        None if should_attempt_owner_env_resolution_without_decl(resolved_body.as_ref()) => {
-            resolver.evaluate_imported_decl_with_owner_env(
-                &resolved_source_canonical_id,
-                resolved_exported_name.as_str(),
-                canonical_dependencies,
-            )
-        }
-        _ => None,
-    };
+    // Legacy owner-env evaluation path removed -- the native type solver handles
+    // cross-file type expansion through SessionSolverHost.
+    let resolved_decl_body: Option<TypeExpr> = None;
 
     if decl.is_none() {
         let body =
@@ -229,6 +239,8 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         resolved_exported_name.as_str(),
         &decl.body,
     );
+    let has_same_file_support_symbols =
+        has_same_file_support_symbols(&symbol_dependencies, &resolved_source_canonical_id);
 
     canonical_dependencies.extend(tracked_deps);
     canonical_dependencies.extend(resolution_deps);
@@ -262,27 +274,35 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
                 is_empty_object_surface(body)
                     || has_non_object_top_level_surface(body)
                     || contains_nested_resolution_targets(body)
+                    || contains_runtime_value_resolution_targets(body)
+                    || has_same_file_support_symbols
             }
             None => true,
         }
     } else {
         selected_body.is_none()
+            || selected_body
+                .as_ref()
+                .is_some_and(|body| contains_runtime_value_resolution_targets(body))
+            || has_same_file_support_symbols
     };
 
     if body_has_structural_extends && requires_source_merge {
         // Keep the raw intersection body for later source-merge-backed evaluation.
     } else if let Some(body) = selected_body {
-        let mut normalized_env = dep_env.clone();
-        for param in &decl.type_parameters {
-            normalized_env.type_bindings.insert(
-                param.name.clone(),
-                std::sync::Arc::new(TypeExpr::type_parameter(param.clone())),
+        let normalized_body = normalize_local_decl_body(&body, &decl.type_parameters);
+        if decl.type_parameters.is_empty() {
+            let mut normalized_env = dep_env.clone();
+            let evaluated_body = verter_semantic::analysis::type_eval::evaluate(
+                &normalized_body,
+                &mut normalized_env,
             );
+            decl.body =
+                choose_preferred_imported_type_body(Some(normalized_body), Some(evaluated_body))
+                    .expect("preferred imported type body should exist");
+        } else {
+            decl.body = normalized_body;
         }
-        let normalized_body =
-            verter_semantic::analysis::type_eval::evaluate(&body, &mut normalized_env);
-        decl.body = choose_preferred_imported_type_body(Some(body), Some(normalized_body))
-            .expect("preferred imported type body should exist");
     } else {
         for param in &decl.type_parameters {
             dep_env.type_bindings.insert(
@@ -300,6 +320,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
             canonical_dependencies: canonical_dependencies.clone(),
             symbol_dependencies: symbol_dependencies.clone(),
             requires_source_merge,
+            body_hydrated: false,
         },
     );
     decl.name = request.local_name.clone();
@@ -320,6 +341,16 @@ fn prepare_local_decl_body(decl: &TypeDeclInfo) -> PreparedLocalDeclBody {
         requires_source_merge: contains_nested_resolution_targets(&body),
         body,
     }
+}
+
+fn has_same_file_support_symbols(
+    symbol_dependencies: &[ImportedSymbolDependency],
+    source_canonical_id: &str,
+) -> bool {
+    symbol_dependencies.iter().any(|dependency| {
+        dependency.canonical_id == source_canonical_id
+            && dependency.exported_name == dependency.local_name
+    })
 }
 
 pub fn prepare_local_imported_type_alias(decl: &TypeDeclInfo) -> PreparedLocalImportedTypeAlias {
@@ -533,12 +564,9 @@ fn materialize_imported_type_body(
         );
     }
     let evaluated_body = verter_semantic::analysis::type_eval::evaluate(body, &mut eval_env);
-    let mut expansion_env = eval_env.clone();
-    let expanded = expand_object_shape(
-        &evaluated_body,
-        &mut expansion_env,
-        &ExpansionBudget::default(),
-    );
+    let solver_host =
+        verter_semantic::analysis::type_solver::host::EvalEnvSolverHost::new(&eval_env);
+    let expanded = expand_object_shape(&evaluated_body, &solver_host);
     let materialized_body = expanded_object_shape_to_type_expr(&expanded.value)?;
     choose_preferred_imported_type_body(Some(evaluated_body), Some(materialized_body))
 }
@@ -703,14 +731,6 @@ pub fn should_attempt_owner_env_resolution(
     count_top_level_properties(resolved_body) <= count_top_level_properties(&decl.body)
 }
 
-fn should_attempt_owner_env_resolution_without_decl(resolved_body: Option<&TypeExpr>) -> bool {
-    let Some(resolved_body) = resolved_body else {
-        return true;
-    };
-
-    is_empty_object_surface(resolved_body) || has_non_object_top_level_surface(resolved_body)
-}
-
 fn has_non_object_top_level_surface(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Parenthesized(inner) => has_non_object_top_level_surface(inner),
@@ -762,6 +782,97 @@ fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
             expressions.iter().any(contains_nested_resolution_targets)
         }
         TypeExpr::Infer { .. } => false,
+    }
+}
+
+fn contains_runtime_value_resolution_targets(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => false,
+        TypeExpr::TypeOf(_) => true,
+        TypeExpr::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(contains_runtime_value_resolution_targets),
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::KeyOf(inner)
+        | TypeExpr::Rest(inner) => contains_runtime_value_resolution_targets(inner),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| contains_runtime_value_resolution_targets(&element.ty)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types.iter().any(contains_runtime_value_resolution_targets)
+        }
+        TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+            ObjectMember::Property(prop) => contains_runtime_value_resolution_targets(&prop.ty),
+            ObjectMember::IndexSignature(sig) => {
+                contains_runtime_value_resolution_targets(&sig.key_type)
+                    || contains_runtime_value_resolution_targets(&sig.value_type)
+            }
+            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                func.parameters
+                    .iter()
+                    .any(|param| contains_runtime_value_resolution_targets(&param.ty))
+                    || func
+                        .return_type
+                        .as_deref()
+                        .is_some_and(contains_runtime_value_resolution_targets)
+            }
+            ObjectMember::Method(method) => {
+                method
+                    .function
+                    .parameters
+                    .iter()
+                    .any(|param| contains_runtime_value_resolution_targets(&param.ty))
+                    || method
+                        .function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(contains_runtime_value_resolution_targets)
+            }
+        }),
+        TypeExpr::Function(func) => {
+            func.parameters
+                .iter()
+                .any(|param| contains_runtime_value_resolution_targets(&param.ty))
+                || func
+                    .return_type
+                    .as_deref()
+                    .is_some_and(contains_runtime_value_resolution_targets)
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            contains_runtime_value_resolution_targets(object)
+                || contains_runtime_value_resolution_targets(index)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            contains_runtime_value_resolution_targets(check)
+                || contains_runtime_value_resolution_targets(extends)
+                || contains_runtime_value_resolution_targets(true_type)
+                || contains_runtime_value_resolution_targets(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            contains_runtime_value_resolution_targets(source)
+                || contains_runtime_value_resolution_targets(value)
+                || name_type
+                    .as_deref()
+                    .is_some_and(contains_runtime_value_resolution_targets)
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(contains_runtime_value_resolution_targets),
     }
 }
 
@@ -1175,6 +1286,10 @@ mod tests {
     #[derive(Default)]
     struct TestResolver {
         envs: FxHashMap<String, EvalEnv>,
+        prepared_decls: FxHashMap<
+            (String, String),
+            Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
+        >,
         resolved_body: Option<TypeExpr>,
         owner_env_body: Option<TypeExpr>,
         owner_env_resolution_calls: usize,
@@ -1187,6 +1302,16 @@ mod tests {
     impl ImportedTypeAliasResolver for TestResolver {
         fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>> {
             self.envs.get(canonical_id).cloned().map(Arc::new)
+        }
+
+        fn prepared_type_decl(
+            &self,
+            canonical_id: &str,
+            exported_name: &str,
+        ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
+            self.prepared_decls
+                .get(&(canonical_id.to_string(), exported_name.to_string()))
+                .cloned()
         }
 
         fn budget_is_exhausted(&self) -> bool {
@@ -1211,16 +1336,6 @@ mod tests {
             } else {
                 Ok(self.resolved_body.clone())
             }
-        }
-
-        fn evaluate_imported_decl_with_owner_env(
-            &mut self,
-            _source_canonical_id: &str,
-            _exported_name: &str,
-            _canonical_dependencies: &mut BTreeSet<String>,
-        ) -> Option<TypeExpr> {
-            self.owner_env_resolution_calls += 1;
-            self.owner_env_body.clone()
         }
 
         fn imported_symbol_dependencies(
@@ -1270,6 +1385,22 @@ mod tests {
         env
     }
 
+    fn prepared_decl(
+        name: &str,
+        body: TypeExpr,
+    ) -> Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl> {
+        let mut decl = verter_semantic::analysis::type_solver::PreparedTypeDecl::new(
+            verter_semantic::analysis::type_solver::ResolvedRootIdentity::new(
+                "/deps/source.ts",
+                name,
+            ),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.exported_name = Some(name.to_string());
+        Arc::new(decl)
+    }
+
     fn generic_type_param(name: &str) -> TypeParam {
         TypeParam {
             name: name.to_string(),
@@ -1288,6 +1419,30 @@ mod tests {
             canonical_id: canonical_id.to_string(),
             exported_name: exported_name.to_string(),
         }
+    }
+
+    #[test]
+    fn prepare_imported_type_alias_prefers_prepared_decl_over_eval_env_lookup() {
+        let request = ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/App.vue".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalProps".to_string(),
+            imported_name: "ImportedProps".to_string(),
+            source_canonical_id: "/deps/source.ts".to_string(),
+            exported_name: "ImportedProps".to_string(),
+        };
+        let mut resolver = TestResolver::default();
+        resolver.prepared_decls.insert(
+            ("/deps/source.ts".to_string(), "ImportedProps".to_string()),
+            prepared_decl("ImportedProps", object_with_string_prop("label")),
+        );
+
+        let prepared = prepare_imported_type_alias(&mut resolver, request, &mut BTreeSet::new())
+            .expect("prepared type alias should materialize from prepared decl cache");
+
+        assert_eq!(prepared.decl.name, "LocalProps");
+        assert_eq!(resolver.external_resolution_calls, 0);
+        assert_eq!(resolver.owner_env_resolution_calls, 0);
     }
 
     #[test]
@@ -1432,6 +1587,42 @@ mod tests {
             panic!("expected property");
         };
         assert_eq!(prop.name, "item");
+    }
+
+    #[test]
+    fn prepare_imported_type_alias_marks_same_file_support_symbols_for_source_merge() {
+        let request = ImportedTypeAliasResolveRequest {
+            owner_canonical_id: "/src/App.vue".to_string(),
+            import_source: "./types".to_string(),
+            local_name: "LocalProps".to_string(),
+            imported_name: "ImportedProps".to_string(),
+            source_canonical_id: "/src/types.ts".to_string(),
+            exported_name: "ImportedProps".to_string(),
+        };
+        let mut deps = BTreeSet::new();
+        let mut resolver = TestResolver::default();
+        resolver.envs.insert(
+            "/src/types.ts".to_string(),
+            env_with_decl(
+                "ImportedProps",
+                object_with_named_prop("item", "LocalHelper"),
+            ),
+        );
+        resolver.symbol_dependencies.insert(
+            ("/src/types.ts".to_string(), "ImportedProps".to_string()),
+            vec![imported_symbol_dependency(
+                "LocalHelper",
+                "/src/types.ts",
+                "LocalHelper",
+            )],
+        );
+
+        let actual = prepare_imported_type_alias(&mut resolver, request, &mut deps).unwrap();
+
+        assert!(
+            actual.requires_source_merge,
+            "same-file helper symbols must force source merge so owner env hydration can pick up their local support context"
+        );
     }
 
     #[test]

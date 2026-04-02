@@ -1,8 +1,7 @@
 use super::*;
 use crate::resolver_core::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
-    should_attempt_owner_env_resolution, ImportedEvalCollectorResolver, ImportedEvalLookupResolver,
-    ImportedEvalSourceMergeResolver,
+    should_attempt_owner_env_resolution, ImportedEvalResolver,
 };
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -341,61 +340,345 @@ fn exact_dependency(specifier: &str, resolved: &str) -> DependencyResolution {
     }
 }
 
-fn budget_exceeded_field(name: &str) -> verter_semantic::analysis::type_expand::ExpandedField {
-    verter_semantic::analysis::type_expand::ExpandedField {
-        name: name.to_string(),
-        r#type: TypeExpr::Primitive(PrimitiveName::String),
-        raw_type: None,
-        optional: false,
-        completeness: verter_semantic::analysis::type_expand::ExpansionCompleteness::Partial,
-        diagnostics: vec![
-            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
-                reason: verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
-                context: "test".to_string(),
-                property_name: Some(name.to_string()),
+#[test]
+fn runtime_value_collection_keeps_used_type_argument_runtime_roots() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Alias",
+        vec![plain_type_param("T")],
+        verter_semantic::analysis::type_expr::TypeExpr::named("T"),
+    ));
+
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+        "Alias",
+        vec![verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+            verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["theme".to_string()],
             },
-        ],
-    }
+        )],
+    );
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut state = RuntimeValueCollectState::default();
+    collect_runtime_value_names_from_expr(
+        &expr,
+        &env,
+        &rustc_hash::FxHashMap::default(),
+        &mut active_locals,
+        &mut state,
+        &mut required,
+    );
+
+    assert!(required.contains("theme"));
+    assert_eq!(required.len(), 1);
 }
 
 #[test]
-fn component_meta_expansion_retry_skips_non_empty_budget_limited_results() {
-    let computed = ComputedEvaluatedTypes {
-        evaluated_types: Some(
-            verter_semantic::analysis::type_expand::ExpandedComponentTypes {
-                props: vec![budget_exceeded_field("label")],
-                ..Default::default()
+fn runtime_value_collection_does_not_multiply_memo_entries_for_unused_generic_arguments() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Alias",
+        vec![plain_type_param("T")],
+        verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+            verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["theme".to_string()],
             },
         ),
-        discovered_dependencies: BTreeSet::new(),
-    };
+    ));
 
-    assert!(
-        !should_retry_component_meta_expansion(&computed),
-        "non-empty budget-limited expansion output should be kept instead of rerunning the full symbolic expansion"
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+            "Alias",
+            vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                PrimitiveName::String,
+            )],
+        ),
+        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+            "Alias",
+            vec![
+                verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                    "Alias",
+                    vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                        PrimitiveName::String,
+                    )],
+                ),
+            ],
+        ),
+        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+            "Alias",
+            vec![
+                verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                    "Alias",
+                    vec![
+                        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                            "Alias",
+                            vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                                PrimitiveName::String,
+                            )],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ]);
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut state = RuntimeValueCollectState::default();
+    collect_runtime_value_names_from_expr(
+        &expr,
+        &env,
+        &rustc_hash::FxHashMap::default(),
+        &mut active_locals,
+        &mut state,
+        &mut required,
+    );
+
+    assert!(required.contains("theme"));
+    assert_eq!(required.len(), 1);
+    assert_eq!(
+        state.memo.len(),
+        1,
+        "unused generic arguments should not create distinct runtime-value memo entries",
     );
 }
 
 #[test]
-fn component_meta_expansion_retry_keeps_empty_budget_limited_results_retryable() {
-    let computed = ComputedEvaluatedTypes {
-        evaluated_types: Some(
-            verter_semantic::analysis::type_expand::ExpandedComponentTypes {
-                props: Vec::new(),
-                define_props: Vec::new(),
-                define_emits: Vec::new(),
-                emits: Vec::new(),
-                define_slots: Vec::new(),
-                slot_bindings: Vec::new(),
-                bindings: vec![budget_exceeded_field("binding")],
+fn surface_import_collection_does_not_multiply_memo_entries_for_unused_generic_arguments() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Alias",
+        vec![plain_type_param("T")],
+        verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+            verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["theme".to_string()],
             },
         ),
-        discovered_dependencies: BTreeSet::new(),
-    };
+    ));
 
-    assert!(
-        should_retry_component_meta_expansion(&computed),
-        "budget-limited expansion should remain retryable when it produced no component surface"
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+            "Alias",
+            vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                PrimitiveName::String,
+            )],
+        ),
+        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+            "Alias",
+            vec![
+                verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                    "Alias",
+                    vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                        PrimitiveName::Number,
+                    )],
+                ),
+            ],
+        ),
+    ]);
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut state = SurfaceImportCollectState::default();
+    collect_surface_eval_import_names_from_expr(
+        &expr,
+        &env,
+        &rustc_hash::FxHashMap::default(),
+        &mut active_locals,
+        &mut state,
+        &mut required,
+    );
+
+    assert!(required.contains("theme"));
+    assert_eq!(required.len(), 1);
+    assert_eq!(
+        state.memo.len(),
+        1,
+        "unused generic arguments should not create distinct surface-import memo entries",
+    );
+}
+
+#[test]
+fn surface_member_collection_does_not_multiply_memo_entries_for_unused_generic_arguments() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Picker",
+        vec![plain_type_param("T")],
+        single_prop_object(
+            "value",
+            verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+                verter_semantic::analysis::type_expr::ValueRef {
+                    path: vec!["theme".to_string()],
+                },
+            ),
+        ),
+    ));
+
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+        indexed_access(
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Picker",
+                vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                    PrimitiveName::String,
+                )],
+            ),
+            "value",
+        ),
+        indexed_access(
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Picker",
+                vec![
+                    verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                        "Picker",
+                        vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                            PrimitiveName::Number,
+                        )],
+                    ),
+                ],
+            ),
+            "value",
+        ),
+    ]);
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut state = SurfaceImportCollectState::default();
+    collect_surface_eval_import_names_from_expr(
+        &expr,
+        &env,
+        &rustc_hash::FxHashMap::default(),
+        &mut active_locals,
+        &mut state,
+        &mut required,
+    );
+
+    assert!(required.contains("theme"));
+    assert_eq!(required.len(), 1);
+    assert_eq!(
+        state.member_memo.len(),
+        1,
+        "unused generic arguments should not create distinct surface-member memo entries",
+    );
+}
+
+#[test]
+fn slot_import_collection_does_not_multiply_memo_entries_for_unused_generic_arguments() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Alias",
+        vec![plain_type_param("T")],
+        verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+            verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["theme".to_string()],
+            },
+        ),
+    ));
+
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+            "Alias",
+            vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                PrimitiveName::String,
+            )],
+        ),
+        verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+            "Alias",
+            vec![
+                verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                    "Alias",
+                    vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                        PrimitiveName::Number,
+                    )],
+                ),
+            ],
+        ),
+    ]);
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut state = SlotImportCollectState::default();
+    collect_slot_eval_import_names_from_expr_with_mode(
+        &expr,
+        &env,
+        &rustc_hash::FxHashMap::default(),
+        &mut active_locals,
+        &mut state,
+        &mut required,
+        SlotImportWalkMode::Structural,
+        None,
+    );
+
+    assert!(required.contains("theme"));
+    assert_eq!(required.len(), 1);
+    assert_eq!(
+        state.memo.len(),
+        1,
+        "unused generic arguments should not create distinct slot-import memo entries",
+    );
+}
+
+#[test]
+fn slot_member_collection_does_not_multiply_memo_entries_for_unused_generic_arguments() {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(alias_decl(
+        "Picker",
+        vec![plain_type_param("T")],
+        single_prop_object(
+            "value",
+            verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
+                verter_semantic::analysis::type_expr::ValueRef {
+                    path: vec!["theme".to_string()],
+                },
+            ),
+        ),
+    ));
+
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+        indexed_access(
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Picker",
+                vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                    PrimitiveName::String,
+                )],
+            ),
+            "value",
+        ),
+        indexed_access(
+            verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                "Picker",
+                vec![
+                    verter_semantic::analysis::type_expr::TypeExpr::named_with_args(
+                        "Picker",
+                        vec![verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                            PrimitiveName::Number,
+                        )],
+                    ),
+                ],
+            ),
+            "value",
+        ),
+    ]);
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let mut active_locals = rustc_hash::FxHashSet::default();
+    let mut state = SlotImportCollectState::default();
+    collect_slot_eval_import_names_from_expr_with_mode(
+        &expr,
+        &env,
+        &rustc_hash::FxHashMap::default(),
+        &mut active_locals,
+        &mut state,
+        &mut required,
+        SlotImportWalkMode::Structural,
+        None,
+    );
+
+    assert!(required.contains("theme"));
+    assert_eq!(required.len(), 1);
+    assert_eq!(
+        state.member_memo.len(),
+        1,
+        "unused generic arguments should not create distinct slot-member memo entries",
     );
 }
 
@@ -749,7 +1032,7 @@ fn imported_eval_lookup_resolver_rejects_stale_dependency_envs() {
     let before_view = host.resolver_store_view();
     let resolver = HostImportedEvalResolver::new(&host, "/types.ts", Some(&before_view));
     assert!(
-        ImportedEvalLookupResolver::dependency_eval_env(&resolver, "/types.ts").is_some(),
+        resolver.cached_dependency_eval_env("/types.ts").is_some(),
         "lookup resolver should accept dependency envs from its captured view"
     );
 
@@ -760,7 +1043,7 @@ fn imported_eval_lookup_resolver_rejects_stale_dependency_envs() {
     );
 
     assert!(
-        ImportedEvalLookupResolver::dependency_eval_env(&resolver, "/types.ts").is_none(),
+        resolver.cached_dependency_eval_env("/types.ts").is_none(),
         "lookup resolver must reject dependency envs that changed after the view was captured"
     );
 }
@@ -1046,11 +1329,13 @@ defineProps<Props>();
         "export interface Props { label: string }",
     );
 
-    let resolver = HostImportedEvalResolver::new(&host, "/src/App.vue", Some(&before_view));
     assert!(
-        resolver
-            .resolve_import_canonical_id("/src/App.vue", &before_import)
-            .is_none(),
+        host.resolve_type_dependency_canonical_in_view(
+            "/src/App.vue",
+            &before_import.source,
+            Some(&before_view),
+        )
+        .is_none(),
         "captured imported-eval lookups must not recover missing routes from the live workspace"
     );
 }
@@ -1119,7 +1404,7 @@ fn imported_eval_merge_keeps_captured_dependency_import_routes_when_candidates_c
     let before_view = host.resolver_store_view();
     let mut resolver = HostImportedEvalResolver::new(&host, "/src/index.ts", Some(&before_view));
     let eval_source =
-        ImportedEvalSourceMergeResolver::load_eval_source_for_merge(&mut resolver, "/src/index.ts");
+        ImportedEvalResolver::load_eval_source_for_merge(&mut resolver, "/src/index.ts");
 
     // The merge source is not available when the only candidate is a JS file with no type surface
     assert!(
@@ -1481,6 +1766,7 @@ fn collect_slot_import_names_distinguishes_local_member_instantiations() {
         &mut state,
         &mut required,
         SlotImportWalkMode::Structural,
+        None,
     );
 
     assert_eq!(
@@ -1830,96 +2116,6 @@ defineProps<Props>()
 }
 
 #[test]
-fn evaluate_imported_decl_with_owner_env_preserves_route_union_surface_for_package_alias_exports() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/workspace/node_modules/vue-router/package.json".to_string(),
-        Arc::from(
-            r#"{ "name": "vue-router", "types": "./dist/vue-router.d.ts", "exports": { ".": { "types": "./dist/vue-router.d.ts", "import": "./dist/vue-router.js" } } }"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/vue-router/dist/vue-router.d.ts".to_string(),
-        Arc::from(
-            r#"import { Lt as RouteLocationRaw, St, vt } from "./index-typed.js";
-export { RouteLocationRaw, St, vt };"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/vue-router/dist/index-typed.d.ts".to_string(),
-        Arc::from(
-            r#"
-export interface St { path: string }
-export interface vt { name: string }
-type RouteLocationRaw = string | St | vt
-export { RouteLocationRaw as Lt, St, vt }
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/vue-router/dist/index-typed.js".to_string(),
-        Arc::from("export const runtimeOnly = true"),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
-    upsert_vue(
-        &host,
-        "/workspace/src/Link.vue",
-        r#"<script lang="ts">
-import type { RouteLocationRaw } from 'vue-router'
-
-export interface Props {
-  to?: RouteLocationRaw
-}
-</script>
-<script setup lang="ts">
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-    );
-
-    let view = host.resolver_store_view();
-    let dep_resolutions = host
-        .dependency_resolutions_for_eval_in_view("/workspace/src/Link.vue", Some(&view))
-        .unwrap_or_default();
-    let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
-        &host,
-        "/workspace/src/Link.vue",
-        &dep_resolutions,
-        Some(&view),
-    );
-    let mut deps = BTreeSet::new();
-    let evaluated = crate::resolver_core::evaluate_imported_decl_with_owner_env(
-        &mut resolver,
-        "/workspace/node_modules/vue-router/dist/index-typed.d.ts",
-        "RouteLocationRaw",
-        &mut deps,
-    );
-
-    // The non-exported local type alias in a package .d.ts file is not reachable through
-    // the imported decl path when the file only exports under a different alias (Lt).
-    assert!(
-        evaluated.is_none(),
-        "non-exported local type alias should not be reachable through imported decl context",
-    );
-}
-
-#[test]
 fn imported_type_alias_dependency_eval_env_preserves_route_union_surface_for_package_alias_exports()
 {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -1986,11 +2182,9 @@ defineProps<Props>()
 
     let view = host.resolver_store_view();
     let resolver = HostImportedEvalResolver::new(&host, "/workspace/src/Link.vue", Some(&view));
-    let env = ImportedEvalLookupResolver::dependency_eval_env(
-        &resolver,
-        "/workspace/node_modules/vue-router/dist/index-typed.d.ts",
-    )
-    .expect("dependency eval env should exist");
+    let env = resolver
+        .cached_dependency_eval_env("/workspace/node_modules/vue-router/dist/index-typed.d.ts")
+        .expect("dependency eval env should exist");
     let route = env
         .type_symbols
         .get("RouteLocationRaw")
@@ -2080,7 +2274,7 @@ defineProps<Props>()
     let mut deps = BTreeSet::new();
     let mut budget =
         crate::resolver_core::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
-    let alias = crate::resolver_core::ImportedEvalCollectorResolver::collect_imported_type_alias(
+    let alias = crate::resolver_core::ImportedEvalResolver::collect_imported_type_alias(
         &mut resolver,
         crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/workspace/src/Link.vue".to_string(),
@@ -2451,106 +2645,6 @@ defineProps<SharedProps>()
     assert!(
         cached.env.is_some(),
         "promoted loaded dependency should retain eval env in shared host cache"
-    );
-}
-
-#[test]
-fn imported_decl_resolution_persists_required_name_lookups_in_host_cache() {
-    let ws = Arc::new(CountingWorkspace::new());
-    ws.inject_file(
-        "/workspace/node_modules/pkg/package.json",
-        r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
-    );
-    ws.inject_file(
-        "/workspace/node_modules/pkg/dist/index.d.ts",
-        r#"export { Alpha } from "./shared";"#,
-    );
-    ws.inject_file(
-        "/workspace/node_modules/pkg/dist/shared.d.ts",
-        r#"
-import type { Base } from "./base";
-export interface Alpha extends Base { alpha?: string }
-"#,
-    );
-    ws.inject_file(
-        "/workspace/node_modules/pkg/dist/base.d.ts",
-        r#"export interface Base { base?: number }"#,
-    );
-    ws.inject_file(
-        "/workspace/node_modules/pkg/dist/index.js",
-        "export const runtimeOnly = true",
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
-    upsert_vue(
-        &host,
-        "/workspace/src/App.vue",
-        r#"<script lang="ts">
-import type { Alpha } from 'pkg'
-export interface Props extends Alpha {}
-</script>
-<script setup lang="ts">
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-    );
-    host.set_import_dependencies(
-        "/workspace/src/App.vue",
-        vec![exact_dependency(
-            "pkg",
-            "/workspace/node_modules/pkg/dist/index.d.ts",
-        )],
-    );
-    host.set_import_dependencies(
-        "/workspace/node_modules/pkg/dist/index.d.ts",
-        vec![exact_dependency(
-            "./shared",
-            "/workspace/node_modules/pkg/dist/shared.d.ts",
-        )],
-    );
-    host.set_import_dependencies(
-        "/workspace/node_modules/pkg/dist/shared.d.ts",
-        vec![exact_dependency(
-            "./base",
-            "/workspace/node_modules/pkg/dist/base.d.ts",
-        )],
-    );
-
-    let view = host.resolver_store_view();
-    let dep_resolutions = host
-        .dependency_resolutions_for_eval_in_view("/workspace/src/App.vue", Some(&view))
-        .unwrap_or_default();
-    let mut resolver = HostImportedEvalResolver::with_dep_resolutions(
-        &host,
-        "/workspace/src/App.vue",
-        &dep_resolutions,
-        Some(&view),
-    );
-    let evaluated = crate::resolver_core::evaluate_imported_decl_with_owner_env(
-        &mut resolver,
-        "/workspace/node_modules/pkg/dist/shared.d.ts",
-        "Alpha",
-        &mut BTreeSet::new(),
-    );
-
-    // The imported decl evaluation path does not resolve Alpha through the package
-    // re-export chain when the file is only reachable via barrel hops from the owner.
-    assert!(
-        evaluated.is_none(),
-        "imported declaration should not evaluate through indirect package re-export chains"
     );
 }
 
@@ -3328,10 +3422,8 @@ export interface Props extends Base {
         "cached dependency lookup should not materialize the Vue entry when resolver owner matches the target",
     );
 
-    let first_eval_source = ImportedEvalSourceMergeResolver::load_eval_source_for_merge(
-        &mut resolver,
-        "/src/types.vue",
-    );
+    let first_eval_source =
+        ImportedEvalResolver::load_eval_source_for_merge(&mut resolver, "/src/types.vue");
     assert!(
         first_eval_source.is_none(),
         "eval-source lookup should not return a source when the cached dependency is absent",
@@ -3663,7 +3755,7 @@ defineProps<Props>()
     let mut deps = BTreeSet::new();
     let mut budget =
         crate::resolver_core::ImportedEvalTraversalBudget::new("/workspace/src/Link.vue", 16);
-    let alias = crate::resolver_core::ImportedEvalCollectorResolver::collect_imported_type_alias(
+    let alias = crate::resolver_core::ImportedEvalResolver::collect_imported_type_alias(
         &mut resolver,
         crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/workspace/src/Link.vue".to_string(),
@@ -4323,11 +4415,8 @@ fn resolve_imported_type_root_and_declaration_reuse_host_imported_dependency_cac
     let view = host.resolver_store_view();
     let resolver_a = HostImportedEvalResolver::new(&host, "/src/Consumer.ts", Some(&view));
 
-    let root_a = ImportedEvalLookupResolver::resolve_imported_type_root(
-        &resolver_a,
-        "/src/index.ts",
-        "Props",
-    );
+    let root_a =
+        ImportedEvalResolver::resolve_imported_type_root(&resolver_a, "/src/index.ts", "Props");
     let decl_a = resolver_a.resolve_imported_type_declaration("/src/types.ts", "Props");
 
     let cached_index = host
@@ -4360,11 +4449,8 @@ fn resolve_imported_type_root_and_declaration_reuse_host_imported_dependency_cac
     );
 
     let resolver_b = HostImportedEvalResolver::new(&host, "/src/OtherConsumer.ts", Some(&view));
-    let root_b = ImportedEvalLookupResolver::resolve_imported_type_root(
-        &resolver_b,
-        "/src/index.ts",
-        "Props",
-    );
+    let root_b =
+        ImportedEvalResolver::resolve_imported_type_root(&resolver_b, "/src/index.ts", "Props");
     let decl_b = resolver_b.resolve_imported_type_declaration("/src/types.ts", "Props");
 
     assert_eq!(root_a, root_b);
@@ -4397,7 +4483,7 @@ fn resolve_imported_type_root_follows_local_exported_import_symbol_via_shallow_g
     let resolver = HostImportedEvalResolver::new(&host, "/src/Consumer.ts", Some(&view));
 
     let root =
-        ImportedEvalLookupResolver::resolve_imported_type_root(&resolver, "/src/index.ts", "Props");
+        ImportedEvalResolver::resolve_imported_type_root(&resolver, "/src/index.ts", "Props");
 
     assert_eq!(root, ("/src/types.ts".to_string(), "Foo".to_string()));
 
@@ -4428,7 +4514,7 @@ fn collect_imported_type_alias_reuses_host_cached_prepared_alias_across_resolver
     let mut deps_a = BTreeSet::new();
     let mut budget_a =
         crate::resolver_core::ImportedEvalTraversalBudget::new("/src/ConsumerA.ts", 16);
-    let alias_a = ImportedEvalCollectorResolver::collect_imported_type_alias(
+    let alias_a = ImportedEvalResolver::collect_imported_type_alias(
         &mut resolver_a,
         crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/src/ConsumerA.ts".to_string(),
@@ -4462,7 +4548,7 @@ fn collect_imported_type_alias_reuses_host_cached_prepared_alias_across_resolver
     let mut deps_b = BTreeSet::new();
     let mut budget_b =
         crate::resolver_core::ImportedEvalTraversalBudget::new("/src/ConsumerB.ts", 16);
-    let alias_b = ImportedEvalCollectorResolver::collect_imported_type_alias(
+    let alias_b = ImportedEvalResolver::collect_imported_type_alias(
         &mut resolver_b,
         crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/src/ConsumerB.ts".to_string(),
@@ -4507,7 +4593,7 @@ fn collect_imported_type_alias_does_not_reresolve_already_normalized_root() {
     let mut deps = BTreeSet::new();
     let mut budget = crate::resolver_core::ImportedEvalTraversalBudget::new("/src/Consumer.ts", 16);
 
-    let alias = ImportedEvalCollectorResolver::collect_imported_type_alias(
+    let alias = ImportedEvalResolver::collect_imported_type_alias(
         &mut resolver,
         crate::resolver_core::ImportedTypeAliasResolveRequest {
             owner_canonical_id: "/src/Consumer.ts".to_string(),
@@ -8270,7 +8356,7 @@ fn import_bindings_for_merge_uses_cached_external_analysis_without_materializing
     );
 
     let mut resolver = HostImportedEvalResolver::new(&host, "/src/owner.ts", None);
-    let bindings = ImportedEvalSourceMergeResolver::import_bindings_for_merge(
+    let bindings = ImportedEvalResolver::import_bindings_for_merge(
         &mut resolver,
         "/src/types.ts",
         &eval_source,
@@ -8385,6 +8471,78 @@ export type ClassNameArray = ClassNameValue[]
     assert!(
         !cached.prepared_type_aliases.contains_key("ClassNameArray"),
         "same-file recursive support aliases should stay in the base eval env/local closure path instead of being re-prepared as imported aliases",
+    );
+}
+
+#[test]
+fn resolve_shallow_symbol_dependency_alias_reuses_cached_hydrated_body_without_rebuilding_it() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BaseProps { replace?: boolean }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+import type { BaseProps as ImportedBase } from './base'
+
+export interface Props extends ImportedBase {
+  activeClass?: string
+}
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+
+    let _seeded = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed imported state");
+
+    let first = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .expect("Props alias should hydrate through the shallow cache path");
+    assert!(
+        !first.2.symbol_dependencies.is_empty(),
+        "test setup should keep helper symbol dependencies attached so the regression catches repeated rebuilds",
+    );
+
+    let cached_after_first = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("types dependency should remain cached after hydration");
+    let cached_alias = cached_after_first
+        .prepared_type_aliases
+        .get("Props")
+        .expect("prepared alias cache should contain Props after hydration");
+    assert!(
+        cached_alias.body_hydrated,
+        "non-generic shallow alias hydration should mark the cached body as already hydrated even when helper symbol dependencies remain attached, got {:?}",
+        cached_alias.decl.body,
+    );
+
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = cache
+            .get_mut("/src/types.ts")
+            .expect("types dependency should stay cached");
+        let cached_alias = Arc::make_mut(entry)
+            .prepared_type_aliases
+            .get_mut("Props")
+            .expect("prepared alias cache should still contain Props");
+        cached_alias.decl.body = TypeExpr::Primitive(PrimitiveName::Number);
+    }
+
+    let second = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .expect("subsequent shallow alias lookups should reuse the cached hydrated body");
+
+    assert_eq!(
+        second.2.decl.body,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "once a non-generic shallow alias body is cached as hydrated, later lookups should reuse it instead of rebuilding a fresh eval env just because helper symbol dependencies remain attached",
     );
 }
 
@@ -8658,10 +8816,11 @@ export type Avatar = {
         .get_raw_analysis_snapshot_in_view("/src/types.ts", None)
         .expect("types snapshot should exist");
     let mut prepared_env = host
-        .build_shallow_imported_decl_eval_env_in_view(
+        .build_cache_only_lookup_env_for_type_decl_in_view(
             "/src/types.ts",
             &snapshot,
             &prepared.2.decl,
+            &prepared.2.symbol_dependencies,
             None,
         )
         .expect("prepared env should build");
@@ -8772,10 +8931,11 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
         .get_raw_analysis_snapshot_in_view("/src/types.ts", None)
         .expect("types snapshot should exist");
     let mut prepared_env = host
-        .build_shallow_imported_decl_eval_env_in_view(
+        .build_cache_only_lookup_env_for_type_decl_in_view(
             "/src/types.ts",
             &snapshot,
             &prepared.2.decl,
+            &prepared.2.symbol_dependencies,
             None,
         )
         .expect("prepared env should build");
@@ -8809,6 +8969,1098 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
     assert!(
         !cached.prepared_type_aliases.contains_key("LinkProps"),
         "same-file support symbols should stay in base eval env/local-closure state instead of becoming prepared imported aliases",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn shallow_imported_decl_env_hydrates_same_file_helper_import_deps_and_runtime_values() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './index'
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file("/src/index.ts", "export * from './Button.vue'\n");
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type VariantMap<T extends { variants: Record<string, any> }> = Id<{
+  [K in keyof T['variants']]: T['variants'][K]
+}>
+
+type SlotMap<T extends { slots: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]: T['slots'][K]
+}>
+
+export type ComponentConfig<T extends { variants: Record<string, any>; slots: Record<string, any> }> = {
+  variants: VariantMap<T>
+  slots: SlotMap<T>
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/theme.ts",
+        r#"
+const theme: {
+  variants: {
+    color: 'primary' | 'neutral'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    base: string
+    label: string
+  }
+} = {
+  variants: {
+    color: 'primary',
+    size: 'sm',
+  },
+  slots: {
+    base: '',
+    label: '',
+  },
+}
+
+export default theme
+"#,
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import theme from './theme'
+import type { ComponentConfig } from './types'
+
+type Button = ComponentConfig<typeof theme>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  size?: Button['variants']['size']
+  ui?: Button['slots']
+}
+</script>
+<template><button /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./index", "/src/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./Button.vue", "/src/Button.vue")],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![
+            exact_dependency("./theme", "/src/theme.ts"),
+            exact_dependency("./types", "/src/types.ts"),
+        ],
+    );
+
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/Button.vue", "ButtonProps", None)
+        .expect("ButtonProps should hydrate through the shallow cache path");
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/Button.vue", None)
+        .expect("Button snapshot should exist");
+    let button_base_env = host
+        .base_eval_env_in_view("/src/Button.vue", None)
+        .expect("Button base env should exist");
+    let required_runtime_value_names =
+        collect_required_runtime_value_names_for_type_decl(&prepared.2.decl, &button_base_env);
+    assert!(
+        required_runtime_value_names.contains("theme")
+            || matches!(prepared.2.decl.body, TypeExpr::Object(_)),
+        "ButtonProps should either keep the helper runtime value dependency through Button -> typeof theme or already materialize a concrete body, got {:?}; prepared body: {:?}",
+        required_runtime_value_names,
+        prepared.2.decl.body,
+    );
+    let mut prepared_env = host
+        .build_cache_only_lookup_env_for_type_decl_in_view(
+            "/src/Button.vue",
+            &snapshot,
+            &prepared.2.decl,
+            &prepared.2.symbol_dependencies,
+            None,
+        )
+        .expect("prepared env should build");
+    assert!(
+        prepared_env.value_symbols.contains_key("theme"),
+        "prepared env should hydrate imported runtime values required by same-file helpers, got {:?}",
+        prepared_env.value_symbols.keys().collect::<Vec<_>>(),
+    );
+    let hydrated_theme = prepared_env
+        .value_symbols
+        .get("theme")
+        .expect("theme should be present in the prepared env");
+    assert!(
+        !matches!(
+            hydrated_theme.type_annotation.as_ref(),
+            Some(TypeExpr::TypeOf(value_ref)) if value_ref.path == ["theme".to_string()]
+        ),
+        "theme import should hydrate to the underlying exported value, not a self-referential default wrapper: {:?}",
+        hydrated_theme.type_annotation,
+    );
+    let evaluated =
+        verter_semantic::analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
+    let TypeExpr::Object(object) = evaluated else {
+        panic!("ButtonProps should evaluate to an object, got {evaluated:?}");
+    };
+
+    let color = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("ButtonProps should include color");
+    let color_members = match color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                other => panic!("expected concrete string literal members, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected color union to be concrete, got {other:?}"),
+    };
+    assert_eq!(
+        color_members,
+        BTreeSet::from(["neutral", "primary"]),
+        "ButtonProps color should hydrate through the helper's imported deps",
+    );
+
+    let ui = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "ui" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("ButtonProps should include ui");
+    let TypeExpr::Object(ui_shape) = ui else {
+        panic!("ButtonProps ui should be a concrete object, got {ui:?}");
+    };
+    let ui_members: BTreeSet<_> = ui_shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ui_members,
+        BTreeSet::from(["base", "label"]),
+        "ButtonProps ui should hydrate through typeof theme",
+    );
+}
+
+#[test]
+fn standalone_shallow_alias_hydration_materializes_same_file_helper_import_deps_and_runtime_values()
+{
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type VariantMap<T extends { variants: Record<string, any> }> = Id<{
+  [K in keyof T['variants']]: T['variants'][K]
+}>
+
+type SlotMap<T extends { slots: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]: T['slots'][K]
+}>
+
+export type ComponentConfig<T extends { variants: Record<string, any>; slots: Record<string, any> }> = {
+  variants: VariantMap<T>
+  slots: SlotMap<T>
+}
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/theme.ts",
+        r#"
+const theme: {
+  variants: {
+    color: 'primary' | 'neutral'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    base: string
+    label: string
+  }
+} = {
+  variants: {
+    color: 'primary',
+    size: 'sm',
+  },
+  slots: {
+    base: '',
+    label: '',
+  },
+}
+
+export default theme
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import theme from './theme'
+import type { ComponentConfig } from './types'
+
+type Button = ComponentConfig<typeof theme>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  size?: Button['variants']['size']
+  ui?: Button['slots']
+}
+</script>
+<template><button /></template>"#,
+    );
+
+    let dep_resolutions = host
+        .dependency_resolutions_for_eval_in_view("/src/Button.vue", None)
+        .expect("standalone button dependency resolutions should exist");
+    assert_eq!(
+        dep_resolutions
+            .get("./theme")
+            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        Some("/src/theme.ts"),
+        "standalone host should resolve theme import for Button.vue"
+    );
+    assert_eq!(
+        dep_resolutions
+            .get("./types")
+            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        Some("/src/types.ts"),
+        "standalone host should resolve types import for Button.vue"
+    );
+
+    let prepared = host
+        .resolve_shallow_symbol_dependency_alias_in_view("/src/Button.vue", "ButtonProps", None)
+        .expect("ButtonProps should hydrate through the standalone shallow cache path");
+    assert!(
+        prepared
+            .2
+            .symbol_dependencies
+            .iter()
+            .any(|dependency| dependency.local_name == "Button"
+                && dependency.canonical_id == "/src/Button.vue"
+                && dependency.exported_name == "Button"),
+        "standalone shallow alias hydration should keep the same-file Button helper dependency, got {:?}",
+        prepared.2.symbol_dependencies
+    );
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/Button.vue", None)
+        .expect("Button snapshot should exist");
+    let button_base_env = host
+        .base_eval_env_in_view("/src/Button.vue", None)
+        .expect("standalone button base env should exist");
+    let button_base_decl = button_base_env
+        .type_symbols
+        .get("Button")
+        .cloned()
+        .expect("standalone button base env should contain Button");
+    let button_helper_deps = host.imported_symbol_dependencies_in_view(
+        "/src/Button.vue",
+        "Button",
+        &button_base_decl.body,
+        None,
+    );
+    assert!(
+        button_helper_deps.iter().any(|dependency| dependency.local_name == "ComponentConfig"
+            && dependency.canonical_id == "/src/types.ts"
+            && dependency.exported_name == "ComponentConfig"),
+        "standalone Button helper should discover imported ComponentConfig through the cache-only dependency collector, got {:?}",
+        button_helper_deps
+    );
+    let button_lookup_env = host
+        .build_cache_only_lookup_env_for_expr_in_view(
+            "/src/Button.vue",
+            &button_base_decl.body,
+            None,
+        )
+        .expect("standalone Button lookup env should build");
+    assert!(
+        button_lookup_env
+            .type_symbols
+            .contains_key("ComponentConfig"),
+        "standalone Button lookup env should hydrate imported ComponentConfig, got {:?}",
+        button_lookup_env.type_symbols.keys().collect::<Vec<_>>()
+    );
+    let required_runtime_value_names =
+        collect_required_runtime_value_names_for_type_decl(&prepared.2.decl, &button_base_env);
+    assert!(
+        required_runtime_value_names.contains("theme")
+            || matches!(prepared.2.decl.body, TypeExpr::Object(_)),
+        "standalone ButtonProps should either keep the helper runtime value dependency through Button -> typeof theme or already materialize a concrete body, got {:?}; prepared body: {:?}; Button body: {:?}; ComponentConfig body: {:?}",
+        required_runtime_value_names,
+        prepared.2.decl.body,
+        button_base_env.type_symbols.get("Button").map(|decl| &decl.body),
+        button_base_env
+            .type_symbols
+            .get("ComponentConfig")
+            .map(|decl| &decl.body),
+    );
+
+    let mut prepared_env = host
+        .build_cache_only_lookup_env_for_type_decl_in_view(
+            "/src/Button.vue",
+            &snapshot,
+            &prepared.2.decl,
+            &prepared.2.symbol_dependencies,
+            None,
+        )
+        .expect("standalone prepared env should build");
+    assert!(
+        prepared_env.type_symbols.contains_key("Button"),
+        "standalone prepared env should include same-file Button helper, got {:?}",
+        prepared_env.type_symbols.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        prepared_env.type_symbols.contains_key("ComponentConfig"),
+        "standalone prepared env should include imported ComponentConfig helper, got {:?}",
+        prepared_env.type_symbols.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        prepared_env.value_symbols.contains_key("theme"),
+        "standalone prepared env should hydrate imported runtime values required by same-file helpers, got {:?}",
+        prepared_env.value_symbols.keys().collect::<Vec<_>>()
+    );
+    let hydrated_theme = prepared_env
+        .value_symbols
+        .get("theme")
+        .expect("standalone theme should be present in the prepared env");
+    assert!(
+        !matches!(
+            hydrated_theme.type_annotation.as_ref(),
+            Some(TypeExpr::TypeOf(value_ref)) if value_ref.path == ["theme".to_string()]
+        ),
+        "standalone theme import should hydrate to the underlying exported value, not a self-referential default wrapper: {:?}",
+        hydrated_theme.type_annotation,
+    );
+    let button_decl = prepared_env
+        .type_symbols
+        .get("Button")
+        .cloned()
+        .expect("standalone prepared env should contain Button");
+    assert!(
+        prepared_env.type_symbols.contains_key("VariantMap"),
+        "standalone prepared env should contain VariantMap, got {:?}",
+        prepared_env.type_symbols.keys().collect::<Vec<_>>()
+    );
+    let component_config_decl = prepared_env
+        .type_symbols
+        .get("ComponentConfig")
+        .cloned()
+        .expect("standalone prepared env should contain ComponentConfig");
+    let evaluated_button =
+        verter_semantic::analysis::type_eval::evaluate(&button_decl.body, &mut prepared_env);
+    let TypeExpr::Object(button_object) = evaluated_button else {
+        panic!("standalone Button should evaluate to an object, got {evaluated_button:?}");
+    };
+    let button_variants = button_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "variants" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("standalone Button should expose variants");
+    let TypeExpr::Object(variants_object) = button_variants else {
+        panic!("standalone Button variants should be an object, got {button_variants:?}");
+    };
+    assert!(
+        variants_object
+            .properties
+            .iter()
+            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "color")),
+        "standalone Button variants should expose color, got {:?}",
+        variants_object.properties
+    );
+    assert!(
+        !component_config_decl.body.is_unknown(),
+        "standalone ComponentConfig should not stay unknown"
+    );
+    let evaluated_variant_map = verter_semantic::analysis::type_eval::evaluate(
+        &TypeExpr::Ref {
+            name: Arc::from("VariantMap"),
+            type_arguments: Arc::from([TypeExpr::TypeOf(
+                verter_semantic::analysis::type_expr::ValueRef {
+                    path: vec!["theme".to_string()],
+                },
+            )]),
+        },
+        &mut prepared_env,
+    );
+    let TypeExpr::Object(variant_map_object) = &evaluated_variant_map else {
+        panic!("standalone VariantMap<typeof theme> should evaluate to an object, got {evaluated_variant_map:?}");
+    };
+    let variant_map_color = variant_map_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("standalone VariantMap<typeof theme> should include color");
+    let variant_map_color_members = match variant_map_color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                other => panic!(
+                    "expected standalone VariantMap<typeof theme>.color members to be string literals, got {other:?}"
+                ),
+            })
+            .collect(),
+        other => panic!(
+            "expected standalone VariantMap<typeof theme>.color to be concrete, got {other:?}"
+        ),
+    };
+    assert_eq!(
+        variant_map_color_members,
+        BTreeSet::from(["neutral", "primary"]),
+        "standalone VariantMap<typeof theme> should keep concrete color members"
+    );
+    let saved_t = prepared_env.type_bindings.insert(
+        "T".to_string(),
+        Arc::new(TypeExpr::TypeOf(
+            verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["theme".to_string()],
+            },
+        )),
+    );
+    let evaluated_variant_map_from_bound_t = verter_semantic::analysis::type_eval::evaluate(
+        &TypeExpr::Ref {
+            name: Arc::from("VariantMap"),
+            type_arguments: Arc::from([TypeExpr::type_parameter(
+                verter_semantic::analysis::type_expr::TypeParam {
+                    name: "T".to_string(),
+                    constraint: None,
+                    default: None,
+                },
+            )]),
+        },
+        &mut prepared_env,
+    );
+    if let Some(saved_t) = saved_t {
+        prepared_env.type_bindings.insert("T".to_string(), saved_t);
+    } else {
+        prepared_env.type_bindings.remove("T");
+    }
+    let TypeExpr::Object(variant_map_from_bound_t_object) = &evaluated_variant_map_from_bound_t
+    else {
+        panic!(
+            "standalone VariantMap<T> with bound T=typeof theme should evaluate to an object, got {evaluated_variant_map_from_bound_t:?}"
+        );
+    };
+    let variant_map_from_bound_t_color = variant_map_from_bound_t_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("standalone VariantMap<T> with bound T should include color");
+    let variant_map_from_bound_t_color_members = match variant_map_from_bound_t_color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                other => panic!(
+                    "expected standalone VariantMap<T>.color members to be string literals, got {other:?}"
+                ),
+            })
+            .collect(),
+        other => panic!("expected standalone VariantMap<T>.color to be concrete, got {other:?}"),
+    };
+    assert_eq!(
+        variant_map_from_bound_t_color_members,
+        BTreeSet::from(["neutral", "primary"]),
+        "standalone VariantMap<T> with bound T should keep concrete color members"
+    );
+    let button_variants_eval = verter_semantic::analysis::type_eval::evaluate(
+        &TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("Button")),
+            index: Arc::new(TypeExpr::string_literal("variants")),
+        },
+        &mut prepared_env,
+    );
+    let TypeExpr::Object(button_variants_object) = &button_variants_eval else {
+        panic!(
+            "standalone Button['variants'] should evaluate to an object, got {button_variants_eval:?}"
+        );
+    };
+    assert!(
+        button_variants_object
+            .properties
+            .iter()
+            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "color")),
+        "standalone Button['variants'] should expose color, got {:?}",
+        button_variants_object.properties
+    );
+    let button_variants_color = button_variants_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("standalone Button['variants'] should include color");
+    let button_variants_color_members = match button_variants_color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                other => panic!(
+                    "expected standalone Button['variants'].color members to be string literals, got {other:?}"
+                ),
+            })
+            .collect(),
+        other => panic!(
+            "expected standalone Button['variants'].color to be concrete, got {other:?}"
+        ),
+    };
+    assert_eq!(
+        button_variants_color_members,
+        BTreeSet::from(["neutral", "primary"]),
+        "standalone Button['variants'].color should stay concrete"
+    );
+    let button_color_eval = verter_semantic::analysis::type_eval::evaluate(
+        &TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("Button")),
+                index: Arc::new(TypeExpr::string_literal("variants")),
+            }),
+            index: Arc::new(TypeExpr::string_literal("color")),
+        },
+        &mut prepared_env,
+    );
+    let button_color_members = match &button_color_eval {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                other => panic!(
+                    "expected standalone Button['variants']['color'] members to be string literals, got {other:?}"
+                ),
+            })
+            .collect(),
+        other => panic!(
+            "expected standalone Button['variants']['color'] to be concrete, got {other:?}"
+        ),
+    };
+    assert_eq!(
+        button_color_members,
+        BTreeSet::from(["neutral", "primary"]),
+        "standalone Button['variants']['color'] should evaluate before ButtonProps evaluation"
+    );
+
+    let evaluated =
+        verter_semantic::analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
+    let TypeExpr::Object(object) = evaluated else {
+        panic!("standalone ButtonProps should evaluate to an object, got {evaluated:?}");
+    };
+
+    let color = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("standalone ButtonProps should include color");
+    let color_members = match color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                other => panic!("expected concrete string literal members, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected standalone color union to be concrete, got {other:?}"),
+    };
+    assert_eq!(
+        color_members,
+        BTreeSet::from(["neutral", "primary"]),
+        "standalone shallow alias hydration should make ButtonProps concrete"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn owner_eval_env_materializes_imported_same_file_helper_aliases_for_macro_expansion() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type VariantMap<T extends { variants: Record<string, any> }> = Id<{
+  [K in keyof T['variants']]: T['variants'][K]
+}>
+
+type SlotMap<T extends { slots: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]: T['slots'][K]
+}>
+
+export type ComponentConfig<T extends { variants: Record<string, any>; slots: Record<string, any> }> = {
+  variants: VariantMap<T>
+  slots: SlotMap<T>
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/theme.ts",
+        r#"
+const theme: {
+  variants: {
+    color: 'primary' | 'neutral'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    base: string
+    label: string
+  }
+} = {
+  variants: {
+    color: 'primary',
+    size: 'sm',
+  },
+  slots: {
+    base: '',
+    label: '',
+  },
+}
+
+export default theme
+"#,
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import theme from './theme'
+import type { ComponentConfig } from './types'
+
+type Button = ComponentConfig<typeof theme>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  size?: Button['variants']['size']
+  ui?: Button['slots']
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file("/src/index.ts", "export * from './Button.vue'\n");
+    let app_source = r#"<script setup lang="ts">
+import type { ButtonProps } from './index'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#;
+    ws.inject_file("/src/App.vue", app_source);
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/App.vue"),
+        "app should load from the workspace",
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./index", "/src/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./Button.vue", "/src/Button.vue")],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![
+            exact_dependency("./theme", "/src/theme.ts"),
+            exact_dependency("./types", "/src/types.ts"),
+        ],
+    );
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", None)
+        .expect("app snapshot should exist");
+    let dep_resolutions = host
+        .dependency_resolutions_for_eval_in_view("/src/App.vue", None)
+        .expect("app dependency resolutions should exist");
+    let imported_inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+    let source_ids: Vec<&str> = imported_inputs
+        .sources
+        .iter()
+        .map(|source| source.canonical_id.as_str())
+        .collect();
+    assert!(
+        source_ids.contains(&"/src/Button.vue"),
+        "owner eval inputs should record the imported helper source for ButtonProps, got {source_ids:?}"
+    );
+    let built = host
+        .build_owner_eval_env_with_inputs_from_owner_env_in_view(
+            "/src/App.vue",
+            &snapshot,
+            &imported_inputs,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("owner eval env should build");
+
+    if std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some() {
+        let button_alias = host
+            .resolve_shallow_symbol_dependency_alias_in_view("/src/Button.vue", "Button", None)
+            .map(|prepared| prepared.2.decl.body);
+        let button_props_alias = host
+            .resolve_shallow_symbol_dependency_alias_in_view("/src/Button.vue", "ButtonProps", None)
+            .map(|prepared| prepared.2.decl.body);
+        eprintln!("WORKSPACE_BUTTON_ALIAS={button_alias:?}");
+        eprintln!("WORKSPACE_BUTTON_PROPS_ALIAS={button_props_alias:?}");
+        eprintln!(
+            "WORKSPACE_OWNER_ENV_BUTTON={:?}",
+            built.env.type_symbols.get("Button")
+        );
+        eprintln!(
+            "WORKSPACE_OWNER_ENV_BUTTON_PROPS={:?}",
+            built.env.type_symbols.get("ButtonProps")
+        );
+        eprintln!(
+            "WORKSPACE_OWNER_ENV_THEME={:?}",
+            built.env.value_symbols.get("theme")
+        );
+    }
+
+    assert!(
+        built.env.type_symbols.contains_key("ButtonProps"),
+        "owner env should hydrate imported ButtonProps"
+    );
+    assert!(
+        built.env.type_symbols.contains_key("Button"),
+        "owner env should hydrate same-file imported helper aliases needed by ButtonProps, got {:?}",
+        built.env.type_symbols.keys().collect::<Vec<_>>(),
+    );
+
+    let mut env = built.env;
+    let button_props = env
+        .type_symbols
+        .get("ButtonProps")
+        .cloned()
+        .expect("ButtonProps should be present in the owner env");
+    let evaluated = verter_semantic::analysis::type_eval::evaluate(&button_props.body, &mut env);
+    let TypeExpr::Object(object) = evaluated else {
+        panic!("ButtonProps should evaluate to an object, got {evaluated:?}");
+    };
+
+    let color = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("ButtonProps should include color");
+    let color_members = match color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                _ => None,
+            })
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    assert_eq!(
+        color_members,
+        BTreeSet::from(["primary", "neutral"]),
+        "owner eval env should make imported ButtonProps concrete enough for macro expansion, got {color:?}",
+    );
+
+    let parsed = verter_compiler::compile::parse_sfc(app_source, None, None);
+    let owner_eval_source = VerterHost::build_eval_script_source(app_source, Some(&parsed));
+    let solver_env = env.clone();
+    let solver_host =
+        crate::resolver_core::SessionSolverHost::with_owner_env(&host, None, &solver_env);
+    let expanded = verter_semantic::analysis::type_eval_build::expand_macro_types(
+        snapshot.macros.as_ref(),
+        Some(owner_eval_source.as_str()),
+        &mut env,
+        None,
+        &solver_host,
+    );
+    let expanded_color = expanded
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .find_map(|prop| (prop.name == "color").then_some(&prop.ty))
+        .expect("expanded defineProps should include color");
+    let expanded_color_members = match expanded_color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                _ => None,
+            })
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    assert_eq!(
+        expanded_color_members,
+        BTreeSet::from(["primary", "neutral"]),
+        "macro expansion should preserve the same imported helper literal union, got {expanded_color:?}",
+    );
+
+    let computed = host
+        .compute_evaluated_types_with_tracking_from_owner_context_in_view(
+            "/src/App.vue",
+            &snapshot,
+            &imported_inputs,
+            Some(owner_eval_source.as_str()),
+            host.base_eval_env_in_view("/src/App.vue", None),
+            None,
+        )
+        .expect("compute_evaluated_types should succeed");
+    let computed_color = computed
+        .evaluated_types
+        .as_ref()
+        .expect("computed types should contain defineProps output")
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .find_map(|prop| (prop.name == "color").then_some(&prop.ty))
+        .expect("computed defineProps should include color");
+    let computed_color_members = match computed_color {
+        TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(value)) => {
+            BTreeSet::from([value.as_str()])
+        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .filter_map(|ty| match ty {
+                TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                    value,
+                )) => Some(value.as_str()),
+                TypeExpr::Primitive(PrimitiveName::Undefined) => None,
+                _ => None,
+            })
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    assert_eq!(
+        computed_color_members,
+        BTreeSet::from(["primary", "neutral"]),
+        "full evaluated-types computation should preserve the same imported helper literal union, got {computed_color:?}",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn owner_eval_env_keeps_indirect_cross_file_helpers_out_of_picked_imported_props() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/deep.ts",
+        r#"
+export interface DeepValue {
+  nested?: string
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/mid.ts",
+        r#"
+import type { DeepValue } from './deep'
+
+export interface HeavyValue {
+  deep?: DeepValue
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+import type { HeavyValue } from './mid'
+
+export interface Props {
+  a?: string
+  heavy?: HeavyValue
+}
+"#,
+    );
+    let app_source = r#"<script setup lang="ts">
+import type { Props } from './types'
+
+defineProps<Pick<Props, 'a'>>()
+</script>
+<template><div /></template>"#;
+    ws.inject_file("/src/App.vue", app_source);
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./mid", "/src/mid.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/mid.ts",
+        vec![exact_dependency("./deep", "/src/deep.ts")],
+    );
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", None)
+        .expect("app snapshot should exist");
+    let dep_resolutions = host
+        .dependency_resolutions_for_eval_in_view("/src/App.vue", None)
+        .expect("app dependency resolutions should exist");
+    let imported_inputs = host.imported_eval_inputs("/src/App.vue", &snapshot, &dep_resolutions);
+
+    let built = host
+        .build_owner_eval_env_with_inputs_from_owner_env_in_view(
+            "/src/App.vue",
+            &snapshot,
+            &imported_inputs,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("owner env should build");
+
+    assert!(
+        built.env.type_symbols.contains_key("Props"),
+        "owner env should materialize the imported props root",
+    );
+    assert!(
+        !built.env.type_symbols.contains_key("HeavyValue"),
+        "owner env should keep imported sibling helpers out of the owner env until a visited property actually demands them, got {:?}",
+        built.env.type_symbols.keys().collect::<Vec<_>>(),
+    );
+    assert!(
+        !built.env.type_symbols.contains_key("DeepValue"),
+        "owner env should not recursively widen indirect cross-file helpers when the current query only picks a subset of props, got {:?}",
+        built.env.type_symbols.keys().collect::<Vec<_>>(),
+    );
+
+    let mut env = built.env;
+    let parsed = verter_compiler::compile::parse_sfc(app_source, None, None);
+    let owner_eval_source = VerterHost::build_eval_script_source(app_source, Some(&parsed));
+    let solver_env = env.clone();
+    let solver_host =
+        crate::resolver_core::SessionSolverHost::with_owner_env(&host, None, &solver_env);
+    let expanded = verter_semantic::analysis::type_eval_build::expand_macro_types(
+        snapshot.macros.as_ref(),
+        Some(owner_eval_source.as_str()),
+        &mut env,
+        None,
+        &solver_host,
+    );
+    let expanded_props: BTreeSet<_> = expanded
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|prop| prop.name.as_str())
+        .collect();
+    assert_eq!(
+        expanded_props,
+        BTreeSet::from(["a"]),
+        "picking a subset of imported props should still expand the visited prop correctly without hydrating indirect helpers, got {:?}",
+        expanded
+            .define_props
+            .iter()
+            .flat_map(|entry| entry.result.value.properties.iter())
+            .map(|prop| (&prop.name, &prop.ty))
+            .collect::<Vec<_>>(),
     );
 }
 

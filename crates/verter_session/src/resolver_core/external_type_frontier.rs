@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::shallow_type_state::{
+use super::shallow_file_state::{
     BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, LocalClosureStatus,
-    ResolutionBudgets, ResolutionCounters, ShallowTypeFileState,
+    ResolutionBudgets, ResolutionCounters, ShallowFileState,
 };
 use verter_semantic::analysis::type_expr::{TypeExpr, TypeParam};
 
@@ -124,11 +124,11 @@ pub struct ExternalTypeFrontier {
 
 /// Trait for the host to provide file state to the frontier engine.
 ///
-/// The frontier engine never performs file I/O itself — all file state
+/// The frontier engine never performs file I/O itself â€” all file state
 /// comes through this trait.
 pub trait FrontierHost {
     /// Get or build the shallow type state for a canonical file.
-    fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowTypeFileState>>;
+    fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>>;
 
     /// Resolve an import specifier from a given file to its canonical ID.
     fn resolve_import_canonical(&self, from_canonical: &str, specifier: &str) -> Option<String>;
@@ -248,13 +248,15 @@ impl ExternalTypeFrontier {
             };
         };
 
+        let type_view = state.type_view();
+
         // Step 1: Try direct/alias export routing
-        if let Some(target) = state.export_target(&pending.exported_name) {
+        if let Some(target) = type_view.export_target(&pending.exported_name) {
             return self.resolve_through_export(host, pending, &state, target);
         }
 
         // Step 2: Try wildcard reexport routing
-        for (order, wildcard_source) in state.wildcard_reexports.iter().enumerate() {
+        for (order, wildcard_source) in type_view.wildcard_reexports().iter().enumerate() {
             if let Some(target_canonical) =
                 host.resolve_import_canonical(&pending.canonical_id, wildcard_source)
             {
@@ -285,8 +287,12 @@ impl ExternalTypeFrontier {
 
                 // Try resolving in the wildcard target
                 if let Some(wc_state) = host.ensure_shallow_state(&target_canonical) {
-                    if wc_state.export_target(&pending.exported_name).is_some() {
-                        // Found it — enqueue as next-level work from the target file
+                    if wc_state
+                        .type_view()
+                        .export_target(&pending.exported_name)
+                        .is_some()
+                    {
+                        // Found it â€” enqueue as next-level work from the target file
                         let next = PendingExternalSymbol {
                             canonical_id: target_canonical.clone(),
                             exported_name: pending.exported_name.clone(),
@@ -350,7 +356,7 @@ impl ExternalTypeFrontier {
         &mut self,
         host: &H,
         pending: &PendingExternalSymbol,
-        state: &Arc<ShallowTypeFileState>,
+        state: &Arc<ShallowFileState>,
         target: &ExportTarget,
     ) -> ResolvedSymbol {
         match target {
@@ -393,6 +399,7 @@ impl ExternalTypeFrontier {
                 }
 
                 let (body, type_parameters) = state
+                    .type_view()
                     .symbol(symbol_name)
                     .map(|symbol| {
                         (
@@ -403,7 +410,9 @@ impl ExternalTypeFrontier {
                     .unwrap_or_else(|| (None, Vec::new()));
 
                 // Run local closure
-                let closure = state.local_closure(symbol_name, self.budgets.local_closure_steps);
+                let closure = state
+                    .type_view()
+                    .local_closure(symbol_name, self.budgets.local_closure_steps);
                 self.counters.local_closure_steps += closure.steps;
 
                 let status = match &closure.status {
@@ -435,7 +444,7 @@ impl ExternalTypeFrontier {
                 source_specifier,
                 original_name,
             } => {
-                // Follow the reexport — enqueue in next level
+                // Follow the reexport â€” enqueue in next level
                 if let Some(target_canonical) =
                     host.resolve_import_canonical(&pending.canonical_id, source_specifier)
                 {
@@ -534,7 +543,7 @@ impl ExternalTypeFrontier {
         }
 
         let state = host.ensure_shallow_state(&current.0)?;
-        for wildcard_source in &state.wildcard_reexports {
+        for wildcard_source in state.type_view().wildcard_reexports() {
             let Some(target_canonical) = host.resolve_import_canonical(&current.0, wildcard_source)
             else {
                 continue;
@@ -609,7 +618,7 @@ mod tests {
 
     /// Mock host for testing the frontier engine.
     struct MockHost {
-        files: FxHashMap<String, Arc<ShallowTypeFileState>>,
+        files: FxHashMap<String, Arc<ShallowFileState>>,
         resolutions: FxHashMap<(String, String), String>,
     }
 
@@ -621,7 +630,7 @@ mod tests {
             }
         }
 
-        fn add_file(&mut self, canonical_id: &str, state: ShallowTypeFileState) {
+        fn add_file(&mut self, canonical_id: &str, state: ShallowFileState) {
             self.files.insert(canonical_id.to_string(), Arc::new(state));
         }
 
@@ -632,7 +641,7 @@ mod tests {
     }
 
     impl FrontierHost for MockHost {
-        fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowTypeFileState>> {
+        fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
             self.files.get(canonical_id).cloned()
         }
 
@@ -658,8 +667,8 @@ mod tests {
         )
     }
 
-    fn make_state(source: &str) -> ShallowTypeFileState {
-        ShallowTypeFileState::from_analysis(Hash16::default(), make_analysis(source), None)
+    fn make_state(source: &str) -> ShallowFileState {
+        ShallowFileState::from_analysis(Hash16::default(), make_analysis(source), None)
     }
 
     #[test]
@@ -812,7 +821,7 @@ mod tests {
 
     #[test]
     fn missing_file_produces_route_not_found() {
-        let host = MockHost::new(); // empty — no files
+        let host = MockHost::new(); // empty â€” no files
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -890,7 +899,7 @@ mod tests {
         let second = frontier.get_resolved("/src/second.ts", "Props");
         assert!(
             second.is_none(),
-            "Props should NOT be resolved from second.ts — first-wins"
+            "Props should NOT be resolved from second.ts â€” first-wins"
         );
     }
 
@@ -1090,7 +1099,7 @@ mod tests {
             "/src/barrel.ts",
             make_state(r#"export { Props } from "./missing""#),
         );
-        // No resolution for ./missing — host returns None
+        // No resolution for ./missing â€” host returns None
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1156,7 +1165,7 @@ mod tests {
     #[test]
     fn local_export_without_eval_env_produces_invalid_declaration() {
         let mut host = MockHost::new();
-        // Without eval_env, symbols map is empty — local closure fails
+        // Without eval_env, symbols map is empty â€” local closure fails
         host.add_file(
             "/src/types.ts",
             make_state("export interface Props { label: string }"),
@@ -1172,7 +1181,7 @@ mod tests {
 
         let resolved = frontier.get_resolved("/src/types.ts", "Props").unwrap();
         // Without eval_env, symbols are empty so local closure returns
-        // MissingLocalSymbol → InvalidDeclaration
+        // MissingLocalSymbol â†’ InvalidDeclaration
         assert_eq!(
             resolved.status,
             ResolvedSymbolStatus::InvalidDeclaration,

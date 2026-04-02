@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use rustc_hash::FxHashSet;
 use verter_semantic::analysis::type_eval::EvalEnv;
@@ -11,6 +13,20 @@ use crate::resolver_core::ImportedEvalInputs;
 pub struct OwnerEvalEnvBuild {
     pub env: EvalEnv,
     pub requested_binding_names: FxHashSet<String>,
+}
+
+fn owner_eval_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
+            || std::env::var_os("VERTER_META_DEBUG").is_some()
+    })
+}
+
+fn owner_eval_debug(message: impl FnOnce() -> String) {
+    if owner_eval_debug_enabled() {
+        eprintln!("[verter-owner-env] {}", message());
+    }
 }
 
 pub trait OwnerEvalEnvAssembler {
@@ -29,6 +45,7 @@ pub trait OwnerEvalEnvAssembler {
     fn materialize_imported_runtime_values(
         &self,
         snapshot: &Self::Snapshot,
+        canonical_id: &str,
         owner_local_value_names: &FxHashSet<String>,
         required_runtime_value_names: Option<&FxHashSet<String>>,
         env: &mut EvalEnv,
@@ -52,6 +69,19 @@ pub fn build_owner_eval_env_with_inputs<A: OwnerEvalEnvAssembler>(
     owner_env: Option<EvalEnv>,
     required_runtime_value_names: Option<&FxHashSet<String>>,
 ) -> Option<OwnerEvalEnvBuild> {
+    let started = owner_eval_debug_enabled().then(Instant::now);
+    owner_eval_debug(|| {
+        format!(
+            "start owner={} dep_sources={} imported_aliases={} overrides={} owner_env={}",
+            canonical_id,
+            imported_inputs.sources.len(),
+            imported_inputs.type_aliases.len(),
+            prop_type_overrides
+                .map(|overrides| overrides.len())
+                .unwrap_or_default(),
+            owner_env.is_some(),
+        )
+    });
     let mut env = owner_env.or_else(|| {
         assembler
             .base_eval_env(canonical_id)
@@ -61,29 +91,95 @@ pub fn build_owner_eval_env_with_inputs<A: OwnerEvalEnvAssembler>(
     let local_value_names: FxHashSet<String> = env.value_symbols.keys().cloned().collect();
     let requested_binding_names = collect_requested_binding_names(macros);
 
+    let dep_merge_started = owner_eval_debug_enabled().then(Instant::now);
     for dep_source in &imported_inputs.sources {
         if let Some(dep_env) = assembler.base_eval_env(dep_source.canonical_id.as_str()) {
             env.extend_missing_from_ref(dep_env.as_ref());
         }
     }
+    owner_eval_debug(|| {
+        format!(
+            "dep_merge owner={} dep_sources={} type_symbols={} value_symbols={} took {:?}",
+            canonical_id,
+            imported_inputs.sources.len(),
+            env.type_symbols.len(),
+            env.value_symbols.len(),
+            dep_merge_started
+                .map(|start| start.elapsed())
+                .unwrap_or_default(),
+        )
+    });
 
+    let type_alias_started = owner_eval_debug_enabled().then(Instant::now);
+    owner_eval_debug(|| {
+        format!(
+            "type_aliases:start owner={} aliases={} type_symbols={}",
+            canonical_id,
+            imported_inputs.type_aliases.len(),
+            env.type_symbols.len(),
+        )
+    });
     assembler.materialize_imported_type_aliases(
         snapshot,
         &local_type_names,
         imported_inputs,
         &mut env,
     );
+    owner_eval_debug(|| {
+        format!(
+            "type_aliases:end owner={} aliases={} type_symbols={} took {:?}",
+            canonical_id,
+            imported_inputs.type_aliases.len(),
+            env.type_symbols.len(),
+            type_alias_started
+                .map(|start| start.elapsed())
+                .unwrap_or_default(),
+        )
+    });
+
+    let runtime_started = owner_eval_debug_enabled().then(Instant::now);
+    owner_eval_debug(|| {
+        format!(
+            "runtime_values:start owner={} required_runtime_values={} value_symbols={}",
+            canonical_id,
+            required_runtime_value_names
+                .map(|required| required.len())
+                .unwrap_or_default(),
+            env.value_symbols.len(),
+        )
+    });
     assembler.materialize_imported_runtime_values(
         snapshot,
+        canonical_id,
         &local_value_names,
         required_runtime_value_names,
         &mut env,
     );
+    owner_eval_debug(|| {
+        format!(
+            "runtime_values:end owner={} value_symbols={} took {:?}",
+            canonical_id,
+            env.value_symbols.len(),
+            runtime_started
+                .map(|start| start.elapsed())
+                .unwrap_or_default(),
+        )
+    });
 
     if let Some(overrides) = prop_type_overrides {
         inject_prop_type_overrides(&mut env, overrides);
     }
 
+    owner_eval_debug(|| {
+        format!(
+            "end owner={} requested_bindings={} type_symbols={} value_symbols={} took {:?}",
+            canonical_id,
+            requested_binding_names.len(),
+            env.type_symbols.len(),
+            env.value_symbols.len(),
+            started.map(|start| start.elapsed()).unwrap_or_default(),
+        )
+    });
     Some(OwnerEvalEnvBuild {
         env,
         requested_binding_names,
@@ -146,6 +242,7 @@ mod tests {
         fn materialize_imported_runtime_values(
             &self,
             _snapshot: &Self::Snapshot,
+            _canonical_id: &str,
             owner_local_value_names: &FxHashSet<String>,
             required_runtime_value_names: Option<&FxHashSet<String>>,
             env: &mut EvalEnv,

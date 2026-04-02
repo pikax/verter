@@ -173,6 +173,99 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 }
 
 // ---------------------------------------------------------------------------
+// Solver-backed type expansion (M6 cutover path)
+// ---------------------------------------------------------------------------
+
+/// Expand a resolved macro's type annotations through the new native solver.
+///
+/// Takes the same `ResolvedMacroMeta` as `resolved_macro_to_expansion` but
+/// runs each prop/emit type_annotation through `solve_type` for deeper
+/// resolution of generics, utilities, and cross-file types.
+pub fn resolved_macro_to_expansion_via_solver(
+    macro_meta: &ResolvedMacroMeta,
+    host: &crate::VerterHost,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> TypeExpansionResult {
+    use verter_semantic::analysis::type_solver::solve::{solve_type, SolveLimits};
+
+    let solver_host = crate::resolver_core::SessionSolverHost::new(host, store_view);
+    let limits = SolveLimits::default();
+
+    let mut members = Vec::new();
+
+    for prop in &macro_meta.props {
+        let type_expr = prop
+            .type_annotation
+            .as_deref()
+            .map(|text| {
+                let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
+                let result = solve_type(&parsed, &solver_host, limits.clone());
+                result.value
+            })
+            .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
+
+        members.push(ExpandedMember {
+            name: prop.name.clone(),
+            type_expr,
+            raw_type: prop.type_annotation.clone(),
+            optional: prop.is_optional,
+            description: prop.description.clone(),
+        });
+    }
+
+    for emit in &macro_meta.emits {
+        let type_expr = emit
+            .payload_type
+            .as_deref()
+            .map(|text| {
+                let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
+                let result = solve_type(&parsed, &solver_host, limits.clone());
+                result.value
+            })
+            .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
+
+        members.push(ExpandedMember {
+            name: emit.name.clone(),
+            type_expr,
+            raw_type: emit.payload_type.clone(),
+            optional: false,
+            description: emit.description.clone(),
+        });
+    }
+
+    for slot in &macro_meta.slots {
+        members.push(ExpandedMember {
+            name: slot.name.clone(),
+            type_expr: TypeExpr::primitive(PrimitiveName::Unknown),
+            raw_type: slot.return_type.clone(),
+            optional: !slot.is_required,
+            description: slot.description.clone(),
+        });
+    }
+
+    let completeness = if members.is_empty() {
+        ExpansionCompleteness::LowerBound
+    } else {
+        ExpansionCompleteness::Exact
+    };
+
+    let type_expr = if !macro_meta.type_name.is_empty() {
+        // Also solve the top-level type name through the solver
+        let parsed = TypeExpr::named(&macro_meta.type_name);
+        let result = solve_type(&parsed, &solver_host, limits);
+        result.value
+    } else {
+        TypeExpr::primitive(PrimitiveName::Unknown)
+    };
+
+    TypeExpansionResult {
+        type_expr,
+        members,
+        completeness,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -274,5 +367,56 @@ mod tests {
             TypeExpr::Ref { name, .. } => assert_eq!(name.as_ref(), "ButtonProps"),
             other => panic!("expected Ref, got: {other:?}"),
         }
+    }
+
+    // -- M5: Comparison harness — old vs solver --
+
+    #[test]
+    fn solver_expansion_matches_old_path_for_simple_macro() {
+        let macro_meta = make_resolved_macro();
+
+        // Old path
+        let old = resolved_macro_to_expansion(&macro_meta);
+
+        // Solver path (standalone host — no files loaded, so solver can't
+        // resolve cross-file refs, but primitive type_text should match)
+        let host = crate::VerterHost::new_standalone(Default::default());
+        let solver = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+
+        // Same number of members
+        assert_eq!(old.members.len(), solver.members.len());
+
+        // Same member names and optionality
+        for (o, s) in old.members.iter().zip(solver.members.iter()) {
+            assert_eq!(o.name, s.name, "member name mismatch");
+            assert_eq!(o.optional, s.optional, "optional mismatch for {}", o.name);
+            assert_eq!(o.raw_type, s.raw_type, "raw_type mismatch for {}", o.name);
+        }
+
+        // Solver resolves primitive type_text directly
+        for m in &solver.members {
+            assert!(
+                !matches!(m.type_expr, TypeExpr::Unknown { .. }),
+                "solver should resolve primitive type text for {}",
+                m.name
+            );
+        }
+    }
+
+    #[test]
+    fn solver_expansion_preserves_completeness() {
+        let macro_meta = make_resolved_macro();
+        let host = crate::VerterHost::new_standalone(Default::default());
+        let result = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        assert_eq!(result.completeness, ExpansionCompleteness::Exact);
+    }
+
+    #[test]
+    fn solver_expansion_empty_macro_is_lower_bound() {
+        let mut macro_meta = make_resolved_macro();
+        macro_meta.props.clear();
+        let host = crate::VerterHost::new_standalone(Default::default());
+        let result = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        assert_eq!(result.completeness, ExpansionCompleteness::LowerBound);
     }
 }

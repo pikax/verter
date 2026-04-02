@@ -79,6 +79,19 @@ fn log_expand_stage(
     });
 }
 
+fn log_expand_stage_start(log: &ExpandStageLog<'_>) {
+    type_expand_debug(|| {
+        format!(
+            "expand_macro_types:item_start macro_index={} macro_kind={:?} stage={} target={} steps={}",
+            log.macro_index,
+            log.macro_kind,
+            log.stage,
+            log.target,
+            log.start_steps,
+        )
+    });
+}
+
 fn log_expand_skip(
     macro_index: usize,
     macro_kind: crate::analysis::types::AnalyzedMacroKind,
@@ -988,56 +1001,101 @@ pub fn parse_type_parameter_clause(clause: &str) -> Vec<TypeParam> {
 /// Convenience wrapper: expand all macro type annotations from source.
 ///
 /// Builds an `EvalEnv` from the source, then expands each prop/emit/slot
-/// type annotation using the new expansion service with default budget.
+/// type annotation using the native solver with default limits.
 pub fn evaluate_macro_types(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: &str,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     let mut env = parse_and_build_env(source);
-    let budget = crate::analysis::type_expand::ExpansionBudget::default();
-    expand_macro_types(macros, Some(source), &mut env, None, &budget)
+    let solver_host = crate::analysis::type_solver::host::EvalEnvSolverHost::new(&env);
+    expand_macro_types(macros, Some(source), &mut env, None, &solver_host)
 }
 
 // ---------------------------------------------------------------------------
 // Expansion-based macro type evaluation
 // ---------------------------------------------------------------------------
 
-/// Expand all macro-backed type annotations using the new expander service.
+/// Expand all macro-backed type annotations using the native type solver.
 ///
-/// Replaces `evaluate_macro_types_impl`. Uses `expand_object_shape` for
-/// defineProps type parameters and `expand_normalized_expr` for individual
-/// prop/emit/slot/binding annotations.
+/// All type resolution goes through `solve_type()` via the provided
+/// `TypeSolverHost`. The host determines how type references are resolved:
+/// - `EvalEnvSolverHost` for standalone/test contexts (resolves from local env)
+/// - `SessionSolverHost` for production (resolves from host caches + owner env)
 pub fn expand_macro_types(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     env: &mut EvalEnv,
     local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
-    budget: &crate::analysis::type_expand::ExpansionBudget,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    let mut lookup = crate::analysis::type_eval::NoopEvalLookup;
-    expand_macro_types_with_lookup(
-        macros,
-        source,
-        env,
-        local_binding_names,
-        budget,
-        &mut lookup,
-    )
-}
-
-pub fn expand_macro_types_with_lookup(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: Option<&str>,
-    env: &mut EvalEnv,
-    local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
-    budget: &crate::analysis::type_expand::ExpansionBudget,
-    lookup: &mut dyn crate::analysis::type_eval::EvalLookup,
+    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
-        expand_normalized_expr_with_lookup, expand_object_shape_with_lookup,
         ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape, ExpandedMacroProps,
+        ExpandedNormalizedExpr, ExpandedObjectShape, ExpansionCompleteness, ExpansionDiagnostic,
+        ExpansionResult, ExpansionStopReason,
     };
     use crate::analysis::type_expr_lower::parse_type_annotation;
+    use crate::analysis::type_solver::result::{IncompleteReason, SolverExactness, SolverResult};
+    use crate::analysis::type_solver::solve::{solve_type, SolveLimits};
+
+    // -- local helpers: solver result → expansion result conversion --
+
+    fn solver_exactness_to_completeness(exactness: SolverExactness) -> ExpansionCompleteness {
+        match exactness {
+            SolverExactness::ExactConcrete | SolverExactness::ExactSymbolic => {
+                ExpansionCompleteness::Exact
+            }
+            SolverExactness::Incomplete => ExpansionCompleteness::Partial,
+        }
+    }
+
+    fn incomplete_reason_to_diagnostic(reason: &IncompleteReason) -> ExpansionDiagnostic {
+        let stop_reason = match reason {
+            IncompleteReason::MissingSource { .. } => ExpansionStopReason::UnresolvedReference,
+            IncompleteReason::UnsupportedSyntax { .. } => ExpansionStopReason::UnsupportedOperator,
+            IncompleteReason::Cancelled => ExpansionStopReason::BudgetExceeded,
+            IncompleteReason::RecursionPolicy { .. } => ExpansionStopReason::BudgetExceeded,
+        };
+        ExpansionDiagnostic {
+            reason: stop_reason,
+            context: reason.to_string(),
+            property_name: None,
+        }
+    }
+
+    fn solver_to_expr_result(
+        result: SolverResult<TypeExpr>,
+    ) -> ExpansionResult<ExpandedNormalizedExpr> {
+        let completeness = solver_exactness_to_completeness(result.exactness);
+        let diagnostics = result
+            .incomplete_reasons
+            .iter()
+            .map(incomplete_reason_to_diagnostic)
+            .collect();
+        ExpansionResult {
+            value: ExpandedNormalizedExpr { expr: result.value },
+            completeness,
+            diagnostics,
+        }
+    }
+
+    fn solver_to_object_shape_result(
+        result: SolverResult<TypeExpr>,
+    ) -> ExpansionResult<ExpandedObjectShape> {
+        let completeness = solver_exactness_to_completeness(result.exactness);
+        let diagnostics: Vec<ExpansionDiagnostic> = result
+            .incomplete_reasons
+            .iter()
+            .map(incomplete_reason_to_diagnostic)
+            .collect();
+
+        let shape = crate::analysis::type_expand::type_expr_to_expanded_shape(&result.value);
+
+        ExpansionResult {
+            value: shape,
+            completeness,
+            diagnostics,
+        }
+    }
 
     let mut result = ExpandedComponentTypes::default();
     let macro_type_params = source.map(collect_define_macro_type_params);
@@ -1065,20 +1123,18 @@ pub fn expand_macro_types_with_lookup(
                 if !parsed.is_unknown() {
                     let item_started = Instant::now();
                     let item_start_steps = env.steps();
-                    let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
-                    log_expand_stage(
-                        ExpandStageLog {
-                            macro_index,
-                            macro_kind: m.kind,
-                            stage: "prop_field",
-                            target: field.name.as_str(),
-                            started: item_started,
-                            start_steps: item_start_steps,
-                        },
-                        expanded.completeness,
-                        &expanded.diagnostics,
-                        env,
-                    );
+                    let stage_log = ExpandStageLog {
+                        macro_index,
+                        macro_kind: m.kind,
+                        stage: "prop_field",
+                        target: field.name.as_str(),
+                        started: item_started,
+                        start_steps: item_start_steps,
+                    };
+                    log_expand_stage_start(&stage_log);
+                    let solved = solve_type(&parsed, solver_host, SolveLimits::default());
+                    let expanded = solver_to_expr_result(solved);
+                    log_expand_stage(stage_log, expanded.completeness, &expanded.diagnostics, env);
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -1100,17 +1156,19 @@ pub fn expand_macro_types_with_lookup(
                 if let Some(lowered) = type_params.get(define_props_index) {
                     let item_started = Instant::now();
                     let item_start_steps = env.steps();
-                    let shape_result =
-                        expand_object_shape_with_lookup(lowered, env, budget, lookup);
+                    let stage_log = ExpandStageLog {
+                        macro_index,
+                        macro_kind: m.kind,
+                        stage: "define_props",
+                        target: "type_param",
+                        started: item_started,
+                        start_steps: item_start_steps,
+                    };
+                    log_expand_stage_start(&stage_log);
+                    let solved = solve_type(lowered, solver_host, SolveLimits::default());
+                    let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
-                        ExpandStageLog {
-                            macro_index,
-                            macro_kind: m.kind,
-                            stage: "define_props",
-                            target: "type_param",
-                            started: item_started,
-                            start_steps: item_start_steps,
-                        },
+                        stage_log,
                         shape_result.completeness,
                         &shape_result.diagnostics,
                         env,
@@ -1136,17 +1194,19 @@ pub fn expand_macro_types_with_lookup(
                 if let Some(lowered) = type_params.get(define_emits_index) {
                     let item_started = Instant::now();
                     let item_start_steps = env.steps();
-                    let shape_result =
-                        expand_object_shape_with_lookup(lowered, env, budget, lookup);
+                    let stage_log = ExpandStageLog {
+                        macro_index,
+                        macro_kind: m.kind,
+                        stage: "define_emits",
+                        target: "type_param",
+                        started: item_started,
+                        start_steps: item_start_steps,
+                    };
+                    log_expand_stage_start(&stage_log);
+                    let solved = solve_type(lowered, solver_host, SolveLimits::default());
+                    let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
-                        ExpandStageLog {
-                            macro_index,
-                            macro_kind: m.kind,
-                            stage: "define_emits",
-                            target: "type_param",
-                            started: item_started,
-                            start_steps: item_start_steps,
-                        },
+                        stage_log,
                         shape_result.completeness,
                         &shape_result.diagnostics,
                         env,
@@ -1169,20 +1229,18 @@ pub fn expand_macro_types_with_lookup(
                 if !parsed.is_unknown() {
                     let item_started = Instant::now();
                     let item_start_steps = env.steps();
-                    let expanded = expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
-                    log_expand_stage(
-                        ExpandStageLog {
-                            macro_index,
-                            macro_kind: m.kind,
-                            stage: "emit_field",
-                            target: field.name.as_str(),
-                            started: item_started,
-                            start_steps: item_start_steps,
-                        },
-                        expanded.completeness,
-                        &expanded.diagnostics,
-                        env,
-                    );
+                    let stage_log = ExpandStageLog {
+                        macro_index,
+                        macro_kind: m.kind,
+                        stage: "emit_field",
+                        target: field.name.as_str(),
+                        started: item_started,
+                        start_steps: item_start_steps,
+                    };
+                    log_expand_stage_start(&stage_log);
+                    let solved = solve_type(&parsed, solver_host, SolveLimits::default());
+                    let expanded = solver_to_expr_result(solved);
+                    log_expand_stage(stage_log, expanded.completeness, &expanded.diagnostics, env);
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -1204,21 +1262,23 @@ pub fn expand_macro_types_with_lookup(
                     if m.slot_fields.is_empty() {
                         let item_started = Instant::now();
                         let item_start_steps = env.steps();
+                        let stage_log = ExpandStageLog {
+                            macro_index,
+                            macro_kind: m.kind,
+                            stage: "define_slots",
+                            target: "type_param",
+                            started: item_started,
+                            start_steps: item_start_steps,
+                        };
+                        log_expand_stage_start(&stage_log);
                         let previous_slot_return_mode =
                             env.preserve_canonical_vue_vnode_slot_returns;
                         env.preserve_canonical_vue_vnode_slot_returns = true;
-                        let shape_result =
-                            expand_object_shape_with_lookup(lowered, env, budget, lookup);
+                        let solved = solve_type(lowered, solver_host, SolveLimits::default());
                         env.preserve_canonical_vue_vnode_slot_returns = previous_slot_return_mode;
+                        let shape_result = solver_to_object_shape_result(solved);
                         log_expand_stage(
-                            ExpandStageLog {
-                                macro_index,
-                                macro_kind: m.kind,
-                                stage: "define_slots",
-                                target: "type_param",
-                                started: item_started,
-                                start_steps: item_start_steps,
-                            },
+                            stage_log,
                             shape_result.completeness,
                             &shape_result.diagnostics,
                             env,
@@ -1249,23 +1309,26 @@ pub fn expand_macro_types_with_lookup(
                     if !parsed.is_unknown() {
                         let item_started = Instant::now();
                         let item_start_steps = env.steps();
-                        let expanded =
-                            expand_normalized_expr_with_lookup(&parsed, env, budget, lookup);
+                        let slot_binding_target = format!("{}.{}", slot.name, binding.name);
+                        let stage_log = ExpandStageLog {
+                            macro_index,
+                            macro_kind: m.kind,
+                            stage: "slot_binding",
+                            target: slot_binding_target.as_str(),
+                            started: item_started,
+                            start_steps: item_start_steps,
+                        };
+                        log_expand_stage_start(&stage_log);
+                        let solved = solve_type(&parsed, solver_host, SolveLimits::default());
+                        let expanded = solver_to_expr_result(solved);
                         log_expand_stage(
-                            ExpandStageLog {
-                                macro_index,
-                                macro_kind: m.kind,
-                                stage: "slot_binding",
-                                target: &format!("{}.{}", slot.name, binding.name),
-                                started: item_started,
-                                start_steps: item_start_steps,
-                            },
+                            stage_log,
                             expanded.completeness,
                             &expanded.diagnostics,
                             env,
                         );
                         result.slot_bindings.push(ExpandedField {
-                            name: format!("{}.{}", slot.name, binding.name),
+                            name: slot_binding_target,
                             r#type: expanded.value.expr,
                             raw_type: Some(type_ann.clone()),
                             optional: false,
@@ -1296,20 +1359,18 @@ pub fn expand_macro_types_with_lookup(
     for (name, type_ann) in binding_entries {
         let item_started = Instant::now();
         let item_start_steps = env.steps();
-        let expanded = expand_normalized_expr_with_lookup(&type_ann, env, budget, lookup);
-        log_expand_stage(
-            ExpandStageLog {
-                macro_index: usize::MAX,
-                macro_kind: crate::analysis::types::AnalyzedMacroKind::DefineExpose,
-                stage: "binding",
-                target: name.as_str(),
-                started: item_started,
-                start_steps: item_start_steps,
-            },
-            expanded.completeness,
-            &expanded.diagnostics,
-            env,
-        );
+        let stage_log = ExpandStageLog {
+            macro_index: usize::MAX,
+            macro_kind: crate::analysis::types::AnalyzedMacroKind::DefineExpose,
+            stage: "binding",
+            target: name.as_str(),
+            started: item_started,
+            start_steps: item_start_steps,
+        };
+        log_expand_stage_start(&stage_log);
+        let solved = solve_type(&type_ann, solver_host, SolveLimits::default());
+        let expanded = solver_to_expr_result(solved);
+        log_expand_stage(stage_log, expanded.completeness, &expanded.diagnostics, env);
         result.bindings.push(ExpandedField {
             name,
             r#type: expanded.value.expr,
@@ -1481,19 +1542,8 @@ pub fn parse_value_expression_type(expression: &str) -> Option<TypeExpr> {
 
 /// Parse and evaluate a value expression against an existing evaluation environment.
 pub fn evaluate_value_expression(expression: &str, env: &mut EvalEnv) -> Option<TypeExpr> {
-    let mut lookup = crate::analysis::type_eval::NoopEvalLookup;
-    evaluate_value_expression_with_lookup(expression, env, &mut lookup)
-}
-
-pub fn evaluate_value_expression_with_lookup(
-    expression: &str,
-    env: &mut EvalEnv,
-    lookup: &mut dyn crate::analysis::type_eval::EvalLookup,
-) -> Option<TypeExpr> {
     let lowered = parse_value_expression_type(expression)?;
-    Some(crate::analysis::type_eval::evaluate_with_lookup(
-        &lowered, env, lookup,
-    ))
+    Some(crate::analysis::type_eval::evaluate(&lowered, env))
 }
 
 fn lower_value_expression(expr: &Expression<'_>, source: &str) -> TypeExpr {

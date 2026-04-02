@@ -262,7 +262,7 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Imported component-meta hydration must stay cache-owned too. Once shallow imported dependency state exists, later alias/registry/fallthrough resolver stages must read only from that cache-owned state and must not jump back to raw snapshot/source builders for imported files.
 - Component-meta resolvers must deepen in exactly one place per requested symbol/query path. Do not let a file-level helper widen into sibling symbols/files that are not on the active declaration route.
 - Component-meta metadata/fallthrough projection must stay query-scoped. Reuse the resolved state plus captured `HostStoreView`/session view; do not re-enter a fresh top-level meta/fallthrough query when a resolved query already exists.
-- Imported-eval collection for component-meta must stay single-path and lazy. Do not introduce eager collection modes or reparsing fallbacks from stored source text; selected imported symbols must be hydrated through the host-owned cache only.
+- Imported symbol collection for component-meta must stay single-path and lazy. Do not introduce eager collection modes or reparsing fallbacks from stored source text; selected imported symbols must be hydrated through the host-owned cache and resolved via the solver only.
 
 ### CodeTransform Is the Single Source of Truth (CRITICAL)
 
@@ -274,15 +274,50 @@ Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` gene
 
 **Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string — the source map still reflects the pre-replace byte offsets.
 
-### Type Evaluator Sharing & Depth Limits
+### Native Type Solver (`type_solver`)
 
-`verter_semantic::analysis::type_eval` is the shared lightweight type evaluator used by analysis, host, and resolver surfaces. Its memory and caching invariants matter across the workspace.
+`verter_semantic::analysis::type_solver` is the sole authority for all type expansion. It handles `defineProps<T>()`, `defineEmits<T>()`, component-meta type resolution, and cross-file generic instantiation.
 
-- Recursive `TypeExpr` structure is Arc-backed (`Arc<TypeExpr>`, `Arc<[TypeExpr]>`, `Arc<ObjectExpr>`, `Arc<FunctionExpr>`) so clones stay shallow.
-- `EvalEnv.type_bindings` stores `Arc<TypeExpr>`, not owned `TypeExpr`, so generic instantiation does not re-copy bound subtrees.
-- `resolved_refs` caches `Arc<TypeExpr>` values keyed by stable declaration identity plus interned type arguments. Cache-hit callers may clone the outer `TypeExpr`, but child allocations must stay shared.
-- `max_ref_depth` is a safety valve for nested `evaluate_ref` chains only. When the limit is hit, return a symbolic `TypeExpr::Ref` built from the already-interned evaluated args. Do not cache that fallback result.
-- Structural-sharing regressions should be covered in dedicated evaluator tests such as `crates/verter_semantic/src/analysis/type_eval_memory_tests.rs` and `crates/verter_semantic/src/analysis/type_eval_tests.rs`.
+**Architecture — two separate structs to avoid cloning:**
+
+- `QueryArena` — append-only immutable node store. Nodes are interned as `NodeId` (u32). Once allocated, nodes are never mutated.
+- `SolverCaches` — mutable memoization tables (relation, instantiation, keyspace, member). Separate from arena so the relation engine can hold `&QueryArena` and `&mut SolverCaches` simultaneously.
+
+**Pipeline:** `TypeExpr → lower → QueryArena → resolve_node → project_to_type_expr → TypeExpr`
+
+**Host boundary:** `TypeSolverHost` trait (in `type_solver::host`) is the seam between `verter_session` (file readiness, frontier, caches) and the solver (arena, relations, projections). The solver never reopens route discovery — it only accepts resolved root identities. Two implementations exist: `SessionSolverHost` in `resolver_core/solver_host.rs` (production, bridges host caches) and `EvalEnvSolverHost` in `type_solver/host.rs` (standalone, wraps an `EvalEnv`'s type_symbols for local-only resolution without a session).
+
+**Exactness model:** `ExactConcrete | ExactSymbolic | Incomplete` — replaces old `Exact | LowerBound | OpaqueFallback`. Execution status (`Completed | Cancelled | HardStop`) is tracked separately from semantic exactness.
+
+**Operators implemented:** keyof, indexed access, conditionals (with distributive distribution + infer binding collection), mapped types (with key remapping via `as` clause), template literals (iterative cartesian expansion with 10k guard), typeof, all 20 built-in utilities (Partial, Required, Readonly, Pick, Omit, Record, Extract, Exclude, NonNullable, ReturnType, Parameters, ConstructorParameters, InstanceType, Awaited, Uppercase, Lowercase, Capitalize, Uncapitalize, NoInfer).
+
+**Key files:**
+
+| File | Purpose |
+| --- | --- |
+| `crates/verter_semantic/src/analysis/type_solver/mod.rs` | Module root, re-exports |
+| `crates/verter_semantic/src/analysis/type_solver/arena.rs` | QueryArena (node store) + SolverCaches (memo tables) |
+| `crates/verter_semantic/src/analysis/type_solver/solve.rs` | Top-level `solve_type()` entry, `resolve_node`, operator resolution |
+| `crates/verter_semantic/src/analysis/type_solver/relate.rs` | Tri-state relation engine (zero-clone, reads via `&QueryArena`) |
+| `crates/verter_semantic/src/analysis/type_solver/host.rs` | `TypeSolverHost` trait, `ResolvedRootIdentity`, `EvalEnvSolverHost` |
+| `crates/verter_semantic/src/analysis/type_solver/lower.rs` | `TypeExpr → NodeId` lowering |
+| `crates/verter_semantic/src/analysis/type_solver/prepared.rs` | `PreparedTypeDecl`, `PreparedValueDecl` |
+| `crates/verter_semantic/src/analysis/type_solver/builtin.rs` | 20 built-in utility implementations |
+| `crates/verter_semantic/src/analysis/type_solver/project.rs` | member/keyspace/surface projections |
+| `crates/verter_semantic/src/analysis/type_solver/recursion.rs` | Tarjan SCC + RecursionTracker |
+| `crates/verter_session/src/resolver_core/solver_host.rs` | `SessionSolverHost` (bridges host caches to solver) |
+| `crates/verter_session/src/resolver_core/type_expansion_verter.rs` | `resolved_macro_to_expansion_via_solver()` (component-meta integration) |
+
+**Cutover status:** The solver is the sole type expansion authority. The legacy evaluator body (`EvalLookup`, `evaluate_with_lookup()`, `ImportedEvalLookup`, `ImportedDeclEvalResolver`, `ExpansionBudget`, budget retry logic) has been deleted. `type_eval.rs` now contains only symbol table types (`TypeDeclInfo`, `EvalEnv`, `TypeExpr`, etc.) and a convenience `evaluate()` function that delegates to `solve_type()` via `EvalEnvSolverHost`. The `type_expand/` module retains only `expand_macro_types()`, `expand_object_shape()`, and `expand_normalized_expr()` -- all of which take `&dyn TypeSolverHost` instead of the deleted budget/lookup parameters. The old 4-level `ImportedEval*` trait hierarchy has been flattened into a single `ImportedEvalResolver: DeclarationMetadataResolver` trait.
+
+### Type Evaluation Symbol Tables (`type_eval`)
+
+`verter_semantic::analysis::type_eval` contains the shared type-representation types and symbol tables used by the solver and analysis layers. The legacy evaluator body has been deleted -- all evaluation now goes through `type_solver`.
+
+- `TypeExpr` — recursive Arc-backed type representation (`Arc<TypeExpr>`, `Arc<[TypeExpr]>`, `Arc<ObjectExpr>`, `Arc<FunctionExpr>`). Clones stay shallow.
+- `EvalEnv` — per-file symbol table: `type_bindings` (generic params), `type_symbols` (named declarations). Stores `Arc<TypeExpr>` so generic instantiation does not re-copy subtrees.
+- `TypeDeclInfo` — declaration metadata (body, type params, span).
+- `evaluate()` — convenience wrapper that delegates to `solve_type()` via `EvalEnvSolverHost`. No longer contains evaluation logic itself.
 
 ### IDE Script Error Recovery
 

@@ -6829,6 +6829,133 @@ defineSlots<ButtonSlots>()
 }
 
 #[test]
+fn resolve_component_meta_does_not_publish_package_helpers_from_imported_local_registry_entries() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue/package.json".to_string(),
+        Arc::from(r#"{ "name": "vue", "types": "./dist/index.d.ts" }"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/dist/index.d.ts".to_string(),
+        Arc::from(
+            r#"
+export type Ref<T> = {
+  value: T
+}
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/helpers.ts".to_string(),
+        Arc::from(
+            r#"
+import type { Ref } from 'vue'
+
+export interface ImportedHelper {
+  current?: Ref<string>
+}
+"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    let project = MetaProject::new(host);
+    project
+        .upsert_base(
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ImportedHelper } from './helpers'
+
+defineProps<{
+  helper?: ImportedHelper
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./helpers".to_string(),
+            resolved_canonical_id: Some("/workspace/src/helpers.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/workspace/src/helpers.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/vue/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta(
+            "/workspace/src/App.vue",
+            crate::types::ResolverMode::Expanded,
+        )
+        .expect("resolved component meta should exist");
+
+    let published_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(
+        published_names.contains("ImportedHelper"),
+        "the directly imported helper should still publish, got {published_names:?}"
+    );
+    assert!(
+        !published_names.contains("Ref"),
+        "imported local registry entries should not recurse into package helper refs, got {published_names:?}"
+    );
+
+    let helper_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ImportedHelper")
+        .expect("ImportedHelper should stay published");
+    let TypeExpr::Object(helper_shape) = &helper_entry.type_expr else {
+        panic!(
+            "ImportedHelper should materialize as an object, got {:?}",
+            helper_entry.type_expr
+        );
+    };
+    let current_member = helper_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "current" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("ImportedHelper should keep a current member");
+    assert!(
+        matches!(current_member, TypeExpr::Ref { name, .. } if name.as_ref() == "Ref"),
+        "imported local registry entries should keep package-backed member refs symbolic, got {:?}",
+        current_member
+    );
+}
+
+#[test]
 fn resolve_component_meta_skips_unreferenced_owner_local_registry_helpers() {
     let project = make_project();
     project
@@ -9278,6 +9405,385 @@ defineSlots<ButtonSlots>()
         "resolved slot ui should expose label, got {:?}",
         ui_prop
     );
+}
+
+#[test]
+fn imported_non_exported_component_config_helpers_materialize_in_registry() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type VariantMap<T extends { variants: Record<string, any> }> = Id<{
+  [K in keyof T['variants']]: T['variants'][K]
+}>
+
+type SlotMap<T extends { slots: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]: T['slots'][K]
+}>
+
+export type ComponentConfig<T extends { variants: Record<string, any>; slots: Record<string, any> }> = {
+  variants: VariantMap<T>
+  slots: SlotMap<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"
+const theme: {
+  variants: {
+    color: 'primary' | 'neutral'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    base: string
+    label: string
+  }
+} = {
+  variants: {
+    color: 'primary',
+    size: 'sm',
+  },
+  slots: {
+    base: '',
+    label: '',
+  },
+}
+
+export default theme
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import theme from './theme'
+import type { ComponentConfig } from './types'
+
+type Button = ComponentConfig<typeof theme>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  size?: Button['variants']['size']
+  ui?: Button['slots']
+}
+</script>
+<template><button /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/src/index.ts", "export * from './Button.vue'\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps } from './index'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let snapshot = project
+        .host()
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", None)
+        .expect("app snapshot should exist");
+    let dep_resolutions = project
+        .host()
+        .dependency_resolutions_for_eval_in_view("/src/App.vue", None)
+        .expect("app dependency resolutions should exist");
+    let imported_inputs = project
+        .host()
+        .imported_eval_inputs_with_owner_context_in_view(
+            "/src/App.vue",
+            &snapshot,
+            &dep_resolutions,
+            None,
+            None,
+            None,
+        );
+    let imported_button_props_alias = imported_inputs
+        .type_aliases
+        .iter()
+        .find(|alias| alias.local_name == "ButtonProps")
+        .expect("imported inputs should contain ButtonProps alias");
+    let resolved_button_props_alias_body =
+        resolved_imported_alias_body(project.host(), imported_button_props_alias);
+    if std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some() {
+        eprintln!("RESOLVED_BUTTON_PROPS_ALIAS_BODY={resolved_button_props_alias_body:?}");
+    }
+    let TypeExpr::Object(resolved_button_props_object) = &resolved_button_props_alias_body else {
+        panic!(
+            "resolved imported ButtonProps alias should materialize to an object, got {resolved_button_props_alias_body:?}"
+        );
+    };
+    let resolved_button_color = resolved_button_props_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("resolved imported ButtonProps alias should expose color");
+    assert_union_string_literals(resolved_button_color, &["primary", "neutral"]);
+    let mut manual_owner_env = project
+        .host()
+        .base_eval_env_in_view("/src/App.vue", None)
+        .expect("App.vue base env should exist");
+    for dep_source in &imported_inputs.sources {
+        let dep_env = project
+            .host()
+            .base_eval_env_arc_in_view(dep_source.canonical_id.as_str(), None)
+            .expect("dep env should exist for imported eval source");
+        manual_owner_env.extend_missing_from_ref(dep_env.as_ref());
+    }
+    manual_owner_env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
+        name: "ButtonProps".to_string(),
+        declaration_id: 999,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+        type_parameters: Vec::new(),
+        body: resolved_button_props_alias_body.clone(),
+    });
+    let manual_button_props = manual_owner_env
+        .type_symbols
+        .get("ButtonProps")
+        .cloned()
+        .expect("manual owner env should contain ButtonProps");
+    let manual_evaluated_button_props = verter_semantic::analysis::type_eval::evaluate(
+        &manual_button_props.body,
+        &mut manual_owner_env,
+    );
+    let TypeExpr::Object(manual_button_props_object) = manual_evaluated_button_props else {
+        panic!(
+            "manual owner env should evaluate ButtonProps to an object, got {manual_evaluated_button_props:?}"
+        );
+    };
+    let manual_color = manual_button_props_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("manual owner env should expose color");
+    assert_union_string_literals(manual_color, &["primary", "neutral"]);
+    let button_snapshot = project
+        .host()
+        .get_raw_analysis_snapshot_in_view("/src/Button.vue", None)
+        .expect("button snapshot should exist");
+    let button_base_decl = project
+        .host()
+        .base_eval_env_in_view("/src/Button.vue", None)
+        .and_then(|env| env.type_symbols.get("ButtonProps").cloned())
+        .expect("ButtonProps should exist in Button.vue base env");
+    let mut imported_button_env = project
+        .host()
+        .build_cache_only_lookup_env_for_type_decl_in_view(
+            "/src/Button.vue",
+            &button_snapshot,
+            &button_base_decl,
+            &[],
+            None,
+        )
+        .expect("button shallow lookup env should exist");
+    if std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some() {
+        eprintln!(
+            "BUTTON_THEME_VALUE={:?}",
+            imported_button_env.value_symbols.get("theme")
+        );
+        eprintln!(
+            "BUTTON_PROPS_DECL={:?}",
+            imported_button_env.type_symbols.get("ButtonProps")
+        );
+    }
+    let button_props = imported_button_env
+        .type_symbols
+        .get("ButtonProps")
+        .cloned()
+        .expect("ButtonProps should exist in the Button.vue shallow lookup env");
+    let evaluated_button_props = verter_semantic::analysis::type_eval::evaluate(
+        &button_props.body,
+        &mut imported_button_env,
+    );
+    let TypeExpr::Object(button_props_object) = evaluated_button_props else {
+        panic!(
+            "ButtonProps should evaluate to an object in standalone meta host, got {evaluated_button_props:?}"
+        );
+    };
+    let button_color = button_props_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "color" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("ButtonProps should include color in standalone meta host");
+    assert_union_string_literals(button_color, &["primary", "neutral"]);
+    let button_size = button_props_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "size" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("ButtonProps should include size in standalone meta host");
+    assert_union_string_literals(button_size, &["sm", "md"]);
+    let parsed = verter_compiler::compile::parse_sfc(
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './index'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        None,
+        None,
+    );
+    let explicit_owner_eval_source = VerterHost::build_eval_script_source(
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './index'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        Some(&parsed),
+    );
+    let explicit_owner_env = project.host().base_eval_env_in_view("/src/App.vue", None);
+    let explicit_computed = project
+        .host()
+        .compute_evaluated_types_with_tracking_from_owner_context_in_view(
+            "/src/App.vue",
+            &snapshot,
+            &imported_inputs,
+            Some(explicit_owner_eval_source.as_str()),
+            explicit_owner_env,
+            None,
+        )
+        .expect("explicit owner-context evaluated-types should succeed");
+    let explicit_types = explicit_computed
+        .evaluated_types
+        .as_ref()
+        .expect("explicit owner-context should include defineProps output");
+    assert_union_string_literals(
+        evaluated_define_props_type(explicit_types, "color"),
+        &["primary", "neutral"],
+    );
+    assert_union_string_literals(
+        evaluated_define_props_type(explicit_types, "size"),
+        &["sm", "md"],
+    );
+    let computed = project
+        .host()
+        .compute_evaluated_types_with_tracking_from_owner_context_in_view(
+            "/src/App.vue",
+            &snapshot,
+            &imported_inputs,
+            None,
+            None,
+            None,
+        )
+        .expect("direct computed evaluated-types should succeed");
+    let direct_types = computed
+        .evaluated_types
+        .as_ref()
+        .expect("direct evaluated-types should include defineProps output");
+    assert_union_string_literals(
+        evaluated_define_props_type(direct_types, "color"),
+        &["primary", "neutral"],
+    );
+    assert_union_string_literals(
+        evaluated_define_props_type(direct_types, "size"),
+        &["sm", "md"],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("should resolve component meta state");
+    if std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some() {
+        let button_decl = project
+            .host()
+            .base_eval_env_in_view("/src/Button.vue", None)
+            .and_then(|env| env.type_symbols.get("Button").cloned())
+            .expect("Button should exist in the imported file eval env");
+        eprintln!("BUTTON_DECL={:?}", button_decl.body);
+    }
+    let types = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded component-meta state should carry evaluated types");
+    assert_union_string_literals(
+        evaluated_define_props_type(types, "color"),
+        &["primary", "neutral"],
+    );
+    assert_union_string_literals(evaluated_define_props_type(types, "size"), &["sm", "md"]);
+
+    let ui_prop = evaluated_define_props_type(types, "ui");
+    let TypeExpr::Object(ui_shape) = ui_prop else {
+        panic!(
+            "ui prop should resolve to a concrete object, got {:?}",
+            ui_prop
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "resolved ui prop should expose base, got {:?}",
+        ui_prop
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "resolved ui prop should expose label, got {:?}",
+        ui_prop
+    );
+
+    if let Some(button_entry) = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+    {
+        let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+            panic!(
+                "Button helper should materialize as an object when published, got {:?}",
+                button_entry.type_expr
+            );
+        };
+        let variants_prop = button_shape
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "variants" => {
+                    Some(&property.ty)
+                }
+                _ => None,
+            })
+            .expect("published Button helper should include variants");
+        let TypeExpr::Object(variants_shape) = variants_prop else {
+            panic!(
+                "published Button helper variants should materialize as an object, got {:?}",
+                variants_prop
+            );
+        };
+        let color_prop = variants_shape
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("published Button helper variants should include color");
+        assert_union_string_literals(color_prop, &["primary", "neutral"]);
+    }
 }
 
 #[test]

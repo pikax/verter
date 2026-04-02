@@ -1,5 +1,5 @@
 #![allow(clippy::too_many_arguments)]
-//! # verter_session — In-memory virtual file host for Vue SFC compilation
+//! # verter_session â€” In-memory virtual file host for Vue SFC compilation
 //!
 //! Manages the lifecycle of Vue Single File Components in a stateful,
 //! in-memory store. Each `.vue` file (or non-SFC dependency) is parsed,
@@ -15,20 +15,20 @@
 //!
 //! ## Dependencies
 //!
-//! - **`verter_workspace`** — sole authority for file access and import resolution
-//! - **`verter_compiler`** — SFC tokenizer, parser, and template/script/style codegen
-//! - **`verter_semantic::analysis`** — static analysis (imports, bindings, macros, style analysis)
+//! - **`verter_workspace`** â€” sole authority for file access and import resolution
+//! - **`verter_compiler`** â€” SFC tokenizer, parser, and template/script/style codegen
+//! - **`verter_semantic::analysis`** â€” static analysis (imports, bindings, macros, style analysis)
 //!
 //! ## Key types
 //!
 //! | Type | Purpose |
 //! |------|---------|
-//! | [`VerterHost`] | Main entry point — owns the file store and compile cache |
+//! | [`VerterHost`] | Main entry point â€” owns the file store and compile cache |
 //! | [`HostConfig`] | Per-host configuration (dev mode, error policy, analysis level) |
 //! | [`CompileProfile`] | Per-compilation variant (production, SSR, HMR strategy, etc.) |
-//! | [`HostUpdateResult`] | Result of [`VerterHost::upsert`] — lists changed/removed virtual nodes |
-//! | [`VirtualFileResponse`] | Result of [`VerterHost::get_virtual_file`] — compiled code + metadata |
-//! | [`ResolvedId`] | Result of [`VerterHost::resolve`] — canonical + virtual IDs |
+//! | [`HostUpdateResult`] | Result of [`VerterHost::upsert`] â€” lists changed/removed virtual nodes |
+//! | [`VirtualFileResponse`] | Result of [`VerterHost::get_virtual_file`] â€” compiled code + metadata |
+//! | [`ResolvedId`] | Result of [`VerterHost::resolve`] â€” canonical + virtual IDs |
 //!
 //! ## Caching
 //!
@@ -40,14 +40,14 @@
 //!
 //! ## Internal modules
 //!
-//! - [`cache`] — virtual node diffing, compile slot invalidation, LRU eviction
-//! - [`compile`] — external source merging, main module assembly
-//! - [`deps`] — dependency tracking, tiered smart invalidation
-//! - [`hash`] — xxh3-based content hashing, profile hashing, semantic hashing
-//! - [`id`] — canonical ID normalization, virtual ID rendering, import resolution
-//! - [`parse`] — SFC tokenization → [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
-//! - [`shared`] — feature-gated `RwLock`/`RefCell` abstraction
-//! - [`upsert`] — change detection, result building, export signature diffing
+//! - [`cache`] â€” virtual node diffing, compile slot invalidation, LRU eviction
+//! - [`compile`] â€” external source merging, main module assembly
+//! - [`deps`] â€” dependency tracking, tiered smart invalidation
+//! - [`hash`] â€” xxh3-based content hashing, profile hashing, semantic hashing
+//! - [`id`] â€” canonical ID normalization, virtual ID rendering, import resolution
+//! - [`parse`] â€” SFC tokenization â†’ [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
+//! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
+//! - [`upsert`] â€” change detection, result building, export signature diffing
 
 mod cache;
 mod compile;
@@ -209,11 +209,11 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
     pub external_type_analysis:
         Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
-    /// Canonical shallow type file state — the authoritative symbol/export
+    /// Canonical shallow type file state â€” the authoritative symbol/export
     /// surface for this imported file.  Populated through the shared host
     /// ensure-path and reused by component-meta, LSP, MCP, and other
     /// host-backed consumers.
-    pub shallow_type_state: Option<Arc<crate::resolver_core::ShallowTypeFileState>>,
+    pub shallow_file_state: Option<Arc<crate::resolver_core::ShallowFileState>>,
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
     pub eval_source: Option<Arc<str>>,
     pub env: Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
@@ -223,10 +223,16 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub resolved_type_roots: rustc_hash::FxHashMap<String, ImportedTypeRootCacheEntry>,
     pub resolved_type_declarations:
         rustc_hash::FxHashMap<String, crate::resolver_core::ResolvedTypeDeclaration>,
+    pub prepared_type_decls: rustc_hash::FxHashMap<
+        String,
+        Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
+    >,
+    pub prepared_value_decls: rustc_hash::FxHashMap<
+        String,
+        Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
+    >,
     pub prepared_type_aliases:
         rustc_hash::FxHashMap<String, crate::resolver_core::CachedPreparedImportedTypeAlias>,
-    pub evaluated_type_decls:
-        rustc_hash::FxHashMap<String, crate::resolver_core::CachedEvaluatedImportedDecl>,
     pub dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
 }
 
@@ -242,9 +248,9 @@ pub(crate) struct ImportedTypeRootCacheEntry {
 /// compile slots. It is designed to be long-lived (one per Vite dev server or
 /// WASM session) and provides the full upsert-resolve-load lifecycle:
 ///
-/// 1. [`upsert`](Self::upsert) — parse and store a file, returning change info
-/// 2. [`resolve`](Self::resolve) — map a raw import ID to canonical + virtual IDs
-/// 3. [`get_virtual_file`](Self::get_virtual_file) — compile on demand (or cache hit) and return code
+/// 1. [`upsert`](Self::upsert) â€” parse and store a file, returning change info
+/// 2. [`resolve`](Self::resolve) â€” map a raw import ID to canonical + virtual IDs
+/// 3. [`get_virtual_file`](Self::get_virtual_file) â€” compile on demand (or cache hit) and return code
 ///
 /// Internal state is protected by `RwLock` for thread-safe concurrent access.
 pub struct VerterHost {
@@ -272,9 +278,9 @@ pub struct VerterHost {
     pub(crate) metrics: HostMetrics,
     /// Scheduler for async per-file staging.
     ///
-    /// The scheduler coordinates Source→Analysis→Artifact progression
+    /// The scheduler coordinates Sourceâ†’Analysisâ†’Artifact progression
     /// with generation tracking, priority queuing, and blocker management.
-    /// It is the sole parser — upsert() delegates to the scheduler.
+    /// It is the sole parser â€” upsert() delegates to the scheduler.
     #[cfg(feature = "scheduler")]
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
     /// Per-file compile cache: overrides, compile slots, diagnostics, deps.
@@ -427,7 +433,7 @@ impl VerterHost {
     /// Set the query profile for this session.
     ///
     /// Query profiles control prewarming, budgets, and allowed query families.
-    /// They do not change the semantic meaning of results — only execution policy.
+    /// They do not change the semantic meaning of results â€” only execution policy.
     pub fn set_query_profile(&self, profile: verter_semantic::profile::QueryProfile) {
         *self.query_profile.lock() = profile;
     }
@@ -452,7 +458,7 @@ impl VerterHost {
     ///
     /// Extracts the declared surface from the file's script analysis,
     /// caches it in the semantic DB, and returns a `QueryResult`.
-    /// Cross-file fallthrough is not resolved at this layer — the returned
+    /// Cross-file fallthrough is not resolved at this layer â€” the returned
     /// accepted surface equals the declared surface.
     pub fn semantic_component_surface(
         &self,
@@ -811,7 +817,7 @@ impl VerterHost {
         self.ws().preferred_specifier(importer_id, target_id)
     }
 
-    // ── effective_* helpers: override-aware state for compile-path consumers ──
+    // â”€â”€ effective_* helpers: override-aware state for compile-path consumers â”€â”€
 
     /// Override-aware file state for a profile.
     ///
@@ -1008,7 +1014,7 @@ impl VerterHost {
     /// Clear compile caches (compile slots, template analysis, type hashes)
     /// without removing files from the scheduler or alias maps.
     ///
-    /// This is a lighter operation than [`close`](Self::close) — parsed source
+    /// This is a lighter operation than [`close`](Self::close) â€” parsed source
     /// and analysis snapshots are preserved, only per-profile compile results
     /// are flushed. Useful for invalidating stale compile results while keeping
     /// the file set intact.
@@ -1194,7 +1200,7 @@ impl VerterHost {
     /// Get the scheduler's source snapshot for a file (scheduler feature only).
     ///
     /// Returns `None` if the file hasn't been upserted or the snapshot is stale.
-    /// This is a lock-free ArcSwap read — no contention with upsert/compile.
+    /// This is a lock-free ArcSwap read â€” no contention with upsert/compile.
     #[cfg(feature = "scheduler")]
     pub fn scheduler_source(
         &self,
@@ -1214,7 +1220,7 @@ impl VerterHost {
 
     /// Get export signatures from the scheduler's analysis snapshot.
     ///
-    /// This is the lock-free read path — returns data from the scheduler's
+    /// This is the lock-free read path â€” returns data from the scheduler's
     /// ArcSwap snapshots without touching the `files` RwLock.
     #[cfg(feature = "scheduler")]
     pub fn scheduler_export_signatures(
@@ -1291,7 +1297,7 @@ impl VerterHost {
     ///
     /// Used by `did_close` to discard the editor-buffer version. Unlike
     /// `remove()`, this does NOT clean up aliases, reverse deps, or VFS
-    /// state — the file still exists on disk, it just needs a fresh parse.
+    /// state â€” the file still exists on disk, it just needs a fresh parse.
     ///
     /// On the scheduler path, sets `evicted = true` and clears profile state
     /// (compile_slots, overrides, diagnostics) but preserves deps/aliases for
@@ -1364,7 +1370,7 @@ impl VerterHost {
                 self.scheduler.close_file(canonical_id);
             }
 
-            // Submit to scheduler — it loads via WorkspaceSourceLoader
+            // Submit to scheduler â€” it loads via WorkspaceSourceLoader
             let handle = self
                 .scheduler
                 .submit_request(verter_scheduler::scheduler::Request {

@@ -158,6 +158,49 @@ assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl
 
 26 behavioral invariant tests for `ExternalTypeFrontier` and `ShallowTypeFileState`. Uses `MockHost` (in-memory `FrontierHost` impl) for isolated testing. Covers: diamond dedup, barrel ordering (declared-order wildcard precedence), same-file local closure, cycle termination, warm cache reuse, budget enforcement, export routing (direct > alias > wildcard), and store-view consistency. Run with `cargo test --package verter_session frontier_tests`.
 
+### Component-Meta Chronic Hang Sweep
+
+Use the repository-owned `nuxt-ui` benchmark path when touching `component-meta` expansion, imported-type traversal, or runtime-value collection hot paths.
+
+Quick smoke test:
+
+```bash
+cargo build --package verter_napi
+cp target/debug/verter_napi.dll packages/native/dist/verter-native.win32-x64-msvc.node
+cd packages/benchmark
+node --expose-gc --import tsx -e "
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
+import { loadVerterCompatModule } from './src/verter-compat.js';
+const uiRoot = resolve('../../.integration-tests/repos/nuxt-ui');
+const file = resolve(uiRoot, 'src/runtime/components/ContextMenuContent.vue').replace(/\\\\/g, '/');
+const compat = await loadVerterCompatModule();
+const checker = await compat.createCheckerByJson(uiRoot.replace(/\\\\/g, '/'), {
+  compilerOptions: { strict: true, jsx: 'preserve' },
+}, { forceUseTs: true, runtimeMode: 'dedicated', typeExpansionBackend: 'verter' });
+checker.updateFile(file, readFileSync(file.replace(/\\//g, '\\\\'), 'utf-8'));
+const t0 = performance.now();
+const meta = await checker.getComponentMeta(file);
+console.log(Math.round(performance.now() - t0) + 'ms', meta?.props?.length + ' props');
+checker.close();
+"
+```
+
+Full sweep:
+
+```bash
+cd packages/benchmark
+for comp in ContextMenuContent DatePicker Dialog DrawerContent HoverCard \
+  HoverCardContent Menubar MenubarContent NavigationMenuContent PopoverContent \
+  SelectContent Sheet SheetContent SlideoverContent StepperContent TabsContent \
+  Toast TooltipContent; do
+  echo -n "$comp: "
+  node --expose-gc --import tsx src/_trace-component.ts "$comp"
+done
+```
+
+`src/_trace-component.ts` resolves benchmark component tokens to the owning Vue file, including content-style aliases such as `DrawerContent -> Drawer.vue` and `Dialog -> Modal.vue`. The acceptance target is no hangs and sub-10s completion per component.
+
 ### Testing Strategy
 
 - **Unit tests**: Test individual plugins with minimal SFC snippets

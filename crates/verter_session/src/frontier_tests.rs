@@ -2,7 +2,7 @@
 //!
 //! These tests lock the desired behavior *before* the frontier/shallow-state
 //! implementation lands.  Tests that rely on new public API are `#[ignore]`
-//! until Phases 1–3 provide them.
+//! until Phases 1â€“3 provide them.
 //!
 //! Invariants under test:
 //! - Each canonical imported file is loaded/parsed at most once per request.
@@ -82,7 +82,7 @@ fn resolve_type(
     .expect("resolution should not error")
 }
 
-/// CountingWorkspace — thin wrapper over MemoryWorkspace that counts reads.
+/// CountingWorkspace â€” thin wrapper over MemoryWorkspace that counts reads.
 struct CountingWorkspace {
     inner: Arc<verter_workspace::MemoryWorkspace>,
     read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
@@ -347,7 +347,7 @@ defineProps<Left & Right>()
     let result = resolve_type(&host, "/workspace/src/Consumer.vue", "lib", "Left");
     assert!(result.is_some(), "Left should resolve");
 
-    // Now resolve Right — shared.d.ts should already be cached
+    // Now resolve Right â€” shared.d.ts should already be cached
     let result2 = resolve_type(&host, "/workspace/src/Consumer.vue", "lib", "Right");
     assert!(result2.is_some(), "Right should resolve");
 
@@ -504,7 +504,7 @@ defineProps<Props>()
         "Props should resolve through same-file chain"
     );
 
-    // The provenance should show zero cycle detections — same-file deps
+    // The provenance should show zero cycle detections â€” same-file deps
     // should not appear as external cycles
     let p = host.provenance().snapshot();
     assert_eq!(
@@ -1026,7 +1026,7 @@ defineProps<Props>()
 }
 
 // ===========================================================================
-// V2 + V3: Barrel with sibling wildcards — at most one full scan per request
+// V2 + V3: Barrel with sibling wildcards â€” at most one full scan per request
 // ===========================================================================
 
 /// A barrel with many sibling wildcard sources should not re-scan already-
@@ -1235,7 +1235,7 @@ defineProps<Alpha & Beta>()
     assert!(alpha.is_some(), "Alpha should resolve");
     assert!(beta.is_some(), "Beta should resolve");
 
-    // shared.d.ts is a companion to both Alpha and Beta — it must be loaded at most once
+    // shared.d.ts is a companion to both Alpha and Beta â€” it must be loaded at most once
     let shared_reads = ws.read_count("/workspace/node_modules/lib/dist/shared.d.ts");
     assert!(
         shared_reads <= 1,
@@ -1302,13 +1302,13 @@ defineProps<Props>()
 }
 
 // ===========================================================================
-// Phase 1: ShallowTypeFileState host integration tests
+// Phase 1: ShallowFileState host integration tests
 // ===========================================================================
 
 /// After upserting and loading an imported dependency, the host should
 /// populate and cache the shallow type file state.
 #[test]
-fn shallow_type_state_populated_after_imported_dependency_load() {
+fn shallow_file_state_populated_after_imported_dependency_load() {
     let host = strict_host();
 
     upsert_non_sfc(
@@ -1333,7 +1333,7 @@ defineProps<Props>()
     let _result = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
 
     // The shallow type state should now be available from the host
-    let shallow = host.shallow_type_state_in_view("/src/types.ts", None);
+    let shallow = host.shallow_file_state_in_view("/src/types.ts", None);
     assert!(
         shallow.is_some(),
         "shallow type state should be populated after imported dependency load"
@@ -1356,7 +1356,7 @@ defineProps<Props>()
 
 /// The shallow type state should capture reexport routing correctly.
 #[test]
-fn shallow_type_state_captures_reexport_routes() {
+fn shallow_file_state_captures_reexport_routes() {
     let host = strict_host();
 
     upsert_non_sfc(
@@ -1398,7 +1398,7 @@ defineProps<Props>()
     // Trigger resolution to load the barrel
     let _result = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
 
-    let shallow = host.shallow_type_state_in_view("/src/barrel.ts", None);
+    let shallow = host.shallow_file_state_in_view("/src/barrel.ts", None);
     assert!(
         shallow.is_some(),
         "barrel shallow state should be populated"
@@ -1432,7 +1432,7 @@ defineProps<Props>()
 /// The shallow type state is hash-keyed: after content changes, the old
 /// state should be invalidated and a new one built.
 #[test]
-fn shallow_type_state_invalidated_on_content_change() {
+fn shallow_file_state_invalidated_on_content_change() {
     let host = strict_host();
 
     upsert_non_sfc(
@@ -1454,7 +1454,7 @@ defineProps<Props>()
     let _result = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
 
     let state1 = host
-        .shallow_type_state_in_view("/src/types.ts", None)
+        .shallow_file_state_in_view("/src/types.ts", None)
         .expect("state should exist");
     let hash1 = state1.whole_hash;
 
@@ -1468,13 +1468,66 @@ defineProps<Props>()
     let _result2 = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
 
     let state2 = host
-        .shallow_type_state_in_view("/src/types.ts", None)
+        .shallow_file_state_in_view("/src/types.ts", None)
         .expect("state should exist after update");
 
     // The hash should have changed
     assert_ne!(
         hash1, state2.whole_hash,
         "whole_hash should change after content update"
+    );
+}
+
+#[test]
+fn imported_dependency_cache_populates_prepared_decl_maps() {
+    let host = strict_host();
+
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+export interface Props { label: string }
+export const defaults: Props = { label: 'ok' }
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    set_dep(&host, "/src/Consumer.vue", "./types", "/src/types.ts");
+
+    let _ = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
+    let prepared_type = host.prepared_type_decl_in_view("/src/types.ts", "Props", None);
+    let prepared_value = host.prepared_value_decl_in_view("/src/types.ts", "defaults", None);
+
+    assert!(
+        prepared_type.is_some(),
+        "prepared type decl should materialize on demand"
+    );
+    assert!(
+        prepared_value.is_some(),
+        "prepared value decl should materialize on demand"
+    );
+
+    let cached = host
+        .imported_dependency_cache
+        .lock()
+        .get("/src/types.ts")
+        .cloned()
+        .expect("imported dependency entry should exist");
+
+    assert!(
+        cached.prepared_type_decls.contains_key("Props"),
+        "prepared type declarations should be cached on the imported dependency entry"
+    );
+    assert!(
+        cached.prepared_value_decls.contains_key("defaults"),
+        "prepared value declarations should be cached on the imported dependency entry"
     );
 }
 
@@ -1596,7 +1649,7 @@ defineProps<Props>()
 }
 
 // ===========================================================================
-// Hang isolation tests — reproduce Accordion hang with minimal fixtures
+// Hang isolation tests â€” reproduce Accordion hang with minimal fixtures
 // ===========================================================================
 
 /// Test 1: Resolve a complex union type (simulating Vue's `Component`) from
@@ -1638,7 +1691,7 @@ defineProps<{ comp: Component }>()
         "/src/runtime-core.d.ts",
     );
 
-    // This must not hang — if it returns within the test timeout, the test passes
+    // This must not hang â€” if it returns within the test timeout, the test passes
     let result = resolve_type(&host, "/src/Consumer.vue", "./runtime-core", "Component");
     // Component is a complex union, resolution may or may not produce props
     let _ = result;
@@ -1693,7 +1746,7 @@ defineEmits<AccordionRootEmits>()
     assert!(result.is_some(), "AccordionRootProps should resolve");
 }
 
-/// Test 3: Simulate the full Accordion pattern — a type from file A that
+/// Test 3: Simulate the full Accordion pattern â€” a type from file A that
 /// has symbol_dependencies pointing to types in file B (runtime-core),
 /// where file B has a complex `Component` type.
 #[test]
@@ -1763,7 +1816,7 @@ defineEmits<AccordionRootEmits>()
     );
 }
 
-/// Test 4a: Scale test — a type file with many inter-dependent types
+/// Test 4a: Scale test â€” a type file with many inter-dependent types
 /// simulating reka-ui's index3.d.ts (1000+ types). Tests whether
 /// imported_symbol_dependencies hangs at scale.
 #[test]
@@ -2068,7 +2121,7 @@ defineEmits<AccordionRootEmits>()
         "/node_modules/@vue/runtime-core.d.ts",
     );
 
-    // Full component-meta resolution — this is the path that hangs on real nuxt-ui
+    // Full component-meta resolution â€” this is the path that hangs on real nuxt-ui
     let meta =
         host.resolve_component_meta("/src/Accordion.vue", crate::types::ResolverMode::Expanded);
     assert!(meta.is_some(), "Accordion component-meta should resolve");

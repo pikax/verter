@@ -55,6 +55,16 @@ pub struct ImportedEvalOverflow {
 }
 
 #[derive(Debug, Clone)]
+pub struct ImportedTypeAliasResolveRequest {
+    pub owner_canonical_id: String,
+    pub import_source: String,
+    pub local_name: String,
+    pub imported_name: String,
+    pub source_canonical_id: String,
+    pub exported_name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ComputedEvaluatedTypes {
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     pub discovered_dependencies: BTreeSet<String>,

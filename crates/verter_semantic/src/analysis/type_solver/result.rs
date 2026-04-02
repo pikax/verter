@@ -1,0 +1,404 @@
+//! Solver result types: exactness model, execution status, and relation outcomes.
+//!
+//! These types replace the old `Exact | LowerBound | OpaqueFallback` completion
+//! model with a semantically richer three-way exactness distinction plus
+//! separate operational status tracking.
+
+use std::fmt;
+
+// ---------------------------------------------------------------------------
+// Exactness
+// ---------------------------------------------------------------------------
+
+/// Semantic exactness of a solver result.
+///
+/// - `ExactConcrete`: fully materialized finite result.
+/// - `ExactSymbolic`: exact but not finitely materialized (e.g. `Record<string, T>`,
+///   open mapped types, recursive type identities).
+/// - `Incomplete`: missing source, unsupported syntax, cancelled request, or
+///   hard recursion-policy stop.
+///
+/// Important: "infinite keyspace" is `ExactSymbolic`, not `Incomplete`.
+/// "Operator stayed symbolic" is `ExactSymbolic` if the symbolic form is exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SolverExactness {
+    ExactConcrete,
+    ExactSymbolic,
+    Incomplete,
+}
+
+impl SolverExactness {
+    /// Returns `true` if the result is exact (concrete or symbolic).
+    pub fn is_exact(self) -> bool {
+        matches!(self, Self::ExactConcrete | Self::ExactSymbolic)
+    }
+
+    /// Merge two exactness values — the result is the "least exact" of the two.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Incomplete, _) | (_, Self::Incomplete) => Self::Incomplete,
+            (Self::ExactSymbolic, _) | (_, Self::ExactSymbolic) => Self::ExactSymbolic,
+            (Self::ExactConcrete, Self::ExactConcrete) => Self::ExactConcrete,
+        }
+    }
+}
+
+impl fmt::Display for SolverExactness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExactConcrete => write!(f, "ExactConcrete"),
+            Self::ExactSymbolic => write!(f, "ExactSymbolic"),
+            Self::Incomplete => write!(f, "Incomplete"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Execution status
+// ---------------------------------------------------------------------------
+
+/// Operational status of a solver query, tracked separately from semantic
+/// exactness.
+///
+/// This prevents operational interruption from being modeled as a semantic
+/// approximation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExecutionStatus {
+    /// Query completed normally within all operational guards.
+    Completed,
+    /// Query was cancelled by the caller (e.g. request timeout).
+    Cancelled,
+    /// Query was interrupted by an operational guard (e.g. instantiation depth).
+    Interrupted,
+    /// Query hit a deterministic hard stop (e.g. template literal explosion).
+    HardStop,
+}
+
+impl ExecutionStatus {
+    pub fn is_completed(self) -> bool {
+        self == Self::Completed
+    }
+}
+
+impl fmt::Display for ExecutionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Completed => write!(f, "Completed"),
+            Self::Cancelled => write!(f, "Cancelled"),
+            Self::Interrupted => write!(f, "Interrupted"),
+            Self::HardStop => write!(f, "HardStop"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incomplete reason
+// ---------------------------------------------------------------------------
+
+/// Why a solver result is `Incomplete`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncompleteReason {
+    /// Source file not available for the required declaration.
+    MissingSource {
+        canonical_id: String,
+        symbol_name: String,
+    },
+    /// Syntax or operator not yet implemented in the solver.
+    UnsupportedSyntax { description: String },
+    /// Request was externally cancelled.
+    Cancelled,
+    /// Recursion policy hard stop — the recursive group requires a solver
+    /// feature not yet implemented or convergence cannot be represented.
+    RecursionPolicy { description: String },
+}
+
+impl fmt::Display for IncompleteReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingSource {
+                canonical_id,
+                symbol_name,
+            } => write!(f, "missing source: {}::{}", canonical_id, symbol_name),
+            Self::UnsupportedSyntax { description } => {
+                write!(f, "unsupported: {}", description)
+            }
+            Self::Cancelled => write!(f, "cancelled"),
+            Self::RecursionPolicy { description } => {
+                write!(f, "recursion policy: {}", description)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Solver result wrapper
+// ---------------------------------------------------------------------------
+
+/// Complete solver result: value + exactness + execution status + optional
+/// incomplete reasons.
+#[derive(Debug, Clone)]
+pub struct SolverResult<T> {
+    pub value: T,
+    pub exactness: SolverExactness,
+    pub execution_status: ExecutionStatus,
+    pub incomplete_reasons: Vec<IncompleteReason>,
+}
+
+impl<T> SolverResult<T> {
+    /// Create a fully exact concrete result.
+    pub fn exact_concrete(value: T) -> Self {
+        Self {
+            value,
+            exactness: SolverExactness::ExactConcrete,
+            execution_status: ExecutionStatus::Completed,
+            incomplete_reasons: Vec::new(),
+        }
+    }
+
+    /// Create an exact symbolic result.
+    pub fn exact_symbolic(value: T) -> Self {
+        Self {
+            value,
+            exactness: SolverExactness::ExactSymbolic,
+            execution_status: ExecutionStatus::Completed,
+            incomplete_reasons: Vec::new(),
+        }
+    }
+
+    /// Create an incomplete result.
+    pub fn incomplete(value: T, reason: IncompleteReason) -> Self {
+        Self {
+            value,
+            exactness: SolverExactness::Incomplete,
+            execution_status: ExecutionStatus::Completed,
+            incomplete_reasons: vec![reason],
+        }
+    }
+
+    /// Create an incomplete result due to hard stop.
+    pub fn hard_stop(value: T, reason: IncompleteReason) -> Self {
+        Self {
+            value,
+            exactness: SolverExactness::Incomplete,
+            execution_status: ExecutionStatus::HardStop,
+            incomplete_reasons: vec![reason],
+        }
+    }
+
+    /// Map the value while preserving metadata.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SolverResult<U> {
+        SolverResult {
+            value: f(self.value),
+            exactness: self.exactness,
+            execution_status: self.execution_status,
+            incomplete_reasons: self.incomplete_reasons,
+        }
+    }
+
+    /// Merge metadata from another result (keeps the "least exact" status).
+    pub fn merge_status<U>(&mut self, other: &SolverResult<U>) {
+        self.exactness = self.exactness.merge(other.exactness);
+        if other.execution_status != ExecutionStatus::Completed {
+            self.execution_status = other.execution_status;
+        }
+        self.incomplete_reasons
+            .extend(other.incomplete_reasons.iter().cloned());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relation result
+// ---------------------------------------------------------------------------
+
+/// Tri-state relation result. Replaces scattered boolean assignability helpers.
+///
+/// Used by:
+/// - conditional resolution
+/// - `infer` binding
+/// - object/function compatibility
+/// - generic instantiation decisions
+/// - union/intersection simplification
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelationResult {
+    Assignable,
+    NotAssignable,
+    Unknown,
+}
+
+impl RelationResult {
+    /// Logical AND: both must be `Assignable` for the result to be `Assignable`.
+    /// If either is `Unknown`, result is `Unknown`.
+    pub fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::NotAssignable, _) | (_, Self::NotAssignable) => Self::NotAssignable,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Assignable, Self::Assignable) => Self::Assignable,
+        }
+    }
+
+    /// Logical OR: if either is `Assignable`, result is `Assignable`.
+    pub fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Assignable, _) | (_, Self::Assignable) => Self::Assignable,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::NotAssignable, Self::NotAssignable) => Self::NotAssignable,
+        }
+    }
+
+    /// Negate: `Assignable` ↔ `NotAssignable`, `Unknown` stays `Unknown`.
+    pub fn negate(self) -> Self {
+        match self {
+            Self::Assignable => Self::NotAssignable,
+            Self::NotAssignable => Self::Assignable,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl fmt::Display for RelationResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Assignable => write!(f, "Assignable"),
+            Self::NotAssignable => write!(f, "NotAssignable"),
+            Self::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relation mode
+// ---------------------------------------------------------------------------
+
+/// Which relation check to perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelationMode {
+    /// `A` is assignable to `B` — the standard TypeScript assignability check.
+    Assignable,
+    /// Strict subtype (not currently distinguished from Assignable in the
+    /// initial implementation, but reserved for future refinement).
+    Subtype,
+}
+
+// ---------------------------------------------------------------------------
+// Keyspace
+// ---------------------------------------------------------------------------
+
+/// The keyspace of a type — the set of keys it accepts for indexing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Keyspace {
+    /// Finite enumerable key set.
+    Finite(Vec<String>),
+    /// Open domain (e.g. `string`, `number`, or `symbol` index signatures).
+    Open,
+    /// Empty keyspace — `never` or `{}`.
+    Empty,
+}
+
+impl Keyspace {
+    pub fn is_finite(&self) -> bool {
+        matches!(self, Self::Finite(_))
+    }
+
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Open)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exactness_merge_picks_least_exact() {
+        assert_eq!(
+            SolverExactness::ExactConcrete.merge(SolverExactness::ExactConcrete),
+            SolverExactness::ExactConcrete
+        );
+        assert_eq!(
+            SolverExactness::ExactConcrete.merge(SolverExactness::ExactSymbolic),
+            SolverExactness::ExactSymbolic
+        );
+        assert_eq!(
+            SolverExactness::ExactSymbolic.merge(SolverExactness::Incomplete),
+            SolverExactness::Incomplete
+        );
+        assert_eq!(
+            SolverExactness::ExactConcrete.merge(SolverExactness::Incomplete),
+            SolverExactness::Incomplete
+        );
+    }
+
+    #[test]
+    fn exactness_is_exact() {
+        assert!(SolverExactness::ExactConcrete.is_exact());
+        assert!(SolverExactness::ExactSymbolic.is_exact());
+        assert!(!SolverExactness::Incomplete.is_exact());
+    }
+
+    #[test]
+    fn relation_result_and_logic() {
+        use RelationResult::*;
+        assert_eq!(Assignable.and(Assignable), Assignable);
+        assert_eq!(Assignable.and(NotAssignable), NotAssignable);
+        assert_eq!(Assignable.and(Unknown), Unknown);
+        assert_eq!(NotAssignable.and(Unknown), NotAssignable);
+    }
+
+    #[test]
+    fn relation_result_or_logic() {
+        use RelationResult::*;
+        assert_eq!(Assignable.or(NotAssignable), Assignable);
+        assert_eq!(NotAssignable.or(NotAssignable), NotAssignable);
+        assert_eq!(NotAssignable.or(Unknown), Unknown);
+        assert_eq!(Assignable.or(Unknown), Assignable);
+    }
+
+    #[test]
+    fn relation_result_negate() {
+        assert_eq!(
+            RelationResult::Assignable.negate(),
+            RelationResult::NotAssignable
+        );
+        assert_eq!(
+            RelationResult::NotAssignable.negate(),
+            RelationResult::Assignable
+        );
+        assert_eq!(RelationResult::Unknown.negate(), RelationResult::Unknown);
+    }
+
+    #[test]
+    fn solver_result_map_preserves_metadata() {
+        let result = SolverResult::exact_symbolic(42);
+        let mapped = result.map(|x| x.to_string());
+        assert_eq!(mapped.value, "42");
+        assert_eq!(mapped.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(mapped.execution_status, ExecutionStatus::Completed);
+    }
+
+    #[test]
+    fn solver_result_merge_status_picks_worst() {
+        let mut a = SolverResult::exact_concrete(1);
+        let b = SolverResult::incomplete(
+            2,
+            IncompleteReason::MissingSource {
+                canonical_id: "foo".into(),
+                symbol_name: "Bar".into(),
+            },
+        );
+        a.merge_status(&b);
+        assert_eq!(a.exactness, SolverExactness::Incomplete);
+        assert_eq!(a.incomplete_reasons.len(), 1);
+    }
+
+    #[test]
+    fn keyspace_predicates() {
+        assert!(Keyspace::Finite(vec!["a".into()]).is_finite());
+        assert!(!Keyspace::Finite(vec![]).is_open());
+        assert!(Keyspace::Open.is_open());
+        assert!(!Keyspace::Empty.is_finite());
+    }
+}

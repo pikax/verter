@@ -1,4 +1,4 @@
-//! `impl VerterHost` — resolve and virtual file retrieval methods.
+//! `impl VerterHost` â€” resolve and virtual file retrieval methods.
 //!
 //! Contains [`VerterHost::resolve`], [`VerterHost::get_virtual_file`],
 //! [`VerterHost::list_virtual_files`], and the internal [`VerterHost::compile_entry`]
@@ -1809,6 +1809,7 @@ impl VerterHost {
         })?;
         let _ =
             self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
+        #[cfg(test)]
         let _ = self.ensure_export_registry_in_view(result.0.as_str(), store_view);
         component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
@@ -2149,7 +2150,7 @@ impl VerterHost {
 
         self.hydrate_compile_blockers(&canonical);
 
-        // Cache miss — compile by requesting the Main virtual file.
+        // Cache miss â€” compile by requesting the Main virtual file.
         // This populates ALL cached outputs (script, template, styles, TSX, etc.)
         // for the given profile.
         let _ = self.get_virtual_file(VirtualQuery {
@@ -2287,7 +2288,7 @@ impl VerterHost {
                     }
                 }
 
-                // Cache miss — use effective_* helpers for override-aware state
+                // Cache miss â€” use effective_* helpers for override-aware state
                 let efs = self
                     .effective_file_state(&canonical_id, Some(profile_hash))
                     .ok_or_else(|| HostError::MissingSource {
@@ -2674,11 +2675,11 @@ impl VerterHost {
         }
     }
 
-    /// Generate public API output for a Vue SFC — minimal TypeScript declarations.
+    /// Generate public API output for a Vue SFC â€” minimal TypeScript declarations.
     ///
     /// Unlike [`get_ide`](Self::get_ide), this does NOT require a prior
     /// [`get_virtual_file`](Self::get_virtual_file) call. It performs
-    /// macro-only extraction (OXC parse → defineProps/Emits/Model/Options)
+    /// macro-only extraction (OXC parse â†’ defineProps/Emits/Model/Options)
     /// and generates a `ComponentPublicInstance`-based declaration.
     ///
     /// Returns `None` if the file is not in the host or not a Vue SFC.
@@ -2813,7 +2814,7 @@ impl VerterHost {
             }
             arc
         } else {
-            // No <script setup> — fall through to direct path for empty stub
+            // No <script setup> â€” fall through to direct path for empty stub
             let tsc_out = verter_compiler::tsc::generate_tsc_output_with_options(
                 &source,
                 &component_name,
@@ -2941,7 +2942,7 @@ impl VerterHost {
                 .or_else(|| Some(snapshot.canonical_id.clone())),
             is_production: profile.is_production,
             // Host always assembles a standalone `function render()` via
-            // assemble_main_module, so inline mode must be off — otherwise the
+            // assemble_main_module, so inline mode must be off â€” otherwise the
             // template emits bare identifiers (missing `$setup.` prefix).
             inline: Some(false),
             component_id: profile.component_id.clone(),
@@ -3151,7 +3152,7 @@ impl VerterHost {
             );
         }
 
-        // Combined IDE output (TSX/JSX) for LSP type checking — stored separately, not as virtual file
+        // Combined IDE output (TSX/JSX) for LSP type checking â€” stored separately, not as virtual file
         let cached_tsx = compiled.tsx.map(|tsx| CachedTsx {
             code: Arc::from(tsx.code),
             source_map: if tsx.source_map.is_empty() {
@@ -3165,7 +3166,7 @@ impl VerterHost {
 
         // Convert raw template data into analysis types when available
         let template_analysis = compiled.template_data.as_ref().map(|raw| {
-            // Build script import pairs for component → source resolution
+            // Build script import pairs for component â†’ source resolution
             let (all_imports, binding_class_unions, props_binding_name) = template_converter_inputs(
                 &snapshot.script_imports,
                 &snapshot.script_macros,
@@ -3430,7 +3431,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
     fn ensure_shallow_state(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<crate::resolver_core::ShallowTypeFileState>> {
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         let canonical = self
             .host
             .resolve_eval_dependency_canonical_in_view(canonical_id, self.store_view)
@@ -3441,7 +3442,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
                 .host
                 .clone_current_imported_dependency_entry(canonical.as_str(), self.store_view)
             {
-                if let Some(ref state) = entry.shallow_type_state {
+                if let Some(ref state) = entry.shallow_file_state {
                     if state.has_wildcard_reexports() {
                         self.host
                             .provenance
@@ -3458,14 +3459,14 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
                     canonical.as_str(),
                     self.store_view,
                 )
-                .and_then(|entry| entry.shallow_type_state.clone());
+                .and_then(|entry| entry.shallow_file_state.clone());
         }
 
         if let Some(entry) = self
             .host
             .clone_current_imported_dependency_entry(canonical.as_str(), self.store_view)
         {
-            if let Some(ref state) = entry.shallow_type_state {
+            if let Some(ref state) = entry.shallow_file_state {
                 if !state.symbols.is_empty() {
                     if state.has_wildcard_reexports() {
                         self.host
@@ -3479,7 +3480,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         }
 
         self.host
-            .symbol_shallow_type_state_in_view(canonical.as_str(), self.store_view)
+            .symbol_shallow_file_state_in_view(canonical.as_str(), self.store_view)
     }
 
     fn resolve_import_canonical(&self, from_canonical: &str, specifier: &str) -> Option<String> {

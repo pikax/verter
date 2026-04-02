@@ -1,7 +1,7 @@
-//! Canonical shallow type file state for imported dependencies.
+//! Canonical shallow file state for imported dependencies.
 //!
-//! `ShallowTypeFileState` is the authoritative representation of an imported
-//! type file's symbol/export surface.  It is populated exactly once per
+//! `ShallowFileState` is the authoritative representation of an imported
+//! file's shallow symbol/export surface.  It is populated exactly once per
 //! `(canonical_id, whole_hash)` through the shared host ensure-path and reused
 //! by component-meta, LSP, MCP, and other host-backed consumers.
 //!
@@ -10,30 +10,30 @@
 //! - Export routing and symbol lookup are O(1) after construction.
 //! - Same-file local closure is computed lazily per symbol on first access.
 //! - Cross-file references are returned as `ExternalSymbolRef` for the
-//!   frontier engine to handle — this module never crosses import boundaries.
+//!   frontier engine to handle â€” this module never crosses import boundaries.
 
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
-use verter_semantic::analysis::type_eval::TypeDeclKind;
-use verter_semantic::analysis::type_expr::{TypeExpr, TypeParam};
+use verter_semantic::analysis::type_eval::{FunctionSignature, TypeDeclKind, ValueDeclKind};
+use verter_semantic::analysis::type_expr::{ObjectExpr, TypeExpr, TypeParam};
 use verter_semantic::analysis::Hash16;
 
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
 
-/// Authoritative shallow state for one imported type file.
+/// Authoritative shallow state for one imported file.
 ///
 /// Keyed by `(canonical_id, whole_hash)`.  Invalidated when the file's
 /// whole-hash changes.
 #[derive(Debug, Clone)]
-pub struct ShallowTypeFileState {
+pub struct ShallowFileState {
     /// Content hash of the source that produced this state.
     pub whole_hash: Hash16,
 
-    /// Named exports: exported name → routing target.
+    /// Named exports: exported name â†’ routing target.
     pub exports: FxHashMap<String, ExportTarget>,
 
     /// `export * from` sources, in declaration order.
@@ -42,16 +42,30 @@ pub struct ShallowTypeFileState {
     /// All locally-declared type symbols (exported or internal).
     pub symbols: FxHashMap<String, ShallowTypeSymbol>,
 
+    /// All locally-declared value symbols that may participate in `typeof`
+    /// queries or value-driven type expansion.
+    pub value_symbols: FxHashMap<String, ShallowValueSymbol>,
+
     /// Import-local names (names that come from `import` declarations).
     /// Used to classify dependencies as local vs external during closure.
     pub import_locals: FxHashSet<String>,
 
-    /// Import specifier targets: local import name → (source_specifier, imported_name).
+    /// Import specifier targets: local import name â†’ (source_specifier, imported_name).
     pub import_targets: FxHashMap<String, (String, String)>,
 
     /// The underlying analyzed source (retained for methods that still need
     /// the full analysis surface during the transition).
     pub analysis: Arc<AnalyzedExternalTypeSource>,
+}
+
+/// Narrow type-resolution view over [`ShallowFileState`].
+///
+/// This keeps the frontier and other type-only consumers focused on the
+/// export/type-symbol surface even though the canonical file cache also owns
+/// value-side declarations.
+#[derive(Clone, Copy)]
+pub struct ShallowTypeView<'a> {
+    state: &'a ShallowFileState,
 }
 
 /// Where an exported name resolves to.
@@ -82,6 +96,19 @@ pub struct ShallowTypeSymbol {
     /// Names of import-local symbols this type directly depends on.
     /// These become `ExternalSymbolRef` during frontier traversal.
     pub external_deps: Vec<ExternalSymbolRef>,
+}
+
+/// Shallow metadata for one locally-declared value symbol.
+#[derive(Debug, Clone)]
+pub struct ShallowValueSymbol {
+    /// Declaration kind.
+    pub kind: ValueDeclKind,
+    /// Explicit type annotation, if present.
+    pub type_annotation: Option<TypeExpr>,
+    /// Function signature, if this value is callable.
+    pub function_signature: Option<FunctionSignature>,
+    /// Object literal shape, if the declaration is a literal object.
+    pub object_shape: Option<ObjectExpr>,
 }
 
 /// A reference to an imported symbol that needs cross-file resolution.
@@ -122,9 +149,10 @@ impl Default for ResolutionBudgets {
             // 500 covers even very large single-file type libraries.
             local_closure_steps: 500,
             // Intentionally high: real dependency graphs rarely exceed
-            // 200 unique external symbols per query.  2000 covers
-            // deep reka-ui inheritance chains.
-            frontier_symbol_visits: 2000,
+            // 200 unique external symbols per query.  The shared external
+            // type step ceiling keeps frontier and external resolution in
+            // sync.
+            frontier_symbol_visits: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
             // Intentionally high: expansion is the costliest phase but
             // the frontier already limits how much work reaches here.
             builder_expansion_steps: 5000,
@@ -190,7 +218,7 @@ pub enum LocalClosureStatus {
     BudgetExceeded,
 }
 // NOTE: No `LocalCycle` variant. Same-file cycles are handled by the visited
-// set — a revisited node is silently skipped, which is correct graph traversal.
+// set â€” a revisited node is silently skipped, which is correct graph traversal.
 // The closure result reflects the *reachable* set, not a cycle error.
 
 /// Outcome of local closure for one requested symbol.
@@ -210,7 +238,7 @@ pub struct LocalClosureResult {
 // Construction
 // ---------------------------------------------------------------------------
 
-impl ShallowTypeFileState {
+impl ShallowFileState {
     /// Build from an existing `AnalyzedExternalTypeSource` and export-routing data.
     ///
     /// This is the primary construction path: the host ensures the file is loaded
@@ -225,6 +253,7 @@ impl ShallowTypeFileState {
         let mut import_locals = FxHashSet::default();
         let mut import_targets = FxHashMap::default();
         let mut symbols = FxHashMap::default();
+        let mut value_symbols = FxHashMap::default();
 
         // Populate exports from the extracted bindings
         // Direct reexports
@@ -276,7 +305,7 @@ impl ShallowTypeFileState {
             );
         }
 
-        // Locally-declared type symbols from eval env (if available)
+        // Locally-declared symbols from eval env (if available)
         if let Some(env) = eval_env {
             for (name, decl) in &env.type_symbols {
                 let local_type_sym = analysis.local_type_symbol(name);
@@ -303,10 +332,22 @@ impl ShallowTypeFileState {
                     },
                 );
             }
+
+            for (name, decl) in &env.value_symbols {
+                value_symbols.insert(
+                    name.clone(),
+                    ShallowValueSymbol {
+                        kind: decl.kind,
+                        type_annotation: decl.type_annotation.clone(),
+                        function_signature: decl.function_signature.clone(),
+                        object_shape: decl.object_shape.clone(),
+                    },
+                );
+            }
         }
         // Note: when no eval_env is provided, symbols stay empty.
         // The analysis-level symbol data (AnalyzedExternalTypeSymbol) does not
-        // carry TypeExpr bodies — only dependency metadata. Callers that need
+        // carry TypeExpr bodies â€” only dependency metadata. Callers that need
         // symbol bodies must build the shallow state through the eval-env path.
 
         Self {
@@ -314,6 +355,7 @@ impl ShallowTypeFileState {
             exports,
             wildcard_reexports,
             symbols,
+            value_symbols,
             import_locals,
             import_targets,
             analysis,
@@ -330,6 +372,11 @@ impl ShallowTypeFileState {
         self.exports.get(name)
     }
 
+    /// Get the narrow type-resolution view over this file state.
+    pub fn type_view(&self) -> ShallowTypeView<'_> {
+        ShallowTypeView { state: self }
+    }
+
     /// Whether this file has any wildcard re-exports.
     pub fn has_wildcard_reexports(&self) -> bool {
         !self.wildcard_reexports.is_empty()
@@ -338,6 +385,11 @@ impl ShallowTypeFileState {
     /// Look up a local symbol by name.
     pub fn symbol(&self, name: &str) -> Option<&ShallowTypeSymbol> {
         self.symbols.get(name)
+    }
+
+    /// Look up a local value symbol by name.
+    pub fn value_symbol(&self, name: &str) -> Option<&ShallowValueSymbol> {
+        self.value_symbols.get(name)
     }
 
     /// Check if a name is an import-local binding.
@@ -399,7 +451,7 @@ impl ShallowTypeFileState {
                     }
                 }
             } else if self.import_locals.contains(&current) {
-                // This is an import — classify as external
+                // This is an import â€” classify as external
                 if let Some((source, imported)) = self.import_targets.get(&current) {
                     let ext_ref = ExternalSymbolRef {
                         local_name: current.clone(),
@@ -413,7 +465,7 @@ impl ShallowTypeFileState {
                         external_refs.push(ext_ref);
                     }
                 } else {
-                    // Import-local without a target — treat as missing
+                    // Import-local without a target â€” treat as missing
                     return LocalClosureResult {
                         status: LocalClosureStatus::MissingLocalSymbol { name: current },
                         local_symbols_used: local_used,
@@ -443,6 +495,29 @@ impl ShallowTypeFileState {
             unresolved_external: external_refs,
             steps: steps as u64,
         }
+    }
+}
+
+impl<'a> ShallowTypeView<'a> {
+    /// Look up a named export. Returns `None` if the name is not directly
+    /// exported (may still be available through wildcard reexports).
+    pub fn export_target(self, name: &str) -> Option<&'a ExportTarget> {
+        self.state.export_target(name)
+    }
+
+    /// Wildcard `export *` sources in declaration order.
+    pub fn wildcard_reexports(self) -> &'a [String] {
+        &self.state.wildcard_reexports
+    }
+
+    /// Look up a local type symbol by name.
+    pub fn symbol(self, name: &str) -> Option<&'a ShallowTypeSymbol> {
+        self.state.symbol(name)
+    }
+
+    /// Compute same-file closure for one symbol.
+    pub fn local_closure(self, symbol_name: &str, budget: usize) -> LocalClosureResult {
+        self.state.local_closure(symbol_name, budget)
     }
 }
 
@@ -511,6 +586,8 @@ fn classify_deps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_semantic::analysis::type_eval::ValueDeclKind;
+    use verter_semantic::analysis::type_eval_build::parse_and_build_env;
 
     fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
@@ -524,7 +601,7 @@ mod tests {
     #[test]
     fn simple_interface_produces_local_export() {
         let analysis = make_analysis("export interface Props { label: string }");
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         assert!(
             state.export_target("Props").is_some(),
@@ -545,7 +622,7 @@ mod tests {
     #[test]
     fn reexport_produces_reexport_target() {
         let analysis = make_analysis(r#"export { Foo } from "./inner""#);
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         match state.export_target("Foo") {
             Some(ExportTarget::Reexport {
@@ -563,7 +640,7 @@ mod tests {
     fn wildcard_reexport_captured_in_order() {
         let analysis =
             make_analysis("export * from './a'\nexport * from './b'\nexport * from './c'\n");
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         assert_eq!(
             state.wildcard_reexports,
@@ -580,7 +657,7 @@ mod tests {
     #[test]
     fn analysis_only_has_no_symbols() {
         let analysis = make_analysis("export interface Props { label: string }\n");
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         // Symbols require eval_env
         assert!(
@@ -599,7 +676,7 @@ export { Foo } from './direct'
 export * from './wildcard'
 "#,
         );
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         // Foo should resolve through the direct reexport, not the wildcard
         match state.export_target("Foo") {
@@ -630,7 +707,7 @@ import type { Beta as B } from './b'
 export interface Props extends Alpha { beta: B }
 "#,
         );
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         assert!(state.is_import_local("Alpha"));
         assert_eq!(
@@ -653,7 +730,7 @@ import Foo from './dep'
 export { Foo as Bar }
 "#,
         );
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         assert!(state.is_import_local("Foo"));
         assert!(
@@ -685,7 +762,7 @@ export default class Props {
 }
 "#,
         );
-        let state = ShallowTypeFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         assert!(
             state.export_target("Props").is_none(),
@@ -700,6 +777,67 @@ export default class Props {
                 );
             }
             other => panic!("expected Local export for default, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_env_construction_populates_value_symbols() {
+        let source = r#"
+export interface Props { label: string }
+export const defaults: Props = { label: 'ok' }
+export function makeProps(): Props { return defaults }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let defaults = state
+            .value_symbol("defaults")
+            .expect("defaults value symbol should be present");
+        assert_eq!(defaults.kind, ValueDeclKind::Const);
+        assert!(defaults.type_annotation.is_some());
+        assert!(defaults.object_shape.is_some());
+
+        let make_props = state
+            .value_symbol("makeProps")
+            .expect("makeProps value symbol should be present");
+        assert_eq!(make_props.kind, ValueDeclKind::Function);
+        assert!(make_props.function_signature.is_some());
+    }
+
+    #[test]
+    fn type_view_exposes_only_type_resolution_surface() {
+        let source = r#"
+import type { Shared } from './shared'
+export interface Props extends Shared { label: string }
+export const defaults: Props = { label: 'ok' }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let view = state.type_view();
+
+        assert!(view.export_target("Props").is_some());
+        assert!(view.symbol("Props").is_some());
+        assert!(view.wildcard_reexports().is_empty());
+        assert!(
+            state.value_symbol("defaults").is_some(),
+            "value symbols remain on the broad file state"
+        );
+    }
+
+    #[test]
+    fn exported_value_declarations_are_published_in_export_targets() {
+        let source = r#"
+export interface Props { label: string }
+export const defaults: Props = { label: 'ok' }
+"#;
+        let analysis = make_analysis(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+
+        match state.export_target("defaults") {
+            Some(ExportTarget::Local { symbol_name }) => assert_eq!(symbol_name, "defaults"),
+            other => panic!("expected Local export for defaults, got {other:?}"),
         }
     }
 }
