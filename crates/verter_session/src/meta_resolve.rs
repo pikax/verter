@@ -222,10 +222,6 @@ pub struct ResolvedComponentMetaState {
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
     /// Expanded types (populated in `Expanded` mode only).
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
-    /// Cached imported eval inputs from `resolve_component_meta(Expanded)`.
-    /// Threaded through to `build_fallthrough_eval_env_with_inputs` to avoid
-    /// a redundant second `imported_eval_inputs()` call in the fallthrough path.
-    pub cached_eval_inputs: Option<Arc<crate::host_manage::ImportedEvalInputs>>,
     /// Semantic fact versions consumed while producing this resolved state.
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
 }
@@ -348,19 +344,19 @@ fn enrich_missing_slot_bindings(
                     .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
                         raw: "unknown".to_string(),
                     });
-                evaluated_types.slot_bindings.push(
-                    verter_semantic::analysis::type_expand::ExpandedField {
-                        name: field_name,
-                        r#type: parsed_type,
-                        raw_type,
-                        optional: false,
-                        exactness:
-                            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
-                        execution_status:
-                            verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
-                        diagnostics: Vec::new(),
-                    },
-                );
+                evaluated_types
+                    .slot_bindings
+                    .push(verter_semantic::analysis::type_expand::ExpandedField {
+                    name: field_name,
+                    r#type: parsed_type,
+                    raw_type,
+                    optional: false,
+                    exactness:
+                        verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                    execution_status:
+                        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                    diagnostics: Vec::new(),
+                });
             }
         }
     }
@@ -512,24 +508,14 @@ impl VerterHost {
             component_meta_trace_event!(
                 "resolve_component_meta_result",
                 format!(
-                    "owner={} mode={mode:?} source={} attempts={} macros={} resolved_types={} has_evaluated_types={} cached_type_aliases={} fact_versions={} budget_exhausted={}",
+                    "owner={} mode={mode:?} source={} attempts={} macros={} resolved_types={} has_evaluated_types={} fact_versions={}",
                     canonical,
                     trace_request_source(result.source),
                     result.attempts,
                     resolved.resolved_macros.len(),
                     resolved.resolved_type_registry.len(),
                     resolved.evaluated_types.is_some(),
-                    resolved
-                        .cached_eval_inputs
-                        .as_ref()
-                        .map(|inputs| inputs.type_aliases.len())
-                        .unwrap_or_default(),
                     resolved.fact_versions.len(),
-                    resolved
-                        .cached_eval_inputs
-                        .as_ref()
-                        .and_then(|inputs| inputs.overflow.as_ref())
-                        .is_some(),
                 ),
             );
         }
@@ -620,7 +606,6 @@ impl VerterHost {
             &snapshot,
             &mut parts.resolved_type_registry,
             &mut parts.resolved_type_registry_meta,
-            parts.cached_eval_inputs.as_deref(),
             store_view,
         );
         let append_elapsed = append_start.elapsed();
@@ -640,16 +625,11 @@ impl VerterHost {
         component_meta_trace_event!(
             "component_meta_parts",
             format!(
-                "owner={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} cached_type_aliases={} fact_versions={}",
+                "owner={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} fact_versions={}",
                 canonical,
                 parts.resolved_macros.len(),
                 parts.resolved_type_registry.len(),
                 parts.evaluated_types.is_some(),
-                parts
-                    .cached_eval_inputs
-                    .as_ref()
-                    .map(|inputs| inputs.type_aliases.len())
-                    .unwrap_or_default(),
                 parts.fact_versions.len(),
             ),
         );
@@ -661,7 +641,6 @@ impl VerterHost {
             resolved_type_registry: parts.resolved_type_registry,
             resolved_type_registry_meta: parts.resolved_type_registry_meta,
             evaluated_types: parts.evaluated_types,
-            cached_eval_inputs: parts.cached_eval_inputs,
             fact_versions: parts.fact_versions,
         };
         Some(state)
@@ -676,7 +655,6 @@ impl VerterHost {
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis,
         >,
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
-        cached_eval_inputs: Option<&crate::host_manage::ImportedEvalInputs>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
         let owner_registry_collection_env = self.base_eval_env_in_view(owner_canonical, store_view);
@@ -749,62 +727,6 @@ impl VerterHost {
         }
 
         let mut registry_lookup_env = self.base_eval_env_in_view(owner_canonical, store_view);
-        if let Some(inputs) = cached_eval_inputs {
-            if let Some(env) = registry_lookup_env.as_mut() {
-                prune_package_imported_registry_aliases(env, inputs);
-            }
-        }
-
-        if let Some(inputs) = cached_eval_inputs {
-            for alias in &inputs.type_aliases {
-                let alias_is_demanded = queued_names.contains(alias.local_name.as_str());
-                if !alias_is_demanded {
-                    continue;
-                }
-                if let Some((_resolved_canonical_id, _resolved_exported_name, prepared)) = self
-                    .resolve_prepared_symbol_dependency_alias_in_view(
-                        alias.merge_root_canonical.as_str(),
-                        alias.merge_root_exported.as_str(),
-                        store_view,
-                    )
-                {
-                    let mut declaration = resolve_type_declaration_in_view(
-                        self,
-                        alias.merge_root_canonical.as_str(),
-                        alias.merge_root_exported.as_str(),
-                        store_view,
-                    );
-                    if declaration.canonical_source.is_empty() {
-                        declaration.canonical_source = alias.merge_root_canonical.clone();
-                    }
-                    let type_expr = if is_component_meta_registry_package_source(Some(
-                        alias.merge_root_canonical.as_str(),
-                    )) {
-                        prepared.decl.body.clone()
-                    } else {
-                        materialize_imported_component_meta_registry_decl_body_in_view(
-                            self,
-                            alias.merge_root_canonical.as_str(),
-                            &prepared.decl,
-                            &prepared.symbol_dependencies,
-                            store_view,
-                        )
-                    };
-                    upsert_component_meta_registry_entry(
-                        owner_canonical,
-                        resolved_type_registry,
-                        resolved_type_registry_meta,
-                        &mut published_names,
-                        &mut queued_names,
-                        &mut referenced_names,
-                        alias.local_name.clone(),
-                        type_expr,
-                        declaration,
-                        None,
-                    );
-                }
-            }
-        }
 
         let mut _loop_iterations: usize = 0;
         let mut _loop_materializations: usize = 0;
@@ -1617,19 +1539,6 @@ fn owner_component_meta_registry_collection_expr(
     env.and_then(|env| env.type_symbols.get(name).map(|decl| decl.body.clone()))
 }
 
-fn prune_package_imported_registry_aliases(
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    imported_inputs: &crate::host_manage::ImportedEvalInputs,
-) {
-    for alias in &imported_inputs.type_aliases {
-        if is_component_meta_registry_package_source(Some(alias.merge_root_canonical.as_str()))
-            || is_component_meta_registry_package_source(Some(alias.source_canonical_id.as_str()))
-        {
-            env.type_symbols.remove(alias.local_name.as_str());
-        }
-    }
-}
-
 fn enqueue_component_meta_registry_ref(
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
@@ -1960,15 +1869,13 @@ fn materialize_component_meta_registry_decl_body_with_snapshot_in_view(
     seed_symbol_dependencies: &[crate::resolver_core::ImportedSymbolDependency],
     store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    let Some(mut env) = host.build_cache_only_lookup_env_for_type_decl_in_view(
+    let mut env = host.build_cache_only_lookup_env_for_type_decl_in_view(
         canonical_id,
         snapshot,
         decl,
         seed_symbol_dependencies,
         store_view,
-    ) else {
-        return None;
-    };
+    )?;
     env.limits.max_depth = env
         .limits
         .max_depth
@@ -2915,7 +2822,6 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
 impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolver<'_> {
     type Snapshot = FileAnalysisSnapshot;
     type EvalContext = CapturedComponentMetaInputs;
-    type ImportedInputs = crate::host_manage::ImportedEvalInputs;
 
     fn resolve_type_declaration(
         &self,
@@ -2951,7 +2857,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         owner_canonical: &str,
         snapshot: &Self::Snapshot,
         eval_context: Option<&Self::EvalContext>,
-    ) -> ComponentMetaEvalOutputs<Self::ImportedInputs> {
+    ) -> ComponentMetaEvalOutputs {
         let eval_started = component_meta_debug_enabled().then(Instant::now);
         if component_meta_debug_enabled() {
             component_meta_debug(format!(
@@ -2969,52 +2875,33 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                     .dependency_resolutions_for_eval_in_view(owner_canonical, self.store_view)
                     .unwrap_or_default()
             });
-        let imported_inputs = Arc::new(self.host.imported_eval_inputs_with_owner_context_in_view(
-            owner_canonical,
-            snapshot,
-            &dep_resolutions,
-            eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
-            eval_context.and_then(|captured| captured.owner_env.as_ref()),
-            self.store_view,
-        ));
-        if component_meta_debug_enabled() {
-            component_meta_debug(format!(
-                "resolve_component_meta owner={} mode={:?} step=evaluated_types:imported_inputs_done sources={} type_aliases={} tracked_deps={}",
-                owner_canonical,
-                ResolverMode::Expanded,
-                imported_inputs.sources.len(),
-                imported_inputs.type_aliases.len(),
-                imported_inputs.canonical_dependencies.len(),
-            ));
-        }
-        let mut tracked_dependencies = imported_inputs.canonical_dependencies.clone();
+        // Tracked dependencies: snapshot-level candidates + solver-discovered deps.
+        // The legacy walker is no longer used for dependency tracking.
+        let mut tracked_dependencies = std::collections::BTreeSet::new();
         tracked_dependencies.extend(self.host.cache_dependency_candidates_from_snapshot(
             owner_canonical,
             snapshot,
             &dep_resolutions,
         ));
         let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
-        let computed_eval_types = if imported_inputs.overflow.is_some() {
-            None
-        } else {
-            self.host
-                .compute_evaluated_types_with_tracking_from_owner_context_in_view(
-                    owner_canonical,
-                    snapshot,
-                    &imported_inputs,
-                    eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
-                    eval_context.and_then(|captured| captured.owner_env.clone()),
-                    self.store_view,
-                )
-        };
+        // Always run the solver-host macro path. The solver resolves cross-file
+        // types on demand from the host's prepared-decl cache.
+        let computed_eval_types = self
+            .host
+            .compute_evaluated_types_with_tracking_from_owner_context_in_view(
+                owner_canonical,
+                snapshot,
+                eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
+                eval_context.and_then(|captured| captured.owner_env.clone()),
+                self.store_view,
+            );
         if let Some(compute_eval_start) = compute_eval_start {
             let elapsed = compute_eval_start.elapsed();
             component_meta_debug(format!(
-                "EVAL_TYPES owner={} elapsed_ms={:.1} has_result={} overflow={}",
+                "EVAL_TYPES owner={} elapsed_ms={:.1} has_result={}",
                 owner_canonical,
                 elapsed.as_secs_f64() * 1000.0,
                 computed_eval_types.is_some(),
-                imported_inputs.overflow.is_some(),
             ));
         }
         if let Some(computed) = computed_eval_types.as_ref() {
@@ -3034,7 +2921,6 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         }
         ComponentMetaEvalOutputs {
             evaluated_types,
-            cached_eval_inputs: Some(imported_inputs),
             tracked_dependencies,
         }
     }

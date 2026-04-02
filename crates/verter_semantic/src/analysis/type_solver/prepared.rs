@@ -8,7 +8,6 @@
 //! - `PreparedImportedTypeAlias`
 //! - `PreparedLocalImportedTypeAlias`
 //! - `PreparedImportedDeclContext`
-//! - `ImportedEvalInputs`
 
 use rustc_hash::FxHashMap;
 

@@ -1264,7 +1264,7 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                 raw_type: Some("any".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
-            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
             },
             crate::analysis::type_expand::ExpandedField {
@@ -1273,7 +1273,7 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                 raw_type: Some("any".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
-            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
             },
         ],
@@ -1348,7 +1348,7 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                 raw_type: Some("RouteLocationRaw".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
-            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: diagnostics.clone(),
             },
             crate::analysis::type_expand::ExpandedField {
@@ -1357,7 +1357,7 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                 raw_type: Some("NuxtLinkProps['to']".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
-            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: vec![crate::analysis::type_expand::ExpansionDiagnostic {
                     reason:
                         crate::analysis::type_expand::ExpansionStopReason::IndeterminateConditional,
@@ -3649,4 +3649,3 @@ fn root_reachability_v_model_radio_consumes_checked_and_change() {
         other => panic!("expected Branches, got: {:?}", other),
     }
 }
-

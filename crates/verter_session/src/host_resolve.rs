@@ -1296,6 +1296,7 @@ impl VerterHost {
         Ok((target, frontier.touched_canonical_ids(), had_route_cycle))
     }
 
+    #[allow(clippy::type_complexity)]
     fn run_external_type_frontier_closure_in_view(
         &self,
         dep_canonical: &str,

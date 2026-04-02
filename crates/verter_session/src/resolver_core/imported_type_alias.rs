@@ -6,8 +6,34 @@ use verter_semantic::analysis::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, ObjectExpr, ObjectMember, ObjectProperty,
     PrimitiveName, TypeExpr, TypeParam,
 };
+// ---------------------------------------------------------------------------
+// Types for imported type alias resolution
+// ---------------------------------------------------------------------------
 
-use crate::resolver_core::{ImportedSymbolDependency, ImportedTypeAliasResolveRequest};
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ImportedSymbolDependency {
+    pub local_name: String,
+    pub canonical_id: String,
+    pub exported_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedTypeAliasResolveRequest {
+    pub owner_canonical_id: String,
+    pub import_source: String,
+    pub local_name: String,
+    pub imported_name: String,
+    pub source_canonical_id: String,
+    pub exported_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComputedEvaluatedTypes {
+    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub discovered_dependencies: BTreeSet<String>,
+}
+
+// ---------------------------------------------------------------------------
 
 struct PreparedLocalDeclBody {
     body: TypeExpr,
@@ -283,7 +309,7 @@ pub fn prepare_imported_type_alias<R: ImportedTypeAliasResolver>(
         selected_body.is_none()
             || selected_body
                 .as_ref()
-                .is_some_and(|body| contains_runtime_value_resolution_targets(body))
+                .is_some_and(contains_runtime_value_resolution_targets)
             || has_same_file_support_symbols
     };
 
@@ -700,37 +726,6 @@ pub fn choose_preferred_imported_type_body(
     }
 }
 
-pub fn should_attempt_owner_env_resolution(
-    decl: &TypeDeclInfo,
-    resolved_body: Option<&TypeExpr>,
-) -> bool {
-    let Some(resolved_body) = resolved_body else {
-        return true;
-    };
-
-    if is_empty_object_surface(resolved_body) && !is_empty_object_surface(&decl.body) {
-        return true;
-    }
-
-    if has_non_object_top_level_surface(resolved_body) {
-        return true;
-    }
-
-    if contains_nested_resolution_targets(resolved_body) {
-        return true;
-    }
-
-    if contains_nested_resolution_targets(&decl.body) {
-        return true;
-    }
-
-    if !has_non_object_top_level_surface(&decl.body) {
-        return false;
-    }
-
-    count_top_level_properties(resolved_body) <= count_top_level_properties(&decl.body)
-}
-
 fn has_non_object_top_level_surface(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Parenthesized(inner) => has_non_object_top_level_surface(inner),
@@ -873,21 +868,6 @@ fn contains_runtime_value_resolution_targets(expr: &TypeExpr) -> bool {
         TypeExpr::TemplateLiteral { expressions, .. } => expressions
             .iter()
             .any(contains_runtime_value_resolution_targets),
-    }
-}
-
-fn count_top_level_properties(expr: &TypeExpr) -> usize {
-    match expr {
-        TypeExpr::Parenthesized(inner) => count_top_level_properties(inner),
-        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            types.iter().map(count_top_level_properties).sum()
-        }
-        TypeExpr::Object(obj) => obj
-            .properties
-            .iter()
-            .filter(|member| matches!(member, ObjectMember::Property(_) | ObjectMember::Method(_)))
-            .count(),
-        _ => 0,
     }
 }
 

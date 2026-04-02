@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
 use crate::resolver_core::{
-    build_imported_eval_inputs_with_owner_context, build_owner_eval_env_with_inputs,
     collect_dynamic_root_candidates_from_type,
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry, fallthrough_cache_key,
@@ -22,14 +21,11 @@ use crate::resolver_core::{
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
     resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
     resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
-    resolve_usage_prop_type, CollectedImportedTypeAlias, DeclarationMetadataResolver,
-    DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver, ExportSurface,
-    FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
-    FallthroughResolverHost, ImportedEvalBinding, ImportedEvalOwnerSnapshot, ImportedEvalResolver,
-    ImportedEvalTraversalBudget, ImportedRuntimeValueResolver, ImportedSymbolDependency,
+    resolve_usage_prop_type, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
+    ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
+    FallthroughResolverHost, ImportedRuntimeValueResolver, ImportedSymbolDependency,
     ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
-    OwnerEvalEnvAssembler, RequestSource, ResolvedConsumedBindings, ResolvedExportTarget,
-    SingleflightRole, StoreView,
+    RequestSource, ResolvedConsumedBindings, SingleflightRole, StoreView,
 };
 use crate::resolver_store::HostStoreView;
 use crate::shared::{read_lock, write_lock};
@@ -363,7 +359,6 @@ macro_rules! component_meta_trace_event {
 pub(crate) use component_meta_trace_event;
 
 const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
-const COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS: usize = 2_000;
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 impl FallthroughResolutionView for crate::types::FallthroughResolution {
@@ -747,21 +742,7 @@ fn log_snapshot_debug(
     ));
 }
 
-pub type ImportedEvalInputs = crate::resolver_core::ImportedEvalInputs;
-pub(crate) type ImportedEvalSource = crate::resolver_core::ImportedEvalSource;
-pub(crate) type ImportedTypeAlias = crate::resolver_core::ImportedTypeAlias;
 pub(crate) type ComputedEvaluatedTypes = crate::resolver_core::ComputedEvaluatedTypes;
-
-pub(crate) struct HostImportedEvalResolver<'a> {
-    host: &'a VerterHost,
-    owner_canonical_id: &'a str,
-    dep_resolutions: std::borrow::Cow<'a, rustc_hash::FxHashMap<String, DependencyResolution>>,
-    budget: ImportedEvalTraversalBudget,
-    external_type_cache: crate::resolver_core::ExternalTypeBodyCache,
-    prepare_failure_count: u64,
-    merge_root_frontier_failure: Option<String>,
-    store_view: Option<&'a crate::resolver_store::HostStoreView>,
-}
 
 struct HostRuntimeValueResolver<'a> {
     host: &'a VerterHost,
@@ -773,212 +754,121 @@ struct HostExportGraphResolver<'a> {
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ValueDeclIdentity {
-    canonical_id: String,
-    name: String,
+impl ExportGraphResolver for HostExportGraphResolver<'_> {
+    fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
+        let (file_kind, _, export_signatures) = self
+            .host
+            .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
+        Some(ExportSurface {
+            file_kind: match file_kind {
+                FileKind::VueSfc => ExportGraphFileKind::VueSfc,
+                FileKind::NonSfc => ExportGraphFileKind::NonSfc,
+            },
+            export_signatures,
+        })
+    }
+
+    fn local_export_span(
+        &self,
+        canonical_id: &str,
+        binding_name: &str,
+    ) -> Option<verter_span::Span> {
+        let (file_kind, script_analysis, export_signatures) = self
+            .host
+            .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
+        VerterHost::find_export_span(
+            file_kind,
+            &script_analysis,
+            &export_signatures,
+            binding_name,
+        )
+        .map(|(start, end)| verter_span::Span::new(start, end))
+    }
+
+    fn resolve_reexport_target(
+        &self,
+        canonical_id: &str,
+        source: &str,
+        sig: &verter_semantic::analysis::ExportSignature,
+    ) -> Option<String> {
+        let declaration_file = canonical_id.ends_with(".d.ts")
+            || canonical_id.ends_with(".d.mts")
+            || canonical_id.ends_with(".d.cts");
+        if sig.is_type || declaration_file {
+            self.host.resolve_type_dependency_canonical_in_view(
+                canonical_id,
+                source,
+                self.store_view,
+            )
+        } else {
+            self.host.resolve_loaded_dependency_canonical_in_view(
+                canonical_id,
+                source,
+                verter_workspace::ResolveRequestKind::EsmImport,
+                self.store_view,
+            )
+        }
+    }
 }
 
-impl<'a> HostImportedEvalResolver<'a> {
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn new(
-        host: &'a VerterHost,
-        owner_canonical_id: &'a str,
-        store_view: Option<&'a crate::resolver_store::HostStoreView>,
-    ) -> Self {
-        Self {
-            host,
-            owner_canonical_id,
-            dep_resolutions: std::borrow::Cow::Owned(
-                host.dependency_resolutions_for_eval_in_view(owner_canonical_id, store_view)
-                    .unwrap_or_default(),
-            ),
-            budget: ImportedEvalTraversalBudget::new(
-                owner_canonical_id,
-                COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
-            ),
-            external_type_cache: crate::resolver_core::ExternalTypeBodyCache::default(),
-            prepare_failure_count: 0,
-            merge_root_frontier_failure: None,
-            store_view,
-        }
-    }
-
-    pub(crate) fn with_dep_resolutions(
-        host: &'a VerterHost,
-        owner_canonical_id: &'a str,
-        dep_resolutions: &'a rustc_hash::FxHashMap<String, DependencyResolution>,
-        store_view: Option<&'a crate::resolver_store::HostStoreView>,
-    ) -> Self {
-        Self {
-            host,
-            owner_canonical_id,
-            dep_resolutions: std::borrow::Cow::Borrowed(dep_resolutions),
-            budget: ImportedEvalTraversalBudget::new(
-                owner_canonical_id,
-                COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
-            ),
-            external_type_cache: crate::resolver_core::ExternalTypeBodyCache::default(),
-            prepare_failure_count: 0,
-            merge_root_frontier_failure: None,
-            store_view,
-        }
-    }
-
-    fn cached_dependency(
-        &self,
-        dep_canonical: &str,
-    ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
-        self.host
-            .clone_current_imported_dependency_entry(dep_canonical, self.store_view)
-    }
-
-    fn cached_snapshot(&self, canonical_id: &str) -> Option<Arc<FileAnalysisSnapshot>> {
-        self.cached_dependency(canonical_id)
-            .and_then(|dependency| dependency.snapshot.clone())
-    }
-
-    fn cached_eval_source(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.cached_dependency(canonical_id)
-            .and_then(|dependency| dependency.eval_source.clone())
-    }
-
-    fn cached_type_dependency_canonical(
-        &self,
-        owner_canonical_id: &str,
-        import_source: &str,
-    ) -> Option<String> {
-        self.host.resolve_type_dependency_canonical_in_view(
-            owner_canonical_id,
-            import_source,
-            self.store_view,
-        )
-    }
-
-    fn resolve_imported_dependency_canonical(
-        &self,
-        owner_canonical_id: &str,
-        import_source: &str,
-        resolved_hint: Option<&str>,
-    ) -> Option<String> {
-        self.host.resolve_imported_dependency_canonical_in_view(
-            owner_canonical_id,
-            import_source,
-            resolved_hint,
-            Some(self.dep_resolutions.as_ref()),
-            self.store_view,
-        )
-    }
-
-    fn cached_dependency_eval_env(
+impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
+    fn dependency_eval_env(
         &self,
         canonical_id: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         self.host
-            .clone_current_imported_dependency_entry(canonical_id, self.store_view)
-            .and_then(|dependency| dependency.env.clone())
+            .base_eval_env_arc_in_view(canonical_id, self.store_view)
+    }
+
+    fn prepared_value_decl(
+        &self,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+        self.host
+            .prepared_value_decl_in_view(canonical_id, symbol_name, self.store_view)
+    }
+
+    fn resolve_import_canonical_id(
+        &self,
+        owner_canonical_id: &str,
+        import: &verter_semantic::analysis::types::AnalyzedImport,
+    ) -> Option<String> {
+        self.host
+            .dependency_resolutions_for_eval_in_view(owner_canonical_id, self.store_view)
+            .and_then(|resolutions| {
+                resolutions
+                    .get(&import.source)
+                    .and_then(DependencyResolution::effective_target)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        resolutions
+                            .get(&import.source)
+                            .and_then(|resolution| resolution.resolved_canonical_id.clone())
+                    })
+            })
             .or_else(|| {
-                self.host
-                    .materialize_imported_dependency_state_in_view(canonical_id, self.store_view)
-                    .and_then(|dependency| dependency.env.clone())
+                self.host.resolve_loaded_dependency_canonical_in_view(
+                    owner_canonical_id,
+                    &import.source,
+                    if import.is_type_only {
+                        verter_workspace::ResolveRequestKind::TypeImport
+                    } else {
+                        verter_workspace::ResolveRequestKind::EsmImport
+                    },
+                    self.store_view,
+                )
             })
     }
 
-    fn cached_prepared_type_alias(
+    fn resolve_value_export_target(
         &self,
-        canonical_id: &str,
-        exported_name: &str,
-    ) -> Option<crate::resolver_core::CachedPreparedImportedTypeAlias> {
-        self.host.clone_cached_prepared_imported_type_alias(
-            canonical_id,
-            exported_name,
-            self.store_view,
-        )
-    }
-
-    fn cache_prepared_type_alias(
-        &self,
-        canonical_id: &str,
-        exported_name: &str,
-        cached: crate::resolver_core::CachedPreparedImportedTypeAlias,
-    ) {
-        self.host.cache_prepared_imported_type_alias(
-            canonical_id,
-            exported_name,
-            cached,
-            self.store_view,
-        );
-    }
-
-    fn cached_required_owner_import_names(
-        &self,
-        owner_canonical_id: &str,
-        owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-        owner_eval_source: &str,
-        owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    ) -> rustc_hash::FxHashSet<String> {
-        let _trace = component_meta_trace_scope!(
-            "collect_required_owner_import_names",
-            format!(
-                "owner={} macros={} bindings={} source_len={} type_symbols={} value_symbols={}",
-                owner_canonical_id,
-                owner_snapshot.macros.len(),
-                owner_snapshot.bindings.len(),
-                owner_eval_source.len(),
-                owner_env.type_symbols.len(),
-                owner_env.value_symbols.len(),
-            ),
-        );
-        if let Some(cached) = self
-            .host
-            .clone_cached_required_owner_import_names(owner_canonical_id, self.store_view)
-        {
-            component_meta_trace_event!(
-                "collect_required_owner_import_names_result",
-                format!(
-                    "owner={} hit=true required={}",
-                    owner_canonical_id,
-                    cached.len(),
-                ),
-            );
-            return cached;
-        }
-
-        let required = collect_required_owner_import_names_from_parts(
-            owner_snapshot,
-            owner_eval_source,
-            owner_env,
-        );
-        if self.cached_dependency(owner_canonical_id).is_some() {
-            self.host.cache_required_owner_import_names(
-                owner_canonical_id,
-                required.clone(),
-                self.store_view,
-            );
-        }
-        component_meta_trace_event!(
-            "collect_required_owner_import_names_result",
-            format!(
-                "owner={} hit=false required={}",
-                owner_canonical_id,
-                required.len(),
-            ),
-        );
-        required
-    }
-
-    fn cached_required_import_names_for_exported_type(
-        &self,
-        canonical_id: &str,
-        exported_name: &str,
-        eval_source: &str,
-    ) -> rustc_hash::FxHashSet<String> {
-        let _ = eval_source;
-        self.host.required_import_names_for_exported_type_in_view(
-            canonical_id,
-            exported_name,
-            self.store_view,
-        )
+        dep_canonical_id: &str,
+        imported_name: &str,
+    ) -> Option<(String, String)> {
+        self.host
+            .resolve_value_export_target_in_view(dep_canonical_id, imported_name, self.store_view)
+            .map(|target| (target.canonical_id, target.name))
     }
 }
 
@@ -1142,777 +1032,10 @@ pub(crate) fn collect_type_expr_symbol_refs(
     }
 }
 
-impl ExportGraphResolver for HostExportGraphResolver<'_> {
-    fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
-        let (file_kind, _, export_signatures) = self
-            .host
-            .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
-        Some(ExportSurface {
-            file_kind: match file_kind {
-                FileKind::VueSfc => ExportGraphFileKind::VueSfc,
-                FileKind::NonSfc => ExportGraphFileKind::NonSfc,
-            },
-            export_signatures,
-        })
-    }
-
-    fn local_export_span(
-        &self,
-        canonical_id: &str,
-        binding_name: &str,
-    ) -> Option<verter_span::Span> {
-        let (file_kind, script_analysis, export_signatures) = self
-            .host
-            .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
-        VerterHost::find_export_span(
-            file_kind,
-            &script_analysis,
-            &export_signatures,
-            binding_name,
-        )
-        .map(|(start, end)| verter_span::Span::new(start, end))
-    }
-
-    fn resolve_reexport_target(
-        &self,
-        canonical_id: &str,
-        source: &str,
-        sig: &verter_semantic::analysis::ExportSignature,
-    ) -> Option<String> {
-        let declaration_file = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
-        if sig.is_type || declaration_file {
-            self.host.resolve_type_dependency_canonical_in_view(
-                canonical_id,
-                source,
-                self.store_view,
-            )
-        } else {
-            self.host.resolve_loaded_dependency_canonical_in_view(
-                canonical_id,
-                source,
-                verter_workspace::ResolveRequestKind::EsmImport,
-                self.store_view,
-            )
-        }
-    }
-}
-
-impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
-    fn dependency_eval_env(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
-        self.host
-            .base_eval_env_arc_in_view(canonical_id, self.store_view)
-    }
-
-    fn prepared_value_decl(
-        &self,
-        canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        self.host
-            .prepared_value_decl_in_view(canonical_id, symbol_name, self.store_view)
-    }
-
-    fn resolve_import_canonical_id(
-        &self,
-        owner_canonical_id: &str,
-        import: &verter_semantic::analysis::types::AnalyzedImport,
-    ) -> Option<String> {
-        self.host
-            .dependency_resolutions_for_eval_in_view(owner_canonical_id, self.store_view)
-            .and_then(|resolutions| {
-                resolutions
-                    .get(&import.source)
-                    .and_then(DependencyResolution::effective_target)
-                    .map(str::to_string)
-                    .or_else(|| {
-                        resolutions
-                            .get(&import.source)
-                            .and_then(|resolution| resolution.resolved_canonical_id.clone())
-                    })
-            })
-            .or_else(|| {
-                self.host.resolve_loaded_dependency_canonical_in_view(
-                    owner_canonical_id,
-                    &import.source,
-                    if import.is_type_only {
-                        verter_workspace::ResolveRequestKind::TypeImport
-                    } else {
-                        verter_workspace::ResolveRequestKind::EsmImport
-                    },
-                    self.store_view,
-                )
-            })
-    }
-
-    fn resolve_value_export_target(
-        &self,
-        dep_canonical_id: &str,
-        imported_name: &str,
-    ) -> Option<(String, String)> {
-        self.host
-            .resolve_value_export_target_in_view(dep_canonical_id, imported_name, self.store_view)
-            .map(|target| (target.canonical_id, target.name))
-    }
-}
-
-impl DeclarationMetadataResolver for HostImportedEvalResolver<'_> {
-    fn resolve_export_target(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-    ) -> Option<ResolvedExportTarget> {
-        self.host
-            .resolve_named_type_export_target_in_view(
-                dep_canonical,
-                requested_name,
-                self.store_view,
-            )
-            .map(|(canonical, name)| ResolvedExportTarget {
-                source_canonical_id: (canonical != dep_canonical).then_some(canonical),
-                source_name: name,
-            })
-    }
-
-    fn get_export_span_follow_reexports(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-    ) -> Option<verter_span::Span> {
-        self.host
-            .get_export_span_follow_reexports_in_view(
-                dep_canonical,
-                requested_name,
-                self.store_view,
-            )
-            .map(|(_, start, end)| verter_span::Span::new(start, end))
-    }
-
-    fn read_source(&self, canonical_source: &str) -> Option<String> {
-        self.host
-            .read_analysis_source_in_view(canonical_source, self.store_view)
-            .map(|source| source.to_string())
-    }
-
-    fn type_declaration_id(
-        &self,
-        canonical_source: &str,
-        resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
-        self.host.local_type_declaration_id_in_view(
-            canonical_source,
-            resolved_name,
-            self.store_view,
-        )
-    }
-
-    fn resolve_type_dependency_canonical(
-        &self,
-        from_canonical: &str,
-        import_source: &str,
-    ) -> Option<String> {
-        self.cached_type_dependency_canonical(from_canonical, import_source)
-    }
-
-    fn resolve_direct_type_reexport_target(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-    ) -> Option<(String, String)> {
-        self.host.resolve_direct_type_reexport_target_in_view(
-            dep_canonical,
-            requested_name,
-            self.store_view,
-        )
-    }
-
-    fn resolve_local_import_symbol_target(
-        &self,
-        dep_canonical: &str,
-        resolved_name: &str,
-    ) -> Option<(String, String)> {
-        self.host.resolve_local_import_symbol_target_in_view(
-            dep_canonical,
-            resolved_name,
-            self.store_view,
-        )
-    }
-
-    fn resolve_local_export_symbol_target(
-        &self,
-        canonical_source: &str,
-        exported_name: &str,
-    ) -> Option<String> {
-        self.host.resolve_local_export_symbol_target_in_view(
-            canonical_source,
-            exported_name,
-            self.store_view,
-        )
-    }
-
-    fn resolve_local_type_symbol_metadata(
-        &self,
-        canonical_source: &str,
-        resolved_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
-        let analysis = self
-            .host
-            .external_type_analysis_in_view(canonical_source, self.store_view)?;
-        let symbol = analysis.local_type_symbol(resolved_name)?;
-        let kind = match symbol.kind {
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
-                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
-            }
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
-                crate::resolver_core::ResolvedDeclarationKind::Interface
-            }
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
-                crate::resolver_core::ResolvedDeclarationKind::Class
-            }
-        };
-        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata {
-            kind,
-            span: symbol.span,
-        })
-    }
-}
-
-impl ImportedTypeAliasResolver for HostImportedEvalResolver<'_> {
-    fn dependency_eval_env(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
-        self.cached_dependency_eval_env(canonical_id)
-    }
-
-    fn prepared_type_decl(
-        &self,
-        canonical_id: &str,
-        exported_name: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
-        self.host
-            .prepared_type_decl_in_view(canonical_id, exported_name, self.store_view)
-    }
-
-    fn budget_is_exhausted(&self) -> bool {
-        self.budget.is_exhausted()
-    }
-
-    fn set_budget_overflow(&mut self, message: String) {
-        self.budget.set_overflow(message);
-    }
-
-    fn resolve_external_type_body(
-        &mut self,
-        request: &ImportedTypeAliasResolveRequest,
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-    ) -> Result<Option<verter_semantic::analysis::type_expr::TypeExpr>, ImportedTypeAliasPrepareError>
-    {
-        let _trace = component_meta_trace_scope!(
-            "resolve_external_type_body",
-            format!(
-                "owner={} import={} name={} tracked_deps={} resolution_deps={} cache_entries={}",
-                request.owner_canonical_id,
-                request.import_source,
-                request.imported_name,
-                tracked_deps.len(),
-                resolution_deps.len(),
-                self.external_type_cache.len(),
-            ),
-        );
-        let tracked_before = tracked_deps.len();
-        let resolution_before = resolution_deps.len();
-        let cache_before = self.external_type_cache.len();
-        let mut visiting = rustc_hash::FxHashSet::default();
-        let result = match self.host.resolve_external_type_from_loaded_files_in_view(
-            request.owner_canonical_id.as_str(),
-            request.import_source.as_str(),
-            request.imported_name.as_str(),
-            tracked_deps,
-            resolution_deps,
-            &mut self.external_type_cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
-            self.store_view,
-        ) {
-            Ok(resolved) => Ok(resolved.map(|resolved| {
-                crate::resolver_core::resolved_elements_to_type_expr_via_type_text(&resolved)
-            })),
-            Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
-                limit,
-                type_name,
-                last_dep,
-            }) => Err(ImportedTypeAliasPrepareError::StepLimitExceeded {
-                limit,
-                type_name,
-                last_dep,
-            }),
-            Err(_) => Err(ImportedTypeAliasPrepareError::Other),
-        };
-        component_meta_trace_event!(
-            "resolve_external_type_body_result",
-            format!(
-                "owner={} import={} name={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={}",
-                request.owner_canonical_id,
-                request.import_source,
-                request.imported_name,
-                match &result {
-                    Ok(Some(_)) => "ok:resolved",
-                    Ok(None) => "ok:none",
-                    Err(ImportedTypeAliasPrepareError::StepLimitExceeded { .. }) => {
-                        "err:step_limit"
-                    }
-                    Err(ImportedTypeAliasPrepareError::Other) => "err:other",
-                },
-                tracked_deps.len().saturating_sub(tracked_before),
-                resolution_deps.len().saturating_sub(resolution_before),
-                self.external_type_cache.len().saturating_sub(cache_before),
-                visiting.len(),
-            ),
-        );
-        result
-    }
-
-    fn imported_symbol_dependencies(
-        &self,
-        source_canonical_id: &str,
-        exported_name: &str,
-        decl_body: &verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> Vec<ImportedSymbolDependency> {
-        let mut dependencies = if exported_name.is_empty() {
-            self.host.imported_symbol_dependencies_in_view(
-                source_canonical_id,
-                exported_name,
-                decl_body,
-                self.store_view,
-            )
-        } else {
-            let structural = self
-                .host
-                .structural_imported_symbol_dependencies_for_exported_type_in_view(
-                    source_canonical_id,
-                    exported_name,
-                    self.store_view,
-                );
-            if structural.is_empty() {
-                self.host.imported_symbol_dependencies_in_view(
-                    source_canonical_id,
-                    exported_name,
-                    decl_body,
-                    self.store_view,
-                )
-            } else {
-                structural
-            }
-        };
-        let Some(env) = self.cached_dependency_eval_env(source_canonical_id) else {
-            return dependencies;
-        };
-        let Some(decl) = env.type_symbols.get(exported_name) else {
-            return dependencies;
-        };
-
-        let mut seen = rustc_hash::FxHashSet::default();
-        for dependency in &dependencies {
-            seen.insert((
-                dependency.local_name.clone(),
-                dependency.canonical_id.clone(),
-                dependency.exported_name.clone(),
-            ));
-        }
-        for dependency in self
-            .host
-            .required_imported_symbol_dependencies_for_type_decl_in_view(
-                source_canonical_id,
-                decl,
-                self.store_view,
-            )
-        {
-            if seen.insert((
-                dependency.local_name.clone(),
-                dependency.canonical_id.clone(),
-                dependency.exported_name.clone(),
-            )) {
-                dependencies.push(dependency);
-            }
-        }
-        dependencies.sort_by(|left, right| {
-            left.local_name
-                .cmp(&right.local_name)
-                .then_with(|| left.canonical_id.cmp(&right.canonical_id))
-                .then_with(|| left.exported_name.cmp(&right.exported_name))
-        });
-        dependencies
-    }
-
-    fn cached_prepared_imported_type_alias(
-        &self,
-        source_canonical_id: &str,
-        exported_name: &str,
-    ) -> Option<crate::resolver_core::CachedPreparedImportedTypeAlias> {
-        let cached = self.cached_prepared_type_alias(source_canonical_id, exported_name);
-        if cached.is_some() {
-            component_meta_trace_event!(
-                "prepare_imported_type_alias_cache_hit",
-                format!("source={} exported={}", source_canonical_id, exported_name),
-            );
-        }
-        cached
-    }
-
-    fn cache_prepared_imported_type_alias(
-        &self,
-        source_canonical_id: &str,
-        exported_name: &str,
-        cached: crate::resolver_core::CachedPreparedImportedTypeAlias,
-    ) {
-        self.cache_prepared_type_alias(source_canonical_id, exported_name, cached);
-    }
-}
-
-impl ImportedEvalResolver for HostImportedEvalResolver<'_> {
-    fn resolve_imported_type_dependency(
-        &self,
-        owner_canonical_id: &str,
-        import: &verter_semantic::analysis::AnalyzedImport,
-    ) -> Option<String> {
-        self.resolve_imported_dependency_canonical(
-            owner_canonical_id,
-            &import.source,
-            import.resolved_canonical_id.as_deref(),
-        )
-    }
-
-    fn collect_imported_type_alias(
-        &mut self,
-        request: ImportedTypeAliasResolveRequest,
-        canonical_dependencies: &mut std::collections::BTreeSet<String>,
-        budget: &mut ImportedEvalTraversalBudget,
-    ) -> Option<CollectedImportedTypeAlias> {
-        let _trace = component_meta_trace_scope!(
-            "collect_imported_type_alias",
-            format!(
-                "owner={} local={} imported={} source={} exported={}",
-                request.owner_canonical_id,
-                request.local_name,
-                request.imported_name,
-                request.source_canonical_id,
-                request.exported_name,
-            ),
-        );
-        if budget.is_exhausted() {
-            return None;
-        }
-
-        canonical_dependencies.insert(request.source_canonical_id.clone());
-        let merge_root = (
-            request.source_canonical_id.clone(),
-            request.exported_name.clone(),
-        );
-        let prepared = crate::resolver_core::prepare_imported_type_alias(
-            self,
-            ImportedTypeAliasResolveRequest {
-                owner_canonical_id: request.owner_canonical_id.clone(),
-                import_source: request.import_source.clone(),
-                local_name: merge_root.1.clone(),
-                imported_name: merge_root.1.clone(),
-                source_canonical_id: merge_root.0.clone(),
-                exported_name: merge_root.1.clone(),
-            },
-            canonical_dependencies,
-        );
-        let Some(prepared) = prepared else {
-            self.prepare_failure_count += 1;
-            return None;
-        };
-
-        Some(CollectedImportedTypeAlias {
-            alias: ImportedTypeAlias {
-                local_name: request.local_name,
-                source_canonical_id: request.source_canonical_id,
-                exported_name: request.exported_name,
-                requires_source_merge: prepared.requires_source_merge,
-                merge_root_canonical: merge_root.0,
-                merge_root_exported: merge_root.1,
-            },
-            symbol_dependencies: prepared.symbol_dependencies,
-        })
-    }
-
-    fn prepare_imported_type_alias_failure_count(&self) -> u64 {
-        self.prepare_failure_count
-    }
-
-    fn collect_required_owner_import_names(
-        &self,
-        owner_canonical_id: &str,
-        owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-        owner_eval_source: &str,
-        owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    ) -> rustc_hash::FxHashSet<String> {
-        self.cached_required_owner_import_names(
-            owner_canonical_id,
-            owner_snapshot,
-            owner_eval_source,
-            owner_env,
-        )
-    }
-
-    fn track_direct_eval_dependencies(
-        &self,
-        owner_canonical_id: &str,
-        owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-        canonical_dependencies: &mut std::collections::BTreeSet<String>,
-    ) {
-        self.host.track_direct_eval_dependencies(
-            owner_canonical_id,
-            owner_snapshot,
-            self.dep_resolutions.as_ref(),
-            canonical_dependencies,
-        );
-    }
-
-    fn load_owner_eval_source(
-        &self,
-        owner_canonical_id: &str,
-        _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-    ) -> String {
-        self.cached_eval_source(owner_canonical_id)
-            .map(|source| source.as_ref().to_string())
-            .or_else(|| {
-                self.host
-                    .current_eval_state_in_view(owner_canonical_id, self.store_view)
-                    .map(|(source, cached_parse, _)| {
-                        VerterHost::build_eval_script_source(&source, cached_parse.as_deref())
-                    })
-            })
-            .unwrap_or_default()
-    }
-
-    fn load_owner_eval_env(
-        &self,
-        owner_canonical_id: &str,
-        _owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-        _owner_eval_source: &str,
-    ) -> verter_semantic::analysis::type_eval::EvalEnv {
-        self.host
-            .base_eval_env_in_view(owner_canonical_id, self.store_view)
-            // Owner eval env must come from the cache-owning pass. If it is absent,
-            // keep the failure shallow instead of reparsing source in the resolver path.
-            .unwrap_or_default()
-    }
-
-    fn record_eval_input_source(
-        &mut self,
-        canonical_id: &str,
-        seen_sources: &mut rustc_hash::FxHashSet<String>,
-        inputs: &mut Vec<ImportedEvalSource>,
-        canonical_dependencies: &mut std::collections::BTreeSet<String>,
-    ) {
-        let _trace = component_meta_trace_scope!(
-            "record_eval_input_source",
-            format!(
-                "canonical={} seen_sources={} inputs={} canonical_dependencies={}",
-                canonical_id,
-                seen_sources.len(),
-                inputs.len(),
-                canonical_dependencies.len(),
-            ),
-        );
-        let Some(dependency) = self.cached_dependency(canonical_id) else {
-            canonical_dependencies.insert(canonical_id.to_string());
-            return;
-        };
-        if dependency.eval_source.is_none() {
-            canonical_dependencies.insert(dependency.resolved_canonical_id.clone());
-            return;
-        }
-
-        canonical_dependencies.insert(dependency.resolved_canonical_id.clone());
-        if !seen_sources.insert(dependency.resolved_canonical_id.clone()) {
-            return;
-        }
-
-        inputs.push(ImportedEvalSource {
-            canonical_id: dependency.resolved_canonical_id.clone(),
-        });
-    }
-
-    fn load_eval_source_for_merge(&mut self, canonical_id: &str) -> Option<Arc<str>> {
-        let _trace = component_meta_trace_scope!(
-            "load_eval_source_for_merge",
-            format!("canonical={canonical_id}"),
-        );
-        self.cached_eval_source(canonical_id)
-    }
-
-    fn required_import_names_for_exported_type(
-        &self,
-        canonical_id: &str,
-        exported_name: &str,
-        eval_source: &str,
-    ) -> rustc_hash::FxHashSet<String> {
-        self.cached_required_import_names_for_exported_type(
-            canonical_id,
-            exported_name,
-            eval_source,
-        )
-    }
-
-    fn import_bindings_for_merge(
-        &mut self,
-        canonical_id: &str,
-        eval_source: &str,
-    ) -> Vec<ImportedEvalBinding> {
-        let _trace = component_meta_trace_scope!(
-            "import_bindings_for_merge",
-            format!(
-                "canonical={} source_len={}",
-                canonical_id,
-                eval_source.len()
-            ),
-        );
-        let snapshot = self.cached_snapshot(canonical_id);
-
-        if let Some(snapshot) = snapshot {
-            return snapshot
-                .imports
-                .iter()
-                .flat_map(|import| {
-                    import
-                        .bindings
-                        .iter()
-                        .map(move |binding| ImportedEvalBinding {
-                            local_name: binding.name.clone(),
-                            imported_name: binding.imported_name.clone(),
-                            source: import.source.clone(),
-                            resolved_canonical_id: import.resolved_canonical_id.clone(),
-                            is_namespace: matches!(
-                                binding.kind,
-                                verter_semantic::analysis::types::ImportBindingKind::Namespace
-                            ),
-                        })
-                })
-                .collect();
-        }
-
-        if let Some(analysis) = self
-            .host
-            .external_type_analysis_in_view(canonical_id, self.store_view)
-        {
-            return analysis
-                .extracted
-                .bindings
-                .iter()
-                .map(|binding| ImportedEvalBinding {
-                    local_name: binding.local_name.clone(),
-                    imported_name: if binding.is_namespace {
-                        None
-                    } else if binding.imported_name != binding.local_name {
-                        Some(binding.imported_name.clone())
-                    } else {
-                        None
-                    },
-                    source: binding.source.clone(),
-                    resolved_canonical_id: None,
-                    is_namespace: binding.is_namespace,
-                })
-                .collect();
-        }
-
-        Vec::new()
-    }
-
-    fn resolve_import_binding_dependency(
-        &self,
-        owner_canonical_id: &str,
-        binding: &ImportedEvalBinding,
-    ) -> Option<String> {
-        let _trace = component_meta_trace_scope!(
-            "resolve_import_binding_dependency",
-            format!(
-                "owner={} local={} imported={} source={} namespace={}",
-                owner_canonical_id,
-                binding.local_name,
-                binding.imported_name.as_deref().unwrap_or(""),
-                binding.source,
-                binding.is_namespace,
-            ),
-        );
-        self.resolve_imported_dependency_canonical(
-            owner_canonical_id,
-            &binding.source,
-            binding.resolved_canonical_id.as_deref(),
-        )
-    }
-
-    fn resolve_imported_type_declaration(
-        &self,
-        dep_canonical: &str,
-        imported_name: &str,
-    ) -> crate::resolver_core::ResolvedTypeDeclaration {
-        self.host.resolve_imported_type_declaration_in_view(
-            dep_canonical,
-            imported_name,
-            self.store_view,
-        )
-    }
-
-    fn resolve_imported_type_root(
-        &self,
-        dep_canonical: &str,
-        imported_name: &str,
-    ) -> (String, String) {
-        self.host
-            .resolve_imported_type_root_in_view(dep_canonical, imported_name, self.store_view)
-    }
-
-    fn run_frontier_for_merge_roots(
-        &mut self,
-        roots: &[(String, String)],
-    ) -> Option<crate::resolver_core::ExternalTypeFrontier> {
-        self.merge_root_frontier_failure = None;
-        if roots.is_empty() {
-            return None;
-        }
-
-        let adapter = crate::host_resolve::HostFrontierAdapter {
-            host: self.host,
-            store_view: self.store_view,
-            materialize_symbols: true,
-        };
-
-        let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
-        frontier.seed(roots.iter().map(|(canonical_id, exported_name)| {
-            crate::resolver_core::PendingExternalSymbol {
-                canonical_id: canonical_id.clone(),
-                exported_name: exported_name.clone(),
-            }
-        }));
-
-        if let Err(failure) = frontier.run(&adapter) {
-            self.merge_root_frontier_failure = Some(format!(
-                "component-meta external type resolution step budget exceeded (maxSteps={}) while resolving merge inputs for '{}' (lastDep='{}')",
-                failure.limit, self.owner_canonical_id, failure.context,
-            ));
-            return None;
-        }
-
-        Some(frontier)
-    }
-
-    fn merge_root_frontier_failure_message(&self) -> Option<String> {
-        self.merge_root_frontier_failure.clone()
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ValueDeclIdentity {
+    canonical_id: String,
+    name: String,
 }
 
 struct CacheOnlyPreparedAliasResolver<'a> {
@@ -1993,60 +1116,6 @@ impl ImportedTypeAliasResolver for CacheOnlyPreparedAliasResolver<'_> {
             cached,
             self.store_view,
         );
-    }
-}
-
-type OwnerEvalEnvBuild = crate::resolver_core::OwnerEvalEnvBuild;
-
-struct HostOwnerEvalEnvAssembler<'a> {
-    host: &'a VerterHost,
-    store_view: Option<&'a HostStoreView>,
-}
-
-impl OwnerEvalEnvAssembler for HostOwnerEvalEnvAssembler<'_> {
-    type Snapshot = FileAnalysisSnapshot;
-
-    fn base_eval_env(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
-        self.host
-            .base_eval_env_arc_in_view(canonical_id, self.store_view)
-    }
-
-    fn materialize_imported_type_aliases(
-        &self,
-        _snapshot: &Self::Snapshot,
-        owner_local_type_names: &rustc_hash::FxHashSet<String>,
-        imported_inputs: &ImportedEvalInputs,
-        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    ) {
-        self.host
-            .materialize_imported_type_aliases_into_env_in_view(
-                owner_local_type_names,
-                imported_inputs,
-                env,
-                self.store_view,
-            );
-    }
-
-    fn materialize_imported_runtime_values(
-        &self,
-        snapshot: &Self::Snapshot,
-        canonical_id: &str,
-        owner_local_value_names: &rustc_hash::FxHashSet<String>,
-        required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
-        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    ) {
-        self.host
-            .materialize_imported_runtime_values_into_env_in_view(
-                canonical_id,
-                snapshot,
-                owner_local_value_names,
-                required_runtime_value_names,
-                env,
-                self.store_view,
-            );
     }
 }
 
@@ -2208,15 +1277,6 @@ impl VerterHost {
                 Arc::new(verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param)),
             );
         }
-    }
-
-    fn owner_generic_type_bindings(
-        env: &verter_semantic::analysis::type_eval::EvalEnv,
-    ) -> rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr> {
-        env.type_bindings
-            .iter()
-            .map(|(name, bound)| (name.clone(), (**bound).clone()))
-            .collect()
     }
 
     pub(crate) fn build_eval_script_source(
@@ -3252,18 +2312,6 @@ impl VerterHost {
             .map(|root| (root.canonical_source.clone(), root.resolved_name.clone()))
     }
 
-    fn clone_cached_imported_type_declaration(
-        &self,
-        canonical_id: &str,
-        exported_name: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<crate::resolver_core::ResolvedTypeDeclaration> {
-        self.clone_current_imported_dependency_entry(canonical_id, store_view)?
-            .resolved_type_declarations
-            .get(exported_name)
-            .cloned()
-    }
-
     fn clone_cached_prepared_imported_type_alias(
         &self,
         canonical_id: &str,
@@ -3332,17 +2380,6 @@ impl VerterHost {
         self.clone_cached_prepared_value_decl(canonical_id, symbol_name, store_view)
     }
 
-    fn clone_cached_required_owner_import_names(
-        &self,
-        canonical_id: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<rustc_hash::FxHashSet<String>> {
-        self.clone_current_imported_dependency_entry(canonical_id, store_view)?
-            .required_owner_import_names
-            .as_ref()
-            .map(|names| (**names).clone())
-    }
-
     fn clone_cached_required_import_names_for_exported_type(
         &self,
         canonical_id: &str,
@@ -3369,22 +2406,13 @@ impl VerterHost {
             return cached;
         }
 
-        let mut required =
+        let required =
             if let Some(analysis) = self.external_type_analysis_in_view(canonical_id, store_view) {
                 analysis.required_import_names(exported_name)
             } else {
                 rustc_hash::FxHashSet::default()
             };
-        if required.is_empty() {
-            if let Some(env) = self
-                .clone_current_imported_dependency_entry(canonical_id, store_view)
-                .and_then(|dependency| dependency.env.clone())
-            {
-                if let Some(decl) = env.type_symbols.get(exported_name) {
-                    required.extend(collect_required_import_names_for_type_decl(decl, &env));
-                }
-            }
-        }
+        // Walker-based import name discovery deleted. The solver resolves on demand.
 
         if self
             .clone_current_imported_dependency_entry(canonical_id, store_view)
@@ -3470,18 +2498,18 @@ impl VerterHost {
                 continue;
             }
 
-            if analysis.local_symbol_span(root_name).is_some() {
-                if seen.insert((
+            if analysis.local_symbol_span(root_name).is_some()
+                && seen.insert((
                     root_name.to_string(),
                     canonical_id.to_string(),
                     root_name.to_string(),
-                )) {
-                    dependencies.push(ImportedSymbolDependency {
-                        local_name: root_name.to_string(),
-                        canonical_id: canonical_id.to_string(),
-                        exported_name: root_name.to_string(),
-                    });
-                }
+                ))
+            {
+                dependencies.push(ImportedSymbolDependency {
+                    local_name: root_name.to_string(),
+                    canonical_id: canonical_id.to_string(),
+                    exported_name: root_name.to_string(),
+                });
             }
         }
         dependencies.sort_by(|left, right| {
@@ -3601,78 +2629,18 @@ impl VerterHost {
 
     pub(crate) fn required_imported_symbol_dependencies_for_type_decl_in_view(
         &self,
-        canonical_id: &str,
-        decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        _canonical_id: &str,
+        _decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
+        _store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Vec<ImportedSymbolDependency> {
-        let analysis = match self.external_type_analysis_in_view(canonical_id, store_view) {
-            Some(analysis) => analysis,
-            None => return Vec::new(),
-        };
-        let env = match self.base_eval_env_in_view(canonical_id, store_view) {
-            Some(env) => env,
-            None => return Vec::new(),
-        };
-        let runtime_value_roots = collect_required_runtime_value_names_for_type_decl(decl, &env);
-        let required_names = collect_required_import_names_for_type_decl(decl, &env);
-        let mut dependencies = Vec::new();
-        let mut seen = rustc_hash::FxHashSet::default();
-
-        for required_name in required_names {
-            let root_name = required_name
-                .split('.')
-                .next()
-                .unwrap_or(required_name.as_str());
-            if runtime_value_roots.contains(root_name) || is_builtin_type_symbol(root_name) {
-                continue;
-            }
-
-            let Some((import_source, imported_name)) =
-                analysis.local_import_symbol_target(root_name)
-            else {
-                continue;
-            };
-            let imported_member = if root_name == required_name {
-                imported_name.to_string()
-            } else if let Some(suffix) = required_name.strip_prefix(root_name) {
-                format!("{}{}", imported_name, suffix)
-            } else {
-                imported_name.to_string()
-            };
-            let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
-                canonical_id,
-                import_source,
-                store_view,
-            ) else {
-                continue;
-            };
-            let (resolved_canonical, resolved_name) = self.resolve_imported_type_root_in_view(
-                dep_canonical.as_str(),
-                imported_member.as_str(),
-                store_view,
-            );
-            if seen.insert((
-                required_name.clone(),
-                resolved_canonical.clone(),
-                resolved_name.clone(),
-            )) {
-                dependencies.push(ImportedSymbolDependency {
-                    local_name: required_name,
-                    canonical_id: resolved_canonical,
-                    exported_name: resolved_name,
-                });
-            }
-        }
-
-        dependencies.sort_by(|left, right| {
-            left.local_name
-                .cmp(&right.local_name)
-                .then_with(|| left.canonical_id.cmp(&right.canonical_id))
-                .then_with(|| left.exported_name.cmp(&right.exported_name))
-        });
-        dependencies
+        // Walker-based import name discovery deleted. The solver resolves dependencies
+        // on demand through prepared-decl caches.
+        Vec::new()
     }
 
+    // Deleted: the loop body that used runtime_value_roots, analysis, canonical_id,
+    // store_view was part of the walker-based dependency discovery path.
+    // Placeholder to satisfy the compiler for any remaining references:
     fn structural_imported_symbol_dependencies_for_exported_type_in_view(
         &self,
         canonical_id: &str,
@@ -3731,71 +2699,8 @@ impl VerterHost {
             }
         }
 
-        let Some(analysis) = entry.external_type_analysis.clone() else {
-            dependencies.sort_by(|left, right| {
-                left.local_name
-                    .cmp(&right.local_name)
-                    .then_with(|| left.canonical_id.cmp(&right.canonical_id))
-                    .then_with(|| left.exported_name.cmp(&right.exported_name))
-            });
-            return dependencies;
-        };
-        let Some(decl) = env.type_symbols.get(exported_name) else {
-            dependencies.sort_by(|left, right| {
-                left.local_name
-                    .cmp(&right.local_name)
-                    .then_with(|| left.canonical_id.cmp(&right.canonical_id))
-                    .then_with(|| left.exported_name.cmp(&right.exported_name))
-            });
-            return dependencies;
-        };
-        let runtime_value_roots = collect_required_runtime_value_names_for_type_decl(decl, &env);
-        let required_names = collect_required_import_names_for_type_decl(decl, &env);
-        for required_name in required_names {
-            let root_name = required_name
-                .split('.')
-                .next()
-                .unwrap_or(required_name.as_str());
-            if runtime_value_roots.contains(root_name) || is_builtin_type_symbol(root_name) {
-                continue;
-            }
-
-            let Some((import_source, imported_name)) =
-                analysis.local_import_symbol_target(root_name)
-            else {
-                continue;
-            };
-            let imported_member = if root_name == required_name {
-                imported_name.to_string()
-            } else if let Some(suffix) = required_name.strip_prefix(root_name) {
-                format!("{}{}", imported_name, suffix)
-            } else {
-                imported_name.to_string()
-            };
-            let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
-                canonical_id,
-                import_source,
-                store_view,
-            ) else {
-                continue;
-            };
-            let (resolved_canonical, resolved_name) = self.resolve_imported_type_root_in_view(
-                dep_canonical.as_str(),
-                imported_member.as_str(),
-                store_view,
-            );
-            if seen.insert((
-                required_name.clone(),
-                resolved_canonical.clone(),
-                resolved_name.clone(),
-            )) {
-                dependencies.push(ImportedSymbolDependency {
-                    local_name: required_name,
-                    canonical_id: resolved_canonical,
-                    exported_name: resolved_name,
-                });
-            }
-        }
+        // Walker-based cross-file import name discovery deleted.
+        // The solver resolves dependencies on demand through prepared-decl caches.
 
         dependencies.sort_by(|left, right| {
             left.local_name
@@ -3853,7 +2758,7 @@ impl VerterHost {
         );
 
         let mut required_runtime_value_names =
-            collect_required_runtime_value_names_for_type_decl(decl, &env);
+            /* walker deleted — solver resolves on demand */ rustc_hash::FxHashSet::default();
         let mut referenced_names = std::collections::BTreeSet::new();
         collect_type_expr_symbol_refs(&decl.body, &mut referenced_names);
         let mut local_closure_roots = std::collections::BTreeSet::new();
@@ -3895,7 +2800,8 @@ impl VerterHost {
                 store_view,
             );
             required_runtime_value_names.extend(
-                collect_required_runtime_value_names_for_type_decl(local_decl, &base_env),
+                /* walker deleted — solver resolves on demand */
+                rustc_hash::FxHashSet::default(),
             );
             for dependency in self.required_imported_symbol_dependencies_for_type_decl_in_view(
                 canonical_id,
@@ -4319,54 +3225,6 @@ impl VerterHost {
         target
     }
 
-    pub(crate) fn resolve_imported_dependency_canonical_in_view(
-        &self,
-        owner_canonical_id: &str,
-        import_source: &str,
-        resolved_hint: Option<&str>,
-        dep_resolutions: Option<&rustc_hash::FxHashMap<String, DependencyResolution>>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<String> {
-        let _trace = component_meta_trace_scope!(
-            "resolve_imported_dependency_canonical_in_view",
-            format!(
-                "owner={} source={} hint={} store_view={}",
-                owner_canonical_id,
-                import_source,
-                resolved_hint.is_some(),
-                store_view.is_some(),
-            ),
-        );
-        let resolved = self
-            .resolve_type_dependency_canonical_in_view(
-                owner_canonical_id,
-                import_source,
-                store_view,
-            )
-            .or_else(|| resolved_hint.map(str::to_string))
-            .or_else(|| {
-                dep_resolutions
-                    .and_then(|resolutions| resolutions.get(import_source))
-                    .and_then(|resolution| resolution.resolved_canonical_id.clone())
-            })
-            .or_else(|| {
-                dep_resolutions
-                    .and_then(|resolutions| resolutions.get(import_source))
-                    .and_then(DependencyResolution::effective_target)
-                    .map(str::to_string)
-            });
-        component_meta_trace_event!(
-            "resolve_imported_dependency_canonical_in_view_result",
-            format!(
-                "owner={} source={} resolved={}",
-                owner_canonical_id,
-                import_source,
-                resolved.as_deref().unwrap_or(""),
-            ),
-        );
-        resolved
-    }
-
     pub(crate) fn resolve_imported_type_root_in_view(
         &self,
         dep_canonical: &str,
@@ -4430,62 +3288,6 @@ impl VerterHost {
                 (canonical, imported_name.to_string())
             });
         self.cache_imported_type_root(dep_canonical, imported_name, resolved.clone(), store_view);
-        resolved
-    }
-
-    pub(crate) fn resolve_imported_type_declaration_in_view(
-        &self,
-        dep_canonical: &str,
-        imported_name: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> crate::resolver_core::ResolvedTypeDeclaration {
-        let _trace = component_meta_trace_scope!(
-            "resolve_imported_type_declaration",
-            format!("canonical={} imported={}", dep_canonical, imported_name),
-        );
-        if let Some(cached) =
-            self.clone_cached_imported_type_declaration(dep_canonical, imported_name, store_view)
-        {
-            component_meta_trace_event!(
-                "resolve_imported_type_declaration_cache_hit",
-                format!("canonical={} imported={}", dep_canonical, imported_name),
-            );
-            return cached;
-        }
-
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
-            .unwrap_or_else(|| dep_canonical.to_string());
-
-        let _ = self.ensure_shallow_imported_dependency_state_in_view(
-            normalized_canonical.as_str(),
-            store_view,
-        );
-        if let Some(cached) =
-            self.clone_cached_imported_type_declaration(dep_canonical, imported_name, store_view)
-        {
-            component_meta_trace_event!(
-                "resolve_imported_type_declaration_cache_hit",
-                format!(
-                    "canonical={} imported={} source=host_imported_dep",
-                    dep_canonical, imported_name
-                ),
-            );
-            return cached;
-        }
-
-        let resolved = crate::meta_resolve::resolve_type_declaration_in_view(
-            self,
-            normalized_canonical.as_str(),
-            imported_name,
-            store_view,
-        );
-        self.cache_imported_type_declaration(
-            dep_canonical,
-            imported_name,
-            resolved.clone(),
-            store_view,
-        );
         resolved
     }
 
@@ -4625,33 +3427,6 @@ impl VerterHost {
         );
     }
 
-    fn cache_imported_type_declaration(
-        &self,
-        canonical_id: &str,
-        exported_name: &str,
-        declaration: crate::resolver_core::ResolvedTypeDeclaration,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) {
-        if self
-            .clone_current_imported_dependency_entry(canonical_id, store_view)
-            .is_none()
-        {
-            return;
-        }
-
-        let workspace_generation = self.ws().content_generation();
-        let mut cache = self.imported_dependency_cache.lock();
-        let Some(entry) = cache.get_mut(canonical_id) else {
-            return;
-        };
-        if entry.workspace_generation != workspace_generation {
-            return;
-        }
-        Arc::make_mut(entry)
-            .resolved_type_declarations
-            .insert(exported_name.to_string(), declaration);
-    }
-
     fn cache_prepared_imported_type_alias(
         &self,
         canonical_id: &str,
@@ -4677,30 +3452,6 @@ impl VerterHost {
         Arc::make_mut(entry)
             .prepared_type_aliases
             .insert(exported_name.to_string(), cached);
-    }
-
-    fn cache_required_owner_import_names(
-        &self,
-        canonical_id: &str,
-        required_names: rustc_hash::FxHashSet<String>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) {
-        if self
-            .clone_current_imported_dependency_entry(canonical_id, store_view)
-            .is_none()
-        {
-            return;
-        }
-
-        let workspace_generation = self.ws().content_generation();
-        let mut cache = self.imported_dependency_cache.lock();
-        let Some(entry) = cache.get_mut(canonical_id) else {
-            return;
-        };
-        if entry.workspace_generation != workspace_generation {
-            return;
-        }
-        Arc::make_mut(entry).required_owner_import_names = Some(Arc::new(required_names));
     }
 
     fn cache_required_import_names_for_exported_type(
@@ -5666,232 +4417,6 @@ impl VerterHost {
         None
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn imported_eval_inputs(
-        &self,
-        owner_canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-    ) -> ImportedEvalInputs {
-        self.imported_eval_inputs_with_owner_context(
-            owner_canonical_id,
-            snapshot,
-            dep_resolutions,
-            None,
-            None,
-        )
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn imported_eval_inputs_with_owner_context(
-        &self,
-        owner_canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-        owner_eval_source: Option<&str>,
-        owner_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
-    ) -> ImportedEvalInputs {
-        self.imported_eval_inputs_with_owner_context_in_view(
-            owner_canonical_id,
-            snapshot,
-            dep_resolutions,
-            owner_eval_source,
-            owner_env,
-            None,
-        )
-    }
-
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(crate) fn imported_eval_inputs_with_owner_context_in_view(
-        &self,
-        owner_canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-        owner_eval_source: Option<&str>,
-        owner_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> ImportedEvalInputs {
-        let _trace = component_meta_trace_scope!(
-            "imported_eval_inputs",
-            format!(
-                "owner={} imports={} dep_resolutions={} owner_eval_source={} owner_env={} store_view={}",
-                owner_canonical_id,
-                snapshot.imports.len(),
-                dep_resolutions.len(),
-                owner_eval_source.is_some(),
-                owner_env.is_some(),
-                store_view.is_some(),
-            ),
-        );
-        self.provenance
-            .imported_eval_inputs_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let started = component_meta_debug_enabled().then(Instant::now);
-        let owner_snapshot = ImportedEvalOwnerSnapshot {
-            imports: snapshot.imports.as_slice(),
-            macros: snapshot.macros.as_ref(),
-            bindings: snapshot.bindings.as_ref(),
-            macro_type_deps: snapshot.macro_type_deps.as_ref(),
-        };
-        let mut budget = ImportedEvalTraversalBudget::new(
-            owner_canonical_id,
-            COMPONENT_META_MAX_IMPORTED_TYPE_ROOTS,
-        );
-        if let Some(started) = started {
-            component_meta_debug(format!(
-                "imported_eval_inputs:start owner={} imports={} prework_took {:?}",
-                owner_canonical_id,
-                snapshot.imports.len(),
-                started.elapsed(),
-            ));
-        }
-        let mut collector = HostImportedEvalResolver::with_dep_resolutions(
-            self,
-            owner_canonical_id,
-            dep_resolutions,
-            store_view,
-        );
-        let imported_inputs = build_imported_eval_inputs_with_owner_context(
-            &mut collector,
-            owner_canonical_id,
-            &owner_snapshot,
-            owner_eval_source,
-            owner_env,
-            None,
-            &mut budget,
-        );
-        self.provenance.imported_eval_worklist_seed_count.fetch_add(
-            imported_inputs.stats.worklist_seed_count,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.provenance
-            .imported_eval_worklist_resolved_count
-            .fetch_add(
-                imported_inputs.stats.worklist_resolved_count,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        self.provenance
-            .imported_eval_worklist_enqueued_from_symbol_deps_count
-            .fetch_add(
-                imported_inputs
-                    .stats
-                    .worklist_enqueued_from_symbol_deps_count,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        self.provenance
-            .imported_eval_reached_merge_roots_count
-            .fetch_add(
-                imported_inputs.stats.reached_merge_roots_count,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        self.provenance.imported_eval_sources_count.fetch_add(
-            imported_inputs.stats.imported_sources_count,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.provenance
-            .imported_eval_normalized_type_root_calls
-            .fetch_add(
-                imported_inputs.stats.normalized_imported_type_root_calls,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        self.provenance.imported_eval_prepare_failures.fetch_add(
-            imported_inputs.stats.prepare_imported_type_alias_failures,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.provenance
-            .imported_eval_dropped_unreached_aliases
-            .fetch_add(
-                imported_inputs.stats.dropped_unreached_aliases,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        component_meta_trace_event!(
-            "imported_eval_inputs_result",
-            format!(
-                "owner={} type_aliases={} sources={} overflow={} canonical_dependencies={}",
-                owner_canonical_id,
-                imported_inputs.type_aliases.len(),
-                imported_inputs.sources.len(),
-                imported_inputs.overflow.is_some(),
-                imported_inputs.canonical_dependencies.len(),
-            ),
-        );
-
-        if component_meta_debug_enabled() {
-            component_meta_debug(format!(
-                "imported_eval_inputs:end owner={} type_aliases=[{}] sources={} total_took={:?}",
-                owner_canonical_id,
-                imported_inputs
-                    .type_aliases
-                    .iter()
-                    .map(|alias| format!(
-                        "{}<-{}#{}",
-                        alias.local_name, alias.source_canonical_id, alias.exported_name
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                imported_inputs.sources.len(),
-                started.map(|start| start.elapsed()).unwrap_or_default(),
-            ));
-        }
-
-        imported_inputs
-    }
-
-    fn track_direct_eval_dependencies(
-        &self,
-        owner_canonical_id: &str,
-        owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-        canonical_dependencies: &mut std::collections::BTreeSet<String>,
-    ) {
-        let _trace = component_meta_trace_scope!(
-            "track_direct_eval_dependencies",
-            format!(
-                "owner={} macro_type_deps={} imports={} dep_resolutions={}",
-                owner_canonical_id,
-                owner_snapshot.macro_type_deps.len(),
-                owner_snapshot.imports.len(),
-                dep_resolutions.len(),
-            ),
-        );
-        for dep in owner_snapshot.macro_type_deps.iter() {
-            if let Some(dep_canonical) = self
-                .resolve_type_dependency_canonical(owner_canonical_id, &dep.import_source)
-                .or_else(|| {
-                    dep_resolutions
-                        .get(&dep.import_source)
-                        .and_then(|resolution| resolution.resolved_canonical_id.clone())
-                })
-            {
-                canonical_dependencies.insert(dep_canonical);
-            }
-        }
-
-        for import in owner_snapshot
-            .imports
-            .iter()
-            .filter(|import| !import.is_type_only)
-        {
-            if let Some(dep_canonical) = import.resolved_canonical_id.clone().or_else(|| {
-                dep_resolutions
-                    .get(&import.source)
-                    .and_then(DependencyResolution::effective_target)
-                    .map(str::to_string)
-            }) {
-                canonical_dependencies.insert(dep_canonical);
-            }
-        }
-
-        component_meta_trace_event!(
-            "track_direct_eval_dependencies_result",
-            format!(
-                "owner={} canonical_dependencies={}",
-                owner_canonical_id,
-                canonical_dependencies.len(),
-            ),
-        );
-    }
-
     pub(crate) fn cache_dependency_candidates_from_snapshot(
         &self,
         owner_canonical_id: &str,
@@ -5923,17 +4448,15 @@ impl VerterHost {
         candidates
     }
 
-    /// Compute evaluated types using pre-computed imported eval inputs.
-    /// Avoids redundant `imported_eval_inputs()` calls when the caller
-    /// already has them (e.g., `resolve_component_meta`).
+    /// Compute evaluated types using pre-computed inputs.
+    /// Reuses inputs the caller already has (e.g., `resolve_component_meta`).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn compute_evaluated_types_with_inputs(
         &self,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes> {
-        self.compute_evaluated_types_with_tracking(canonical, snapshot, imported_inputs)
+        self.compute_evaluated_types_with_tracking(canonical, snapshot)
             .and_then(|computed| computed.evaluated_types)
     }
 
@@ -5941,14 +4464,9 @@ impl VerterHost {
         &self,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
     ) -> Option<ComputedEvaluatedTypes> {
         self.compute_evaluated_types_with_tracking_from_owner_context(
-            canonical,
-            snapshot,
-            imported_inputs,
-            None,
-            None,
+            canonical, snapshot, None, None,
         )
     }
 
@@ -5956,14 +4474,12 @@ impl VerterHost {
         &self,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
         owner_eval_source: Option<&str>,
         owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Option<ComputedEvaluatedTypes> {
         self.compute_evaluated_types_with_tracking_from_owner_context_in_view(
             canonical,
             snapshot,
-            imported_inputs,
             owner_eval_source,
             owner_env,
             None,
@@ -5974,7 +4490,6 @@ impl VerterHost {
         &self,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
         owner_eval_source: Option<&str>,
         owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
@@ -5989,7 +4504,6 @@ impl VerterHost {
         self.compute_evaluated_types_from_owner_context_in_view(
             canonical,
             snapshot,
-            imported_inputs,
             &eval_source,
             owner_env,
             store_view,
@@ -6000,40 +4514,32 @@ impl VerterHost {
         &self,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
         eval_source: &str,
         owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<ComputedEvaluatedTypes> {
-        let required_runtime_value_names = if let Some(owner_env) = owner_env.as_ref() {
-            collect_required_runtime_value_names(snapshot, eval_source, owner_env)
-        } else if let Some(base_env) = self.base_eval_env_in_view(canonical, store_view) {
-            collect_required_runtime_value_names(snapshot, eval_source, &base_env)
-        } else {
-            rustc_hash::FxHashSet::default()
-        };
-        let built = self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
-            canonical,
-            snapshot,
-            imported_inputs,
-            None,
-            owner_env,
-            Some(&required_runtime_value_names),
+        // Build local-only env (no walker-based imported type pre-loading).
+        // Cross-file types are resolved on demand through SessionSolverHost.
+        let env = owner_env.unwrap_or_else(|| {
+            self.base_eval_env_in_view(canonical, store_view)
+                .unwrap_or_default()
+        });
+        let requested_binding_names =
+            crate::resolver_core::collect_requested_binding_names(snapshot.macros.as_ref());
+        let solver_host = crate::resolver_core::SessionSolverHost::with_owner_env_and_imports(
+            self,
             store_view,
-        )?;
-        let mut env = built.env;
-        let solver_env = env.clone();
-        let solver_host =
-            crate::resolver_core::SessionSolverHost::with_owner_env(self, store_view, &solver_env);
+            &env,
+            snapshot.imports.as_slice(),
+        );
         let result = verter_semantic::analysis::type_eval_build::expand_macro_types(
             snapshot.macros.as_ref(),
             Some(eval_source),
-            &mut env,
-            Some(&built.requested_binding_names),
+            &mut env.clone(),
+            Some(&requested_binding_names),
             &solver_host,
         );
-        // Dependency tracking now comes from the frontier/shallow-file-state path
-        // rather than the old ImportedEvalLookup side effect.
+        // Dependency tracking comes from the frontier/shallow-file-state path.
         let discovered_dependencies = std::collections::BTreeSet::<String>::new();
         if component_meta_debug_enabled() {
             component_meta_debug(format!(
@@ -6086,15 +4592,13 @@ impl VerterHost {
             crate::types::ResolverMode::Expanded,
             &store_view,
         )?;
-        let include_fallthrough = match resolved.cached_eval_inputs.as_ref() {
-            Some(inputs) => inputs.overflow.is_none(),
-            None => true,
-        };
+        // Always include fallthrough — the solver path does not use walker
+        // overflow as a gating signal.
         let meta = extract_component_meta_from_resolved(
             self,
             canonical.as_str(),
             &resolved,
-            include_fallthrough,
+            true, // include_fallthrough
             Some(&store_view),
         );
         if let Some(started) = started {
@@ -6129,15 +4633,13 @@ impl VerterHost {
             crate::types::ResolverMode::Expanded,
             &store_view,
         )?;
-        let include_fallthrough = match resolved.cached_eval_inputs.as_ref() {
-            Some(inputs) => inputs.overflow.is_none(),
-            None => true,
-        };
+        // Always include fallthrough — the solver path does not use walker
+        // overflow as a gating signal.
         let analysis = extract_component_meta_from_resolved(
             self,
             canonical.as_str(),
             &resolved,
-            include_fallthrough,
+            true, // include_fallthrough
             Some(&store_view),
         );
         Some((analysis, resolved))
@@ -6390,22 +4892,14 @@ impl VerterHost {
             parent_canonical_id: canonical_id,
             store_view,
         };
-        let eval_env = if let Some(ref cached_inputs) = resolved.cached_eval_inputs {
-            self.build_fallthrough_eval_env_with_inputs_in_view(
-                canonical_id,
-                &resolved.snapshot,
-                prop_type_overrides,
-                cached_inputs,
-                store_view,
-            )
-        } else {
-            self.build_fallthrough_eval_env_in_view(
-                canonical_id,
-                &resolved.snapshot,
-                prop_type_overrides,
-                store_view,
-            )
-        };
+        // Build a lightweight fallthrough eval env: base owner env + runtime
+        // values + prop overrides.
+        let eval_env = self.build_fallthrough_eval_env_lightweight_in_view(
+            canonical_id,
+            &resolved.snapshot,
+            prop_type_overrides,
+            store_view,
+        );
 
         let resolved_surface = resolver_resolve_fallthrough_surface(
             &fallthrough_resolver,
@@ -6427,239 +4921,51 @@ impl VerterHost {
         })
     }
 
-    fn build_fallthrough_eval_env_in_view(
+    /// Lightweight fallthrough eval env: base owner env + runtime values + overrides.
+    fn build_fallthrough_eval_env_lightweight_in_view(
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         prop_type_overrides: Option<
             &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
-        let dep_resolutions = self
-            .dependency_resolutions_for_eval_in_view(canonical_id, store_view)
-            .unwrap_or_default();
-        let imported_inputs = self.imported_eval_inputs_with_owner_context_in_view(
-            canonical_id,
-            snapshot,
-            &dep_resolutions,
-            None,
-            None,
-            store_view,
-        );
-        self.build_fallthrough_eval_env_with_inputs_in_view(
-            canonical_id,
-            snapshot,
-            prop_type_overrides,
-            &imported_inputs,
-            store_view,
-        )
-    }
-
-    fn build_fallthrough_eval_env_with_inputs_in_view(
-        &self,
-        canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
-        imported_inputs: &ImportedEvalInputs,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         let _trace = component_meta_trace_scope!(
-            "build_fallthrough_eval_env",
+            "build_fallthrough_eval_env_lightweight",
             format!(
-                "owner={} imports={} imported_sources={} overrides={} store_view={}",
+                "owner={} imports={} overrides={} store_view={}",
                 canonical_id,
                 snapshot.imports.len(),
-                imported_inputs.sources.len(),
                 prop_type_overrides
                     .map(|overrides| overrides.len())
                     .unwrap_or_default(),
                 store_view.is_some(),
             ),
         );
-        let required_runtime_value_names = collect_required_template_runtime_value_names(snapshot);
-        Some(
-            self.build_owner_eval_env_with_inputs_from_owner_env_in_view(
-                canonical_id,
-                snapshot,
-                imported_inputs,
-                prop_type_overrides,
-                None,
-                Some(&required_runtime_value_names),
-                store_view,
-            )?
-            .env,
-        )
-    }
+        let mut env = self
+            .base_eval_env_arc_in_view(canonical_id, store_view)
+            .map(|env| (*env).clone())?;
 
-    fn build_owner_eval_env_with_inputs_from_owner_env_in_view(
-        &self,
-        canonical_id: &str,
-        snapshot: &FileAnalysisSnapshot,
-        imported_inputs: &ImportedEvalInputs,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
-        owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
-        required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<OwnerEvalEnvBuild> {
-        let _trace =
-            component_meta_trace_scope!(
-                "build_owner_eval_env",
-                format!(
-                "owner={} imports={} imported_sources={} overrides={} owner_env={} store_view={}",
-                canonical_id,
-                snapshot.imports.len(),
-                imported_inputs.sources.len(),
-                prop_type_overrides.map(|overrides| overrides.len()).unwrap_or_default(),
-                owner_env.is_some(),
-                store_view.is_some(),
-            ),
-            );
-        let started = component_meta_debug_enabled().then(Instant::now);
-        let assembler = HostOwnerEvalEnvAssembler {
-            host: self,
-            store_view,
-        };
-        let built = build_owner_eval_env_with_inputs(
-            &assembler,
+        // Hydrate required runtime values from imports.
+        let required_runtime_value_names = collect_required_template_runtime_value_names(snapshot);
+        let local_value_names: rustc_hash::FxHashSet<String> =
+            env.value_symbols.keys().cloned().collect();
+        self.materialize_imported_runtime_values_into_env_in_view(
             canonical_id,
             snapshot,
-            snapshot.macros.as_ref(),
-            imported_inputs,
-            prop_type_overrides,
-            owner_env,
-            required_runtime_value_names,
-        )?;
-        if component_meta_debug_enabled() {
-            component_meta_debug(format!(
-                "build_owner_eval_env owner={} dep_sources={} type_symbols={} value_symbols={} took {:?}",
-                canonical_id,
-                imported_inputs.sources.len(),
-                built.env.type_symbols.len(),
-                built.env.value_symbols.len(),
-                started.map(|start| start.elapsed()).unwrap_or_default(),
-            ));
-        }
-        component_meta_trace_event!(
-            "build_owner_eval_env_result",
-            format!(
-                "owner={} type_symbols={} value_symbols={} imported_sources={}",
-                canonical_id,
-                built.env.type_symbols.len(),
-                built.env.value_symbols.len(),
-                imported_inputs.sources.len(),
-            ),
-        );
-        Some(built)
-    }
-
-    fn materialize_imported_type_aliases_into_env_in_view(
-        &self,
-        owner_local_type_names: &rustc_hash::FxHashSet<String>,
-        imported_inputs: &ImportedEvalInputs,
-        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) {
-        let _trace = component_meta_trace_scope!(
-            "materialize_imported_type_aliases",
-            format!(
-                "aliases={} existing_type_symbols={} store_view={}",
-                imported_inputs.type_aliases.len(),
-                env.type_symbols.len(),
-                store_view.is_some(),
-            ),
-        );
-        let mut inserted = 0usize;
-        for alias in &imported_inputs.type_aliases {
-            if owner_local_type_names.contains(&alias.local_name) {
-                continue;
-            }
-            let alias_started = component_meta_debug_enabled().then(Instant::now);
-            if component_meta_debug_enabled() {
-                component_meta_debug(format!(
-                    "materialize_type_alias:start local={} merge_root={}#{} source={}#{} existing_type_symbols={}",
-                    alias.local_name,
-                    alias.merge_root_canonical,
-                    alias.merge_root_exported,
-                    alias.source_canonical_id,
-                    alias.exported_name,
-                    env.type_symbols.len(),
-                ));
-            }
-            // Imported source envs are merged before alias hydration, so a raw dep symbol can
-            // already occupy this local name. Drop non-owner placeholders and replace them with
-            // the prepared root alias surface for the owner's import binding.
-            //
-            // This owner-env path must stay shallow and query-driven: imported source env merges
-            // already make the supporting symbol inventories available, so recursively hydrating
-            // attached imported dependencies here only widens the graph before any visited key
-            // requires it.
-            env.type_symbols.remove(&alias.local_name);
-            let inserted_alias = self.insert_prepared_imported_type_alias_into_env_in_view(
-                env,
-                alias.local_name.as_str(),
-                alias.merge_root_canonical.as_str(),
-                alias.merge_root_exported.as_str(),
-                store_view,
-            );
-            if component_meta_debug_enabled() {
-                component_meta_debug(format!(
-                    "materialize_type_alias:end local={} inserted={} type_symbols={} took {:?}",
-                    alias.local_name,
-                    inserted_alias,
-                    env.type_symbols.len(),
-                    alias_started
-                        .map(|start| start.elapsed())
-                        .unwrap_or_default(),
-                ));
-            }
-            if inserted_alias {
-                inserted += 1;
-            }
-        }
-        component_meta_trace_event!(
-            "materialize_imported_type_aliases_result",
-            format!(
-                "aliases={} inserted={} final_type_symbols={}",
-                imported_inputs.type_aliases.len(),
-                inserted,
-                env.type_symbols.len(),
-            ),
-        );
-    }
-
-    fn insert_prepared_imported_type_alias_into_env_in_view(
-        &self,
-        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-        local_name: &str,
-        canonical_id: &str,
-        exported_name: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> bool {
-        if let Some((_resolved_canonical_id, _resolved_exported_name, prepared)) = self
-            .resolve_prepared_symbol_dependency_alias_in_view(
-                canonical_id,
-                exported_name,
-                store_view,
-            )
-        {
-            let mut decl = prepared.decl;
-            decl.name = local_name.to_string();
-            env.add_type(decl);
-            return true;
-        }
-
-        self.insert_shallow_type_symbol_from_base_env_in_view(
-            env,
-            local_name,
-            canonical_id,
-            exported_name,
+            &local_value_names,
+            Some(&required_runtime_value_names),
+            &mut env,
             store_view,
-        )
+        );
+
+        // Apply prop type overrides for generic root propagation.
+        if let Some(overrides) = prop_type_overrides {
+            crate::resolver_core::inject_prop_type_overrides(&mut env, overrides);
+        }
+
+        Some(env)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -6811,45 +5117,42 @@ impl VerterHost {
             let mut hydrated = cached.clone();
             if !hydrated.body_hydrated
                 && (hydrated.requires_source_merge || !hydrated.symbol_dependencies.is_empty())
+                && hydrated.decl.type_parameters.is_empty()
             {
-                if hydrated.decl.type_parameters.is_empty() {
-                    let evaluated = self
-                        .clone_current_imported_dependency_entry(
+                let evaluated = self
+                    .clone_current_imported_dependency_entry(
+                        resolved_canonical_id.as_str(),
+                        store_view,
+                    )
+                    .and_then(|dependency| dependency.snapshot.clone())
+                    .and_then(|snapshot| {
+                        self.build_cache_only_lookup_env_for_type_decl_in_view(
                             resolved_canonical_id.as_str(),
+                            snapshot.as_ref(),
+                            &hydrated.decl,
+                            &hydrated.symbol_dependencies,
                             store_view,
                         )
-                        .and_then(|dependency| dependency.snapshot.clone())
-                        .and_then(|snapshot| {
-                            self.build_cache_only_lookup_env_for_type_decl_in_view(
-                                resolved_canonical_id.as_str(),
-                                snapshot.as_ref(),
-                                &hydrated.decl,
-                                &hydrated.symbol_dependencies,
-                                store_view,
-                            )
-                        })
-                        .map(|mut env| {
-                            verter_semantic::analysis::type_eval::evaluate(
-                                &hydrated.decl.body,
-                                &mut env,
-                            )
-                        });
-                    if let Some(preferred) =
-                        crate::resolver_core::choose_preferred_imported_type_body(
-                            evaluated,
-                            Some(hydrated.decl.body.clone()),
+                    })
+                    .map(|mut env| {
+                        verter_semantic::analysis::type_eval::evaluate(
+                            &hydrated.decl.body,
+                            &mut env,
                         )
-                    {
-                        hydrated.decl.body = preferred;
-                        hydrated.requires_source_merge = false;
-                        hydrated.body_hydrated = true;
-                        self.cache_prepared_imported_type_alias(
-                            resolved_canonical_id.as_str(),
-                            resolved_exported_name.as_str(),
-                            hydrated.clone(),
-                            store_view,
-                        );
-                    }
+                    });
+                if let Some(preferred) = crate::resolver_core::choose_preferred_imported_type_body(
+                    evaluated,
+                    Some(hydrated.decl.body.clone()),
+                ) {
+                    hydrated.decl.body = preferred;
+                    hydrated.requires_source_merge = false;
+                    hydrated.body_hydrated = true;
+                    self.cache_prepared_imported_type_alias(
+                        resolved_canonical_id.as_str(),
+                        resolved_exported_name.as_str(),
+                        hydrated.clone(),
+                        store_view,
+                    );
                 }
             }
 
@@ -9712,230 +8015,13 @@ impl VerterHost {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn collect_required_owner_import_names(
-    snapshot: &FileAnalysisSnapshot,
-    owner_eval_source: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-) -> rustc_hash::FxHashSet<String> {
-    let owner_snapshot = ImportedEvalOwnerSnapshot {
-        imports: snapshot.imports.as_slice(),
-        macros: snapshot.macros.as_ref(),
-        bindings: snapshot.bindings.as_ref(),
-        macro_type_deps: snapshot.macro_type_deps.as_ref(),
-    };
-    collect_required_owner_import_names_from_parts(&owner_snapshot, owner_eval_source, owner_env)
-}
+// Legacy TypeExpr walkers (collect_required_owner_import_names, collect_slot_eval_import_names_*,
+// collect_surface_eval_import_names_*, collect_runtime_value_names_*, etc.) were deleted.
+// The solver host now resolves cross-file types on demand through prepared-decl caches.
 
-fn collect_required_owner_import_names_from_parts(
-    owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-    owner_eval_source: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-) -> rustc_hash::FxHashSet<String> {
-    let started = component_meta_debug_enabled().then(Instant::now);
-    let mut required = rustc_hash::FxHashSet::default();
-    if owner_eval_source.is_empty() {
-        return required;
-    }
-
-    if component_meta_debug_enabled() {
-        component_meta_debug(format!(
-            "collect_required_imports:start macros={} bindings={} source_len={} type_symbols={} value_symbols={}",
-            owner_snapshot.macros.len(),
-            owner_snapshot.bindings.len(),
-            owner_eval_source.len(),
-            owner_env.type_symbols.len(),
-            owner_env.value_symbols.len(),
-        ));
-    }
-    let type_bindings = VerterHost::owner_generic_type_bindings(owner_env);
-    let mut active_locals = rustc_hash::FxHashSet::default();
-    let mut surface_state = SurfaceImportCollectState::default();
-    let mut slot_state = SlotImportCollectState::default();
-    let macro_type_params =
-        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(
-            owner_eval_source,
-        );
-    let mut define_props_index = 0usize;
-    let mut define_emits_index = 0usize;
-    let mut define_slots_index = 0usize;
-    let imported_binding_names: rustc_hash::FxHashSet<&str> = owner_snapshot
-        .imports
-        .iter()
-        .flat_map(|import| import.bindings.iter().map(|binding| binding.name.as_str()))
-        .collect();
-    for (macro_index, mac) in owner_snapshot.macros.iter().enumerate() {
-        // Prefer the owner-local surface walk. It can follow local aliases and
-        // lazy indexed access without dragging in every imported generic arg
-        // behind the macro root. Only fall back to shared macro deps when the
-        // local macro analyzer captured no root type references.
-        if mac.is_type_based {
-            let is_define_slots =
-                mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots;
-            let macro_type_expr = match mac.kind {
-                verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
-                    let expr = macro_type_params.define_props.get(define_props_index);
-                    define_props_index += 1;
-                    expr
-                }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
-                    let expr = macro_type_params.define_emits.get(define_emits_index);
-                    define_emits_index += 1;
-                    expr
-                }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
-                    let expr = macro_type_params.define_slots.get(define_slots_index);
-                    define_slots_index += 1;
-                    expr
-                }
-                _ => None,
-            };
-            let mut used_local_macro_walk = false;
-            if let Some(expr) = macro_type_expr {
-                if !expr.is_unknown() {
-                    used_local_macro_walk = true;
-                    if is_define_slots {
-                        collect_slot_eval_import_names_from_expr(
-                            expr,
-                            owner_env,
-                            &type_bindings,
-                            &mut active_locals,
-                            &mut slot_state,
-                            &mut required,
-                        );
-                    } else {
-                        collect_surface_eval_import_names_from_expr(
-                            expr,
-                            owner_env,
-                            &type_bindings,
-                            &mut active_locals,
-                            &mut surface_state,
-                            &mut required,
-                        );
-                    }
-                }
-            }
-            if is_define_slots || !used_local_macro_walk {
-                for type_reference in &mac.type_references {
-                    if is_define_slots {
-                        collect_required_slot_import_names_for_symbol(
-                            type_reference,
-                            owner_env,
-                            &type_bindings,
-                            &imported_binding_names,
-                            &mut active_locals,
-                            &mut slot_state,
-                            &mut required,
-                        );
-                    } else {
-                        collect_required_import_names_for_symbol(
-                            type_reference,
-                            owner_env,
-                            &type_bindings,
-                            &imported_binding_names,
-                            &mut active_locals,
-                            &mut surface_state,
-                            &mut required,
-                        );
-                    }
-                }
-            }
-            if !used_local_macro_walk && mac.type_references.is_empty() {
-                for dep in owner_snapshot
-                    .macro_type_deps
-                    .iter()
-                    .filter(|dep| dep.macro_index == macro_index)
-                {
-                    if imported_binding_names.contains(dep.type_name.as_str()) {
-                        required.insert(dep.type_name.clone());
-                    }
-                }
-            }
-        }
-
-        for field in &mac.prop_fields {
-            if let Some(type_ann) = field.type_annotation.as_deref() {
-                let expr =
-                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_ann);
-                if !expr.is_unknown() {
-                    collect_surface_eval_import_names_from_expr(
-                        &expr,
-                        owner_env,
-                        &type_bindings,
-                        &mut active_locals,
-                        &mut surface_state,
-                        &mut required,
-                    );
-                }
-            }
-        }
-
-        for field in &mac.emit_fields {
-            if let Some(payload) = field.payload_type.as_deref() {
-                let expr =
-                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(payload);
-                if !expr.is_unknown() {
-                    collect_surface_eval_import_names_from_expr(
-                        &expr,
-                        owner_env,
-                        &type_bindings,
-                        &mut active_locals,
-                        &mut surface_state,
-                        &mut required,
-                    );
-                }
-            }
-        }
-
-        if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
-            for slot in &mac.slot_fields {
-                for binding in &slot.bindings {
-                    if let Some(type_ann) = binding.type_annotation.as_deref() {
-                        let expr =
-                            verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                                type_ann,
-                            );
-                        if !expr.is_unknown() {
-                            collect_surface_eval_import_names_from_expr(
-                                &expr,
-                                owner_env,
-                                &type_bindings,
-                                &mut active_locals,
-                                &mut surface_state,
-                                &mut required,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if component_meta_debug_enabled() {
-        component_meta_debug(format!(
-            "collect_required_imports:end required_count={} required=[{}] total_took={:?}",
-            required.len(),
-            required.iter().cloned().collect::<Vec<_>>().join(", "),
-            started.map(|start| start.elapsed()).unwrap_or_default(),
-        ));
-    }
-    required
-}
-
-fn collect_required_runtime_value_names(
-    snapshot: &FileAnalysisSnapshot,
-    owner_eval_source: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-) -> rustc_hash::FxHashSet<String> {
-    let owner_snapshot = ImportedEvalOwnerSnapshot {
-        imports: snapshot.imports.as_slice(),
-        macros: snapshot.macros.as_ref(),
-        bindings: snapshot.bindings.as_ref(),
-        macro_type_deps: snapshot.macro_type_deps.as_ref(),
-    };
-    collect_required_runtime_value_names_from_parts(&owner_snapshot, owner_eval_source, owner_env)
-}
-
+/// Collect the set of runtime value names referenced by the template.
+/// This reads pre-analyzed snapshot data (binding_occurrences, prop.referenced_bindings),
+/// NOT TypeExpr trees — it is not a walker.
 fn collect_required_template_runtime_value_names(
     snapshot: &FileAnalysisSnapshot,
 ) -> rustc_hash::FxHashSet<String> {
@@ -9961,2676 +8047,6 @@ fn collect_required_template_runtime_value_names(
     }
 
     required
-}
-
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn collect_required_runtime_value_names_from_parts(
-    owner_snapshot: &ImportedEvalOwnerSnapshot<'_>,
-    owner_eval_source: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-) -> rustc_hash::FxHashSet<String> {
-    let mut required = rustc_hash::FxHashSet::default();
-    if owner_eval_source.is_empty() {
-        return required;
-    }
-
-    let type_bindings = VerterHost::owner_generic_type_bindings(owner_env);
-    let mut active_locals = rustc_hash::FxHashSet::default();
-    let mut state = RuntimeValueCollectState::default();
-    let macro_type_params =
-        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(
-            owner_eval_source,
-        );
-    let mut define_props_index = 0usize;
-    let mut define_emits_index = 0usize;
-    let mut define_slots_index = 0usize;
-    let binding_type_annotations: rustc_hash::FxHashMap<&str, &str> = owner_snapshot
-        .bindings
-        .iter()
-        .filter_map(|binding| {
-            binding
-                .type_annotation
-                .as_deref()
-                .map(|type_ann| (binding.name.as_str(), type_ann))
-        })
-        .collect();
-
-    for mac in owner_snapshot.macros.iter() {
-        if mac.is_type_based {
-            let macro_type_expr = match mac.kind {
-                verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
-                    let expr = macro_type_params.define_props.get(define_props_index);
-                    define_props_index += 1;
-                    expr
-                }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
-                    let expr = macro_type_params.define_emits.get(define_emits_index);
-                    define_emits_index += 1;
-                    expr
-                }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
-                    let expr = macro_type_params.define_slots.get(define_slots_index);
-                    define_slots_index += 1;
-                    expr
-                }
-                _ => None,
-            };
-            if let Some(expr) = macro_type_expr {
-                if !expr.is_unknown() {
-                    collect_runtime_value_names_from_expr(
-                        expr,
-                        owner_env,
-                        &type_bindings,
-                        &mut active_locals,
-                        &mut state,
-                        &mut required,
-                    );
-                }
-            }
-            for type_reference in &mac.type_references {
-                collect_required_runtime_value_names_for_symbol(
-                    type_reference,
-                    owner_env,
-                    &type_bindings,
-                    &mut active_locals,
-                    &mut state,
-                    &mut required,
-                );
-            }
-        }
-
-        for field in &mac.prop_fields {
-            if let Some(type_ann) = field.type_annotation.as_deref() {
-                let expr =
-                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_ann);
-                if !expr.is_unknown() {
-                    collect_runtime_value_names_from_expr(
-                        &expr,
-                        owner_env,
-                        &type_bindings,
-                        &mut active_locals,
-                        &mut state,
-                        &mut required,
-                    );
-                }
-            }
-        }
-
-        for field in &mac.emit_fields {
-            if let Some(payload) = field.payload_type.as_deref() {
-                let expr =
-                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(payload);
-                if !expr.is_unknown() {
-                    collect_runtime_value_names_from_expr(
-                        &expr,
-                        owner_env,
-                        &type_bindings,
-                        &mut active_locals,
-                        &mut state,
-                        &mut required,
-                    );
-                }
-            }
-        }
-
-        if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
-            for slot in &mac.slot_fields {
-                for binding in &slot.bindings {
-                    if let Some(type_ann) = binding.type_annotation.as_deref() {
-                        let expr =
-                            verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                                type_ann,
-                            );
-                        if !expr.is_unknown() {
-                            collect_runtime_value_names_from_expr(
-                                &expr,
-                                owner_env,
-                                &type_bindings,
-                                &mut active_locals,
-                                &mut state,
-                                &mut required,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        for field in &mac.expose_fields {
-            let Some(type_ann) = binding_type_annotations.get(field.name.as_str()) else {
-                continue;
-            };
-            let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_ann);
-            if expr.is_unknown() {
-                continue;
-            }
-            collect_runtime_value_names_from_expr(
-                &expr,
-                owner_env,
-                &type_bindings,
-                &mut active_locals,
-                &mut state,
-                &mut required,
-            );
-        }
-    }
-
-    required
-}
-
-fn collect_required_runtime_value_names_for_symbol(
-    symbol: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut RuntimeValueCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    if owner_env.type_symbols.contains_key(symbol) || type_bindings.contains_key(symbol) {
-        collect_runtime_value_names_from_expr(
-            &verter_semantic::analysis::type_expr::TypeExpr::named(symbol),
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-        );
-    }
-}
-
-fn collect_runtime_value_names_from_function(
-    func: &verter_semantic::analysis::type_expr::FunctionExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut RuntimeValueCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    let mut local_bindings = type_bindings.clone();
-    for param in &func.type_parameters {
-        local_bindings.insert(
-            param.name.clone(),
-            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
-        );
-        if let Some(constraint) = param.constraint.as_deref() {
-            collect_runtime_value_names_from_expr(
-                constraint,
-                owner_env,
-                &local_bindings,
-                active_locals,
-                state,
-                required,
-            );
-        }
-        if let Some(default) = param.default.as_deref() {
-            collect_runtime_value_names_from_expr(
-                default,
-                owner_env,
-                &local_bindings,
-                active_locals,
-                state,
-                required,
-            );
-        }
-    }
-    for param in &func.parameters {
-        collect_runtime_value_names_from_expr(
-            &param.ty,
-            owner_env,
-            &local_bindings,
-            active_locals,
-            state,
-            required,
-        );
-    }
-    if let Some(return_type) = func.return_type.as_deref() {
-        collect_runtime_value_names_from_expr(
-            return_type,
-            owner_env,
-            &local_bindings,
-            active_locals,
-            state,
-            required,
-        );
-    }
-}
-
-fn collect_runtime_value_names_from_expr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut RuntimeValueCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    collect_runtime_value_names_from_expr_with_usage(
-        expr,
-        owner_env,
-        type_bindings,
-        active_locals,
-        state,
-        required,
-        None,
-    );
-}
-
-fn collect_runtime_value_names_from_expr_with_usage(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut RuntimeValueCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashSet<String>>,
-) {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
-
-    let runtime_collect_debug = std::env::var_os("VERTER_DEBUG_RUNTIME_COLLECT").is_some();
-
-    match expr {
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Infer { .. }
-        | TypeExpr::Unknown { .. } => {}
-        TypeExpr::TypeParameter(param) => {
-            if let Some(used_type_parameters) = used_type_parameters.as_deref_mut() {
-                used_type_parameters.insert(param.name.to_string());
-            }
-            if let Some(constraint) = param.constraint.as_deref() {
-                collect_runtime_value_names_from_expr_with_usage(
-                    constraint,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-            if let Some(default) = param.default.as_deref() {
-                collect_runtime_value_names_from_expr_with_usage(
-                    default,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types.iter() {
-                collect_runtime_value_names_from_expr_with_usage(
-                    ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element) => collect_runtime_value_names_from_expr_with_usage(
-            element,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            used_type_parameters.as_deref_mut(),
-        ),
-        TypeExpr::Tuple { elements, .. } => {
-            for element in elements.iter() {
-                collect_runtime_value_names_from_expr_with_usage(
-                    &element.ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        collect_runtime_value_names_from_expr_with_usage(
-                            &prop.ty,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        )
-                    }
-                    ObjectMember::IndexSignature(idx) => {
-                        collect_runtime_value_names_from_expr_with_usage(
-                            &idx.key_type,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                        collect_runtime_value_names_from_expr_with_usage(
-                            &idx.value_type,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        collect_runtime_value_names_from_function(
-                            func,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                        );
-                    }
-                    ObjectMember::Method(method) => collect_runtime_value_names_from_function(
-                        &method.function,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                    ),
-                }
-            }
-        }
-        TypeExpr::Function(func) => collect_runtime_value_names_from_function(
-            func,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-        ),
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if runtime_collect_debug {
-                eprintln!(
-                    "[runtime-collect] ref name={} args={:?} has_bound={} has_decl={} required={:?}",
-                    name,
-                    type_arguments,
-                    type_bindings.contains_key(&**name),
-                    owner_env.type_symbols.contains_key(&**name),
-                    required
-                );
-            }
-            if let Some(bound) = type_bindings.get(&**name) {
-                let binding_guard = format!("$type:{name}");
-                if !active_locals.insert(binding_guard.clone()) {
-                    return;
-                }
-                if let Some(used_type_parameters) = used_type_parameters.as_deref_mut() {
-                    if let TypeExpr::TypeParameter(param) = bound {
-                        used_type_parameters.insert(param.name.to_string());
-                    }
-                }
-                collect_runtime_value_names_from_expr_with_usage(
-                    bound,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-                active_locals.remove(&binding_guard);
-                return;
-            }
-
-            if let Some(decl) = owner_env.type_symbols.get(&**name) {
-                if let Some(cached) = state.memo.get(name) {
-                    let cached_required = cached.required.clone();
-                    let cached_used_type_parameters = cached.used_type_parameters.clone();
-                    required.extend(cached_required);
-                    for (index, param) in decl.type_parameters.iter().enumerate() {
-                        if !cached_used_type_parameters.contains(&*param.name) {
-                            continue;
-                        }
-                        if let Some(arg) = type_arguments.get(index) {
-                            collect_runtime_value_names_from_expr_with_usage(
-                                arg,
-                                owner_env,
-                                type_bindings,
-                                active_locals,
-                                state,
-                                required,
-                                used_type_parameters.as_deref_mut(),
-                            );
-                        }
-                    }
-                    return;
-                }
-                if !active_locals.insert(name.to_string()) {
-                    return;
-                }
-
-                let mut local_bindings = rustc_hash::FxHashMap::default();
-                let mut local_required = rustc_hash::FxHashSet::default();
-                let mut local_used_type_parameters = rustc_hash::FxHashSet::default();
-                for param in &decl.type_parameters {
-                    local_bindings.insert(
-                        param.name.to_string(),
-                        verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ),
-                    );
-                }
-
-                collect_runtime_value_names_from_expr_with_usage(
-                    &decl.body,
-                    owner_env,
-                    &local_bindings,
-                    active_locals,
-                    state,
-                    &mut local_required,
-                    Some(&mut local_used_type_parameters),
-                );
-                active_locals.remove(&**name);
-                state.memo.insert(
-                    name.clone(),
-                    RuntimeValueCollectSummary {
-                        required: local_required.clone(),
-                        used_type_parameters: local_used_type_parameters.clone(),
-                    },
-                );
-                required.extend(local_required);
-                for (index, param) in decl.type_parameters.iter().enumerate() {
-                    if !local_used_type_parameters.contains(&*param.name) {
-                        continue;
-                    }
-                    if let Some(arg) = type_arguments.get(index) {
-                        collect_runtime_value_names_from_expr_with_usage(
-                            arg,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                }
-                return;
-            }
-
-            // External refs (not in owner_env, not in type_bindings) cannot
-            // contribute typeof runtime value names. Do not walk their type
-            // arguments — that would be recursive deep expansion outside the
-            // frontier, which the plan explicitly forbids.
-        }
-        TypeExpr::TypeOf(value_ref) => {
-            if let Some(root) = value_ref.path.first() {
-                required.insert(root.clone());
-                if runtime_collect_debug {
-                    eprintln!(
-                        "[runtime-collect] typeof path={:?} inserted={} required={:?}",
-                        value_ref.path, root, required
-                    );
-                }
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_runtime_value_names_from_expr_with_usage(
-                object,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                used_type_parameters.as_deref_mut(),
-            );
-            collect_runtime_value_names_from_expr_with_usage(
-                index,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            for ty in [check, extends, true_type, false_type] {
-                collect_runtime_value_names_from_expr_with_usage(
-                    ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            collect_runtime_value_names_from_expr_with_usage(
-                source,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                used_type_parameters.as_deref_mut(),
-            );
-            collect_runtime_value_names_from_expr_with_usage(
-                value,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                used_type_parameters.as_deref_mut(),
-            );
-            if let Some(name_type) = name_type.as_deref() {
-                collect_runtime_value_names_from_expr_with_usage(
-                    name_type,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            for expr in expressions.iter() {
-                collect_runtime_value_names_from_expr_with_usage(
-                    expr,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SurfaceMemberTraversalKey {
-    name: Arc<str>,
-    member: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SlotTypeTraversalKey {
-    name: Arc<str>,
-    mode: SlotImportWalkMode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SlotMemberTraversalKey {
-    name: Arc<str>,
-    mode: SlotImportWalkMode,
-    member: String,
-}
-
-#[derive(Default)]
-struct RuntimeValueCollectState {
-    memo: rustc_hash::FxHashMap<Arc<str>, RuntimeValueCollectSummary>,
-}
-
-#[derive(Default)]
-struct RuntimeValueCollectSummary {
-    required: rustc_hash::FxHashSet<String>,
-    used_type_parameters: rustc_hash::FxHashSet<String>,
-}
-
-#[derive(Default, Clone)]
-struct SurfaceTypeParameterUsage {
-    nested_only: bool,
-    allow_terminal_import_refs: bool,
-}
-
-#[derive(Default, Clone)]
-struct SurfaceImportCollectSummary {
-    required: rustc_hash::FxHashSet<String>,
-    used_type_parameters: rustc_hash::FxHashMap<String, SurfaceTypeParameterUsage>,
-}
-
-#[derive(Default)]
-struct SurfaceImportCollectState {
-    memo: rustc_hash::FxHashMap<Arc<str>, SurfaceImportCollectSummary>,
-    member_memo: rustc_hash::FxHashMap<SurfaceMemberTraversalKey, SurfaceImportCollectSummary>,
-}
-
-#[derive(Default, Clone)]
-struct SlotTypeParameterUsage {
-    surface: bool,
-    key_space: bool,
-    structural: bool,
-}
-
-#[derive(Default, Clone)]
-struct SlotImportCollectSummary {
-    required: rustc_hash::FxHashSet<String>,
-    used_type_parameters: rustc_hash::FxHashMap<String, SlotTypeParameterUsage>,
-}
-
-#[derive(Default)]
-struct SlotImportCollectState {
-    memo: rustc_hash::FxHashMap<SlotTypeTraversalKey, SlotImportCollectSummary>,
-    member_memo: rustc_hash::FxHashMap<SlotMemberTraversalKey, SlotImportCollectSummary>,
-}
-
-fn record_surface_type_parameter_usage(
-    used_type_parameters: &mut rustc_hash::FxHashMap<String, SurfaceTypeParameterUsage>,
-    name: &str,
-    allow_terminal_import_refs: bool,
-) {
-    let usage = used_type_parameters.entry(name.to_string()).or_default();
-    if allow_terminal_import_refs {
-        usage.allow_terminal_import_refs = true;
-    } else {
-        usage.nested_only = true;
-    }
-}
-
-fn record_slot_type_parameter_usage(
-    used_type_parameters: &mut rustc_hash::FxHashMap<String, SlotTypeParameterUsage>,
-    name: &str,
-    mode: SlotImportWalkMode,
-) {
-    let usage = used_type_parameters.entry(name.to_string()).or_default();
-    match mode {
-        SlotImportWalkMode::Surface => usage.surface = true,
-        SlotImportWalkMode::KeySpace => usage.key_space = true,
-        SlotImportWalkMode::Structural => usage.structural = true,
-    }
-}
-
-fn replay_surface_type_parameter_usage(
-    usage: &SurfaceTypeParameterUsage,
-    arg: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SurfaceImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    if usage.nested_only {
-        collect_surface_eval_import_names_from_expr_with_mode(
-            arg,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            false,
-            None,
-        );
-    }
-    if usage.allow_terminal_import_refs {
-        collect_surface_eval_import_names_from_expr_with_mode(
-            arg,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            true,
-            None,
-        );
-    }
-}
-
-fn replay_slot_type_parameter_usage(
-    usage: &SlotTypeParameterUsage,
-    arg: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SlotImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    if usage.surface {
-        collect_slot_eval_import_names_from_expr_with_mode(
-            arg,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            SlotImportWalkMode::Surface,
-            None,
-        );
-    }
-    if usage.key_space {
-        collect_slot_eval_import_names_from_expr_with_mode(
-            arg,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            SlotImportWalkMode::KeySpace,
-            None,
-        );
-    }
-    if usage.structural {
-        collect_slot_eval_import_names_from_expr_with_mode(
-            arg,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            SlotImportWalkMode::Structural,
-            None,
-        );
-    }
-}
-
-fn collect_required_import_names_for_type_decl(
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-) -> rustc_hash::FxHashSet<String> {
-    let mut required = rustc_hash::FxHashSet::default();
-    let mut active_locals = rustc_hash::FxHashSet::default();
-    let mut state = SurfaceImportCollectState::default();
-    let mut type_bindings = rustc_hash::FxHashMap::default();
-
-    for param in &decl.type_parameters {
-        type_bindings.insert(
-            param.name.clone(),
-            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
-        );
-        if let Some(constraint) = param.constraint.as_deref() {
-            collect_surface_eval_import_names_from_expr(
-                constraint,
-                owner_env,
-                &type_bindings,
-                &mut active_locals,
-                &mut state,
-                &mut required,
-            );
-        }
-        if let Some(default) = param.default.as_deref() {
-            collect_surface_eval_import_names_from_expr(
-                default,
-                owner_env,
-                &type_bindings,
-                &mut active_locals,
-                &mut state,
-                &mut required,
-            );
-        }
-    }
-
-    collect_surface_eval_import_names_from_expr(
-        &decl.body,
-        owner_env,
-        &type_bindings,
-        &mut active_locals,
-        &mut state,
-        &mut required,
-    );
-    required
-}
-
-fn collect_required_runtime_value_names_for_type_decl(
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-) -> rustc_hash::FxHashSet<String> {
-    let runtime_collect_debug = std::env::var_os("VERTER_DEBUG_RUNTIME_COLLECT").is_some();
-    let mut required = rustc_hash::FxHashSet::default();
-    let mut active_locals = rustc_hash::FxHashSet::default();
-    let mut state = RuntimeValueCollectState::default();
-    let mut type_bindings = rustc_hash::FxHashMap::default();
-
-    for param in &decl.type_parameters {
-        type_bindings.insert(
-            param.name.clone(),
-            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
-        );
-        if let Some(constraint) = param.constraint.as_deref() {
-            collect_runtime_value_names_from_expr(
-                constraint,
-                owner_env,
-                &type_bindings,
-                &mut active_locals,
-                &mut state,
-                &mut required,
-            );
-        }
-        if let Some(default) = param.default.as_deref() {
-            collect_runtime_value_names_from_expr(
-                default,
-                owner_env,
-                &type_bindings,
-                &mut active_locals,
-                &mut state,
-                &mut required,
-            );
-        }
-    }
-
-    collect_runtime_value_names_from_expr(
-        &decl.body,
-        owner_env,
-        &type_bindings,
-        &mut active_locals,
-        &mut state,
-        &mut required,
-    );
-    if runtime_collect_debug {
-        eprintln!(
-            "[runtime-collect] decl-complete name={} required={:?} hasButton={} hasComponentConfig={} typeCount={}",
-            decl.name,
-            required,
-            owner_env.type_symbols.contains_key("Button"),
-            owner_env.type_symbols.contains_key("ComponentConfig"),
-            owner_env.type_symbols.len()
-        );
-    }
-    required
-}
-
-fn collect_required_import_names_for_symbol(
-    symbol: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    imported_binding_names: &rustc_hash::FxHashSet<&str>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SurfaceImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    if owner_env.type_symbols.contains_key(symbol) || type_bindings.contains_key(symbol) {
-        collect_surface_eval_import_names_from_expr(
-            &verter_semantic::analysis::type_expr::TypeExpr::named(symbol),
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-        );
-        return;
-    }
-
-    if let Some((root, _)) = symbol.split_once('.') {
-        if imported_binding_names.contains(root) {
-            required.insert(symbol.to_string());
-            return;
-        }
-    }
-
-    if imported_binding_names.contains(symbol) {
-        required.insert(symbol.to_string());
-    }
-}
-
-fn collect_required_slot_import_names_for_symbol(
-    symbol: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    imported_binding_names: &rustc_hash::FxHashSet<&str>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SlotImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    if owner_env.type_symbols.contains_key(symbol) || type_bindings.contains_key(symbol) {
-        collect_slot_eval_import_names_from_expr(
-            &verter_semantic::analysis::type_expr::TypeExpr::named(symbol),
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-        );
-        return;
-    }
-
-    if let Some((root, _)) = symbol.split_once('.') {
-        if imported_binding_names.contains(root) {
-            required.insert(symbol.to_string());
-            return;
-        }
-    }
-
-    if imported_binding_names.contains(symbol) {
-        required.insert(symbol.to_string());
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum SlotImportWalkMode {
-    Surface,
-    KeySpace,
-    Structural,
-}
-
-fn slot_import_guard(prefix: &str, mode: SlotImportWalkMode, name: &str) -> String {
-    let mode = match mode {
-        SlotImportWalkMode::Surface => "surface",
-        SlotImportWalkMode::KeySpace => "key",
-        SlotImportWalkMode::Structural => "struct",
-    };
-    format!("$slot-{prefix}-{mode}:{name}")
-}
-
-fn slot_member_walk_mode(mode: SlotImportWalkMode) -> SlotImportWalkMode {
-    match mode {
-        SlotImportWalkMode::Structural => SlotImportWalkMode::Structural,
-        SlotImportWalkMode::Surface | SlotImportWalkMode::KeySpace => SlotImportWalkMode::KeySpace,
-    }
-}
-
-fn collect_slot_eval_import_names_from_expr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SlotImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    collect_slot_eval_import_names_from_expr_with_mode(
-        expr,
-        owner_env,
-        type_bindings,
-        active_locals,
-        state,
-        required,
-        SlotImportWalkMode::Surface,
-        None,
-    );
-}
-
-fn collect_slot_eval_import_names_from_expr_with_mode(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SlotImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mode: SlotImportWalkMode,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SlotTypeParameterUsage>>,
-) {
-    use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
-
-    match expr {
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Infer { .. }
-        | TypeExpr::Unknown { .. } => {}
-        TypeExpr::TypeOf(value_ref) => {
-            if let Some(root) = value_ref.path.first() {
-                required.insert(root.clone());
-            }
-        }
-        TypeExpr::TypeParameter(param) => {
-            if let Some(constraint) = param.constraint.as_deref() {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    constraint,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-            if let Some(default) = param.default.as_deref() {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    default,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types.iter() {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element) => collect_slot_eval_import_names_from_expr_with_mode(
-            element,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            mode,
-            used_type_parameters.as_deref_mut(),
-        ),
-        TypeExpr::KeyOf(element) => collect_slot_eval_import_names_from_expr_with_mode(
-            element,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            SlotImportWalkMode::KeySpace,
-            used_type_parameters.as_deref_mut(),
-        ),
-        TypeExpr::Tuple { elements, .. } => {
-            for element in elements.iter() {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    &element.ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match (mode, member) {
-                    (
-                        SlotImportWalkMode::Surface | SlotImportWalkMode::KeySpace,
-                        ObjectMember::IndexSignature(idx),
-                    ) => collect_slot_eval_import_names_from_expr_with_mode(
-                        &idx.key_type,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                        SlotImportWalkMode::KeySpace,
-                        used_type_parameters.as_deref_mut(),
-                    ),
-                    (SlotImportWalkMode::Structural, ObjectMember::Property(prop)) => {
-                        collect_slot_eval_import_names_from_expr_with_mode(
-                            &prop.ty,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            SlotImportWalkMode::Structural,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    (SlotImportWalkMode::Structural, ObjectMember::IndexSignature(idx)) => {
-                        collect_slot_eval_import_names_from_expr_with_mode(
-                            &idx.key_type,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            SlotImportWalkMode::Structural,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                        collect_slot_eval_import_names_from_expr_with_mode(
-                            &idx.value_type,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            SlotImportWalkMode::Structural,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    (
-                        SlotImportWalkMode::Structural,
-                        ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func),
-                    ) => collect_slot_eval_import_names_from_function_structural(
-                        func,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                        used_type_parameters.as_deref_mut(),
-                    ),
-                    (SlotImportWalkMode::Structural, ObjectMember::Method(method)) => {
-                        collect_slot_eval_import_names_from_function_structural(
-                            &method.function,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeExpr::Function(func) => {
-            if mode == SlotImportWalkMode::Structural {
-                collect_slot_eval_import_names_from_function_structural(
-                    func,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if let Some(bound) = type_bindings.get(&**name) {
-                let binding_guard = slot_import_guard("type", mode, name);
-                if !active_locals.insert(binding_guard.clone()) {
-                    return;
-                }
-                if let Some(used_type_parameters) = used_type_parameters.as_deref_mut() {
-                    if let TypeExpr::TypeParameter(param) = bound {
-                        record_slot_type_parameter_usage(
-                            used_type_parameters,
-                            param.name.as_str(),
-                            mode,
-                        );
-                    }
-                }
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    bound,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-                active_locals.remove(&binding_guard);
-                return;
-            }
-
-            if let Some(decl) = owner_env.type_symbols.get(&**name) {
-                let traversal_key = SlotTypeTraversalKey {
-                    name: name.clone(),
-                    mode,
-                };
-                if let Some(cached) = state.memo.get(&traversal_key) {
-                    let cached_required = cached.required.clone();
-                    let cached_used_type_parameters = cached.used_type_parameters.clone();
-                    required.extend(cached_required);
-                    for (index, param) in decl.type_parameters.iter().enumerate() {
-                        let Some(usage) = cached_used_type_parameters.get(param.name.as_str())
-                        else {
-                            continue;
-                        };
-                        let Some(arg) = type_arguments.get(index) else {
-                            continue;
-                        };
-                        replay_slot_type_parameter_usage(
-                            usage,
-                            arg,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                        );
-                    }
-                    return;
-                }
-                let decl_guard = slot_import_guard("decl", mode, name);
-                if !active_locals.insert(decl_guard.clone()) {
-                    return;
-                }
-
-                let mut local_bindings = rustc_hash::FxHashMap::default();
-                let mut local_required = rustc_hash::FxHashSet::default();
-                let mut local_used_type_parameters = rustc_hash::FxHashMap::default();
-                for param in &decl.type_parameters {
-                    local_bindings.insert(
-                        param.name.to_string(),
-                        verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ),
-                    );
-                }
-
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    &decl.body,
-                    owner_env,
-                    &local_bindings,
-                    active_locals,
-                    state,
-                    &mut local_required,
-                    mode,
-                    Some(&mut local_used_type_parameters),
-                );
-                active_locals.remove(&decl_guard);
-                state.memo.insert(
-                    traversal_key,
-                    SlotImportCollectSummary {
-                        required: local_required.clone(),
-                        used_type_parameters: local_used_type_parameters.clone(),
-                    },
-                );
-                required.extend(local_required);
-                for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let Some(usage) = local_used_type_parameters.get(param.name.as_str()) else {
-                        continue;
-                    };
-                    let Some(arg) = type_arguments.get(index) else {
-                        continue;
-                    };
-                    replay_slot_type_parameter_usage(
-                        usage,
-                        arg,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                    );
-                }
-                return;
-            }
-
-            required.insert(name.to_string());
-            if should_recurse_surface_type_arguments(name) {
-                for arg in type_arguments.iter() {
-                    collect_slot_eval_import_names_from_expr_with_mode(
-                        arg,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                        mode,
-                        used_type_parameters.as_deref_mut(),
-                    );
-                }
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            let member_mode = slot_member_walk_mode(mode);
-            if let TypeExpr::Literal(LiteralValue::String(key)) = index.as_ref() {
-                collect_slot_eval_import_names_for_member(
-                    object,
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    member_mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            } else {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    object,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    member_mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    index,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    member_mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            collect_slot_eval_import_names_from_expr_with_mode(
-                check,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                SlotImportWalkMode::Structural,
-                used_type_parameters.as_deref_mut(),
-            );
-            collect_slot_eval_import_names_from_expr_with_mode(
-                extends,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                SlotImportWalkMode::Structural,
-                used_type_parameters.as_deref_mut(),
-            );
-            collect_slot_eval_import_names_from_expr_with_mode(
-                true_type,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                mode,
-                used_type_parameters.as_deref_mut(),
-            );
-            collect_slot_eval_import_names_from_expr_with_mode(
-                false_type,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                mode,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            if mode == SlotImportWalkMode::Structural {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    source,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    SlotImportWalkMode::Structural,
-                    used_type_parameters.as_deref_mut(),
-                );
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    value,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    SlotImportWalkMode::Structural,
-                    used_type_parameters.as_deref_mut(),
-                );
-                if let Some(name_type) = name_type.as_deref() {
-                    collect_slot_eval_import_names_from_expr_with_mode(
-                        name_type,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                        SlotImportWalkMode::Structural,
-                        used_type_parameters.as_deref_mut(),
-                    );
-                }
-            } else {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    source,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    SlotImportWalkMode::KeySpace,
-                    used_type_parameters.as_deref_mut(),
-                );
-                if let Some(name_type) = name_type.as_deref() {
-                    collect_slot_eval_import_names_from_expr_with_mode(
-                        name_type,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                        SlotImportWalkMode::KeySpace,
-                        used_type_parameters.as_deref_mut(),
-                    );
-                }
-            }
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            let nested_mode = if mode == SlotImportWalkMode::Structural {
-                SlotImportWalkMode::Structural
-            } else {
-                SlotImportWalkMode::KeySpace
-            };
-            for expr in expressions.iter() {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    expr,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    nested_mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-    }
-}
-
-fn collect_slot_eval_import_names_from_function_structural(
-    func: &verter_semantic::analysis::type_expr::FunctionExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SlotImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SlotTypeParameterUsage>>,
-) {
-    let mut local_bindings = type_bindings.clone();
-    for param in &func.type_parameters {
-        local_bindings.insert(
-            param.name.clone(),
-            verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()),
-        );
-        if let Some(constraint) = param.constraint.as_deref() {
-            collect_slot_eval_import_names_from_expr_with_mode(
-                constraint,
-                owner_env,
-                &local_bindings,
-                active_locals,
-                state,
-                required,
-                SlotImportWalkMode::Structural,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-        if let Some(default) = param.default.as_deref() {
-            collect_slot_eval_import_names_from_expr_with_mode(
-                default,
-                owner_env,
-                &local_bindings,
-                active_locals,
-                state,
-                required,
-                SlotImportWalkMode::Structural,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-    }
-
-    for param in &func.parameters {
-        collect_slot_eval_import_names_from_expr_with_mode(
-            &param.ty,
-            owner_env,
-            &local_bindings,
-            active_locals,
-            state,
-            required,
-            SlotImportWalkMode::Structural,
-            used_type_parameters.as_deref_mut(),
-        );
-    }
-    if let Some(return_type) = func.return_type.as_deref() {
-        collect_slot_eval_import_names_from_expr_with_mode(
-            return_type,
-            owner_env,
-            &local_bindings,
-            active_locals,
-            state,
-            required,
-            SlotImportWalkMode::Structural,
-            used_type_parameters.as_deref_mut(),
-        );
-    }
-}
-
-fn collect_slot_eval_import_names_for_member(
-    object: &verter_semantic::analysis::type_expr::TypeExpr,
-    key: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SlotImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mode: SlotImportWalkMode,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SlotTypeParameterUsage>>,
-) {
-    use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
-
-    match object {
-        TypeExpr::Object(obj) => {
-            if let Some(member) = obj.properties.iter().find(|member| match member {
-                ObjectMember::Property(prop) => prop.name == key,
-                ObjectMember::Method(method) => method.name == key,
-                _ => false,
-            }) {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        collect_slot_eval_import_names_from_expr_with_mode(
-                            &prop.ty,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            mode,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    ObjectMember::Method(method) if mode == SlotImportWalkMode::Structural => {
-                        collect_slot_eval_import_names_from_function_structural(
-                            &method.function,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if let Some(bound) = type_bindings.get(&**name) {
-                let binding_guard = slot_import_guard("type", mode, name);
-                if !active_locals.insert(binding_guard.clone()) {
-                    return;
-                }
-                if let Some(used_type_parameters) = used_type_parameters.as_deref_mut() {
-                    if let TypeExpr::TypeParameter(param) = bound {
-                        record_slot_type_parameter_usage(
-                            used_type_parameters,
-                            param.name.as_str(),
-                            mode,
-                        );
-                    }
-                }
-                collect_slot_eval_import_names_for_member(
-                    bound,
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-                active_locals.remove(&binding_guard);
-                return;
-            }
-
-            if let Some(decl) = owner_env.type_symbols.get(&**name) {
-                let traversal_key = SlotMemberTraversalKey {
-                    name: name.clone(),
-                    mode,
-                    member: key.to_string(),
-                };
-                if let Some(cached) = state.member_memo.get(&traversal_key) {
-                    let cached_required = cached.required.clone();
-                    let cached_used_type_parameters = cached.used_type_parameters.clone();
-                    required.extend(cached_required);
-                    for (index, param) in decl.type_parameters.iter().enumerate() {
-                        let Some(usage) = cached_used_type_parameters.get(param.name.as_str())
-                        else {
-                            continue;
-                        };
-                        let Some(arg) = type_arguments.get(index) else {
-                            continue;
-                        };
-                        replay_slot_type_parameter_usage(
-                            usage,
-                            arg,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                        );
-                    }
-                    return;
-                }
-                let decl_guard = slot_import_guard("decl", mode, name);
-                if !active_locals.insert(decl_guard.clone()) {
-                    return;
-                }
-
-                let mut local_bindings = rustc_hash::FxHashMap::default();
-                let mut local_required = rustc_hash::FxHashSet::default();
-                let mut local_used_type_parameters = rustc_hash::FxHashMap::default();
-                for param in &decl.type_parameters {
-                    local_bindings.insert(
-                        param.name.to_string(),
-                        verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ),
-                    );
-                }
-
-                collect_slot_eval_import_names_for_member(
-                    &decl.body,
-                    key,
-                    owner_env,
-                    &local_bindings,
-                    active_locals,
-                    state,
-                    &mut local_required,
-                    mode,
-                    Some(&mut local_used_type_parameters),
-                );
-                active_locals.remove(&decl_guard);
-                state.member_memo.insert(
-                    traversal_key,
-                    SlotImportCollectSummary {
-                        required: local_required.clone(),
-                        used_type_parameters: local_used_type_parameters.clone(),
-                    },
-                );
-                required.extend(local_required);
-                for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let Some(usage) = local_used_type_parameters.get(param.name.as_str()) else {
-                        continue;
-                    };
-                    let Some(arg) = type_arguments.get(index) else {
-                        continue;
-                    };
-                    replay_slot_type_parameter_usage(
-                        usage,
-                        arg,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                    );
-                }
-                return;
-            }
-
-            required.insert(name.to_string());
-            collect_slot_eval_import_names_for_builtin_member(
-                name,
-                type_arguments,
-                key,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                mode,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-        TypeExpr::Parenthesized(inner) => collect_slot_eval_import_names_for_member(
-            inner,
-            key,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            mode,
-            used_type_parameters.as_deref_mut(),
-        ),
-        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            for ty in types.iter() {
-                collect_slot_eval_import_names_for_member(
-                    ty,
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            if let TypeExpr::Literal(LiteralValue::String(inner_key)) = index.as_ref() {
-                collect_slot_eval_import_names_for_member(
-                    object,
-                    inner_key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            } else {
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    object,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-                collect_slot_eval_import_names_from_expr_with_mode(
-                    index,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        _ => collect_slot_eval_import_names_from_expr_with_mode(
-            object,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            mode,
-            used_type_parameters.as_deref_mut(),
-        ),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_slot_eval_import_names_for_builtin_member(
-    name: &str,
-    type_arguments: &[verter_semantic::analysis::type_expr::TypeExpr],
-    key: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SlotImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mode: SlotImportWalkMode,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SlotTypeParameterUsage>>,
-) {
-    match name {
-        "Partial" | "Required" | "Readonly" if type_arguments.len() == 1 => {
-            collect_slot_eval_import_names_for_member(
-                &type_arguments[0],
-                key,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                mode,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-        "Pick" if type_arguments.len() == 2 => {
-            let keys = collect_string_literal_keys(&type_arguments[1]);
-            if keys.contains(key) {
-                collect_slot_eval_import_names_for_member(
-                    &type_arguments[0],
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        "Omit" if type_arguments.len() == 2 => {
-            let keys = collect_string_literal_keys(&type_arguments[1]);
-            if !keys.contains(key) {
-                collect_slot_eval_import_names_for_member(
-                    &type_arguments[0],
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    mode,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_surface_eval_import_names_from_expr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SurfaceImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-) {
-    collect_surface_eval_import_names_from_expr_with_mode(
-        expr,
-        owner_env,
-        type_bindings,
-        active_locals,
-        state,
-        required,
-        true,
-        None,
-    );
-}
-
-fn collect_surface_eval_import_names_from_expr_with_mode(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SurfaceImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    allow_terminal_import_refs: bool,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SurfaceTypeParameterUsage>>,
-) {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
-
-    match expr {
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Infer { .. }
-        | TypeExpr::Unknown { .. } => {}
-        TypeExpr::TypeParameter(param) => {
-            if let Some(constraint) = param.constraint.as_deref() {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    constraint,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    allow_terminal_import_refs,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-            if let Some(default) = param.default.as_deref() {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    default,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    allow_terminal_import_refs,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types.iter() {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    allow_terminal_import_refs,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element) => {
-            collect_surface_eval_import_names_from_expr_with_mode(
-                element,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                allow_terminal_import_refs,
-                used_type_parameters.as_deref_mut(),
-            )
-        }
-        TypeExpr::Tuple { elements, .. } => {
-            for element in elements.iter() {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    &element.ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    allow_terminal_import_refs,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        collect_surface_eval_import_names_from_expr_with_mode(
-                            &prop.ty,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            false,
-                            used_type_parameters.as_deref_mut(),
-                        )
-                    }
-                    ObjectMember::IndexSignature(idx) => {
-                        collect_surface_eval_import_names_from_expr_with_mode(
-                            &idx.key_type,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            true,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                        collect_surface_eval_import_names_from_expr_with_mode(
-                            &idx.value_type,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            true,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        collect_surface_eval_import_names_from_function(
-                            func,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                    ObjectMember::Method(method) => {
-                        collect_surface_eval_import_names_from_function(
-                            &method.function,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                }
-            }
-        }
-        TypeExpr::Function(func) => collect_surface_eval_import_names_from_function(
-            func,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            used_type_parameters.as_deref_mut(),
-        ),
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if let Some(bound) = type_bindings.get(&**name) {
-                let binding_guard = format!("$type:{name}");
-                if !active_locals.insert(binding_guard.clone()) {
-                    return;
-                }
-                if let Some(used_type_parameters) = used_type_parameters.as_deref_mut() {
-                    if let TypeExpr::TypeParameter(param) = bound {
-                        record_surface_type_parameter_usage(
-                            used_type_parameters,
-                            param.name.as_str(),
-                            allow_terminal_import_refs,
-                        );
-                    }
-                }
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    bound,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    allow_terminal_import_refs,
-                    used_type_parameters.as_deref_mut(),
-                );
-                active_locals.remove(&binding_guard);
-                return;
-            }
-
-            if let Some(decl) = owner_env.type_symbols.get(&**name) {
-                if let Some(cached) = state.memo.get(name) {
-                    let cached_required = cached.required.clone();
-                    let cached_used_type_parameters = cached.used_type_parameters.clone();
-                    required.extend(cached_required);
-                    for (index, param) in decl.type_parameters.iter().enumerate() {
-                        let Some(usage) = cached_used_type_parameters.get(param.name.as_str())
-                        else {
-                            continue;
-                        };
-                        let Some(arg) = type_arguments.get(index) else {
-                            continue;
-                        };
-                        replay_surface_type_parameter_usage(
-                            usage,
-                            arg,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                        );
-                    }
-                    return;
-                }
-                if !active_locals.insert(name.to_string()) {
-                    return;
-                }
-
-                let mut local_bindings = rustc_hash::FxHashMap::default();
-                let mut local_required = rustc_hash::FxHashSet::default();
-                let mut local_used_type_parameters = rustc_hash::FxHashMap::default();
-                for param in &decl.type_parameters {
-                    local_bindings.insert(
-                        param.name.to_string(),
-                        verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ),
-                    );
-                }
-
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    &decl.body,
-                    owner_env,
-                    &local_bindings,
-                    active_locals,
-                    state,
-                    &mut local_required,
-                    true,
-                    Some(&mut local_used_type_parameters),
-                );
-                active_locals.remove(&**name);
-                state.memo.insert(
-                    name.clone(),
-                    SurfaceImportCollectSummary {
-                        required: local_required.clone(),
-                        used_type_parameters: local_used_type_parameters.clone(),
-                    },
-                );
-                required.extend(local_required);
-                for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let Some(usage) = local_used_type_parameters.get(param.name.as_str()) else {
-                        continue;
-                    };
-                    let Some(arg) = type_arguments.get(index) else {
-                        continue;
-                    };
-                    replay_surface_type_parameter_usage(
-                        usage,
-                        arg,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                    );
-                }
-                return;
-            }
-
-            if allow_terminal_import_refs {
-                required.insert(name.to_string());
-                if should_recurse_surface_type_arguments(name) {
-                    for arg in type_arguments.iter() {
-                        collect_surface_eval_import_names_from_expr_with_mode(
-                            arg,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            true,
-                            used_type_parameters.as_deref_mut(),
-                        );
-                    }
-                }
-            }
-        }
-        TypeExpr::TypeOf(value_ref) => {
-            if let Some(root) = value_ref.path.first() {
-                required.insert(root.clone());
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            if let TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
-                key,
-            )) = index.as_ref()
-            {
-                collect_surface_eval_import_names_for_member(
-                    object,
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            } else {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    object,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    allow_terminal_import_refs,
-                    used_type_parameters.as_deref_mut(),
-                );
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    index,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    true,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            for ty in [check, extends, true_type, false_type] {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    ty,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    true,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            collect_surface_eval_import_names_from_expr_with_mode(
-                source,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                true,
-                used_type_parameters.as_deref_mut(),
-            );
-            collect_surface_eval_import_names_from_expr_with_mode(
-                value,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                false,
-                used_type_parameters.as_deref_mut(),
-            );
-            if let Some(name_type) = name_type.as_deref() {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    name_type,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    true,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            for expr in expressions.iter() {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    expr,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    true,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-    }
-}
-
-fn collect_surface_eval_import_names_for_member(
-    object: &verter_semantic::analysis::type_expr::TypeExpr,
-    key: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SurfaceImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SurfaceTypeParameterUsage>>,
-) {
-    use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
-
-    match object {
-        TypeExpr::Object(obj) => {
-            if let Some(member) = obj.properties.iter().find(|member| match member {
-                ObjectMember::Property(prop) => prop.name == key,
-                ObjectMember::Method(method) => method.name == key,
-                _ => false,
-            }) {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        collect_surface_eval_import_names_from_expr_with_mode(
-                            &prop.ty,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            false,
-                            used_type_parameters.as_deref_mut(),
-                        )
-                    }
-                    ObjectMember::Method(method) => {
-                        collect_surface_eval_import_names_from_function(
-                            &method.function,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                            used_type_parameters.as_deref_mut(),
-                        )
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if let Some(bound) = type_bindings.get(&**name) {
-                let binding_guard = format!("$type:{name}");
-                if !active_locals.insert(binding_guard.clone()) {
-                    return;
-                }
-                if let Some(used_type_parameters) = used_type_parameters.as_deref_mut() {
-                    if let TypeExpr::TypeParameter(param) = bound {
-                        record_surface_type_parameter_usage(
-                            used_type_parameters,
-                            param.name.as_str(),
-                            false,
-                        );
-                    }
-                }
-                collect_surface_eval_import_names_for_member(
-                    bound,
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-                active_locals.remove(&binding_guard);
-                return;
-            }
-
-            if let Some(decl) = owner_env.type_symbols.get(&**name) {
-                let traversal_key = SurfaceMemberTraversalKey {
-                    name: name.clone(),
-                    member: key.to_string(),
-                };
-                if let Some(cached) = state.member_memo.get(&traversal_key) {
-                    let cached_required = cached.required.clone();
-                    let cached_used_type_parameters = cached.used_type_parameters.clone();
-                    required.extend(cached_required);
-                    for (index, param) in decl.type_parameters.iter().enumerate() {
-                        let Some(usage) = cached_used_type_parameters.get(param.name.as_str())
-                        else {
-                            continue;
-                        };
-                        let Some(arg) = type_arguments.get(index) else {
-                            continue;
-                        };
-                        replay_surface_type_parameter_usage(
-                            usage,
-                            arg,
-                            owner_env,
-                            type_bindings,
-                            active_locals,
-                            state,
-                            required,
-                        );
-                    }
-                    return;
-                }
-                if !active_locals.insert(name.to_string()) {
-                    return;
-                }
-
-                let mut local_bindings = rustc_hash::FxHashMap::default();
-                let mut local_required = rustc_hash::FxHashSet::default();
-                let mut local_used_type_parameters = rustc_hash::FxHashMap::default();
-                for param in &decl.type_parameters {
-                    local_bindings.insert(
-                        param.name.to_string(),
-                        verter_semantic::analysis::type_expr::TypeExpr::type_parameter(
-                            param.clone(),
-                        ),
-                    );
-                }
-
-                collect_surface_eval_import_names_for_member(
-                    &decl.body,
-                    key,
-                    owner_env,
-                    &local_bindings,
-                    active_locals,
-                    state,
-                    &mut local_required,
-                    Some(&mut local_used_type_parameters),
-                );
-                active_locals.remove(&**name);
-                state.member_memo.insert(
-                    traversal_key,
-                    SurfaceImportCollectSummary {
-                        required: local_required.clone(),
-                        used_type_parameters: local_used_type_parameters.clone(),
-                    },
-                );
-                required.extend(local_required);
-                for (index, param) in decl.type_parameters.iter().enumerate() {
-                    let Some(usage) = local_used_type_parameters.get(param.name.as_str()) else {
-                        continue;
-                    };
-                    let Some(arg) = type_arguments.get(index) else {
-                        continue;
-                    };
-                    replay_surface_type_parameter_usage(
-                        usage,
-                        arg,
-                        owner_env,
-                        type_bindings,
-                        active_locals,
-                        state,
-                        required,
-                    );
-                }
-                return;
-            }
-
-            required.insert(name.to_string());
-            collect_surface_eval_import_names_for_builtin_member(
-                name,
-                type_arguments,
-                key,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-        TypeExpr::Parenthesized(inner) => collect_surface_eval_import_names_for_member(
-            inner,
-            key,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            used_type_parameters.as_deref_mut(),
-        ),
-        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            for ty in types.iter() {
-                collect_surface_eval_import_names_for_member(
-                    ty,
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            if let TypeExpr::Literal(LiteralValue::String(inner_key)) = index.as_ref() {
-                collect_surface_eval_import_names_for_member(
-                    object,
-                    inner_key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            } else {
-                collect_surface_eval_import_names_from_expr_with_mode(
-                    object,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    false,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        _ => collect_surface_eval_import_names_from_expr_with_mode(
-            object,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            false,
-            used_type_parameters.as_deref_mut(),
-        ),
-    }
-}
-
-fn collect_surface_eval_import_names_for_builtin_member(
-    name: &str,
-    type_arguments: &[verter_semantic::analysis::type_expr::TypeExpr],
-    key: &str,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SurfaceImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SurfaceTypeParameterUsage>>,
-) {
-    match name {
-        "Partial" | "Required" | "Readonly" if type_arguments.len() == 1 => {
-            collect_surface_eval_import_names_for_member(
-                &type_arguments[0],
-                key,
-                owner_env,
-                type_bindings,
-                active_locals,
-                state,
-                required,
-                used_type_parameters.as_deref_mut(),
-            );
-        }
-        "Pick" if type_arguments.len() == 2 => {
-            let keys = collect_string_literal_keys(&type_arguments[1]);
-            if keys.contains(key) {
-                collect_surface_eval_import_names_for_member(
-                    &type_arguments[0],
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        "Omit" if type_arguments.len() == 2 => {
-            let keys = collect_string_literal_keys(&type_arguments[1]);
-            if !keys.contains(key) {
-                collect_surface_eval_import_names_for_member(
-                    &type_arguments[0],
-                    key,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_string_literal_keys(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> rustc_hash::FxHashSet<String> {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
-
-    let mut keys = rustc_hash::FxHashSet::default();
-    match expr {
-        TypeExpr::Literal(LiteralValue::String(value)) => {
-            keys.insert(value.clone());
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types.iter() {
-                keys.extend(collect_string_literal_keys(ty));
-            }
-        }
-        TypeExpr::Parenthesized(inner) => {
-            keys.extend(collect_string_literal_keys(inner));
-        }
-        _ => {}
-    }
-    keys
-}
-
-fn collect_surface_eval_import_names_from_function(
-    func: &verter_semantic::analysis::type_expr::FunctionExpr,
-    owner_env: &verter_semantic::analysis::type_eval::EvalEnv,
-    type_bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-    active_locals: &mut rustc_hash::FxHashSet<String>,
-    state: &mut SurfaceImportCollectState,
-    required: &mut rustc_hash::FxHashSet<String>,
-    mut used_type_parameters: Option<&mut rustc_hash::FxHashMap<String, SurfaceTypeParameterUsage>>,
-) {
-    for param in &func.parameters {
-        collect_surface_eval_import_names_from_expr_with_mode(
-            &param.ty,
-            owner_env,
-            type_bindings,
-            active_locals,
-            state,
-            required,
-            false,
-            used_type_parameters.as_deref_mut(),
-        );
-    }
-}
-
-fn should_recurse_surface_type_arguments(name: &str) -> bool {
-    matches!(
-        name,
-        "Partial"
-            | "Required"
-            | "Readonly"
-            | "Pick"
-            | "Omit"
-            | "Record"
-            | "Extract"
-            | "Exclude"
-            | "NonNullable"
-            | "ReturnType"
-            | "Parameters"
-            | "ConstructorParameters"
-            | "InstanceType"
-            | "Awaited"
-    )
 }
 
 /// Extract slot bindings from a type_text that encodes a slot's function signature.

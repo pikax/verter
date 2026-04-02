@@ -93,15 +93,8 @@ fn component_meta_resolution_budget_error(
     analysis: Option<&verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> Option<MetaError> {
-    if let Some(message) = resolved
-        .cached_eval_inputs
-        .as_ref()
-        .and_then(|inputs| inputs.overflow.as_ref())
-        .map(|overflow| overflow.message.clone())
-    {
-        return Some(MetaError::Host(message));
-    }
-
+    // Walker overflow is no longer meaningful — the solver path replaced
+    // the legacy imported-eval walker. Only check symbolic expansion budget.
     if resolved
         .evaluated_types
         .as_ref()
@@ -519,6 +512,7 @@ impl MetaSession {
     }
 
     /// Resolve an alias to its canonical ID inside this session's overlay view.
+    #[allow(dead_code)]
     pub fn resolve_alias_or_canonical(
         &self,
         canonical_or_alias: &str,

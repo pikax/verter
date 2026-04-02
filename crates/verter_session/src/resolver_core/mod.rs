@@ -6,7 +6,6 @@ use std::sync::Arc;
 mod component_meta;
 mod component_meta_request;
 mod declaration_metadata;
-mod eval_env_build;
 mod export_graph;
 mod external_macro_types;
 mod external_type_body;
@@ -14,9 +13,6 @@ pub mod external_type_frontier;
 mod fallthrough;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
-mod imported_decl_eval;
-mod imported_eval_collect;
-mod imported_eval_types;
 mod imported_type_alias;
 pub mod prepared_decl;
 pub mod query_artifact;
@@ -35,20 +31,16 @@ pub mod type_text_parser;
 
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub use component_meta::{
-    component_meta_resolved_macros, component_meta_type_registry, resolve_component_meta_parts,
-    resolved_elements_to_type_expr_via_type_text, ComponentMetaEvalOutputs,
-    ComponentMetaResolverHost, ResolvedComponentMetaParts, ResolvedJsdocBlock, ResolvedJsdocTag,
-    ResolvedMacroMeta, ResolvedTypeRegistryMeta,
+    collect_requested_binding_names, component_meta_resolved_macros, component_meta_type_registry,
+    resolve_component_meta_parts, resolved_elements_to_type_expr_via_type_text,
+    ComponentMetaEvalOutputs, ComponentMetaResolverHost, ResolvedComponentMetaParts,
+    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedLocalTypeSymbolMetadata,
     ResolvedTypeDeclaration,
-};
-pub use eval_env_build::{
-    build_owner_eval_env_with_inputs, collect_requested_binding_names, OwnerEvalEnvAssembler,
-    OwnerEvalEnvBuild,
 };
 pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
@@ -76,25 +68,12 @@ pub use fallthrough::{
     ResolvedFallthroughSurface,
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
-pub use imported_decl_eval::PreparedImportedDeclContext;
-pub use imported_eval_collect::{
-    build_imported_eval_inputs, build_imported_eval_inputs_with_owner_context,
-    collect_imported_eval_inputs, imported_member_name_for_type_alias,
-    record_merge_inputs_from_frontier, required_type_alias_names_for_import_binding,
-    ImportedEvalBinding, ImportedEvalOwnerSnapshot, ImportedEvalResolver,
-    ImportedEvalTraversalBudget,
-};
-pub use imported_eval_types::{
-    CollectedImportedTypeAlias, ComputedEvaluatedTypes, ImportedEvalInputs, ImportedEvalOverflow,
-    ImportedEvalSource, ImportedEvalStats, ImportedSymbolDependency, ImportedTypeAlias,
-    ImportedTypeAliasResolveRequest,
-};
 pub use imported_type_alias::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
     prepare_imported_type_alias, prepare_local_imported_type_alias,
-    should_attempt_owner_env_resolution, CachedPreparedImportedTypeAlias,
-    ImportedTypeAliasPrepareError, ImportedTypeAliasResolver, PreparedImportedTypeAlias,
-    PreparedLocalImportedTypeAlias,
+    CachedPreparedImportedTypeAlias, ComputedEvaluatedTypes, ImportedSymbolDependency,
+    ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
+    PreparedImportedTypeAlias, PreparedLocalImportedTypeAlias,
 };
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache, prepare_exported_type_decl,

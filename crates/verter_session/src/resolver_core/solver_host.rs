@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_eval::EvalEnv;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
@@ -12,19 +13,31 @@ use verter_semantic::analysis::type_solver::host::{
     RequestStatus, ResolvedRootIdentity, SolverProjection, TypeSolverHost, UtilitySource,
 };
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
+use verter_semantic::analysis::types::AnalyzedImport;
 
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
 
+/// Import binding: maps a local import name to its resolved target.
+#[derive(Debug, Clone)]
+struct ImportBinding {
+    canonical_id: String,
+    exported_name: String,
+}
+
 /// Host-backed `TypeSolverHost` that resolves from:
 /// 1. Owner-local `EvalEnv` type symbols (same-file declarations)
-/// 2. Host's `ImportedDependencyCacheEntry` prepared decl caches (cross-file)
+/// 2. Import bindings (local name → canonical_id + exported name)
+/// 3. Host's `ImportedDependencyCacheEntry` prepared decl caches (cross-file)
 pub struct SessionSolverHost<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a HostStoreView>,
     /// Owner-local type environment. Types declared in the same file as the
     /// macro are resolved from here first.
     owner_env: Option<&'a EvalEnv>,
+    /// Import bindings: local name → (canonical_id, exported_name).
+    /// Built from the owner file's `AnalyzedImport` entries.
+    import_bindings: FxHashMap<String, ImportBinding>,
 }
 
 impl<'a> SessionSolverHost<'a> {
@@ -33,6 +46,7 @@ impl<'a> SessionSolverHost<'a> {
             host,
             store_view,
             owner_env: None,
+            import_bindings: FxHashMap::default(),
         }
     }
 
@@ -46,6 +60,45 @@ impl<'a> SessionSolverHost<'a> {
             host,
             store_view,
             owner_env: Some(owner_env),
+            import_bindings: FxHashMap::default(),
+        }
+    }
+
+    /// Create a solver host with owner env AND import bindings from analyzed imports.
+    /// The import bindings allow bare-name resolution of imported symbols
+    /// (e.g., `import { Foo } from './types'` → `Foo` resolves to the canonical
+    /// ID of `./types` with exported name `Foo`).
+    pub fn with_owner_env_and_imports(
+        host: &'a VerterHost,
+        store_view: Option<&'a HostStoreView>,
+        owner_env: &'a EvalEnv,
+        imports: &[AnalyzedImport],
+    ) -> Self {
+        let mut import_bindings = FxHashMap::default();
+        for import in imports {
+            let Some(ref canonical_id) = import.resolved_canonical_id else {
+                continue;
+            };
+            for binding in &import.bindings {
+                let exported_name = binding
+                    .imported_name
+                    .as_deref()
+                    .unwrap_or("default")
+                    .to_string();
+                import_bindings.insert(
+                    binding.name.clone(),
+                    ImportBinding {
+                        canonical_id: canonical_id.clone(),
+                        exported_name,
+                    },
+                );
+            }
+        }
+        Self {
+            host,
+            store_view,
+            owner_env: Some(owner_env),
+            import_bindings,
         }
     }
 }
@@ -78,6 +131,25 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         &self,
         root_identity: &ResolvedRootIdentity,
     ) -> Option<Arc<PreparedValueDecl>> {
+        // 1. Check owner-local env first (same-file value declarations)
+        if let Some(env) = self.owner_env {
+            if let Some(val) = env.value_symbols.get(&root_identity.symbol_name) {
+                let prepared = PreparedValueDecl {
+                    root_identity: root_identity.clone(),
+                    exported_name: None,
+                    kind: val.kind,
+                    type_annotation: val.type_annotation.clone(),
+                    function_signature: val.function_signature.clone(),
+                    object_shape: val.object_shape.clone(),
+                    member_index: Default::default(),
+                    enum_members: None,
+                    external_deps: Vec::new(),
+                };
+                return Some(Arc::new(prepared));
+            }
+        }
+
+        // 2. Fall back to host's prepared decl cache (cross-file)
         self.host.prepared_value_decl_in_view(
             &root_identity.canonical_id,
             &root_identity.symbol_name,
@@ -110,16 +182,55 @@ impl TypeSolverHost for SessionSolverHost<'_> {
     }
 
     fn root_identity(&self, canonical_id: &str, symbol_name: &str) -> Option<ResolvedRootIdentity> {
-        // Check owner-local env
+        // 1. Check owner-local env (types and values)
         if let Some(env) = self.owner_env {
-            if env.type_symbols.contains_key(symbol_name) {
+            if env.type_symbols.contains_key(symbol_name)
+                || env.value_symbols.contains_key(symbol_name)
+            {
                 return Some(ResolvedRootIdentity::new("$owner", symbol_name));
             }
         }
-        // Check host cache
-        self.host
-            .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)?;
-        Some(ResolvedRootIdentity::new(canonical_id, symbol_name))
+
+        // 2. If canonical_id is provided and non-empty, use it directly
+        if !canonical_id.is_empty() {
+            if self
+                .host
+                .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)
+                .is_some()
+            {
+                return Some(ResolvedRootIdentity::new(canonical_id, symbol_name));
+            }
+            if self
+                .host
+                .prepared_value_decl_in_view(canonical_id, symbol_name, self.store_view)
+                .is_some()
+            {
+                return Some(ResolvedRootIdentity::new(canonical_id, symbol_name));
+            }
+            return None;
+        }
+
+        // 3. Check import bindings: local name → (canonical_id, exported_name).
+        // This is the targeted resolution path for the owner file's direct imports.
+        // It handles renamed and default imports where the local name differs
+        // from the exported name.
+        if let Some(binding) = self.import_bindings.get(symbol_name) {
+            return Some(ResolvedRootIdentity::new(
+                &binding.canonical_id,
+                &binding.exported_name,
+            ));
+        }
+
+        // Unresolved bare-name: the solver encountered a reference that is not
+        // in the owner env, not at a known canonical_id, and not in the import
+        // bindings. This is expected for transitive same-file deps inside
+        // imported prepared decl bodies — the solver does not yet propagate
+        // the defining file's canonical_id through resolution context.
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[solver_host] unresolved bare name: symbol={symbol_name:?} canonical_id={canonical_id:?} (no import binding, no owner-local match)"
+        );
+        None
     }
 
     fn request_status(&self) -> RequestStatus {

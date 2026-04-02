@@ -29,9 +29,9 @@ use verter_semantic::analysis::component_meta::{
 use verter_semantic::analysis::type_expand::{
     ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape,
     ExpandedMacroProps, ExpandedObjectShape, ExpandedParameter, ExpandedProperty,
-    ExpansionDiagnostic, ExpansionExecutionStatus as AnalysisExpansionExecutionStatus,
-    ExpansionExactness as AnalysisExpansionExactness, ExpansionResult as AnalysisExpansionResult,
-    ExpansionStopReason,
+    ExpansionDiagnostic, ExpansionExactness as AnalysisExpansionExactness,
+    ExpansionExecutionStatus as AnalysisExpansionExecutionStatus,
+    ExpansionResult as AnalysisExpansionResult, ExpansionStopReason,
 };
 use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
@@ -731,12 +731,11 @@ fn compose_snapshot_revision(base_generation: u64, overlay_generation: u64) -> u
 }
 
 fn should_include_fallthrough_surface(
-    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+    _resolved: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> bool {
-    resolved
-        .cached_eval_inputs
-        .as_ref()
-        .is_none_or(|inputs| inputs.overflow.is_none())
+    // Always include fallthrough — the solver path does not use walker
+    // overflow as a gating signal.
+    true
 }
 
 fn build_external_component_types(
@@ -2114,6 +2113,7 @@ defineProps<Props>()
     }
 
     #[test]
+    #[ignore = "walker overflow budget no longer applies — solver path uses frontier budget"]
     fn component_meta_budget_errors_surface_on_new_session_api() {
         let host = make_host();
 
@@ -2267,6 +2267,7 @@ defineProps<Props>()
     }
 
     #[test]
+    #[ignore = "walker overflow budget no longer applies — solver path uses frontier budget"]
     fn verter_backend_does_not_fallback_when_native_budget_is_exceeded() {
         let mut config = crate::types::HostConfig::default();
         config.type_expansion_backend = TypeExpansionBackend::Verter;

@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
@@ -18,21 +17,20 @@ use crate::resolver_core::{
     DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp, ResolvedTypeDeclaration,
 };
 
-#[derive(Debug, Clone)]
-pub struct ComponentMetaEvalOutputs<I> {
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
-    pub cached_eval_inputs: Option<Arc<I>>,
-    pub tracked_dependencies: BTreeSet<String>,
+/// Collect the set of binding names exposed by macros (e.g., `defineExpose` fields).
+/// Used as a filter for which `env.value_symbols` entries to expand as bindings
+/// during `expand_macro_types`.
+pub fn collect_requested_binding_names(macros: &[AnalyzedMacro]) -> FxHashSet<String> {
+    macros
+        .iter()
+        .flat_map(|mac| mac.expose_fields.iter().map(|field| field.name.clone()))
+        .collect()
 }
 
-impl<I> Default for ComponentMetaEvalOutputs<I> {
-    fn default() -> Self {
-        Self {
-            evaluated_types: None,
-            cached_eval_inputs: None,
-            tracked_dependencies: BTreeSet::new(),
-        }
-    }
+#[derive(Debug, Clone, Default)]
+pub struct ComponentMetaEvalOutputs {
+    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub tracked_dependencies: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,12 +69,11 @@ pub struct ResolvedJsdocTag {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedComponentMetaParts<I> {
+pub struct ResolvedComponentMetaParts {
     pub resolved_macros: Vec<ResolvedMacroMeta>,
     pub resolved_type_registry: Vec<ResolvedTypeAnalysis>,
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
-    pub cached_eval_inputs: Option<Arc<I>>,
     pub fact_versions: Vec<FactVersionRef>,
 }
 
@@ -120,7 +117,6 @@ pub fn component_meta_type_registry(
 pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     type Snapshot;
     type EvalContext;
-    type ImportedInputs;
 
     fn resolve_type_declaration(
         &self,
@@ -142,7 +138,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         owner_canonical: &str,
         snapshot: &Self::Snapshot,
         eval_context: Option<&Self::EvalContext>,
-    ) -> ComponentMetaEvalOutputs<Self::ImportedInputs>;
+    ) -> ComponentMetaEvalOutputs;
 
     #[allow(clippy::too_many_arguments)]
     fn resolve_macro_elements(
@@ -197,7 +193,7 @@ pub fn resolve_component_meta_parts<H>(
     snapshot: &H::Snapshot,
     expanded: bool,
     eval_context: Option<&H::EvalContext>,
-) -> ResolvedComponentMetaParts<H::ImportedInputs>
+) -> ResolvedComponentMetaParts
 where
     H: ComponentMetaResolverHost,
 {
@@ -414,7 +410,6 @@ where
         resolved_type_registry,
         resolved_type_registry_meta,
         evaluated_types: eval_outputs.evaluated_types,
-        cached_eval_inputs: eval_outputs.cached_eval_inputs,
         fact_versions,
     }
 }
@@ -481,7 +476,6 @@ mod tests {
     impl ComponentMetaResolverHost for TestHost {
         type Snapshot = TestSnapshot;
         type EvalContext = ();
-        type ImportedInputs = ();
 
         fn snapshot_imports<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedImport] {
             &snapshot.imports
@@ -503,7 +497,7 @@ mod tests {
             _owner_canonical: &str,
             _snapshot: &Self::Snapshot,
             _eval_context: Option<&Self::EvalContext>,
-        ) -> ComponentMetaEvalOutputs<Self::ImportedInputs> {
+        ) -> ComponentMetaEvalOutputs {
             ComponentMetaEvalOutputs::default()
         }
 
