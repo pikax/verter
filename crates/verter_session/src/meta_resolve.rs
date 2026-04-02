@@ -323,7 +323,8 @@ fn enrich_missing_slot_bindings(
                         r#type: binding_type,
                         raw_type: None,
                         optional,
-                        completeness: entry.result.completeness,
+                        exactness: entry.result.exactness,
+                        execution_status: entry.result.execution_status,
                         diagnostics: Vec::new(),
                     },
                 );
@@ -353,8 +354,10 @@ fn enrich_missing_slot_bindings(
                         r#type: parsed_type,
                         raw_type,
                         optional: false,
-                        completeness:
-                            verter_semantic::analysis::type_expand::ExpansionCompleteness::Exact,
+                        exactness:
+                            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                        execution_status:
+                            verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                         diagnostics: Vec::new(),
                     },
                 );

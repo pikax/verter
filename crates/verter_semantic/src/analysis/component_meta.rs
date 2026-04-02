@@ -1384,7 +1384,8 @@ fn field_expansion_metadata(
     field: &crate::analysis::type_expand::ExpandedField,
 ) -> crate::analysis::type_expand::ExpansionMetadata {
     crate::analysis::type_expand::ExpansionMetadata {
-        completeness: field.completeness,
+        exactness: field.exactness,
+        execution_status: field.execution_status,
         diagnostics: field.diagnostics.clone(),
     }
 }
@@ -1411,7 +1412,8 @@ fn define_props_property_expansion_metadata(
         .collect();
 
     Some(crate::analysis::type_expand::ExpansionMetadata {
-        completeness: entry.result.completeness,
+        exactness: entry.result.exactness,
+        execution_status: entry.result.execution_status,
         diagnostics,
     })
 }
@@ -1452,7 +1454,8 @@ fn macro_object_property_expansion_metadata(
         .collect();
 
     crate::analysis::type_expand::ExpansionMetadata {
-        completeness: entry.result.completeness,
+        exactness: entry.result.exactness,
+        execution_status: entry.result.execution_status,
         diagnostics,
     }
 }
@@ -1607,7 +1610,7 @@ fn should_prefer_symbolic_prop_type_expr(
             || (matches!(raw_type, "any" | "unknown")
                 && type_expr_is_suspicious_identifier_ref(evaluated_type));
 
-    metadata.completeness == crate::analysis::type_expand::ExpansionCompleteness::Partial
+    metadata.exactness == crate::analysis::type_expand::ExpansionExactness::Incomplete
         && raw_type_supports_symbolic_fallback
         && (type_expr_exceeds_node_limit(evaluated_type, LARGE_PARTIAL_PROP_TYPE_NODE_LIMIT)
             || type_expr_is_placeholder_for_symbolic_fallback(evaluated_type))
@@ -2213,7 +2216,8 @@ fn expanded_define_emit_events(
             readonly: false,
         };
         let payload_expansion = Some(crate::analysis::type_expand::ExpansionMetadata {
-            completeness: entry.result.completeness,
+            exactness: entry.result.exactness,
+            execution_status: entry.result.execution_status,
             diagnostics: entry.result.diagnostics.clone(),
         });
 

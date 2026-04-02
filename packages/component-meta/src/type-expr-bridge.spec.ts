@@ -915,13 +915,15 @@ describe("buildEvaluatedTypeMap", () => {
       {
         name: "count",
         type: { kind: "primitive", name: "number" },
-        completeness: "exact",
+        exactness: "exactConcrete",
+        executionStatus: "completed",
         diagnostics: [],
       },
       {
         name: "label",
         type: { kind: "primitive", name: "string" },
-        completeness: "exact",
+        exactness: "exactConcrete",
+        executionStatus: "completed",
         diagnostics: [],
       },
     ];
@@ -940,7 +942,8 @@ describe("buildEvaluatedTypeMap", () => {
           element: { kind: "primitive", name: "string" },
           readonly: false,
         },
-        completeness: "exact",
+        exactness: "exactConcrete",
+        executionStatus: "completed",
         diagnostics: [],
       },
     ];

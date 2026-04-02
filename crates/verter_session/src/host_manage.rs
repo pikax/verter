@@ -10473,23 +10473,10 @@ fn collect_runtime_value_names_from_expr_with_usage(
                 return;
             }
 
-            for arg in type_arguments.iter() {
-                collect_runtime_value_names_from_expr_with_usage(
-                    arg,
-                    owner_env,
-                    type_bindings,
-                    active_locals,
-                    state,
-                    required,
-                    used_type_parameters.as_deref_mut(),
-                );
-            }
-            if runtime_collect_debug {
-                eprintln!(
-                    "[runtime-collect] ref-fallback-complete name={} required={:?}",
-                    name, required
-                );
-            }
+            // External refs (not in owner_env, not in type_bindings) cannot
+            // contribute typeof runtime value names. Do not walk their type
+            // arguments — that would be recursive deep expansion outside the
+            // frontier, which the plan explicitly forbids.
         }
         TypeExpr::TypeOf(value_ref) => {
             if let Some(root) = value_ref.path.first() {

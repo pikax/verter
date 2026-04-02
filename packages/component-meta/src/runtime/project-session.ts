@@ -148,7 +148,10 @@ export class ProjectSession {
   getResolvedComponentMeta(canonicalId: string): unknown | null {
     this.ensureOpen();
     this.engine.markActivity();
-    const getResolvedComponentMeta = (this._nativeSession as { getResolvedComponentMeta?: typeof this._nativeSession.getResolvedComponentMeta }).getResolvedComponentMeta;
+    const nativeSession = this._nativeSession as {
+      getResolvedComponentMeta?: (canonicalId: string) => unknown | null;
+    };
+    const getResolvedComponentMeta = nativeSession.getResolvedComponentMeta;
     if (typeof getResolvedComponentMeta !== "function") {
       throw new Error(
         "Resolved component-meta query is unavailable on the active native session",
@@ -156,7 +159,7 @@ export class ProjectSession {
     }
     const payload = getResolvedComponentMeta.call(this._nativeSession, canonicalId);
     if (payload === null || payload === undefined) return null;
-    return decodeComponentMetaPayload(payload);
+    return decodeComponentMetaPayload(payload as ArrayBuffer | ArrayBufferView);
   }
 
   /**

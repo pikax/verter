@@ -83,7 +83,7 @@ export interface MetaCheckerOptions {
   /** Force TypeScript usage (no-op in Verter — always uses TS). Kept for Volar compat. */
   forceUseTs?: boolean;
   /** Select the type expansion backend used for component metadata queries. */
-  typeExpansionBackend?: "verter" | "tsserver" | "tsgo" | "auto";
+  typeExpansionBackend?: "verter" | "tsserver" | "tsgo";
   /**
    * Runtime ownership mode.
    * `shared` reuses the process-global pooled runtime.

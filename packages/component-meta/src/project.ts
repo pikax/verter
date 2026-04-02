@@ -43,7 +43,7 @@ import type {
   ProjectSession,
 } from "./runtime/index.js";
 
-export type TypeExpansionBackend = "verter" | "tsserver" | "tsgo" | "auto";
+export type TypeExpansionBackend = "verter" | "tsserver" | "tsgo";
 
 export type ComponentMetaSessionConfig =
   | {
@@ -319,7 +319,7 @@ async function openComponentMetaSessionInternal(
  * Open a component-meta session with explicit backend selection.
  *
  * This is the preferred API over `openMetaProject()`. It supports
- * `typeExpansionBackend` for choosing between Verter, tsserver, TSGO, or auto.
+ * `typeExpansionBackend` for choosing between Verter, tsserver, or TSGO.
  */
 export async function openComponentMetaSession(
   config: ComponentMetaSessionConfig,

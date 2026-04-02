@@ -20,6 +20,16 @@ When adding, removing, or modifying a project in **either** file, you **MUST** u
 | `bundler`           | `bundler`                     |
 | `shallow`           | `shallow`                     |
 
+## Shared Repo Architecture Rules
+
+When integration-test work touches host-backed loading, resolution, or cache behavior, follow the root repository build philosophy in [CLAUDE.md](D:\dev\personal\verter\CLAUDE.md):
+
+1. one shared file-ready/read/parse/shallow-process path per canonical file
+2. no request-local fallback parser/load path
+3. no dual-path transition kept alive for safety
+
+Do not add integration-test-only infrastructure that normalizes or depends on a second host-backed read/parse path.
+
 ## Running Integration Tests
 
 ### Local (primary for development)

@@ -711,16 +711,6 @@ fn build_component_meta_type_expander(
             workspace_roots,
         )
         .map(Some),
-        TypeExpansionBackend::Auto => {
-            let workspace_root = runtime_workspace_root(workspace_roots)?;
-            match select_auto_runtime_backend(&workspace_root) {
-                Some(runtime_backend) => {
-                    build_runtime_component_meta_expander(runtime_backend, workspace_roots)
-                        .map(Some)
-                }
-                None => Ok(None),
-            }
-        }
     }
 }
 
@@ -749,16 +739,6 @@ fn build_runtime_component_meta_expander(
         backend,
         runtime_backend.runtime_key(),
     )) as Arc<dyn ComponentMetaTypeExpander>)
-}
-
-fn select_auto_runtime_backend(workspace_root: &str) -> Option<RuntimeComponentMetaBackend> {
-    if find_tsgo_binary().is_ok() {
-        Some(RuntimeComponentMetaBackend::Tsgo)
-    } else if find_node().is_some() && find_tsserver(None, Some(workspace_root)).is_some() {
-        Some(RuntimeComponentMetaBackend::Tsserver)
-    } else {
-        None
-    }
 }
 
 fn runtime_workspace_root(workspace_roots: &[String]) -> Result<String> {

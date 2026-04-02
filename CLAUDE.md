@@ -22,6 +22,53 @@ Architectural consequence:
 - A performance or correctness fix discovered in one surface should be implemented in the shared owner layer whenever that behavior is reusable.
 - Consumer-local wrappers should stay thin and should not bypass shared parsing, analysis, resolution, or cache ownership.
 
+### Build Philosophy (CRITICAL)
+
+This project follows the same end-state philosophy as `binary-exploring-lamport.md`.
+
+Core rules carried forward:
+
+1. Read, parse, shallow-process, and cache each canonical file once per content hash through one shared host path.
+2. Store the full shallow symbol inventory up front, then process only the requested items on demand.
+3. Same-file closure stays local to the owning file.
+4. Cross-file deepening happens in one place only, one import level at a time.
+5. The builder/solver reads only from cached lookup state; it does not reopen file loading or routing.
+6. The entire design is demand-driven and query-scoped.
+7. The final implementation lands as one clean cutover, not as a merged dual-path transition.
+8. Component-meta, LSP, MCP, and other host-backed consumers must share the same file-ready/read/parse/shallow-process lifecycle.
+
+These are architecture rules, not optimization hints. If a change conflicts with them, fix the owner layer or delete the legacy path rather than preserving a second read/parse/resolution flow.
+
+### Shallow File Processing Core Invariant (CRITICAL)
+
+The shallow file process is a core architectural invariant and must be preserved.
+
+When a canonical file is processed, the host stores its shallow symbol inventory once. That inventory is the authoritative index later stages query.
+
+At minimum, the shallow state must classify and retain:
+
+- imports
+- exports and reexports
+- type declarations
+- interfaces
+- enums
+- classes
+- variables/constants
+- functions/method signatures
+- `typeof`-relevant value declarations
+- local symbol dependency edges
+- cross-file dependency edges
+
+Design rule:
+
+- processing a file means collecting and indexing its symbols, not eagerly evaluating them
+- later stages look up the indexed items they need and only process those items on demand
+- no stage should need to rescan the raw file to rediscover symbols that shallow processing already captured
+
+Performance consequence:
+
+- very high performance comes from targeted demand after broad shallow indexing, not from repeated partial reparsing
+
 ### Macro Type Traversal Rule (CRITICAL)
 
 When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph.

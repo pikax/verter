@@ -8,13 +8,13 @@ mod request;
 pub use request::{
     ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature,
     ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape,
-    ExpandedParameter, ExpandedProperty, ExpansionCompleteness, ExpansionDiagnostic,
-    ExpansionMetadata, ExpansionResult, ExpansionStopReason, SolverExactCompat,
+    ExpandedParameter, ExpandedProperty, ExpansionDiagnostic, ExpansionExactness,
+    ExpansionExecutionStatus, ExpansionMetadata, ExpansionResult, ExpansionStopReason,
 };
 
 use crate::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use crate::analysis::type_solver::host::TypeSolverHost;
-use crate::analysis::type_solver::result::SolverExactness;
+use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
 use crate::analysis::type_solver::solve::{solve_type, SolveLimits};
 
 /// Expand a `TypeExpr` into an `ExpandedObjectShape` via the native solver.
@@ -34,7 +34,8 @@ pub fn expand_normalized_expr(
     let result = solve_type(expr, solver_host, SolveLimits::default());
     ExpansionResult {
         value: ExpandedNormalizedExpr { expr: result.value },
-        completeness: SolverExactCompat::from(result.exactness),
+        exactness: result.exactness,
+        execution_status: result.execution_status,
         diagnostics: Vec::new(),
     }
 }
@@ -53,7 +54,8 @@ fn type_expr_to_object_result(
 ) -> ExpansionResult<ExpandedObjectShape> {
     ExpansionResult {
         value: type_expr_to_expanded_shape(expr),
-        completeness: SolverExactCompat::from(exactness),
+        exactness,
+        execution_status: ExecutionStatus::Completed,
         diagnostics: Vec::new(),
     }
 }

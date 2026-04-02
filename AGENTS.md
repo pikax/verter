@@ -35,6 +35,7 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 - Update documentation when public behavior, module paths, or APIs change.
 - Use conventional commits: `<type>(<scope>): <description>`.
 - Load only the specific reference material needed for the task instead of bulk-reading every file.
+- Follow the shared build philosophy below for type work and any host-backed architecture changes.
 - For `component-meta` type work, use cached lookup/eval state only. Do not add AST/source-walk fallback to recover or expand types after the cache-owning pass.
 - For `component-meta` registry publication, stay shallow and demand-driven: load only the symbols required by the current query, and expand only when a cached lookup result is actually needed.
 - For `component-meta` cross-file resolution, deepen in one place only: follow the active declaration route for the requested symbol/query and do not branch into unrelated sibling symbols/files.
@@ -42,6 +43,53 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 - For `component-meta` metadata or fallthrough projection, reuse the already-resolved state and the captured store/session view. Do not bounce back out to a fresh top-level snapshot/query when a resolved query is already in hand.
 - For `component-meta` imported-type hydration, treat the imported dependency cache as the only source of file state after shallow seeding. Resolver paths must not call raw snapshot/source builders to recover missing imported data; if the cache does not own the needed snapshot/env yet, stay shallow and stop.
 - For `component-meta` imported-eval collection, keep one strategy only: lazy/BFS over the active symbol route. Do not add eager collector modes, source-text fallback parsing, or alternate collection branches that widen traversal.
+
+## Shared Build Philosophy
+
+Follow the same end-state philosophy as `binary-exploring-lamport.md`.
+
+Core rules carried forward:
+
+1. Read, parse, shallow-process, and cache each canonical file once per content hash through one shared host path.
+2. Store the full shallow symbol inventory up front, then process only the requested items on demand.
+3. Same-file closure stays local to the owning file.
+4. Cross-file deepening happens in one place only, one import level at a time.
+5. The builder/solver reads only from cached lookup state; it does not reopen file loading or routing.
+6. The entire design is demand-driven and query-scoped.
+7. The final implementation lands as one clean cutover, not as a merged dual-path transition.
+8. Component-meta, LSP, MCP, and other host-backed consumers must share the same file-ready/read/parse/shallow-process lifecycle.
+
+If a change conflicts with these rules, prefer changing ownership, deleting the legacy path, or breaking an internal interface over preserving a second resolver/load path.
+
+## Shallow File Processing Core Invariant
+
+The shallow file process is a core architectural invariant and must be preserved.
+
+When a canonical file is processed, the host stores its shallow symbol inventory once. That inventory is the authoritative index later stages query.
+
+At minimum, the shallow state must classify and retain:
+
+- imports
+- exports and reexports
+- type declarations
+- interfaces
+- enums
+- classes
+- variables/constants
+- functions/method signatures
+- `typeof`-relevant value declarations
+- local symbol dependency edges
+- cross-file dependency edges
+
+Design rule:
+
+- processing a file means collecting and indexing its symbols, not eagerly evaluating them
+- later stages look up the indexed items they need and only process those items on demand
+- no stage should need to rescan the raw file to rediscover symbols that shallow processing already captured
+
+Performance consequence:
+
+- very high performance comes from targeted demand after broad shallow indexing, not from repeated partial reparsing
 
 ## Task Routing
 

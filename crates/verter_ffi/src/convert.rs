@@ -307,7 +307,8 @@ fn expansion_metadata_to_ffi(
     metadata: verter_semantic::analysis::type_expand::ExpansionMetadata,
 ) -> FfiExpansionMetadata {
     FfiExpansionMetadata {
-        completeness: expansion_completeness_to_string(metadata.completeness),
+        exactness: expansion_exactness_to_string(metadata.exactness),
+        execution_status: expansion_execution_status_to_string(metadata.execution_status),
         diagnostics: metadata
             .diagnostics
             .into_iter()
@@ -320,13 +321,37 @@ fn expansion_metadata_to_ffi(
     }
 }
 
-fn expansion_completeness_to_string(
-    completeness: verter_semantic::analysis::type_expand::ExpansionCompleteness,
+fn expansion_exactness_to_string(
+    exactness: verter_semantic::analysis::type_expand::ExpansionExactness,
 ) -> String {
-    match completeness {
-        verter_semantic::analysis::type_expand::ExpansionCompleteness::Exact => "exact".to_string(),
-        verter_semantic::analysis::type_expand::ExpansionCompleteness::Partial => {
-            "partial".to_string()
+    match exactness {
+        verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+            "exactConcrete".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
+            "exactSymbolic".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete => {
+            "incomplete".to_string()
+        }
+    }
+}
+
+fn expansion_execution_status_to_string(
+    status: verter_semantic::analysis::type_expand::ExpansionExecutionStatus,
+) -> String {
+    match status {
+        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed => {
+            "completed".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Cancelled => {
+            "cancelled".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Interrupted => {
+            "interrupted".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::HardStop => {
+            "hardStop".to_string()
         }
     }
 }
@@ -1208,7 +1233,6 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
             "verter" => TypeExpansionBackend::Verter,
             "tsserver" => TypeExpansionBackend::Tsserver,
             "tsgo" => TypeExpansionBackend::Tsgo,
-            "auto" => TypeExpansionBackend::Auto,
             _ => TypeExpansionBackend::Verter,
         };
     }
@@ -2187,6 +2211,37 @@ mod tests {
         assert_eq!(result.max_profiles_per_file, 4);
         assert_eq!(result.resolve_extensions, vec![".vue", ".ts"]);
         assert_eq!(result.analysis_level, host::AnalysisLevel::Essential);
+    }
+
+    #[test]
+    fn config_auto_backend_defaults_to_verter() {
+        let config = FfiHostConfig {
+            type_expansion_backend: Some("auto".to_string()),
+            ..Default::default()
+        };
+        let result = ffi_config_to_host(config).unwrap();
+        assert_eq!(
+            result.type_expansion_backend,
+            verter_session::type_expansion::TypeExpansionBackend::Verter
+        );
+    }
+
+    #[test]
+    fn expansion_metadata_to_ffi_preserves_exactness_and_execution_status() {
+        let ffi = expansion_metadata_to_ffi(verter_semantic::analysis::type_expand::ExpansionMetadata {
+            exactness: verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+            execution_status:
+                verter_semantic::analysis::type_solver::result::ExecutionStatus::HardStop,
+            diagnostics: vec![verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+                reason: verter_semantic::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
+                context: "kept symbolic".to_string(),
+                property_name: None,
+            }],
+        });
+
+        assert_eq!(ffi.exactness, "exactSymbolic");
+        assert_eq!(ffi.execution_status, "hardStop");
+        assert_eq!(ffi.diagnostics.len(), 1);
     }
 
     // ── Config: all policy string variants ───────────────────────────

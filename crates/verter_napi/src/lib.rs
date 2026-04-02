@@ -190,7 +190,7 @@ pub struct NapiHostConfig {
     pub maxProfilesPerFile: Option<u32>,
     pub resolveExtensions: Option<Vec<String>>,
     pub analysisLevel: Option<String>,
-    /// Type expansion backend: `"verter"` (default), `"tsserver"`, `"tsgo"`, `"auto"`.
+    /// Type expansion backend: `"verter"` (default), `"tsserver"`, or `"tsgo"`.
     pub typeExpansionBackend: Option<String>,
 }
 

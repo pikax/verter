@@ -32,18 +32,38 @@ export interface TestTypeRegistryEntry {
   rawType?: string;
 }
 
+export interface TestExpansionDiagnostic {
+  reason:
+    | "budgetExceeded"
+    | "mappedDepthExceeded"
+    | "unresolvedReference"
+    | "indeterminateConditional"
+    | "infiniteKeySpace"
+    | "unsupportedOperator";
+  context: string;
+  propertyName?: string;
+}
+
+export interface TestExpansionMeta {
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
+  diagnostics?: TestExpansionDiagnostic[];
+}
+
 export interface TestPropMeta {
   name: string;
   type: TestTypeExpr;
   rawType?: string;
   required?: boolean;
   hasDefault?: boolean;
+  typeExpansion?: TestExpansionMeta;
 }
 
 export interface TestSlotBindingMeta {
   name: string;
   type: TestTypeExpr;
   rawType?: string;
+  typeExpansion?: TestExpansionMeta;
 }
 
 export interface TestSlotMeta {
@@ -74,6 +94,21 @@ const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ROOT_REACHABILITY_NO_FALLTHROUGH = 1;
 const FALLTHROUGH_NONE = 1;
 const NO_FALLTHROUGH_REASON_NO_TEMPLATE = 5;
+const EXPANSION_EXACTNESS_EXACT_CONCRETE = 1;
+const EXPANSION_EXACTNESS_EXACT_SYMBOLIC = 2;
+const EXPANSION_EXACTNESS_INCOMPLETE = 3;
+const EXPANSION_EXECUTION_STATUS_COMPLETED = 1;
+const EXPANSION_EXECUTION_STATUS_CANCELLED = 2;
+const EXPANSION_EXECUTION_STATUS_INTERRUPTED = 3;
+const EXPANSION_EXECUTION_STATUS_HARD_STOP = 4;
+const EXPANSION_REASON_BUDGET_EXCEEDED = 1;
+const EXPANSION_REASON_MAPPED_DEPTH_EXCEEDED = 2;
+const EXPANSION_REASON_UNRESOLVED_REFERENCE = 3;
+const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
+const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
+const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
+
+type TypeNodeInit = NonNullable<NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]>[number];
 
 const primitiveTags: Record<TestPrimitiveName, number> = {
   string: 1,
@@ -179,11 +214,14 @@ class TestGraphBuilder {
   }
 }
 
-function typeNode(caseName: string, value: Record<string, unknown>) {
+function typeNode(
+  caseName: "primitive" | "literal" | "ref" | "union" | "indexedAccess" | "object",
+  value: Record<string, unknown>,
+): TypeNodeInit {
   return {
     kind: {
-      case: caseName,
-      value,
+      case: caseName as TypeNodeInit["kind"] extends { case: infer C } ? C : never,
+      value: value as never,
     },
   };
 }
@@ -211,6 +249,7 @@ export function buildTestComponentMetaProtoPayload(
       rawTypeId: builder.stringId(prop.rawType),
       required: Boolean(prop.required),
       hasDefault: Boolean(prop.hasDefault),
+      typeExpansion: expansionMeta(prop.typeExpansion, builder),
       tags: [],
     })),
     events: [],
@@ -221,6 +260,7 @@ export function buildTestComponentMetaProtoPayload(
         nameId: builder.stringId(binding.name),
         typeNodeId: builder.nodeId(binding.type),
         rawTypeId: builder.stringId(binding.rawType),
+        typeExpansion: expansionMeta(binding.typeExpansion, builder),
       })),
       isRequired: Boolean(slot.isRequired),
       returnTypeId: builder.stringId(slot.returnType),
@@ -274,4 +314,63 @@ export function buildTestComponentMetaProtoPayload(
 export function encodeTestComponentMetaPayload(input: TestComponentMetaPayload): Buffer {
   const payload = create(ComponentMetaPayloadSchema, buildTestComponentMetaProtoPayload(input));
   return Buffer.from(toBinary(ComponentMetaPayloadSchema, payload));
+}
+
+function expansionMeta(
+  metadata: TestExpansionMeta | undefined,
+  builder: TestGraphBuilder,
+): Record<string, unknown> | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+  return {
+    exactness: encodeExpansionExactness(metadata.exactness),
+    executionStatus: encodeExpansionExecutionStatus(metadata.executionStatus),
+    diagnostics: (metadata.diagnostics ?? []).map((diagnostic) => ({
+      reason: encodeExpansionReason(diagnostic.reason),
+      contextId: builder.stringId(diagnostic.context),
+      propertyNameId: builder.stringId(diagnostic.propertyName),
+    })),
+  };
+}
+
+function encodeExpansionExactness(value: TestExpansionMeta["exactness"]): number {
+  switch (value) {
+    case "exactConcrete":
+      return EXPANSION_EXACTNESS_EXACT_CONCRETE;
+    case "exactSymbolic":
+      return EXPANSION_EXACTNESS_EXACT_SYMBOLIC;
+    case "incomplete":
+      return EXPANSION_EXACTNESS_INCOMPLETE;
+  }
+}
+
+function encodeExpansionExecutionStatus(value: TestExpansionMeta["executionStatus"]): number {
+  switch (value) {
+    case "completed":
+      return EXPANSION_EXECUTION_STATUS_COMPLETED;
+    case "cancelled":
+      return EXPANSION_EXECUTION_STATUS_CANCELLED;
+    case "interrupted":
+      return EXPANSION_EXECUTION_STATUS_INTERRUPTED;
+    case "hardStop":
+      return EXPANSION_EXECUTION_STATUS_HARD_STOP;
+  }
+}
+
+function encodeExpansionReason(value: TestExpansionDiagnostic["reason"]): number {
+  switch (value) {
+    case "budgetExceeded":
+      return EXPANSION_REASON_BUDGET_EXCEEDED;
+    case "mappedDepthExceeded":
+      return EXPANSION_REASON_MAPPED_DEPTH_EXCEEDED;
+    case "unresolvedReference":
+      return EXPANSION_REASON_UNRESOLVED_REFERENCE;
+    case "indeterminateConditional":
+      return EXPANSION_REASON_INDETERMINATE_CONDITIONAL;
+    case "infiniteKeySpace":
+      return EXPANSION_REASON_INFINITE_KEY_SPACE;
+    case "unsupportedOperator":
+      return EXPANSION_REASON_UNSUPPORTED_OPERATOR;
+  }
 }

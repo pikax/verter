@@ -205,8 +205,9 @@ message JsdocTag {
 }
 
 message ExpansionMetadata {
-  ExpansionCompleteness completeness = 1;
-  repeated ExpansionDiagnostic diagnostics = 2;
+  ExpansionExactness exactness = 1;
+  ExpansionExecutionStatus execution_status = 2;
+  repeated ExpansionDiagnostic diagnostics = 3;
 }
 
 message ExpansionDiagnostic {
@@ -657,10 +658,19 @@ enum MappedModifier {
   MAPPED_MODIFIER_REMOVE = 3;
 }
 
-enum ExpansionCompleteness {
-  EXPANSION_COMPLETENESS_UNSPECIFIED = 0;
-  EXPANSION_COMPLETENESS_EXACT = 1;
-  EXPANSION_COMPLETENESS_PARTIAL = 2;
+enum ExpansionExactness {
+  EXPANSION_EXACTNESS_UNSPECIFIED = 0;
+  EXPANSION_EXACTNESS_EXACT_CONCRETE = 1;
+  EXPANSION_EXACTNESS_EXACT_SYMBOLIC = 2;
+  EXPANSION_EXACTNESS_INCOMPLETE = 3;
+}
+
+enum ExpansionExecutionStatus {
+  EXPANSION_EXECUTION_STATUS_UNSPECIFIED = 0;
+  EXPANSION_EXECUTION_STATUS_COMPLETED = 1;
+  EXPANSION_EXECUTION_STATUS_CANCELLED = 2;
+  EXPANSION_EXECUTION_STATUS_INTERRUPTED = 3;
+  EXPANSION_EXECUTION_STATUS_HARD_STOP = 4;
 }
 
 enum ExpansionStopReason {

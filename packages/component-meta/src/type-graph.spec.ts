@@ -116,6 +116,82 @@ describe("decodeComponentMetaPayload", () => {
     });
   });
 
+  it("decodes expansion exactness and execution status from graph metadata", () => {
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [
+        {
+          name: "item",
+          type: { kind: "ref", name: "Item" },
+          typeExpansion: {
+            exactness: "exactSymbolic",
+            executionStatus: "completed",
+            diagnostics: [
+              {
+                reason: "mappedDepthExceeded",
+                context: "mapped type stayed symbolic",
+              },
+            ],
+          },
+        },
+      ],
+      slots: [
+        {
+          name: "default",
+          isScoped: true,
+          bindings: [
+            {
+              name: "item",
+              type: { kind: "ref", name: "Item" },
+              typeExpansion: {
+                exactness: "incomplete",
+                executionStatus: "cancelled",
+                diagnostics: [
+                  {
+                    reason: "budgetExceeded",
+                    context: "work budget exceeded",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+      typeRegistry: [
+        {
+          name: "Item",
+          type: {
+            kind: "object",
+            properties: [{ name: "label", type: { kind: "primitive", name: "string" } }],
+          },
+        },
+      ],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+
+    expect(native.props[0]?.typeExpansion).toEqual({
+      exactness: "exactSymbolic",
+      executionStatus: "completed",
+      diagnostics: [
+        {
+          reason: "mappedDepthExceeded",
+          context: "mapped type stayed symbolic",
+        },
+      ],
+    });
+    expect(native.slots[0]?.bindings[0]?.typeExpansion).toEqual({
+      exactness: "incomplete",
+      executionStatus: "cancelled",
+      diagnostics: [
+        {
+          reason: "budgetExceeded",
+          context: "work budget exceeded",
+        },
+      ],
+    });
+  });
+
   it("does not leak descriptor memoization across payload instances", () => {
     const stringPayload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Node.vue",

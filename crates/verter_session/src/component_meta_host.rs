@@ -29,8 +29,9 @@ use verter_semantic::analysis::component_meta::{
 use verter_semantic::analysis::type_expand::{
     ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape,
     ExpandedMacroProps, ExpandedObjectShape, ExpandedParameter, ExpandedProperty,
-    ExpansionCompleteness as AnalysisExpansionCompleteness, ExpansionDiagnostic,
-    ExpansionResult as AnalysisExpansionResult, ExpansionStopReason,
+    ExpansionDiagnostic, ExpansionExecutionStatus as AnalysisExpansionExecutionStatus,
+    ExpansionExactness as AnalysisExpansionExactness, ExpansionResult as AnalysisExpansionResult,
+    ExpansionStopReason,
 };
 use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
@@ -103,16 +104,13 @@ impl ComponentMetaHostInner {
     fn backend_error(&self) -> Option<ComponentMetaHostError> {
         match self.backend {
             TypeExpansionBackend::Verter => None,
-            TypeExpansionBackend::Tsserver
-            | TypeExpansionBackend::Tsgo
-            | TypeExpansionBackend::Auto => {
+            TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => {
                 if self.external_expander.read().is_some() {
                     None
                 } else {
                     let backend_name = match self.backend {
                         TypeExpansionBackend::Tsserver => "tsserver",
                         TypeExpansionBackend::Tsgo => "tsgo",
-                        TypeExpansionBackend::Auto => "auto",
                         TypeExpansionBackend::Verter => unreachable!(),
                     };
                     Some(ComponentMetaHostError::Host(format!(
@@ -419,48 +417,6 @@ impl ComponentMetaSession {
                 };
                 Ok(Some((analysis, resolved)))
             }
-            TypeExpansionBackend::Auto => {
-                let canonical = self
-                    .inner
-                    .resolve_alias_or_canonical(canonical_or_alias)
-                    .map_err(ComponentMetaHostError::from)?;
-                let Some((canonical, resolved, store_view)) = self
-                    .inner
-                    .resolve_component_meta_state_with_view(
-                        &canonical,
-                        crate::types::ResolverMode::Expanded,
-                    )
-                    .map_err(ComponentMetaHostError::from)?
-                else {
-                    return Ok(None);
-                };
-
-                let exceeds_threshold =
-                    resolved_state_exceeds_verter_complexity_threshold(&resolved);
-                let analysis = if exceeds_threshold {
-                    let Some(analysis) = self
-                        .get_component_meta_via_external_backend_from_resolved(
-                            &canonical,
-                            &resolved,
-                            true,
-                            Some(&store_view),
-                        )?
-                    else {
-                        return Ok(None);
-                    };
-                    analysis
-                } else {
-                    extract_component_meta_from_resolved_with_evaluated(
-                        self.owner.project.host(),
-                        &canonical,
-                        &resolved,
-                        resolved.evaluated_types.as_ref(),
-                        should_include_fallthrough_surface(&resolved),
-                        Some(&store_view),
-                    )
-                };
-                Ok(Some((analysis, resolved)))
-            }
         }
     }
 
@@ -504,9 +460,6 @@ impl ComponentMetaSession {
                 .map_err(ComponentMetaHostError::from),
             TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => self
                 .get_component_meta_via_external_backend(canonical_or_alias, include_fallthrough),
-            TypeExpansionBackend::Auto => {
-                self.get_component_meta_via_auto_policy(canonical_or_alias, include_fallthrough)
-            }
         }
     }
 
@@ -549,62 +502,6 @@ impl ComponentMetaSession {
     /// Per-session overlay generation counter.
     pub fn overlay_generation(&self) -> u64 {
         self.inner.overlay_generation()
-    }
-
-    // `Auto` commits each request to one backend path based on the
-    // resolved-state complexity signals, rather than querying external by default.
-    fn get_component_meta_via_auto_policy(
-        &self,
-        canonical_or_alias: &str,
-        include_fallthrough: bool,
-    ) -> Result<Option<ComponentMetaAnalysis>, ComponentMetaHostError> {
-        let _trace = component_meta_trace_scope!(
-            "component_meta_auto_policy",
-            format!(
-                "owner={} include_fallthrough={}",
-                canonical_or_alias, include_fallthrough,
-            ),
-        );
-        let Some((canonical, resolved, store_view)) = self
-            .inner
-            .resolve_component_meta_state_with_view(
-                canonical_or_alias,
-                crate::types::ResolverMode::Expanded,
-            )
-            .map_err(ComponentMetaHostError::from)?
-        else {
-            return Ok(None);
-        };
-
-        let exceeds_threshold = resolved_state_exceeds_verter_complexity_threshold(&resolved);
-        component_meta_trace_event!(
-            "component_meta_auto_policy_decision",
-            format!(
-                "owner={} exceeds_threshold={} resolved_macros={} resolved_types={} has_evaluated_types={}",
-                canonical,
-                exceeds_threshold,
-                resolved.resolved_macros.len(),
-                resolved.resolved_type_registry.len(),
-                resolved.evaluated_types.is_some(),
-            ),
-        );
-        if exceeds_threshold {
-            return self.get_component_meta_via_external_backend_from_resolved(
-                &canonical,
-                &resolved,
-                include_fallthrough,
-                Some(&store_view),
-            );
-        }
-
-        Ok(Some(extract_component_meta_from_resolved_with_evaluated(
-            self.owner.project.host(),
-            &canonical,
-            &resolved,
-            resolved.evaluated_types.as_ref(),
-            include_fallthrough && should_include_fallthrough_surface(&resolved),
-            Some(&store_view),
-        )))
     }
 
     fn get_component_meta_via_external_backend(
@@ -842,50 +739,6 @@ fn should_include_fallthrough_surface(
         .is_none_or(|inputs| inputs.overflow.is_none())
 }
 
-fn resolved_state_exceeds_verter_complexity_threshold(
-    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-) -> bool {
-    resolved
-        .cached_eval_inputs
-        .as_ref()
-        .is_some_and(|inputs| inputs.overflow.is_some())
-        || resolved
-            .evaluated_types
-            .as_ref()
-            .is_some_and(component_meta_symbolic_budget_exceeded)
-}
-
-fn component_meta_symbolic_budget_exceeded(types: &ExpandedComponentTypes) -> bool {
-    let field_has_budget = |field: &ExpandedField| {
-        field
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
-    };
-    let macro_has_budget = |shape: &ExpandedMacroObjectShape| {
-        shape
-            .result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
-    };
-    let props_has_budget = |shape: &ExpandedMacroProps| {
-        shape
-            .result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
-    };
-
-    types.props.iter().any(field_has_budget)
-        || types.emits.iter().any(field_has_budget)
-        || types.slot_bindings.iter().any(field_has_budget)
-        || types.bindings.iter().any(field_has_budget)
-        || types.define_props.iter().any(props_has_budget)
-        || types.define_emits.iter().any(macro_has_budget)
-        || types.define_slots.iter().any(macro_has_budget)
-}
-
 fn build_external_component_types(
     expander: &dyn ComponentMetaTypeExpander,
     canonical_id: &str,
@@ -1003,7 +856,8 @@ fn collect_external_slot_binding_fields(
                         r#type: member.type_expr,
                         raw_type: member.raw_type,
                         optional: member.optional,
-                        completeness: analysis_completeness(slot_bindings.completeness),
+                        exactness: analysis_exactness(slot_bindings.completeness),
+                        execution_status: analysis_execution_status(slot_bindings.completeness),
                         diagnostics: expansion_diagnostics(
                             slot_bindings.completeness,
                             format!("type expansion for slot binding {slot_name}"),
@@ -1063,7 +917,8 @@ fn apply_type_expansion_result(
                     r#type: member.type_expr.clone(),
                     raw_type: member.raw_type.clone(),
                     optional: member.optional,
-                    completeness: analysis_completeness(expansion.completeness),
+                    exactness: analysis_exactness(expansion.completeness),
+                    execution_status: analysis_execution_status(expansion.completeness),
                     diagnostics: expansion_diagnostics(
                         expansion.completeness,
                         format!("type expansion for prop {}", member.name),
@@ -1086,7 +941,8 @@ fn apply_type_expansion_result(
                 return;
             }
 
-            let completeness = analysis_completeness(expansion.completeness);
+            let exactness = analysis_exactness(expansion.completeness);
+            let execution_status = analysis_execution_status(expansion.completeness);
             let diagnostics = expansion_diagnostics(
                 expansion.completeness,
                 "external type expansion".to_string(),
@@ -1103,7 +959,8 @@ fn apply_type_expansion_result(
                     expanded_emit_field_from_source(
                         field,
                         members_by_name.get(field.name.as_str()).copied(),
-                        completeness,
+                        exactness,
+                        execution_status,
                         &diagnostics,
                     )
                 })
@@ -1126,7 +983,8 @@ fn apply_type_expansion_result(
                         index_signatures: Vec::new(),
                         call_signatures: Vec::new(),
                     },
-                    completeness,
+                    exactness,
+                    execution_status,
                     diagnostics,
                 },
             });
@@ -1151,7 +1009,8 @@ fn apply_type_expansion_result(
                 r#type: expansion.type_expr.clone(),
                 raw_type: None,
                 optional: false,
-                completeness: analysis_completeness(expansion.completeness),
+                exactness: analysis_exactness(expansion.completeness),
+                execution_status: analysis_execution_status(expansion.completeness),
                 diagnostics: expansion_diagnostics(
                     expansion.completeness,
                     format!("type expansion for defineModel<{field_name}>"),
@@ -1172,7 +1031,8 @@ fn apply_type_expansion_result(
                 },
                 raw_type: None,
                 optional: false,
-                completeness: field.completeness,
+                exactness: field.exactness,
+                execution_status: field.execution_status,
                 diagnostics: field.diagnostics,
             });
         }
@@ -1200,7 +1060,8 @@ fn merged_emit_fields(
 fn expanded_emit_field_from_source(
     field: &verter_semantic::analysis::types::AnalyzedEmitField,
     member: Option<&crate::resolver_core::type_expansion::ExpandedMember>,
-    completeness: AnalysisExpansionCompleteness,
+    exactness: AnalysisExpansionExactness,
+    execution_status: AnalysisExpansionExecutionStatus,
     diagnostics: &[ExpansionDiagnostic],
 ) -> ExpandedField {
     let source_payload = field
@@ -1221,7 +1082,8 @@ fn expanded_emit_field_from_source(
                         .map(str::to_string)
                 }),
                 optional: member.optional,
-                completeness,
+                exactness,
+                execution_status,
                 diagnostics: diagnostics.to_vec(),
             };
         }
@@ -1240,7 +1102,8 @@ fn expanded_emit_field_from_source(
             .map(str::to_string)
             .or_else(|| source_payload.map(str::to_string)),
         optional: false,
-        completeness,
+        exactness,
+        execution_status,
         diagnostics: diagnostics.to_vec(),
     }
 }
@@ -1282,7 +1145,8 @@ fn expansion_result_to_object_shape(
 ) -> AnalysisExpansionResult<ExpandedObjectShape> {
     AnalysisExpansionResult {
         value: expanded_object_shape_from_type_expansion(&expansion),
-        completeness: analysis_completeness(expansion.completeness),
+        exactness: analysis_exactness(expansion.completeness),
+        execution_status: analysis_execution_status(expansion.completeness),
         diagnostics: expansion_diagnostics(
             expansion.completeness,
             "external type expansion".to_string(),
@@ -1378,13 +1242,19 @@ fn expanded_call_signature(function: &FunctionExpr) -> ExpandedCallSignature {
     }
 }
 
-fn analysis_completeness(completeness: ExpansionCompleteness) -> AnalysisExpansionCompleteness {
+fn analysis_exactness(completeness: ExpansionCompleteness) -> AnalysisExpansionExactness {
     match completeness {
-        ExpansionCompleteness::Exact => AnalysisExpansionCompleteness::Exact,
+        ExpansionCompleteness::Exact => AnalysisExpansionExactness::ExactConcrete,
         ExpansionCompleteness::LowerBound | ExpansionCompleteness::OpaqueFallback => {
-            AnalysisExpansionCompleteness::Partial
+            AnalysisExpansionExactness::Incomplete
         }
     }
+}
+
+fn analysis_execution_status(
+    _completeness: ExpansionCompleteness,
+) -> AnalysisExpansionExecutionStatus {
+    AnalysisExpansionExecutionStatus::Completed
 }
 
 fn expansion_diagnostics(
@@ -2213,9 +2083,9 @@ defineProps<Props>()
     }
 
     #[test]
-    fn auto_backend_keeps_simple_requests_on_verter_path() {
+    fn verter_backend_keeps_simple_requests_on_native_path() {
         let mut config = crate::types::HostConfig::default();
-        config.type_expansion_backend = TypeExpansionBackend::Auto;
+        config.type_expansion_backend = TypeExpansionBackend::Verter;
         let host = ComponentMetaHost::new_standalone(config);
         let fake = Arc::new(FakeTypeExpander::object_with_members(vec![(
             "from_external",
@@ -2233,13 +2103,13 @@ defineProps<Props>()
         let result = session
             .get_component_meta("/src/Button.vue")
             .unwrap()
-            .expect("auto backend should still return component meta");
+            .expect("native backend should still return component meta");
 
         let props: BTreeSet<_> = result.props.iter().map(|prop| prop.name.as_str()).collect();
         assert_eq!(props, BTreeSet::from(["msg"]));
         assert!(
             fake.requests.lock().is_empty(),
-            "simple auto request should not touch the external expander"
+            "simple native request should not touch the external expander"
         );
     }
 
@@ -2397,9 +2267,9 @@ defineProps<Props>()
     }
 
     #[test]
-    fn auto_backend_escalates_to_external_expander_when_native_budget_is_exceeded() {
+    fn verter_backend_does_not_fallback_when_native_budget_is_exceeded() {
         let mut config = crate::types::HostConfig::default();
-        config.type_expansion_backend = TypeExpansionBackend::Auto;
+        config.type_expansion_backend = TypeExpansionBackend::Verter;
         let host = ComponentMetaHost::new_standalone(config);
         let fake = Arc::new(FakeTypeExpander::object_with_members(vec![(
             "label",
@@ -2463,17 +2333,20 @@ defineProps<Props>()
         );
 
         let session = host.open_session().unwrap();
-        let result = session
+        let err = session
             .get_component_meta("/src/App.vue")
-            .unwrap()
-            .expect("auto backend should escalate to external expansion");
+            .expect_err("native backend should surface the native budget failure");
 
-        assert_eq!(result.props.len(), 1);
-        assert_eq!(result.props[0].name, "label");
+        match err {
+            ComponentMetaHostError::Host(message) => {
+                assert!(message.contains("external type resolution step budget exceeded"));
+            }
+            other => panic!("expected host budget error, got {other:?}"),
+        }
         assert_eq!(
             fake.requests.lock().len(),
-            1,
-            "threshold-exceeded auto request should use the external expander"
+            0,
+            "native requests must not fall back to the external expander"
         );
     }
 

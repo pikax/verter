@@ -106,7 +106,8 @@ fn props_use_evaluated_type_when_available() {
             r#type: TypeExpr::Primitive(PrimitiveName::String),
             raw_type: None,
             optional: false,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_props: Vec::new(),
@@ -132,8 +133,8 @@ fn props_use_evaluated_type_when_available() {
         result.props[0]
             .type_expansion
             .as_ref()
-            .map(|meta| meta.completeness),
-        Some(crate::analysis::type_expand::ExpansionCompleteness::Exact)
+            .map(|meta| meta.exactness),
+        Some(crate::analysis::type_expand::ExpansionExactness::ExactConcrete)
     );
 }
 
@@ -150,7 +151,8 @@ fn props_preserve_expansion_metadata_when_available() {
             r#type: TypeExpr::named("Missing"),
             raw_type: None,
             optional: false,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Partial,
+            exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: vec![crate::analysis::type_expand::ExpansionDiagnostic {
                 reason: crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
                 context: "unresolved type reference 'Missing'".to_string(),
@@ -175,8 +177,8 @@ fn props_preserve_expansion_metadata_when_available() {
         .expect("expansion metadata should be preserved");
 
     assert_eq!(
-        expansion.completeness,
-        crate::analysis::type_expand::ExpansionCompleteness::Partial
+        expansion.exactness,
+        crate::analysis::type_expand::ExpansionExactness::Incomplete
     );
     assert!(expansion
         .diagnostics
@@ -198,7 +200,8 @@ fn evaluated_types_are_used_when_supplied() {
             r#type: TypeExpr::Primitive(PrimitiveName::String),
             raw_type: None,
             optional: false,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_props: Vec::new(),
@@ -992,7 +995,8 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
             },
             raw_type: Some("Button['ui']".to_string()),
             optional: false,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Partial,
+            exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: vec![
                 crate::analysis::type_expand::ExpansionDiagnostic {
                     reason: crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
@@ -1138,7 +1142,8 @@ fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_c
             ]),
             raw_type: Some("{ root?: string } | undefined".to_string()),
             optional: true,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1199,7 +1204,8 @@ fn optional_prop_raw_type_prefers_source_annotation_without_adding_undefined() {
             ]),
             raw_type: Some("string | string[] | undefined".to_string()),
             optional: true,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1257,7 +1263,8 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                 r#type: TypeExpr::Primitive(PrimitiveName::Any),
                 raw_type: Some("any".to_string()),
                 optional: true,
-                completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
             },
             crate::analysis::type_expand::ExpandedField {
@@ -1265,7 +1272,8 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                 r#type: TypeExpr::Primitive(PrimitiveName::Any),
                 raw_type: Some("any".to_string()),
                 optional: true,
-                completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
             },
         ],
@@ -1339,7 +1347,8 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                 r#type: placeholder.clone(),
                 raw_type: Some("RouteLocationRaw".to_string()),
                 optional: true,
-                completeness: crate::analysis::type_expand::ExpansionCompleteness::Partial,
+                exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: diagnostics.clone(),
             },
             crate::analysis::type_expand::ExpandedField {
@@ -1347,7 +1356,8 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                 r#type: placeholder.clone(),
                 raw_type: Some("NuxtLinkProps['to']".to_string()),
                 optional: true,
-                completeness: crate::analysis::type_expand::ExpansionCompleteness::Partial,
+                exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: vec![crate::analysis::type_expand::ExpansionDiagnostic {
                     reason:
                         crate::analysis::type_expand::ExpansionStopReason::IndeterminateConditional,
@@ -1442,7 +1452,8 @@ fn suspicious_partial_identifier_props_fall_back_to_source_any() {
             r#type: TypeExpr::named("ton"),
             raw_type: Some("ton".to_string()),
             optional: true,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Partial,
+            exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1521,7 +1532,8 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
             r#type: degraded.clone(),
             raw_type: Some("Button['slots']".to_string()),
             optional: true,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Partial,
+            exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: vec![crate::analysis::type_expand::ExpansionDiagnostic {
                 reason: crate::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
                 context: "indexed access was preserved symbolically".to_string(),
@@ -1627,7 +1639,8 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                 "boolean | Partial<Omit<MentionOptions, 'suggestion' | 'suggestions'>>".to_string(),
             ),
             optional: true,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Partial,
+            exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: vec![
                 crate::analysis::type_expand::ExpansionDiagnostic {
                     reason: crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
@@ -1755,7 +1768,8 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
             },
             raw_type: Some("string | undefined".to_string()),
             optional: false,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_slots: Vec::new(),
@@ -1814,7 +1828,8 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
             ]),
             raw_type: Some("string | string[] | undefined".to_string()),
             optional: true,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1860,7 +1875,8 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
             },
             raw_type: Some("(T extends 'single' ? string : string[]) | undefined".to_string()),
             optional: false,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_slots: Vec::new(),
@@ -1917,7 +1933,8 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
             },
             raw_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
             optional: false,
-            completeness: crate::analysis::type_expand::ExpansionCompleteness::Exact,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }],
         define_slots: Vec::new(),
@@ -3632,3 +3649,4 @@ fn root_reachability_v_model_radio_consumes_checked_and_change() {
         other => panic!("expected Branches, got: {:?}", other),
     }
 }
+

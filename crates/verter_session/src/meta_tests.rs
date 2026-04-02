@@ -12774,8 +12774,10 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
                 r#type: TypeExpr::Primitive(PrimitiveName::String),
                 raw_type: None,
                 optional: false,
-                completeness:
-                    verter_semantic::analysis::type_expand::ExpansionCompleteness::Partial,
+                exactness:
+                    verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete,
+                execution_status:
+                    verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: vec![verter_semantic::analysis::type_expand::ExpansionDiagnostic {
                 reason: verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
                 context: "symbolic work limit reached".to_string(),

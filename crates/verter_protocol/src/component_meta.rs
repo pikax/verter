@@ -1039,7 +1039,8 @@ fn expansion_metadata_to_proto(
     metadata: &FfiExpansionMetadata,
 ) -> ExpansionMetadata {
     ExpansionMetadata {
-        completeness: expansion_completeness_to_proto(&metadata.completeness) as i32,
+        exactness: expansion_exactness_to_proto(&metadata.exactness) as i32,
+        execution_status: expansion_execution_status_to_proto(&metadata.execution_status) as i32,
         diagnostics: metadata
             .diagnostics
             .iter()
@@ -1236,11 +1237,22 @@ fn string_ids(builder: &mut GraphBuilder, values: &[String]) -> Vec<u32> {
         .collect()
 }
 
-fn expansion_completeness_to_proto(value: &str) -> proto::ExpansionCompleteness {
+fn expansion_exactness_to_proto(value: &str) -> proto::ExpansionExactness {
     match value {
-        "exact" => proto::ExpansionCompleteness::Exact,
-        "partial" => proto::ExpansionCompleteness::Partial,
-        other => panic!("unknown expansion completeness {other}"),
+        "exactConcrete" => proto::ExpansionExactness::ExactConcrete,
+        "exactSymbolic" => proto::ExpansionExactness::ExactSymbolic,
+        "incomplete" => proto::ExpansionExactness::Incomplete,
+        other => panic!("unknown expansion exactness {other}"),
+    }
+}
+
+fn expansion_execution_status_to_proto(value: &str) -> proto::ExpansionExecutionStatus {
+    match value {
+        "completed" => proto::ExpansionExecutionStatus::Completed,
+        "cancelled" => proto::ExpansionExecutionStatus::Cancelled,
+        "interrupted" => proto::ExpansionExecutionStatus::Interrupted,
+        "hardStop" => proto::ExpansionExecutionStatus::HardStop,
+        other => panic!("unknown expansion execution status {other}"),
     }
 }
 

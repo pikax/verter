@@ -39,10 +39,10 @@ fn type_expand_debug(message: impl FnOnce() -> String) {
 }
 
 fn expansion_metadata_hit_budget(
-    completeness: crate::analysis::type_expand::ExpansionCompleteness,
+    exactness: crate::analysis::type_expand::ExpansionExactness,
     diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
 ) -> bool {
-    completeness == crate::analysis::type_expand::ExpansionCompleteness::Partial
+    exactness == crate::analysis::type_expand::ExpansionExactness::Incomplete
         && diagnostics.iter().any(|diagnostic| {
             diagnostic.reason == crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded
         })
@@ -59,22 +59,24 @@ struct ExpandStageLog<'a> {
 
 fn log_expand_stage(
     log: ExpandStageLog<'_>,
-    completeness: crate::analysis::type_expand::ExpansionCompleteness,
+    exactness: crate::analysis::type_expand::ExpansionExactness,
+    execution_status: crate::analysis::type_expand::ExpansionExecutionStatus,
     diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
     env: &EvalEnv,
 ) {
     type_expand_debug(|| {
         format!(
-            "expand_macro_types:item macro_index={} macro_kind={:?} stage={} target={} took {:?} steps_delta={} completeness={:?} diagnostics={} budget_hit={}",
+            "expand_macro_types:item macro_index={} macro_kind={:?} stage={} target={} took {:?} steps_delta={} exactness={:?} execution_status={:?} diagnostics={} budget_hit={}",
             log.macro_index,
             log.macro_kind,
             log.stage,
             log.target,
             log.started.elapsed(),
             env.steps().saturating_sub(log.start_steps),
-            completeness,
+            exactness,
+            execution_status,
             diagnostics.len(),
-            expansion_metadata_hit_budget(completeness, diagnostics),
+            expansion_metadata_hit_budget(exactness, diagnostics),
         )
     });
 }
@@ -1030,23 +1032,14 @@ pub fn expand_macro_types(
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
         ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape, ExpandedMacroProps,
-        ExpandedNormalizedExpr, ExpandedObjectShape, ExpansionCompleteness, ExpansionDiagnostic,
-        ExpansionResult, ExpansionStopReason,
+        ExpandedNormalizedExpr, ExpandedObjectShape, ExpansionDiagnostic, ExpansionResult,
+        ExpansionStopReason,
     };
     use crate::analysis::type_expr_lower::parse_type_annotation;
-    use crate::analysis::type_solver::result::{IncompleteReason, SolverExactness, SolverResult};
+    use crate::analysis::type_solver::result::{IncompleteReason, SolverResult};
     use crate::analysis::type_solver::solve::{solve_type, SolveLimits};
 
     // -- local helpers: solver result → expansion result conversion --
-
-    fn solver_exactness_to_completeness(exactness: SolverExactness) -> ExpansionCompleteness {
-        match exactness {
-            SolverExactness::ExactConcrete | SolverExactness::ExactSymbolic => {
-                ExpansionCompleteness::Exact
-            }
-            SolverExactness::Incomplete => ExpansionCompleteness::Partial,
-        }
-    }
 
     fn incomplete_reason_to_diagnostic(reason: &IncompleteReason) -> ExpansionDiagnostic {
         let stop_reason = match reason {
@@ -1065,7 +1058,6 @@ pub fn expand_macro_types(
     fn solver_to_expr_result(
         result: SolverResult<TypeExpr>,
     ) -> ExpansionResult<ExpandedNormalizedExpr> {
-        let completeness = solver_exactness_to_completeness(result.exactness);
         let diagnostics = result
             .incomplete_reasons
             .iter()
@@ -1073,7 +1065,8 @@ pub fn expand_macro_types(
             .collect();
         ExpansionResult {
             value: ExpandedNormalizedExpr { expr: result.value },
-            completeness,
+            exactness: result.exactness,
+            execution_status: result.execution_status,
             diagnostics,
         }
     }
@@ -1081,7 +1074,6 @@ pub fn expand_macro_types(
     fn solver_to_object_shape_result(
         result: SolverResult<TypeExpr>,
     ) -> ExpansionResult<ExpandedObjectShape> {
-        let completeness = solver_exactness_to_completeness(result.exactness);
         let diagnostics: Vec<ExpansionDiagnostic> = result
             .incomplete_reasons
             .iter()
@@ -1092,7 +1084,8 @@ pub fn expand_macro_types(
 
         ExpansionResult {
             value: shape,
-            completeness,
+            exactness: result.exactness,
+            execution_status: result.execution_status,
             diagnostics,
         }
     }
@@ -1134,13 +1127,20 @@ pub fn expand_macro_types(
                     log_expand_stage_start(&stage_log);
                     let solved = solve_type(&parsed, solver_host, SolveLimits::default());
                     let expanded = solver_to_expr_result(solved);
-                    log_expand_stage(stage_log, expanded.completeness, &expanded.diagnostics, env);
+                    log_expand_stage(
+                        stage_log,
+                        expanded.exactness,
+                        expanded.execution_status,
+                        &expanded.diagnostics,
+                        env,
+                    );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
                         raw_type: Some(type_ann.clone()),
                         optional: field.is_optional,
-                        completeness: expanded.completeness,
+                        exactness: expanded.exactness,
+                        execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
                     });
                 }
@@ -1169,7 +1169,8 @@ pub fn expand_macro_types(
                     let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
                         stage_log,
-                        shape_result.completeness,
+                        shape_result.exactness,
+                        shape_result.execution_status,
                         &shape_result.diagnostics,
                         env,
                     );
@@ -1207,7 +1208,8 @@ pub fn expand_macro_types(
                     let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
                         stage_log,
-                        shape_result.completeness,
+                        shape_result.exactness,
+                        shape_result.execution_status,
                         &shape_result.diagnostics,
                         env,
                     );
@@ -1240,13 +1242,20 @@ pub fn expand_macro_types(
                     log_expand_stage_start(&stage_log);
                     let solved = solve_type(&parsed, solver_host, SolveLimits::default());
                     let expanded = solver_to_expr_result(solved);
-                    log_expand_stage(stage_log, expanded.completeness, &expanded.diagnostics, env);
+                    log_expand_stage(
+                        stage_log,
+                        expanded.exactness,
+                        expanded.execution_status,
+                        &expanded.diagnostics,
+                        env,
+                    );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
                         raw_type: Some(payload.clone()),
                         optional: false,
-                        completeness: expanded.completeness,
+                        exactness: expanded.exactness,
+                        execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
                     });
                 }
@@ -1279,7 +1288,8 @@ pub fn expand_macro_types(
                         let shape_result = solver_to_object_shape_result(solved);
                         log_expand_stage(
                             stage_log,
-                            shape_result.completeness,
+                            shape_result.exactness,
+                            shape_result.execution_status,
                             &shape_result.diagnostics,
                             env,
                         );
@@ -1323,7 +1333,8 @@ pub fn expand_macro_types(
                         let expanded = solver_to_expr_result(solved);
                         log_expand_stage(
                             stage_log,
-                            expanded.completeness,
+                            expanded.exactness,
+                            expanded.execution_status,
                             &expanded.diagnostics,
                             env,
                         );
@@ -1332,7 +1343,8 @@ pub fn expand_macro_types(
                             r#type: expanded.value.expr,
                             raw_type: Some(type_ann.clone()),
                             optional: false,
-                            completeness: expanded.completeness,
+                            exactness: expanded.exactness,
+                            execution_status: expanded.execution_status,
                             diagnostics: expanded.diagnostics,
                         });
                     }
@@ -1370,13 +1382,20 @@ pub fn expand_macro_types(
         log_expand_stage_start(&stage_log);
         let solved = solve_type(&type_ann, solver_host, SolveLimits::default());
         let expanded = solver_to_expr_result(solved);
-        log_expand_stage(stage_log, expanded.completeness, &expanded.diagnostics, env);
+        log_expand_stage(
+            stage_log,
+            expanded.exactness,
+            expanded.execution_status,
+            &expanded.diagnostics,
+            env,
+        );
         result.bindings.push(ExpandedField {
             name,
             r#type: expanded.value.expr,
             raw_type: None,
             optional: false,
-            completeness: expanded.completeness,
+            exactness: expanded.exactness,
+            execution_status: expanded.execution_status,
             diagnostics: expanded.diagnostics,
         });
     }

@@ -7,6 +7,13 @@ import {
 } from "@verter/proto";
 
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
+import type {
+  NativeConsumedRootBindings,
+  NativeRootBranch,
+  NativeRootReachability,
+  NativeRootTargetRef,
+  NativeUnresolvedRootTargetReason,
+} from "./native-component-meta.js";
 import {
   BRANCH_STATUS_PARTIALLY_UNRESOLVED,
   BRANCH_STATUS_RESOLVED,
@@ -78,8 +85,14 @@ import {
   UNRESOLVED_ROOT_TARGET_UNSUPPORTED_BUILTIN,
 } from "./type-graph-core.js";
 
-const EXPANSION_COMPLETENESS_EXACT = 1;
-const EXPANSION_COMPLETENESS_PARTIAL = 2;
+const EXPANSION_EXACTNESS_EXACT_CONCRETE = 1;
+const EXPANSION_EXACTNESS_EXACT_SYMBOLIC = 2;
+const EXPANSION_EXACTNESS_INCOMPLETE = 3;
+
+const EXPANSION_EXECUTION_STATUS_COMPLETED = 1;
+const EXPANSION_EXECUTION_STATUS_CANCELLED = 2;
+const EXPANSION_EXECUTION_STATUS_INTERRUPTED = 3;
+const EXPANSION_EXECUTION_STATUS_HARD_STOP = 4;
 
 const EXPANSION_REASON_BUDGET_EXCEEDED = 1;
 const EXPANSION_REASON_MAPPED_DEPTH_EXCEEDED = 2;
@@ -439,7 +452,7 @@ function decodeComponentMetaBody(
   graph: DecodedTypeGraph,
 ): Omit<NativeComponentMetaResult, "typeRegistry"> {
   const resolution = decodeOptionalResolution(body.resolution as ProtoRecord | undefined, graph);
-  const rootReachability = decodeRootReachability(
+  const rootReachability: NativeRootReachability = decodeRootReachability(
     requireProtoMessage(body.rootReachability as ProtoRecord | undefined, "root reachability"),
     graph,
   );
@@ -971,7 +984,7 @@ function decodeMemberAvailability(
 function decodeRootReachability(
   reachability: ProtoRecord,
   graph: DecodedTypeGraph,
-): Record<string, unknown> {
+): NativeRootReachability {
   const kind = Number(reachability.kind ?? 0);
   switch (kind) {
     case ROOT_REACHABILITY_NO_FALLTHROUGH:
@@ -991,7 +1004,7 @@ function decodeRootReachability(
   }
 }
 
-function decodeRootBranch(branch: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+function decodeRootBranch(branch: ProtoRecord, graph: DecodedTypeGraph): NativeRootBranch {
   return {
     branchIndex: Number(branch.branchIndex ?? 0),
     ...maybe("conditionText", graph.getStringMaybe(Number(branch.conditionTextId ?? 0))),
@@ -1013,7 +1026,7 @@ function decodeRootBranch(branch: ProtoRecord, graph: DecodedTypeGraph): Record<
 function decodeRootTargetRef(
   target: ProtoRecord,
   graph: DecodedTypeGraph,
-): Record<string, unknown> {
+): NativeRootTargetRef {
   const kind = Number(target.kind ?? 0);
   switch (kind) {
     case ROOT_TARGET_NATIVE_ELEMENT:
@@ -1057,7 +1070,7 @@ function decodeRootTargetRef(
 function decodeUnresolvedRootTargetReason(
   reason: ProtoRecord,
   graph: DecodedTypeGraph,
-): Record<string, unknown> {
+): NativeUnresolvedRootTargetReason {
   const kind = Number(reason.kind ?? 0);
   switch (kind) {
     case UNRESOLVED_ROOT_TARGET_DYNAMIC_COMPONENT_IS:
@@ -1085,7 +1098,7 @@ function decodeUnresolvedRootTargetReason(
 function decodeConsumedRootBindings(
   consumed: ProtoRecord,
   graph: DecodedTypeGraph,
-): Record<string, unknown> {
+): NativeConsumedRootBindings {
   return {
     attrs: decodeStringList(numberList(consumed.attrIds), graph, "consumed attrs"),
     listeners: decodeStringList(numberList(consumed.listenerIds), graph, "consumed listeners"),
@@ -1446,7 +1459,8 @@ function decodeOptionalExpansionMetadata(
     return undefined;
   }
   return {
-    completeness: decodeExpansionCompleteness(Number(metadata.completeness ?? 0)),
+    exactness: decodeExpansionExactness(Number(metadata.exactness ?? 0)),
+    executionStatus: decodeExpansionExecutionStatus(Number(metadata.executionStatus ?? 0)),
     diagnostics: ((metadata.diagnostics as ProtoRecord[] | undefined) ?? []).map((diagnostic) => ({
       reason: decodeExpansionStopReason(Number(diagnostic.reason ?? 0)),
       context: graph.getString(
@@ -1489,14 +1503,39 @@ function decodeStringList(ids: number[], graph: DecodedTypeGraph, context: strin
   return ids.map((id) => graph.getString(readRequiredId(id, context)));
 }
 
-function decodeExpansionCompleteness(value: number): "exact" | "partial" {
+function decodeExpansionExactness(
+  value: number,
+): "exactConcrete" | "exactSymbolic" | "incomplete" {
   switch (value) {
-    case EXPANSION_COMPLETENESS_EXACT:
-      return "exact";
-    case EXPANSION_COMPLETENESS_PARTIAL:
-      return "partial";
+    case EXPANSION_EXACTNESS_EXACT_CONCRETE:
+      return "exactConcrete";
+    case EXPANSION_EXACTNESS_EXACT_SYMBOLIC:
+      return "exactSymbolic";
+    case EXPANSION_EXACTNESS_INCOMPLETE:
+      return "incomplete";
     default:
-      throw graphError(`component-meta graph payload has unknown expansion completeness ${value}`);
+      throw graphError(`component-meta graph payload has unknown expansion exactness ${value}`);
+  }
+}
+
+function decodeExpansionExecutionStatus(
+  value: number,
+): "completed" | "cancelled" | "interrupted" | "hardStop" {
+  switch (value) {
+    case 0:
+      return "completed";
+    case EXPANSION_EXECUTION_STATUS_COMPLETED:
+      return "completed";
+    case EXPANSION_EXECUTION_STATUS_CANCELLED:
+      return "cancelled";
+    case EXPANSION_EXECUTION_STATUS_INTERRUPTED:
+      return "interrupted";
+    case EXPANSION_EXECUTION_STATUS_HARD_STOP:
+      return "hardStop";
+    default:
+      throw graphError(
+        `component-meta graph payload has unknown expansion execution status ${value}`,
+      );
   }
 }
 

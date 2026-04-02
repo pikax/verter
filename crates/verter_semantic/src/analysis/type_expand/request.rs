@@ -1,42 +1,17 @@
-//! Expansion output types — now backed by the native type solver.
+//! Expansion output types backed by the native type solver.
 //!
-//! These types use `SolverExactness` and `SolverResult` from `type_solver`
-//! instead of the old `ExpansionCompleteness` / `ExpansionBudget` model.
-//! The old lightweight evaluator is gone — all expansion goes through
-//! `type_solver::solve::solve_type()`.
+//! These types preserve the solver's exactness and execution status at the
+//! public expansion boundary instead of collapsing back into an Exact/Partial
+//! compatibility contract.
 
 use crate::analysis::type_expr::{TypeExpr, TypeParam};
-use crate::analysis::type_solver::result::SolverExactness;
+use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+
+pub type ExpansionExactness = SolverExactness;
+pub type ExpansionExecutionStatus = ExecutionStatus;
 
 // ---------------------------------------------------------------------------
-// Re-export solver types as the canonical expansion types
-// ---------------------------------------------------------------------------
-
-/// Expansion completeness — re-exported from solver for backward compat.
-/// `Exact` = solver returned `ExactConcrete` or `ExactSymbolic`.
-/// `Partial` = solver returned `Incomplete`.
-pub type ExpansionCompleteness = SolverExactCompat;
-
-/// Compat enum that maps 1:1 with the old ExpansionCompleteness.
-/// Serializes as "exact" / "partial" for protocol stability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SolverExactCompat {
-    Exact,
-    Partial,
-}
-
-impl From<SolverExactness> for SolverExactCompat {
-    fn from(e: SolverExactness) -> Self {
-        match e {
-            SolverExactness::ExactConcrete | SolverExactness::ExactSymbolic => Self::Exact,
-            SolverExactness::Incomplete => Self::Partial,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Output types — same shape, solver-backed
+// Output types - same shape, solver-backed
 // ---------------------------------------------------------------------------
 
 /// Materialized object surface from the solver.
@@ -95,14 +70,16 @@ pub struct ExpandedNormalizedExpr {
 #[serde(rename_all = "camelCase")]
 pub struct ExpansionResult<T> {
     pub value: T,
-    pub completeness: ExpansionCompleteness,
+    pub exactness: ExpansionExactness,
+    pub execution_status: ExpansionExecutionStatus,
     pub diagnostics: Vec<ExpansionDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpansionMetadata {
-    pub completeness: ExpansionCompleteness,
+    pub exactness: ExpansionExactness,
+    pub execution_status: ExpansionExecutionStatus,
     pub diagnostics: Vec<ExpansionDiagnostic>,
 }
 
@@ -136,31 +113,57 @@ impl ExpandedObjectShape {
 }
 
 impl<T> ExpansionResult<T> {
-    pub fn exact(value: T) -> Self {
+    pub fn exact_concrete(value: T) -> Self {
         Self {
             value,
-            completeness: SolverExactCompat::Exact,
+            exactness: SolverExactness::ExactConcrete,
+            execution_status: ExecutionStatus::Completed,
             diagnostics: Vec::new(),
         }
     }
 
-    pub fn partial(value: T, diagnostics: Vec<ExpansionDiagnostic>) -> Self {
+    pub fn exact_symbolic(value: T) -> Self {
         Self {
             value,
-            completeness: SolverExactCompat::Partial,
+            exactness: SolverExactness::ExactSymbolic,
+            execution_status: ExecutionStatus::Completed,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn incomplete(
+        value: T,
+        execution_status: ExpansionExecutionStatus,
+        diagnostics: Vec<ExpansionDiagnostic>,
+    ) -> Self {
+        Self {
+            value,
+            exactness: SolverExactness::Incomplete,
+            execution_status,
             diagnostics,
         }
     }
 
     pub fn is_exact(&self) -> bool {
-        self.completeness == SolverExactCompat::Exact
+        self.exactness.is_exact()
     }
 
     pub fn metadata(&self) -> ExpansionMetadata {
         ExpansionMetadata {
-            completeness: self.completeness,
+            exactness: self.exactness,
+            execution_status: self.execution_status,
             diagnostics: self.diagnostics.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn exact(value: T) -> Self {
+        Self::exact_concrete(value)
+    }
+
+    #[cfg(test)]
+    pub fn partial(value: T, diagnostics: Vec<ExpansionDiagnostic>) -> Self {
+        Self::incomplete(value, ExecutionStatus::Completed, diagnostics)
     }
 }
 
@@ -196,7 +199,8 @@ pub struct ExpandedField {
     pub raw_type: Option<String>,
     #[serde(default)]
     pub optional: bool,
-    pub completeness: ExpansionCompleteness,
+    pub exactness: ExpansionExactness,
+    pub execution_status: ExpansionExecutionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<ExpansionDiagnostic>,
 }
@@ -224,5 +228,31 @@ impl ExpandedComponentTypes {
             && self.define_slots.is_empty()
             && self.slot_bindings.is_empty()
             && self.bindings.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expansion_result_metadata_preserves_exactness_and_execution_status() {
+        let result = ExpansionResult {
+            value: ExpandedNormalizedExpr {
+                expr: TypeExpr::primitive(crate::analysis::type_expr::PrimitiveName::String),
+            },
+            exactness: SolverExactness::ExactSymbolic,
+            execution_status: ExecutionStatus::Interrupted,
+            diagnostics: vec![ExpansionDiagnostic {
+                reason: ExpansionStopReason::UnsupportedOperator,
+                context: "kept symbolic".to_string(),
+                property_name: None,
+            }],
+        };
+
+        let metadata = result.metadata();
+        assert_eq!(metadata.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(metadata.execution_status, ExecutionStatus::Interrupted);
+        assert_eq!(metadata.diagnostics.len(), 1);
     }
 }

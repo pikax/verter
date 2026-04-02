@@ -965,7 +965,7 @@ describe("ComponentMetaChecker", () => {
         compilerOptions: { baseUrl: "." },
       },
       {
-        typeExpansionBackend: "auto",
+        typeExpansionBackend: "tsgo",
       },
     );
 

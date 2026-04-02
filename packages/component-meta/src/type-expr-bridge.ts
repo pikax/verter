@@ -71,7 +71,8 @@ export interface NativeExpandedField {
   name: string;
   type: NativeTypeExpr;
   optional?: boolean;
-  completeness: "exact" | "partial";
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
   diagnostics: NativeExpansionDiagnostic[];
 }
 
@@ -84,7 +85,8 @@ export interface NativeExpandedMacroProps {
 /** Mirrors `ExpansionResult<T>` from Rust. */
 export interface NativeExpansionResult<T> {
   value: T;
-  completeness: "exact" | "partial";
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
   diagnostics: NativeExpansionDiagnostic[];
 }
 
@@ -1379,7 +1381,7 @@ function resolveFiniteObjectEntries(
           resolveIndexedAccessDescriptor(
             createGraphTypeExprRef(expr.graph, node.objectNodeId),
             createGraphTypeExprRef(expr.graph, node.indexNodeId),
-            nativeRegistry,
+            nativeRegistry ?? new Map<string, NativeTypeExprLike>(),
             visiting,
             graphVisiting,
           ),
@@ -1438,7 +1440,7 @@ function resolveFiniteObjectEntries(
         resolveIndexedAccessDescriptor(
           expr.object,
           expr.index,
-          nativeRegistry,
+          nativeRegistry ?? new Map<string, NativeTypeExprLike>(),
           visiting,
           graphVisiting,
         ),
@@ -1522,7 +1524,7 @@ function resolveFiniteDescriptorEntries(
     }
     case "ref":
       return resolveFiniteDescriptorEntries(
-        resolveRegistryRefDescriptor(
+        resolveDescriptorRefDescriptor(
           descriptor.name,
           descriptor.typeArguments ?? [],
           nativeRegistry,
@@ -1535,6 +1537,49 @@ function resolveFiniteDescriptorEntries(
       );
     default:
       return undefined;
+  }
+}
+
+function resolveDescriptorRefDescriptor(
+  name: string,
+  typeArguments: TypeDescriptor[],
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  if (!nativeRegistry || visiting.has(name)) {
+    return undefined;
+  }
+
+  const resolved = nativeRegistry.get(name);
+  if (!resolved) {
+    return undefined;
+  }
+
+  visiting.add(name);
+  try {
+    const base = typeExprToDescriptor(resolved, nativeRegistry, visiting, graphVisiting);
+    if (typeArguments.length === 0) {
+      return base;
+    }
+
+    const parameterNames = collectDescriptorTypeParameterNames(base);
+    if (parameterNames.length === 0) {
+      return base;
+    }
+
+    const bindings = new Map<string, TypeDescriptor>();
+    parameterNames.forEach((parameterName, index) => {
+      const typeArgument = typeArguments[index];
+      if (!typeArgument) {
+        return;
+      }
+      bindings.set(parameterName, typeArgument);
+    });
+
+    return substituteDescriptorTypeParameters(base, bindings);
+  } finally {
+    visiting.delete(name);
   }
 }
 

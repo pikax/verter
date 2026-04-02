@@ -54,8 +54,6 @@ pub enum TypeExpansionBackend {
     Tsserver,
     /// TSGO via LSP JSON-RPC.
     Tsgo,
-    /// Deterministic pre-expansion eligibility check, commits to exactly one backend.
-    Auto,
 }
 
 // ---------------------------------------------------------------------------

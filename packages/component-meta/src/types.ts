@@ -77,7 +77,7 @@ export interface JsdocTag {
   text?: string;
 }
 
-/** Diagnostic explaining why a type expansion is partial. */
+/** Diagnostic explaining why a native type expansion could not stay exact. */
 export interface TypeExpansionDiagnostic {
   reason:
     | "budgetExceeded"
@@ -90,9 +90,10 @@ export interface TypeExpansionDiagnostic {
   propertyName?: string;
 }
 
-/** Completeness and diagnostics from native type expansion. */
+/** Exactness, execution status, and diagnostics from native type expansion. */
 export interface TypeExpansionMeta {
-  completeness: "exact" | "partial";
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
   diagnostics: TypeExpansionDiagnostic[];
 }
 
@@ -102,7 +103,7 @@ export interface PropMeta {
   name: string;
   /** Parsed type descriptor. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the prop type, when available. */
+  /** Native expansion exactness/status for the prop type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** Whether the prop is required (no default, no `?`). */
   required: boolean;
@@ -126,7 +127,7 @@ export interface EventMeta {
   name: string;
   /** Payload type descriptor. */
   payload: TypeDescriptor;
-  /** Native expansion completeness for the payload type, when available. */
+  /** Native expansion exactness/status for the payload type, when available. */
   payloadExpansion?: TypeExpansionMeta;
   /** Whether the event has a runtime validator function. */
   hasValidator: boolean;
@@ -166,7 +167,7 @@ export interface SlotBinding {
   name: string;
   /** Type descriptor for the binding value. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the binding type, when available. */
+  /** Native expansion exactness/status for the binding type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** The expression text (e.g. `"row"`, `"i"`) — may differ from `name`. */
   expression?: string;
@@ -188,7 +189,7 @@ export interface ExposedMeta {
   name: string;
   /** Type descriptor for the exposed value. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the exposed type, when available. */
+  /** Native expansion exactness/status for the exposed type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** JSDoc description from the leading `/** ... *​/` comment. */
   description?: string;
@@ -210,7 +211,7 @@ export interface PublicInstanceMemberMeta {
   kind: "prop" | "slotContainer" | "exposed";
   /** Type descriptor for the public value. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the member type, when available. */
+  /** Native expansion exactness/status for the member type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** Original TS type annotation text when available. */
   rawType?: string;
