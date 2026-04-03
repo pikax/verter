@@ -14,16 +14,99 @@ pub use request::{
 
 use crate::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use crate::analysis::type_solver::host::TypeSolverHost;
-use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+use crate::analysis::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
 use crate::analysis::type_solver::solve::solve_type;
+
+// ---------------------------------------------------------------------------
+// Shared solver-result → expansion-result conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a single `IncompleteReason` to an `ExpansionDiagnostic`.
+fn incomplete_reason_to_expansion_diagnostic(reason: &IncompleteReason) -> ExpansionDiagnostic {
+    let stop_reason = match reason {
+        IncompleteReason::MissingSource { .. } => ExpansionStopReason::UnresolvedReference,
+        IncompleteReason::UnsupportedSyntax { .. } => ExpansionStopReason::UnsupportedOperator,
+        IncompleteReason::Cancelled => ExpansionStopReason::BudgetExceeded,
+        IncompleteReason::RecursionPolicy { .. } => ExpansionStopReason::BudgetExceeded,
+    };
+    ExpansionDiagnostic {
+        reason: stop_reason,
+        context: reason.to_string(),
+        property_name: None,
+    }
+}
+
+/// Convert a single `SolverDiagnostic` to an `ExpansionDiagnostic`.
+fn solver_diagnostic_to_expansion_diagnostic(diagnostic: &SolverDiagnostic) -> ExpansionDiagnostic {
+    match diagnostic {
+        SolverDiagnostic::ConditionalContextTruncated {
+            available,
+            captured,
+        } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::ConditionalContextTruncated,
+            context: format!(
+                "conditional context truncated: {} available, {} captured",
+                available, captured
+            ),
+            property_name: None,
+        },
+    }
+}
+
+/// Collect all expansion diagnostics from a `SolverResult` — both
+/// `incomplete_reasons` and `diagnostics`.
+pub fn solver_result_to_expansion_diagnostics<T>(
+    result: &SolverResult<T>,
+) -> Vec<ExpansionDiagnostic> {
+    let mut out: Vec<ExpansionDiagnostic> = result
+        .incomplete_reasons
+        .iter()
+        .map(incomplete_reason_to_expansion_diagnostic)
+        .collect();
+    out.extend(
+        result
+            .diagnostics
+            .iter()
+            .map(solver_diagnostic_to_expansion_diagnostic),
+    );
+    out
+}
+
+/// Convert a `SolverResult<TypeExpr>` to an `ExpansionResult<ExpandedNormalizedExpr>`,
+/// preserving all metadata including solver diagnostics.
+pub fn solver_result_to_normalized_expansion(
+    result: SolverResult<TypeExpr>,
+) -> ExpansionResult<ExpandedNormalizedExpr> {
+    let diagnostics = solver_result_to_expansion_diagnostics(&result);
+    ExpansionResult {
+        value: ExpandedNormalizedExpr { expr: result.value },
+        exactness: result.exactness,
+        execution_status: result.execution_status,
+        diagnostics,
+    }
+}
+
+/// Convert a `SolverResult<TypeExpr>` to an `ExpansionResult<ExpandedObjectShape>`,
+/// preserving all metadata including solver diagnostics.
+pub fn solver_result_to_object_expansion(
+    result: SolverResult<TypeExpr>,
+) -> ExpansionResult<ExpandedObjectShape> {
+    let diagnostics = solver_result_to_expansion_diagnostics(&result);
+    let shape = type_expr_to_expanded_shape(&result.value);
+    ExpansionResult {
+        value: shape,
+        exactness: result.exactness,
+        execution_status: result.execution_status,
+        diagnostics,
+    }
+}
 
 /// Expand a `TypeExpr` into an `ExpandedObjectShape` via the native solver.
 pub fn expand_object_shape(
     expr: &TypeExpr,
     solver_host: &dyn TypeSolverHost,
 ) -> ExpansionResult<ExpandedObjectShape> {
-    let result = solve_type(expr, solver_host);
-    type_expr_to_object_result(&result.value, result.exactness)
+    solver_result_to_object_expansion(solve_type(expr, solver_host))
 }
 
 /// Expand a `TypeExpr` into a normalized expression via the native solver.
@@ -31,13 +114,7 @@ pub fn expand_normalized_expr(
     expr: &TypeExpr,
     solver_host: &dyn TypeSolverHost,
 ) -> ExpansionResult<ExpandedNormalizedExpr> {
-    let result = solve_type(expr, solver_host);
-    ExpansionResult {
-        value: ExpandedNormalizedExpr { expr: result.value },
-        exactness: result.exactness,
-        execution_status: result.execution_status,
-        diagnostics: Vec::new(),
-    }
+    solver_result_to_normalized_expansion(solve_type(expr, solver_host))
 }
 
 /// Extract an `ExpandedObjectShape` from a `TypeExpr`.
@@ -46,18 +123,6 @@ pub fn expand_normalized_expr(
 /// Non-object types return an empty shape.
 pub fn type_expr_to_object_shape(expr: &TypeExpr) -> ExpandedObjectShape {
     type_expr_to_expanded_shape(expr)
-}
-
-fn type_expr_to_object_result(
-    expr: &TypeExpr,
-    exactness: SolverExactness,
-) -> ExpansionResult<ExpandedObjectShape> {
-    ExpansionResult {
-        value: type_expr_to_expanded_shape(expr),
-        exactness,
-        execution_status: ExecutionStatus::Completed,
-        diagnostics: Vec::new(),
-    }
 }
 
 /// Recursively extract an `ExpandedObjectShape` from a `TypeExpr`,

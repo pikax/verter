@@ -2,16 +2,16 @@
 //!
 //! All paths stored in the workspace snapshot use `CanonicalPath` to ensure
 //! consistent normalization:
-//! - Windows: lowercase drive letter + forward slashes
-//! - Linux/macOS: forward slashes only, NO case transformation
+//! - Windows-style drive prefixes: lowercase drive letter + forward slashes
+//! - Linux/macOS paths without drive prefixes: forward slashes only, NO case transformation
 //! - `\\?\` extended-length prefix stripped
 
 /// A normalized filesystem path.
 ///
 /// Invariants:
 /// - Forward slashes only (no backslashes)
-/// - Windows: lowercase drive letter, `\\?\` prefix stripped
-/// - Linux/macOS: no case transformation
+/// - Windows-style drive prefixes: lowercase drive letter, `\\?\` prefix stripped
+/// - Paths without drive prefixes: no case transformation
 /// - No trailing slash (except root `/` or `C:/`)
 ///
 /// Distinct from [`NormalizedGlob`]: a `CanonicalPath` never contains
@@ -23,7 +23,7 @@ impl CanonicalPath {
     /// Create a new canonical path from a raw string.
     ///
     /// Applies normalization: backslash→forward slash, strip `\\?\`,
-    /// lowercase drive letter (Windows only).
+    /// lowercase Windows-style drive prefixes.
     pub fn new(raw: &str) -> Self {
         Self(canonicalize_path(raw))
     }
@@ -89,20 +89,17 @@ pub fn canonicalize_path(raw: &str) -> String {
         normalized
     };
 
-    // Step 3: lowercase drive letter (Windows paths like C:/ → c:/)
-    // Only on cfg(windows) — Linux paths with X: are left alone.
-    #[cfg(windows)]
-    let normalized = {
-        if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-            let mut chars = normalized.chars();
-            if let Some(first) = chars.next() {
-                format!("{}{}", first.to_ascii_lowercase(), chars.as_str())
-            } else {
-                normalized
-            }
+    // Step 3: lowercase Windows-style drive prefixes (C:/ → c:/) even on
+    // non-Windows hosts, because canonical IDs may still use Windows paths.
+    let normalized = if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+        let mut chars = normalized.chars();
+        if let Some(first) = chars.next() {
+            format!("{}{}", first.to_ascii_lowercase(), chars.as_str())
         } else {
             normalized
         }
+    } else {
+        normalized
     };
 
     // Step 4: strip trailing slash (except root "/" or "X:/")

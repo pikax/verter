@@ -11,6 +11,7 @@ import {
   func,
   ref,
   unknown,
+  recursiveRef,
 } from "../type-ir.js";
 import type { PropertyMetaSchema } from "./types.js";
 
@@ -232,6 +233,53 @@ describe("typeDescriptorToSchema", () => {
       kind: "enum",
       type: "boolean",
       schema: ["false", "true"],
+    });
+  });
+
+  it("recursiveRef with type arguments renders generic name in schema", () => {
+    const schema = typeDescriptorToSchema(recursiveRef("TreeNode", [primitive("string")], []));
+    expect(schema).toEqual({
+      kind: "object",
+      type: "TreeNode<string>",
+      schema: {},
+    });
+  });
+
+  it("recursiveRef with multiple type arguments renders full generic name", () => {
+    const schema = typeDescriptorToSchema(
+      recursiveRef("Map", [primitive("string"), primitive("number")], []),
+    );
+    expect(schema).toEqual({
+      kind: "object",
+      type: "Map<string, number>",
+      schema: {},
+    });
+  });
+
+  it("recursiveRef without type arguments keeps bare name", () => {
+    const schema = typeDescriptorToSchema(recursiveRef("Tree", [], []));
+    expect(schema).toEqual({
+      kind: "object",
+      type: "Tree",
+      schema: {},
+    });
+  });
+
+  it("union schema uses recursiveRef generic text in its type field", () => {
+    const schema = typeDescriptorToSchema(
+      union([recursiveRef("TreeNode", [primitive("string")], []), primitive("undefined")]),
+    );
+    expect(schema).toEqual({
+      kind: "enum",
+      type: "TreeNode<string> | undefined",
+      schema: [
+        {
+          kind: "object",
+          type: "TreeNode<string>",
+          schema: {},
+        },
+        "undefined",
+      ],
     });
   });
 

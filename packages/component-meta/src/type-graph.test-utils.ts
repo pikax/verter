@@ -50,7 +50,8 @@ export interface TestExpansionDiagnostic {
     | "unresolvedReference"
     | "indeterminateConditional"
     | "infiniteKeySpace"
-    | "unsupportedOperator";
+    | "unsupportedOperator"
+    | "conditionalContextTruncated";
   context: string;
   propertyName?: string;
 }
@@ -118,6 +119,7 @@ const EXPANSION_REASON_UNRESOLVED_REFERENCE = 3;
 const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
 const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
 const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
+const EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
 
 type TypeNodeInit = NonNullable<
   NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]
@@ -402,5 +404,7 @@ function encodeExpansionReason(value: TestExpansionDiagnostic["reason"]): number
       return EXPANSION_REASON_INFINITE_KEY_SPACE;
     case "unsupportedOperator":
       return EXPANSION_REASON_UNSUPPORTED_OPERATOR;
+    case "conditionalContextTruncated":
+      return EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED;
   }
 }

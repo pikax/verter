@@ -33,7 +33,8 @@ export interface NativeExpansionDiagnostic {
     | "unresolvedReference"
     | "indeterminateConditional"
     | "infiniteKeySpace"
-    | "unsupportedOperator";
+    | "unsupportedOperator"
+    | "conditionalContextTruncated";
   context: string;
   propertyName?: string;
 }

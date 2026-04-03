@@ -5,6 +5,7 @@
 import { create, toBinary } from "@bufbuild/protobuf";
 import { ComponentMetaPayloadSchema } from "@verter/proto";
 import { describe, expect, it } from "vitest";
+import { ExpansionStopReason } from "../../proto/src/gen/verter/v1/component_meta_pb.js";
 
 import {
   nativeComponentMetaToComponentMeta,
@@ -255,6 +256,53 @@ describe("decodeComponentMetaPayload", () => {
         {
           reason: "budgetExceeded",
           context: "work budget exceeded",
+        },
+      ],
+    });
+  });
+
+  it("decodes conditionalContextTruncated diagnostics and keeps enum numbering stable", () => {
+    expect(ExpansionStopReason.UNSUPPORTED_OPERATOR).toBe(6);
+    expect(ExpansionStopReason.CONDITIONAL_CONTEXT_TRUNCATED).toBe(7);
+
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [
+        {
+          name: "item",
+          type: { kind: "ref", name: "Item" },
+          typeExpansion: {
+            exactness: "exactConcrete",
+            executionStatus: "completed",
+            diagnostics: [
+              {
+                reason: "conditionalContextTruncated",
+                context: "12 available, 8 captured",
+              },
+            ],
+          },
+        },
+      ],
+      typeRegistry: [
+        {
+          name: "Item",
+          type: {
+            kind: "object",
+            properties: [{ name: "label", type: { kind: "primitive", name: "string" } }],
+          },
+        },
+      ],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+
+    expect(native.props[0]?.typeExpansion).toEqual({
+      exactness: "exactConcrete",
+      executionStatus: "completed",
+      diagnostics: [
+        {
+          reason: "conditionalContextTruncated",
+          context: "12 available, 8 captured",
         },
       ],
     });

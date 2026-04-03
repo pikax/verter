@@ -72,7 +72,11 @@ const COMPAT_BLOCKED_SLOT_NAMES = new Set([
   "appContext",
 ]);
 
+/** Maximum descriptor text length before the compat layer considers it
+ *  over-expanded and falls back to the raw type string. */
 const COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH = 512;
+/** Maximum depth for recursive registry ref resolution in compat display.
+ *  Kept at 1 to preserve the shallow-resolution invariant. */
 const COMPAT_MAX_REGISTRY_DISPLAY_DEPTH = 1;
 
 function isCompatVisibleSlotName(name: string): boolean {
@@ -214,6 +218,8 @@ function preferredCompatTypeText(
   return normalizedRawType;
 }
 
+/** Heuristic: does the raw type string look like it lost structural detail
+ *  (e.g. truncated code blocks, ellipsis, bare `object`)? */
 function compatRawTypeLooksLossy(rawType: string): boolean {
   const normalized = rawType.trim();
   return (
@@ -464,6 +470,9 @@ function shouldPreferDescriptorForProp(rawType: string, descriptorText: string):
   );
 }
 
+/** Heuristic: does the descriptor text contain solver artifacts (`@rec(`, bare
+ *  kind keywords, `graphNode()` placeholders) or degenerate unions containing
+ *  `any`, indicating the resolved form is less informative than the raw type? */
 function compatDescriptorLooksLossy(descriptorText: string): boolean {
   const normalized = stripTopLevelUndefinedFromTypeString(descriptorText).trim();
   return (
@@ -475,6 +484,8 @@ function compatDescriptorLooksLossy(descriptorText: string): boolean {
   );
 }
 
+/** Heuristic: does the descriptor text look like the solver over-expanded it
+ *  (too long, or excessive identifier repetition indicating recursive inlining)? */
 function compatDescriptorLooksOverexpanded(descriptorText: string): boolean {
   if (descriptorText.length > COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH) {
     return true;

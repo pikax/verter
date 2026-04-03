@@ -72,7 +72,6 @@ fn discover_vue_files(root: &Path) -> Vec<PathBuf> {
 
 fn make_host(project_root: &Path) -> io::Result<VerterHost> {
     let project_root_id = path_to_host_id(project_root)?;
-    let tsconfig_id = path_to_host_id(&project_root.join("tsconfig.json"))?;
     let ws = FilesystemWorkspace::new(FilesystemOptions {
         roots: vec![project_root_id.clone()],
         ..Default::default()
@@ -177,14 +176,7 @@ fn print_profile(
         resolved.resolved_macros.len(),
         resolved.resolved_type_registry.len()
     );
-    eprintln!(
-        "  cached aliases:       {}",
-        resolved
-            .cached_eval_inputs
-            .as_ref()
-            .map(|inputs| inputs.type_aliases.len())
-            .unwrap_or_default()
-    );
+    eprintln!("  fact versions:        {}", resolved.fact_versions.len());
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::main(limit = 120))]

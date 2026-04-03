@@ -133,17 +133,54 @@ impl fmt::Display for IncompleteReason {
 }
 
 // ---------------------------------------------------------------------------
+// Solver diagnostic (non-semantic observability)
+// ---------------------------------------------------------------------------
+
+/// Non-semantic diagnostic emitted by the solver.
+///
+/// These diagnostics are for observability and do NOT affect `exactness` or
+/// `execution_status`. They propagate through the expansion pipeline as
+/// `ExpansionDiagnostic` entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SolverDiagnostic {
+    /// The conditional context was truncated because more frames were available
+    /// than the capture limit allows.
+    ConditionalContextTruncated {
+        /// Total frames available before truncation.
+        available: usize,
+        /// Frames actually captured (≤ MAX_CONDITIONAL_CONTEXT_FRAMES).
+        captured: usize,
+    },
+}
+
+impl fmt::Display for SolverDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConditionalContextTruncated {
+                available,
+                captured,
+            } => write!(
+                f,
+                "conditional context truncated: {} available, {} captured",
+                available, captured
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Solver result wrapper
 // ---------------------------------------------------------------------------
 
 /// Complete solver result: value + exactness + execution status + optional
-/// incomplete reasons.
+/// incomplete reasons + non-semantic diagnostics.
 #[derive(Debug, Clone)]
 pub struct SolverResult<T> {
     pub value: T,
     pub exactness: SolverExactness,
     pub execution_status: ExecutionStatus,
     pub incomplete_reasons: Vec<IncompleteReason>,
+    pub diagnostics: Vec<SolverDiagnostic>,
 }
 
 impl<T> SolverResult<T> {
@@ -154,6 +191,7 @@ impl<T> SolverResult<T> {
             exactness: SolverExactness::ExactConcrete,
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -164,6 +202,7 @@ impl<T> SolverResult<T> {
             exactness: SolverExactness::ExactSymbolic,
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -174,6 +213,7 @@ impl<T> SolverResult<T> {
             exactness: SolverExactness::Incomplete,
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: vec![reason],
+            diagnostics: Vec::new(),
         }
     }
 
@@ -184,6 +224,7 @@ impl<T> SolverResult<T> {
             exactness: SolverExactness::Incomplete,
             execution_status: ExecutionStatus::HardStop,
             incomplete_reasons: vec![reason],
+            diagnostics: Vec::new(),
         }
     }
 
@@ -194,6 +235,7 @@ impl<T> SolverResult<T> {
             exactness: self.exactness,
             execution_status: self.execution_status,
             incomplete_reasons: self.incomplete_reasons,
+            diagnostics: self.diagnostics,
         }
     }
 
@@ -205,6 +247,7 @@ impl<T> SolverResult<T> {
         }
         self.incomplete_reasons
             .extend(other.incomplete_reasons.iter().cloned());
+        self.diagnostics.extend(other.diagnostics.iter().cloned());
     }
 }
 
@@ -402,5 +445,48 @@ mod tests {
         assert!(!Keyspace::Finite(vec![]).is_open());
         assert!(Keyspace::Open.is_open());
         assert!(!Keyspace::Empty.is_finite());
+    }
+
+    #[test]
+    fn recording_context_truncation_does_not_change_exactness() {
+        let mut result = SolverResult::exact_concrete(42);
+        assert_eq!(result.exactness, SolverExactness::ExactConcrete);
+        assert!(result.diagnostics.is_empty());
+
+        // Record the diagnostic
+        result
+            .diagnostics
+            .push(SolverDiagnostic::ConditionalContextTruncated {
+                available: 12,
+                captured: 8,
+            });
+
+        // Exactness and execution status must be unchanged
+        assert_eq!(result.exactness, SolverExactness::ExactConcrete);
+        assert_eq!(result.execution_status, ExecutionStatus::Completed);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0],
+            SolverDiagnostic::ConditionalContextTruncated {
+                available: 12,
+                captured: 8,
+            }
+        );
+        // Negative: exactness is NOT downgraded to incomplete
+        assert_ne!(result.exactness, SolverExactness::Incomplete);
+    }
+
+    #[test]
+    fn merge_status_propagates_diagnostics() {
+        let mut a = SolverResult::exact_concrete(1);
+        let mut b = SolverResult::exact_symbolic(2);
+        b.diagnostics
+            .push(SolverDiagnostic::ConditionalContextTruncated {
+                available: 10,
+                captured: 8,
+            });
+        a.merge_status(&b);
+        assert_eq!(a.diagnostics.len(), 1);
+        assert_eq!(a.exactness, SolverExactness::ExactSymbolic);
     }
 }

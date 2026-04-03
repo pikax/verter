@@ -390,6 +390,9 @@ fn expansion_stop_reason_to_string(
         verter_semantic::analysis::type_expand::ExpansionStopReason::UnsupportedOperator => {
             "unsupportedOperator".to_string()
         }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::ConditionalContextTruncated => {
+            "conditionalContextTruncated".to_string()
+        }
     }
 }
 
@@ -2087,30 +2090,32 @@ mod tests {
             mode: host::ResolverMode::Expanded,
             whole_hash: [0; 16],
             resolved_macros: Vec::new(),
-            resolved_type_registry: vec![host::meta_resolve::ResolvedTypeAnalysis {
-                name: "Button".to_string(),
-                type_expr: verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
-                    verter_semantic::analysis::type_expr::ObjectExpr {
-                        properties: vec![
-                            verter_semantic::analysis::type_expr::ObjectMember::Property(
-                                verter_semantic::analysis::type_expr::ObjectProperty {
-                                    name: "variants".to_string(),
-                                    ty: verter_semantic::analysis::type_expr::TypeExpr::Object(
-                                        Arc::new(
-                                            verter_semantic::analysis::type_expr::ObjectExpr {
-                                                properties: vec![],
-                                            },
+            resolved_type_registry: vec![
+                verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+                    name: "Button".to_string(),
+                    type_expr: verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+                        verter_semantic::analysis::type_expr::ObjectExpr {
+                            properties: vec![
+                                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                                    verter_semantic::analysis::type_expr::ObjectProperty {
+                                        name: "variants".to_string(),
+                                        ty: verter_semantic::analysis::type_expr::TypeExpr::Object(
+                                            Arc::new(
+                                                verter_semantic::analysis::type_expr::ObjectExpr {
+                                                    properties: vec![],
+                                                },
+                                            ),
                                         ),
-                                    ),
-                                    optional: false,
-                                    readonly: false,
-                                },
-                            ),
-                        ],
-                    },
-                )),
-                type_expansion: None,
-            }],
+                                        optional: false,
+                                        readonly: false,
+                                    },
+                                ),
+                            ],
+                        },
+                    )),
+                    type_expansion: None,
+                },
+            ],
             resolved_type_registry_meta: vec![host::meta_resolve::ResolvedTypeRegistryMeta {
                 name: "Button".to_string(),
                 declaration: host::meta_resolve::ResolvedTypeDeclaration {

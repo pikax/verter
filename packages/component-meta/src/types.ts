@@ -77,7 +77,8 @@ export interface JsdocTag {
   text?: string;
 }
 
-/** Diagnostic explaining why a native type expansion could not stay exact. */
+/** Diagnostic from native type expansion — includes both reasons expansion
+ *  could not stay exact and general observability diagnostics. */
 export interface TypeExpansionDiagnostic {
   reason:
     | "budgetExceeded"
@@ -85,7 +86,8 @@ export interface TypeExpansionDiagnostic {
     | "unresolvedReference"
     | "indeterminateConditional"
     | "infiniteKeySpace"
-    | "unsupportedOperator";
+    | "unsupportedOperator"
+    | "conditionalContextTruncated";
   context: string;
   propertyName?: string;
 }

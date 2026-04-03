@@ -1281,6 +1281,7 @@ fn expansion_reason_to_proto(value: &str) -> proto::ExpansionStopReason {
         "indeterminateConditional" => proto::ExpansionStopReason::IndeterminateConditional,
         "infiniteKeySpace" => proto::ExpansionStopReason::InfiniteKeySpace,
         "unsupportedOperator" => proto::ExpansionStopReason::UnsupportedOperator,
+        "conditionalContextTruncated" => proto::ExpansionStopReason::ConditionalContextTruncated,
         other => panic!("unknown expansion reason {other}"),
     }
 }

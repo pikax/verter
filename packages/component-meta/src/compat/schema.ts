@@ -208,7 +208,7 @@ function convertType(
     }
 
     case "recursiveRef":
-      return { kind: "object" as const, type: td.name, schema: {} };
+      return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
 
     case "unknown":
       return td.rawType || "unknown";
@@ -295,7 +295,7 @@ function schemaDescriptorToString(
       return typeDescriptorToString(td);
     }
     case "recursiveRef":
-      return td.name;
+      return typeDescriptorToString(td);
   }
 }
 

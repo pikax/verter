@@ -100,6 +100,10 @@ pub enum ExpansionStopReason {
     IndeterminateConditional,
     InfiniteKeySpace,
     UnsupportedOperator,
+    /// The solver truncated the conditional context because more frames were
+    /// available than the capture limit. This is a non-semantic observability
+    /// diagnostic — it does not affect exactness.
+    ConditionalContextTruncated,
 }
 
 impl ExpandedObjectShape {
@@ -254,5 +258,38 @@ mod tests {
         assert_eq!(metadata.exactness, SolverExactness::ExactSymbolic);
         assert_eq!(metadata.execution_status, ExecutionStatus::Interrupted);
         assert_eq!(metadata.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn solver_diagnostic_converts_to_expansion_diagnostic_without_downgrading_exactness() {
+        use crate::analysis::type_solver::result::{SolverDiagnostic, SolverResult};
+
+        // A solver result that is exact but has a non-semantic diagnostic
+        let mut solver_result = SolverResult::exact_concrete(TypeExpr::primitive(
+            crate::analysis::type_expr::PrimitiveName::String,
+        ));
+        solver_result
+            .diagnostics
+            .push(SolverDiagnostic::ConditionalContextTruncated {
+                available: 12,
+                captured: 8,
+            });
+
+        let expansion =
+            crate::analysis::type_expand::solver_result_to_normalized_expansion(solver_result);
+
+        // Exactness must NOT be downgraded
+        assert_eq!(expansion.exactness, SolverExactness::ExactConcrete);
+        assert_ne!(expansion.exactness, SolverExactness::Incomplete);
+        assert_eq!(expansion.execution_status, ExecutionStatus::Completed);
+
+        // Diagnostic is present
+        assert_eq!(expansion.diagnostics.len(), 1);
+        assert_eq!(
+            expansion.diagnostics[0].reason,
+            ExpansionStopReason::ConditionalContextTruncated
+        );
+        assert!(expansion.diagnostics[0].context.contains("12"));
+        assert!(expansion.diagnostics[0].context.contains("8"));
     }
 }

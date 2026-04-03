@@ -6,7 +6,11 @@ use verter_session::{HostConfig, VerterHost};
 
 /// Canonical test path: delegates to production `normalize_canonical_id`.
 pub(crate) fn canonical_test_path(path: &Path) -> String {
-    let raw = path.to_string_lossy().replace('\\', "/");
+    let raw = std::fs::canonicalize(path)
+        .ok()
+        .unwrap_or_else(|| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/");
     verter_workspace::resolver::normalize_canonical_id(&raw)
 }
 

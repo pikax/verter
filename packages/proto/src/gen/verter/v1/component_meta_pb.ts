@@ -3394,6 +3394,11 @@ export enum ExpansionStopReason {
    * @generated from enum value: EXPANSION_STOP_REASON_UNSUPPORTED_OPERATOR = 6;
    */
   UNSUPPORTED_OPERATOR = 6,
+
+  /**
+   * @generated from enum value: EXPANSION_STOP_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
+   */
+  CONDITIONAL_CONTEXT_TRUNCATED = 7,
 }
 
 /**

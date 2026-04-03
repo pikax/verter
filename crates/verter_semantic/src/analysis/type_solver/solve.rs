@@ -13,7 +13,9 @@ use super::host::{RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySo
 use super::lower::lower_type_expr;
 use super::prepared::{PreparedTypeDecl, PreparedValueDecl};
 use super::recursion::{RecursionKey, RecursionTracker};
-use super::result::{ExecutionStatus, IncompleteReason, SolverExactness, SolverResult};
+use super::result::{
+    ExecutionStatus, IncompleteReason, SolverDiagnostic, SolverExactness, SolverResult,
+};
 use super::substitution::SubstitutionEnv;
 use crate::analysis::type_expr::TypeExpr;
 
@@ -82,6 +84,18 @@ pub struct SolveState {
     /// prepared-ref symbol resolution. Ensures `current_symbol_conditional_context()`
     /// returns only frames from the currently resolving symbol, not cross-symbol frames.
     pub conditional_context_base_stack: Vec<usize>,
+    /// Non-semantic diagnostics collected during resolution.
+    pub diagnostics: Vec<SolverDiagnostic>,
+}
+
+/// Structured capture of conditional context frames for a recursive ref.
+pub(crate) struct ConditionalContextCapture {
+    /// The captured (possibly truncated) frames.
+    pub frames: Vec<super::arena::ConditionalFrameSnapshot>,
+    /// Total frames that were available before truncation.
+    pub available: usize,
+    /// Whether truncation occurred.
+    pub truncated: bool,
 }
 
 impl SolveState {
@@ -103,6 +117,7 @@ impl SolveState {
             active_substitution_names: Vec::new(),
             conditional_context_stack: Vec::new(),
             conditional_context_base_stack: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -118,22 +133,32 @@ impl SolveState {
         self.is_exceeded()
     }
 
-    /// Returns the conditional context frames scoped to the currently resolving
-    /// symbol. Uses the symbol-local base to avoid capturing cross-symbol frames.
-    pub fn current_symbol_conditional_context(
-        &self,
-    ) -> Vec<super::arena::ConditionalFrameSnapshot> {
+    /// Capture the conditional context frames scoped to the currently resolving
+    /// symbol, returning a structured capture that indicates whether truncation
+    /// occurred.
+    pub(crate) fn capture_symbol_conditional_context(&self) -> ConditionalContextCapture {
         let base = self
             .conditional_context_base_stack
             .last()
             .copied()
             .unwrap_or(0);
-        let start = self
-            .conditional_context_stack
-            .len()
-            .saturating_sub(Self::MAX_CONDITIONAL_CONTEXT_FRAMES)
-            .max(base);
-        self.conditional_context_stack[start..].to_vec()
+        let symbol_slice = &self.conditional_context_stack[base..];
+        let available = symbol_slice.len();
+        let start = available.saturating_sub(Self::MAX_CONDITIONAL_CONTEXT_FRAMES);
+        let frames = symbol_slice[start..].to_vec();
+        ConditionalContextCapture {
+            truncated: available > Self::MAX_CONDITIONAL_CONTEXT_FRAMES,
+            available,
+            frames,
+        }
+    }
+
+    /// Returns the conditional context frames scoped to the currently resolving
+    /// symbol. Uses the symbol-local base to avoid capturing cross-symbol frames.
+    pub fn current_symbol_conditional_context(
+        &self,
+    ) -> Vec<super::arena::ConditionalFrameSnapshot> {
+        self.capture_symbol_conditional_context().frames
     }
 
     /// Record incomplete status.
@@ -147,6 +172,12 @@ impl SolveState {
         if self.exactness == SolverExactness::ExactConcrete {
             self.exactness = SolverExactness::ExactSymbolic;
         }
+    }
+
+    /// Record a non-semantic diagnostic. Does NOT affect exactness or
+    /// execution status.
+    pub(crate) fn record_diagnostic(&mut self, diagnostic: SolverDiagnostic) {
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -217,6 +248,7 @@ fn run_solve_query(
             exactness: state.exactness,
             execution_status: state.execution_status,
             incomplete_reasons: state.incomplete_reasons,
+            diagnostics: state.diagnostics,
         },
         trace: state.visited_external_decls,
     }
@@ -297,6 +329,7 @@ fn cancelled_solver_result(expr: &TypeExpr) -> SolverResult<TypeExpr> {
         exactness: SolverExactness::ExactConcrete,
         execution_status: ExecutionStatus::Cancelled,
         incomplete_reasons: vec![],
+        diagnostics: vec![],
     }
 }
 
@@ -807,12 +840,12 @@ fn resolve_prepared_ref(
     // Compute structural fingerprint for tiered recursion policy.
     // Only compute when the symbol is already active (common non-recursive
     // path pays zero fingerprint cost).
-    let cond_ctx = state.current_symbol_conditional_context();
+    let cond_capture = state.capture_symbol_conditional_context();
     let fingerprint = if state.recursion.is_symbol_active(&rec_key) {
         Some(super::recursion::compute_structural_fingerprint(
             arena,
             &effective_args,
-            &cond_ctx,
+            &cond_capture.frames,
         ))
     } else {
         None
@@ -840,10 +873,16 @@ fn resolve_prepared_ref(
     // Create a recursive placeholder in case the body references itself.
     // Capture symbol name and effective args so downstream transport preserves
     // useful symbolic info instead of degrading to Unknown.
+    if cond_capture.truncated {
+        state.record_diagnostic(SolverDiagnostic::ConditionalContextTruncated {
+            available: cond_capture.available,
+            captured: cond_capture.frames.len(),
+        });
+    }
     let placeholder = arena.alloc(Node::RecursiveRef {
         symbol_name: root_id.symbol_name.clone(),
         type_arguments: effective_args.clone(),
-        conditional_context: cond_ctx,
+        conditional_context: cond_capture.frames,
     });
     state
         .recursion
@@ -3424,11 +3463,12 @@ mod tests {
 
     #[test]
     fn solve_respects_step_limit() {
-        // Create a deeply nested union to trigger step limit
-        let mut expr = TypeExpr::Primitive(PrimitiveName::String);
-        for _ in 0..10 {
-            expr = TypeExpr::Union(Arc::from(vec![expr.clone(), expr.clone()]));
-        }
+        // Create a wide union with distinct literal members to prevent dedup,
+        // ensuring enough resolve steps to exceed the low limit.
+        let members: Vec<TypeExpr> = (0..100)
+            .map(|i| TypeExpr::string_literal(&format!("v{}", i)))
+            .collect();
+        let expr = TypeExpr::Union(Arc::from(members));
 
         let limits = SolveLimits {
             max_resolve_steps: 50, // Very low limit
@@ -8308,5 +8348,149 @@ mod tests {
         // Round-trip must preserve everything
         let round_tripped: TypeExpr = serde_json::from_value(json_value).unwrap();
         assert_eq!(round_tripped, expr);
+    }
+
+    #[test]
+    fn context_capture_keeps_innermost_eight_frames_and_flags_truncation() {
+        use crate::analysis::type_solver::arena::{
+            ConditionalBranch, ConditionalFrameSnapshot, NodeId,
+        };
+        let mut state = SolveState::new(SolveLimits::default());
+
+        // Push 12 frames
+        for i in 0..12 {
+            state
+                .conditional_context_stack
+                .push(ConditionalFrameSnapshot {
+                    branch: ConditionalBranch::True,
+                    decided: true,
+                    check: NodeId(i),
+                    extends: NodeId(i + 100),
+                });
+        }
+
+        let capture = state.capture_symbol_conditional_context();
+        assert_eq!(capture.available, 12);
+        assert_eq!(capture.frames.len(), 8);
+        assert!(capture.truncated);
+
+        // The kept frames should be the innermost 8 (indices 4..12)
+        assert_eq!(capture.frames[0].check, NodeId(4));
+        assert_eq!(capture.frames[7].check, NodeId(11));
+    }
+
+    #[test]
+    fn context_capture_within_cap_is_not_truncated() {
+        use crate::analysis::type_solver::arena::{
+            ConditionalBranch, ConditionalFrameSnapshot, NodeId,
+        };
+        let mut state = SolveState::new(SolveLimits::default());
+
+        for i in 0..5 {
+            state
+                .conditional_context_stack
+                .push(ConditionalFrameSnapshot {
+                    branch: ConditionalBranch::False,
+                    decided: false,
+                    check: NodeId(i),
+                    extends: NodeId(i + 100),
+                });
+        }
+
+        let capture = state.capture_symbol_conditional_context();
+        assert_eq!(capture.available, 5);
+        assert_eq!(capture.frames.len(), 5);
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn context_capture_respects_symbol_base() {
+        use crate::analysis::type_solver::arena::{
+            ConditionalBranch, ConditionalFrameSnapshot, NodeId,
+        };
+        let mut state = SolveState::new(SolveLimits::default());
+
+        // Push 5 frames for an outer symbol
+        for i in 0..5 {
+            state
+                .conditional_context_stack
+                .push(ConditionalFrameSnapshot {
+                    branch: ConditionalBranch::True,
+                    decided: true,
+                    check: NodeId(i),
+                    extends: NodeId(i + 100),
+                });
+        }
+
+        // Push a symbol base at position 5 (simulating inner symbol resolution)
+        state
+            .conditional_context_base_stack
+            .push(state.conditional_context_stack.len());
+
+        // Push 10 frames for the inner symbol
+        for i in 0..10 {
+            state
+                .conditional_context_stack
+                .push(ConditionalFrameSnapshot {
+                    branch: ConditionalBranch::False,
+                    decided: false,
+                    check: NodeId(50 + i),
+                    extends: NodeId(150 + i),
+                });
+        }
+
+        let capture = state.capture_symbol_conditional_context();
+
+        // Should only see frames from the inner symbol (10 available),
+        // keeping the innermost 8
+        assert_eq!(capture.available, 10);
+        assert_eq!(capture.frames.len(), 8);
+        assert!(capture.truncated);
+        // First kept frame should be at index 2 of inner symbol's range
+        assert_eq!(capture.frames[0].check, NodeId(52));
+    }
+
+    #[test]
+    fn context_truncation_diagnostic_requires_placeholder_creation() {
+        use crate::analysis::type_solver::arena::{
+            ConditionalBranch, ConditionalFrameSnapshot, PrimitiveKind,
+        };
+
+        let mut host = TestHost::new();
+        host.add_alias("Tree", TypeExpr::Primitive(PrimitiveName::String));
+
+        let mut arena = QueryArena::new();
+        let check = arena.primitive(PrimitiveKind::String);
+        let extends = arena.primitive(PrimitiveKind::Number);
+
+        let mut state = SolveState::new(SolveLimits {
+            max_instantiation_depth: 0,
+            ..SolveLimits::default()
+        });
+        for _ in 0..12 {
+            state
+                .conditional_context_stack
+                .push(ConditionalFrameSnapshot {
+                    branch: ConditionalBranch::True,
+                    decided: true,
+                    check,
+                    extends,
+                });
+        }
+
+        let root_id = ResolvedRootIdentity::new("/test.ts", "Tree");
+        let _ = resolve_prepared_ref(
+            &mut arena,
+            &host,
+            &mut state,
+            &SubstitutionEnv::new(),
+            &root_id,
+            &[],
+        );
+
+        assert!(
+            state.diagnostics.is_empty(),
+            "context truncation should only be reported once a recursive placeholder is created"
+        );
     }
 }

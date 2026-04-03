@@ -1862,6 +1862,10 @@ export * from './barrel';\n";
         analysis.local_export_symbol_target("Props"),
         Some("LocalFoo")
     );
+    assert_eq!(
+        analysis.local_export_symbol_target("DirectProps"),
+        Some("DirectProps")
+    );
     assert_eq!(analysis.local_export_symbol_target("Alias"), Some("Inner"));
     assert_eq!(analysis.local_symbol_target_name("Alias"), "Inner");
     assert!(analysis.has_local_symbol_target("Alias"));
@@ -1891,7 +1895,7 @@ export * from './barrel';\n";
     assert_eq!(stats.binding_count, 2);
     assert_eq!(stats.direct_reexport_count, 2);
     assert_eq!(stats.wildcard_reexport_count, 1);
-    assert_eq!(stats.local_export_symbol_count, 2);
+    assert_eq!(stats.local_export_symbol_count, 3);
 }
 
 #[test]

@@ -102,6 +102,7 @@ const EXPANSION_REASON_UNRESOLVED_REFERENCE = 3;
 const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
 const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
 const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
+const EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
 
 const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
@@ -1568,7 +1569,8 @@ function decodeExpansionStopReason(
   | "unresolvedReference"
   | "indeterminateConditional"
   | "infiniteKeySpace"
-  | "unsupportedOperator" {
+  | "unsupportedOperator"
+  | "conditionalContextTruncated" {
   switch (value) {
     case EXPANSION_REASON_BUDGET_EXCEEDED:
       return "budgetExceeded";
@@ -1582,6 +1584,8 @@ function decodeExpansionStopReason(
       return "infiniteKeySpace";
     case EXPANSION_REASON_UNSUPPORTED_OPERATOR:
       return "unsupportedOperator";
+    case EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED:
+      return "conditionalContextTruncated";
     default:
       throw graphError(`component-meta graph payload has unknown expansion stop reason ${value}`);
   }

@@ -12,12 +12,7 @@ fn backslash_to_forward_slash() {
 #[test]
 fn strip_extended_length_prefix() {
     let p = CanonicalPath::new("\\\\?\\C:\\foo\\bar");
-    // On Windows: c:/foo/bar. On Linux: C:/foo/bar (no drive lowering).
-    assert!(
-        p.as_str().ends_with(":/foo/bar"),
-        "extended prefix should be stripped, got: {}",
-        p.as_str()
-    );
+    assert_eq!(p.as_str(), "c:/foo/bar");
     assert!(!p.as_str().contains("?"), "no ? should remain");
 }
 
@@ -27,9 +22,8 @@ fn strip_unc_prefix() {
     assert_eq!(p.as_str(), "//server/share/file.txt");
 }
 
-#[cfg(windows)]
 #[test]
-fn lowercase_drive_letter_windows() {
+fn lowercase_drive_letter_for_windows_style_paths() {
     let p = CanonicalPath::new("D:/Project/src/foo.vue");
     assert_eq!(p.as_str(), "d:/Project/src/foo.vue");
     assert!(
@@ -43,7 +37,6 @@ fn lowercase_drive_letter_windows() {
     );
 }
 
-#[cfg(windows)]
 #[test]
 fn already_lowercase_drive_unchanged() {
     let p = CanonicalPath::new("c:/project/foo.ts");
@@ -64,8 +57,7 @@ fn no_case_transform_on_linux() {
 #[test]
 fn forward_slashes_pass_through() {
     let p = CanonicalPath::new("d:/project/src/foo.vue");
-    // On Windows the drive is lowered; on Linux it stays as-is
-    assert!(p.as_str().contains("/project/src/foo.vue"));
+    assert_eq!(p.as_str(), "d:/project/src/foo.vue");
 }
 
 // ── Directory boundary matching ──

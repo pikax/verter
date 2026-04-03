@@ -1083,63 +1083,25 @@ fn expand_macro_types_impl(
     solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
+        solver_result_to_normalized_expansion, solver_result_to_object_expansion,
         ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape, ExpandedMacroProps,
-        ExpandedNormalizedExpr, ExpandedObjectShape, ExpansionDiagnostic, ExpansionResult,
-        ExpansionStopReason,
+        ExpandedNormalizedExpr, ExpandedObjectShape, ExpansionResult,
     };
     use crate::analysis::type_expr_lower::parse_type_annotation;
-    use crate::analysis::type_solver::result::{IncompleteReason, SolverResult};
+    use crate::analysis::type_solver::result::SolverResult;
     use crate::analysis::type_solver::solve::SolveBatch;
 
-    // -- local helpers: solver result → expansion result conversion --
-
-    fn incomplete_reason_to_diagnostic(reason: &IncompleteReason) -> ExpansionDiagnostic {
-        let stop_reason = match reason {
-            IncompleteReason::MissingSource { .. } => ExpansionStopReason::UnresolvedReference,
-            IncompleteReason::UnsupportedSyntax { .. } => ExpansionStopReason::UnsupportedOperator,
-            IncompleteReason::Cancelled => ExpansionStopReason::BudgetExceeded,
-            IncompleteReason::RecursionPolicy { .. } => ExpansionStopReason::BudgetExceeded,
-        };
-        ExpansionDiagnostic {
-            reason: stop_reason,
-            context: reason.to_string(),
-            property_name: None,
-        }
-    }
-
+    // Shared solver-result → expansion-result conversion (replaces local ad hoc mapping)
     fn solver_to_expr_result(
         result: SolverResult<TypeExpr>,
     ) -> ExpansionResult<ExpandedNormalizedExpr> {
-        let diagnostics = result
-            .incomplete_reasons
-            .iter()
-            .map(incomplete_reason_to_diagnostic)
-            .collect();
-        ExpansionResult {
-            value: ExpandedNormalizedExpr { expr: result.value },
-            exactness: result.exactness,
-            execution_status: result.execution_status,
-            diagnostics,
-        }
+        solver_result_to_normalized_expansion(result)
     }
 
     fn solver_to_object_shape_result(
         result: SolverResult<TypeExpr>,
     ) -> ExpansionResult<ExpandedObjectShape> {
-        let diagnostics: Vec<ExpansionDiagnostic> = result
-            .incomplete_reasons
-            .iter()
-            .map(incomplete_reason_to_diagnostic)
-            .collect();
-
-        let shape = crate::analysis::type_expand::type_expr_to_expanded_shape(&result.value);
-
-        ExpansionResult {
-            value: shape,
-            exactness: result.exactness,
-            execution_status: result.execution_status,
-            diagnostics,
-        }
+        solver_result_to_object_expansion(result)
     }
 
     let mut batch = SolveBatch::new(solver_host);

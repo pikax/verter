@@ -169,7 +169,7 @@ pub struct StructuralRecursionFingerprint {
 }
 
 /// Budget limits for fingerprint computation to avoid expensive walks.
-const FINGERPRINT_DEPTH_CAP: usize = 3;
+const FINGERPRINT_DEPTH_CAP: usize = 5;
 const FINGERPRINT_NODE_CAP: usize = 50;
 
 /// Compute a bounded structural fingerprint from type arguments and conditional context.
@@ -206,21 +206,15 @@ pub fn compute_structural_fingerprint(
     }
 }
 
-/// Bounded hash of a node's shape (kind + shallow structure).
-fn hash_node_shape(
-    arena: &QueryArena,
-    node: NodeId,
-    hasher: &mut impl Hasher,
-    depth: usize,
-    visited: &mut usize,
-) {
-    if depth > FINGERPRINT_DEPTH_CAP || *visited > FINGERPRINT_NODE_CAP || node.is_unresolved() {
-        // Opaque marker — too deep or budget exceeded
+/// Hash the non-recursive local identity/shape for a node.
+///
+/// Covers all node kinds, including binder-origin distinction for `Infer`
+/// and `TypeParam` (via NodeId). Does NOT recurse into child nodes.
+fn hash_node_local_shape(arena: &QueryArena, node: NodeId, hasher: &mut impl Hasher) {
+    if node.is_unresolved() {
         255u8.hash(hasher);
         return;
     }
-    *visited += 1;
-
     match arena.get(node) {
         Node::Primitive(kind) => {
             0u8.hash(hasher);
@@ -233,21 +227,14 @@ fn hash_node_shape(
         Node::Union(members) => {
             2u8.hash(hasher);
             members.len().hash(hasher);
-            for &m in members {
-                hash_node_shape(arena, m, hasher, depth + 1, visited);
-            }
         }
         Node::Intersection(members) => {
             3u8.hash(hasher);
             members.len().hash(hasher);
-            for &m in members {
-                hash_node_shape(arena, m, hasher, depth + 1, visited);
-            }
         }
-        Node::Array { element, readonly } => {
+        Node::Array { readonly, .. } => {
             4u8.hash(hasher);
             readonly.hash(hasher);
-            hash_node_shape(arena, *element, hasher, depth + 1, visited);
         }
         Node::Ref {
             name,
@@ -256,24 +243,11 @@ fn hash_node_shape(
             5u8.hash(hasher);
             name.hash(hasher);
             type_arguments.len().hash(hasher);
-            for &a in type_arguments {
-                hash_node_shape(arena, a, hasher, depth + 1, visited);
-            }
         }
-        Node::TypeParam {
-            name,
-            constraint,
-            default,
-        } => {
+        Node::TypeParam { name, .. } => {
             6u8.hash(hasher);
-            node.hash(hasher);
+            node.hash(hasher); // NodeId encodes allocation order — binder identity
             name.hash(hasher);
-            if let Some(constraint) = constraint {
-                hash_node_shape(arena, *constraint, hasher, depth + 1, visited);
-            }
-            if let Some(default) = default {
-                hash_node_shape(arena, *default, hasher, depth + 1, visited);
-            }
         }
         Node::Object(obj) => {
             7u8.hash(hasher);
@@ -282,13 +256,10 @@ fn hash_node_shape(
                 p.name.hash(hasher);
                 p.optional.hash(hasher);
                 p.readonly.hash(hasher);
-                hash_node_shape(arena, p.ty, hasher, depth + 1, visited);
             }
             obj.index_signatures.len().hash(hasher);
             for signature in &obj.index_signatures {
                 signature.readonly.hash(hasher);
-                hash_node_shape(arena, signature.key_type, hasher, depth + 1, visited);
-                hash_node_shape(arena, signature.value_type, hasher, depth + 1, visited);
             }
         }
         Node::Function(func) => {
@@ -300,15 +271,12 @@ fn hash_node_shape(
                     param.name.hash(hasher);
                     param.optional.hash(hasher);
                     param.rest.hash(hasher);
-                    hash_node_shape(arena, param.ty, hasher, depth + 1, visited);
                 }
-                hash_node_shape(arena, sig.return_type, hasher, depth + 1, visited);
             }
         }
-        Node::Conditional { check, extends, .. } => {
+        Node::Conditional { distributive, .. } => {
             9u8.hash(hasher);
-            hash_node_shape(arena, *check, hasher, depth + 1, visited);
-            hash_node_shape(arena, *extends, hasher, depth + 1, visited);
+            distributive.hash(hasher);
         }
         Node::RecursiveRef { symbol_name, .. } => {
             10u8.hash(hasher);
@@ -316,7 +284,7 @@ fn hash_node_shape(
         }
         Node::Infer { name } => {
             11u8.hash(hasher);
-            node.hash(hasher);
+            node.hash(hasher); // NodeId encodes allocation order — binder identity
             name.hash(hasher);
         }
         Node::Tuple { elements, readonly } => {
@@ -327,14 +295,192 @@ fn hash_node_shape(
                 element.label.hash(hasher);
                 element.optional.hash(hasher);
                 element.rest.hash(hasher);
+            }
+        }
+        Node::Applied { identity, args } => {
+            13u8.hash(hasher);
+            identity.hash(hasher);
+            args.len().hash(hasher);
+        }
+        Node::KeyOf(_) => {
+            14u8.hash(hasher);
+        }
+        Node::TypeOf { path } => {
+            15u8.hash(hasher);
+            path.hash(hasher);
+        }
+        Node::IndexedAccess { .. } => {
+            16u8.hash(hasher);
+        }
+        Node::Mapped {
+            parameter,
+            optional,
+            readonly,
+            ..
+        } => {
+            17u8.hash(hasher);
+            parameter.hash(hasher);
+            optional.hash(hasher);
+            readonly.hash(hasher);
+        }
+        Node::TemplateLiteral {
+            quasis,
+            expressions,
+        } => {
+            18u8.hash(hasher);
+            quasis.hash(hasher);
+            expressions.len().hash(hasher);
+        }
+        Node::Rest(_) => {
+            19u8.hash(hasher);
+        }
+        Node::Error { description } => {
+            20u8.hash(hasher);
+            description.hash(hasher);
+        }
+    }
+}
+
+/// Recursively hash the children of a node into the hasher.
+fn hash_node_children(
+    arena: &QueryArena,
+    node: NodeId,
+    hasher: &mut impl Hasher,
+    depth: usize,
+    visited: &mut usize,
+) {
+    if node.is_unresolved() {
+        return;
+    }
+    match arena.get(node) {
+        Node::Primitive(_)
+        | Node::Literal(_)
+        | Node::RecursiveRef { .. }
+        | Node::Infer { .. }
+        | Node::TypeOf { .. }
+        | Node::Error { .. } => {
+            // No children to recurse into
+        }
+        Node::Union(members) | Node::Intersection(members) => {
+            let members = members.clone();
+            for m in &members {
+                hash_node_shape(arena, *m, hasher, depth + 1, visited);
+            }
+        }
+        Node::Array { element, .. } => {
+            hash_node_shape(arena, *element, hasher, depth + 1, visited);
+        }
+        Node::Ref { type_arguments, .. } => {
+            let args = type_arguments.clone();
+            for a in &args {
+                hash_node_shape(arena, *a, hasher, depth + 1, visited);
+            }
+        }
+        Node::TypeParam {
+            constraint,
+            default,
+            ..
+        } => {
+            if let Some(constraint) = constraint {
+                hash_node_shape(arena, *constraint, hasher, depth + 1, visited);
+            }
+            if let Some(default) = default {
+                hash_node_shape(arena, *default, hasher, depth + 1, visited);
+            }
+        }
+        Node::Object(obj) => {
+            let obj = obj.clone();
+            for p in &obj.properties {
+                hash_node_shape(arena, p.ty, hasher, depth + 1, visited);
+            }
+            for signature in &obj.index_signatures {
+                hash_node_shape(arena, signature.key_type, hasher, depth + 1, visited);
+                hash_node_shape(arena, signature.value_type, hasher, depth + 1, visited);
+            }
+        }
+        Node::Function(func) => {
+            let func = func.clone();
+            if let Some(sig) = func.signatures.first() {
+                for param in &sig.parameters {
+                    hash_node_shape(arena, param.ty, hasher, depth + 1, visited);
+                }
+                hash_node_shape(arena, sig.return_type, hasher, depth + 1, visited);
+            }
+        }
+        Node::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            ..
+        } => {
+            hash_node_shape(arena, *check, hasher, depth + 1, visited);
+            hash_node_shape(arena, *extends, hasher, depth + 1, visited);
+            hash_node_shape(arena, *true_branch, hasher, depth + 1, visited);
+            hash_node_shape(arena, *false_branch, hasher, depth + 1, visited);
+        }
+        Node::Applied { args, .. } => {
+            let args = args.clone();
+            for a in &args {
+                hash_node_shape(arena, *a, hasher, depth + 1, visited);
+            }
+        }
+        Node::KeyOf(inner) | Node::Rest(inner) => {
+            hash_node_shape(arena, *inner, hasher, depth + 1, visited);
+        }
+        Node::IndexedAccess { object, index } => {
+            hash_node_shape(arena, *object, hasher, depth + 1, visited);
+            hash_node_shape(arena, *index, hasher, depth + 1, visited);
+        }
+        Node::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            hash_node_shape(arena, *source, hasher, depth + 1, visited);
+            hash_node_shape(arena, *value, hasher, depth + 1, visited);
+            if let Some(name_type) = name_type {
+                hash_node_shape(arena, *name_type, hasher, depth + 1, visited);
+            }
+        }
+        Node::TemplateLiteral { expressions, .. } => {
+            let exprs = expressions.clone();
+            for e in &exprs {
+                hash_node_shape(arena, *e, hasher, depth + 1, visited);
+            }
+        }
+        Node::Tuple { elements, .. } => {
+            let elements = elements.clone();
+            for element in &elements {
                 hash_node_shape(arena, element.ty, hasher, depth + 1, visited);
             }
         }
-        _ => {
-            // Catch-all for less common node kinds
-            254u8.hash(hasher);
-        }
     }
+}
+
+/// Bounded hash of a node's shape (kind + shallow structure).
+fn hash_node_shape(
+    arena: &QueryArena,
+    node: NodeId,
+    hasher: &mut impl Hasher,
+    depth: usize,
+    visited: &mut usize,
+) {
+    if depth > FINGERPRINT_DEPTH_CAP || *visited > FINGERPRINT_NODE_CAP || node.is_unresolved() {
+        // Truncation marker — include depth and visited count so different
+        // truncation points don't collide, plus the local shape to distinguish
+        // nodes at the boundary.
+        255u8.hash(hasher);
+        depth.hash(hasher);
+        (*visited).hash(hasher);
+        hash_node_local_shape(arena, node, hasher);
+        return;
+    }
+    *visited += 1;
+
+    hash_node_local_shape(arena, node, hasher);
+    hash_node_children(arena, node, hasher, depth, visited);
 }
 
 // ---------------------------------------------------------------------------
@@ -824,6 +970,228 @@ mod tests {
             fp_a, fp_b,
             "distinct infer binders with the same textual name must not share a fingerprint"
         );
+    }
+
+    #[test]
+    fn fingerprint_depth_boundary_distinguishes_deep_divergence() {
+        // Two arg trees identical through depth 4, diverging at depth 5.
+        // With FINGERPRINT_DEPTH_CAP = 5, the divergence at depth 5 should
+        // be captured. Pre-fix (cap=3): same fingerprint. Post-fix: different.
+        let mut arena = QueryArena::new();
+
+        // Build a chain: Ref("A", [Ref("B", [Ref("C", [Ref("D", [leaf])])])])
+        let leaf_string = arena.primitive(PrimitiveKind::String);
+        let leaf_number = arena.primitive(PrimitiveKind::Number);
+
+        // Chain with String at the deepest level
+        let d_str = arena.alloc(Node::Ref {
+            name: "D".into(),
+            type_arguments: vec![leaf_string],
+        });
+        let c_str = arena.alloc(Node::Ref {
+            name: "C".into(),
+            type_arguments: vec![d_str],
+        });
+        let b_str = arena.alloc(Node::Ref {
+            name: "B".into(),
+            type_arguments: vec![c_str],
+        });
+        let a_str = arena.alloc(Node::Ref {
+            name: "A".into(),
+            type_arguments: vec![b_str],
+        });
+
+        // Chain with Number at the deepest level
+        let d_num = arena.alloc(Node::Ref {
+            name: "D".into(),
+            type_arguments: vec![leaf_number],
+        });
+        let c_num = arena.alloc(Node::Ref {
+            name: "C".into(),
+            type_arguments: vec![d_num],
+        });
+        let b_num = arena.alloc(Node::Ref {
+            name: "B".into(),
+            type_arguments: vec![c_num],
+        });
+        let a_num = arena.alloc(Node::Ref {
+            name: "A".into(),
+            type_arguments: vec![b_num],
+        });
+
+        let fp_str = compute_structural_fingerprint(&arena, &[a_str], &[]);
+        let fp_num = compute_structural_fingerprint(&arena, &[a_num], &[]);
+
+        assert_ne!(
+            fp_str, fp_num,
+            "trees diverging at depth 5 must produce different fingerprints"
+        );
+    }
+
+    #[test]
+    fn fingerprint_node_budget_distinguishes_truncated_primitive_kinds() {
+        // Build two shapes where the node-budget guard trips on node 51.
+        // The truncated node is Primitive(String) in one case and Primitive(Number) in the other.
+        let mut arena = QueryArena::new();
+
+        // Build a wide union with 50 members + one more primitive that overflows
+        let mut members_str = Vec::new();
+        let mut members_num = Vec::new();
+        for i in 0..50 {
+            let node = arena.alloc(Node::Ref {
+                name: format!("T{}", i),
+                type_arguments: vec![],
+            });
+            members_str.push(node);
+            let node = arena.alloc(Node::Ref {
+                name: format!("T{}", i),
+                type_arguments: vec![],
+            });
+            members_num.push(node);
+        }
+        // The 51st member will be the truncated node
+        members_str.push(arena.primitive(PrimitiveKind::String));
+        members_num.push(arena.primitive(PrimitiveKind::Number));
+
+        let union_str = arena.alloc(Node::Union(members_str));
+        let union_num = arena.alloc(Node::Union(members_num));
+
+        let fp_str = compute_structural_fingerprint(&arena, &[union_str], &[]);
+        let fp_num = compute_structural_fingerprint(&arena, &[union_num], &[]);
+
+        assert_ne!(
+            fp_str, fp_num,
+            "truncated Primitive(String) vs Primitive(Number) must not collide"
+        );
+    }
+
+    #[test]
+    fn fingerprint_truncation_preserves_infer_origin_distinction() {
+        // Force truncation on two distinct Infer nodes with the same textual name.
+        // Build a wide union to exhaust the budget, then place the infer at the end.
+        let mut arena = QueryArena::new();
+
+        let mut members_a = Vec::new();
+        let mut members_b = Vec::new();
+        for i in 0..50 {
+            let node = arena.alloc(Node::Ref {
+                name: format!("T{}", i),
+                type_arguments: vec![],
+            });
+            members_a.push(node);
+            let node = arena.alloc(Node::Ref {
+                name: format!("T{}", i),
+                type_arguments: vec![],
+            });
+            members_b.push(node);
+        }
+        let infer_a = arena.alloc(Node::Infer { name: "X".into() });
+        let infer_b = arena.alloc(Node::Infer { name: "X".into() });
+        members_a.push(infer_a);
+        members_b.push(infer_b);
+
+        let union_a = arena.alloc(Node::Union(members_a));
+        let union_b = arena.alloc(Node::Union(members_b));
+
+        let fp_a = compute_structural_fingerprint(&arena, &[union_a], &[]);
+        let fp_b = compute_structural_fingerprint(&arena, &[union_b], &[]);
+
+        assert_ne!(
+            fp_a, fp_b,
+            "truncated Infer nodes with same name but different origin must not collide"
+        );
+    }
+
+    #[test]
+    fn fingerprint_truncated_node_kind_distinguishes_shapes() {
+        // Truncated Ref vs truncated Union must produce different fingerprints.
+        let mut arena = QueryArena::new();
+
+        // Build a deep tree that triggers depth truncation
+        let leaf = arena.primitive(PrimitiveKind::String);
+
+        // Build chains to depth 5, ending in different node kinds
+        let deep_ref = {
+            let r = arena.alloc(Node::Ref {
+                name: "X".into(),
+                type_arguments: vec![leaf],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "Y".into(),
+                type_arguments: vec![r],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "Z".into(),
+                type_arguments: vec![r],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "W".into(),
+                type_arguments: vec![r],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "V".into(),
+                type_arguments: vec![r],
+            });
+            // At depth > cap, this Ref is truncated
+            arena.alloc(Node::Ref {
+                name: "Deep".into(),
+                type_arguments: vec![r],
+            })
+        };
+
+        let deep_union = {
+            let r = arena.alloc(Node::Ref {
+                name: "X".into(),
+                type_arguments: vec![leaf],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "Y".into(),
+                type_arguments: vec![r],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "Z".into(),
+                type_arguments: vec![r],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "W".into(),
+                type_arguments: vec![r],
+            });
+            let r = arena.alloc(Node::Ref {
+                name: "V".into(),
+                type_arguments: vec![r],
+            });
+            // At depth > cap, this Union is truncated
+            arena.alloc(Node::Union(vec![r]))
+        };
+
+        let fp_ref = compute_structural_fingerprint(&arena, &[deep_ref], &[]);
+        let fp_union = compute_structural_fingerprint(&arena, &[deep_union], &[]);
+
+        assert_ne!(
+            fp_ref, fp_union,
+            "truncated Ref vs truncated Union must produce different fingerprints"
+        );
+    }
+
+    #[test]
+    fn fingerprint_stable_for_identical_shapes() {
+        let mut arena = QueryArena::new();
+        let str_ty = arena.primitive(PrimitiveKind::String);
+        let num_ty = arena.primitive(PrimitiveKind::Number);
+
+        let ref_a = arena.alloc(Node::Ref {
+            name: "Foo".into(),
+            type_arguments: vec![str_ty, num_ty],
+        });
+        let ref_b = arena.alloc(Node::Ref {
+            name: "Foo".into(),
+            type_arguments: vec![str_ty, num_ty],
+        });
+
+        let fp_a = compute_structural_fingerprint(&arena, &[ref_a], &[]);
+        let fp_b = compute_structural_fingerprint(&arena, &[ref_b], &[]);
+
+        assert_eq!(fp_a, fp_b, "identical trees must hash identically");
     }
 
     #[test]
