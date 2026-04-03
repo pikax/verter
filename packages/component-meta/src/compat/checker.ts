@@ -440,7 +440,7 @@ function applyRawTypeDisplayHintsToSchemaInner(
         schema: schema.schema.map((entry, index) =>
           applyRawTypeDisplayHintsToSchemaInner(entry, intersectionParts[index] ?? raw),
         ),
-      };
+      } as unknown as PropertyMetaSchema;
     }
   }
 

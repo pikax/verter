@@ -2335,11 +2335,7 @@ impl VerterHost {
             store_view,
             &entry.resolved_canonical_id,
         );
-        let result = verter_semantic::analysis::type_solver::solve::solve_type(
-            expr,
-            &solver_host,
-            verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
-        );
+        let result = verter_semantic::analysis::type_solver::solve::solve_type(expr, &solver_host);
         Some(verter_semantic::analysis::type_expand::type_expr_to_object_shape(&result.value))
     }
 
@@ -5279,7 +5275,6 @@ impl VerterHost {
                     let solved = verter_semantic::analysis::type_solver::solve::solve_type(
                         &TypeExpr::named(resolved_exported_name.as_str()),
                         &solver_host,
-                        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
                     );
                     match solved.value {
                         TypeExpr::Object(_)

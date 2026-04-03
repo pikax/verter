@@ -11,6 +11,7 @@ use super::builtin::{expand_builtin, BuiltinUtility};
 use super::display::display_node;
 use super::host::{RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource};
 use super::lower::lower_type_expr;
+use super::prepared::{PreparedTypeDecl, PreparedValueDecl};
 use super::recursion::{RecursionKey, RecursionTracker};
 use super::result::{ExecutionStatus, IncompleteReason, SolverExactness, SolverResult};
 use super::substitution::SubstitutionEnv;
@@ -19,6 +20,10 @@ use crate::analysis::type_expr::TypeExpr;
 // ---------------------------------------------------------------------------
 // Operational limits
 // ---------------------------------------------------------------------------
+
+/// Deterministic operational ceiling on template literal cartesian product size.
+/// Exceeding this produces `HardStop` rather than unbounded expansion.
+pub const MAX_TEMPLATE_LITERAL_PRODUCT: usize = 100_000;
 
 /// Operational limits for a solver query (generous TypeScript-like ceilings).
 #[derive(Debug, Clone)]
@@ -35,8 +40,8 @@ impl Default for SolveLimits {
     fn default() -> Self {
         Self {
             max_instantiation_depth: 50,
-            max_resolve_steps: 100_000,
-            max_arena_nodes: 500_000,
+            max_resolve_steps: 500_000,
+            max_arena_nodes: 2_000_000,
         }
     }
 }
@@ -54,9 +59,9 @@ pub struct SolveState {
     /// type declaration body, the declaration is pushed onto this stack so
     /// bare name refs can be resolved through the declaration's
     /// `name_resolution` map (defining file scope).
-    pub type_decl_context_stack: Vec<Arc<super::PreparedTypeDecl>>,
+    pub type_decl_context_stack: Vec<Arc<PreparedTypeDecl>>,
     /// Stack of active value declaration contexts for `typeof` resolution.
-    pub value_decl_context_stack: Vec<Arc<super::PreparedValueDecl>>,
+    pub value_decl_context_stack: Vec<Arc<PreparedValueDecl>>,
     /// External declarations visited during this solve. Recorded by
     /// `resolve_prepared_ref` when it enters a declaration from a
     /// canonical file other than "$owner". Used by the host to publish
@@ -118,79 +123,138 @@ impl SolveState {
 // solve_type — top-level entry point
 // ---------------------------------------------------------------------------
 
-/// Solve (normalize/expand) a `TypeExpr` using the host for cross-file
-/// declaration resolution.
-///
-/// Creates a query-local arena, lowers the expression, resolves references,
-/// and projects the result back to `TypeExpr`.
-pub fn solve_type(
+/// Cached entry from a single solver run, holding both the semantic result
+/// and the external declaration trace. Used by `SolveBatch` and the shared
+/// `run_solve_query` runner.
+#[derive(Debug, Clone)]
+struct CachedSolveEntry {
+    result: SolverResult<TypeExpr>,
+    trace: Vec<ResolvedRootIdentity>,
+}
+
+/// Shared query runner used by `solve_type`, `solve_type_with_trace`, and
+/// `SolveBatch`. Centralises arena creation, lowering, resolution, projection,
+/// and trace capture.
+fn run_solve_query(
     expr: &TypeExpr,
     host: &dyn TypeSolverHost,
     limits: SolveLimits,
-) -> SolverResult<TypeExpr> {
+) -> CachedSolveEntry {
     let mut arena = QueryArena::new();
     let mut state = SolveState::new(limits);
 
-    // Lower the input expression into the arena
     let root = lower_type_expr(&mut arena, expr);
-
-    // Resolve references in the arena through the host
     let resolved = resolve_node(&mut arena, root, host, &mut state, &SubstitutionEnv::new());
-
-    // Project the resolved node back to TypeExpr
     let result_expr = project_to_type_expr(&arena, resolved);
 
-    // Debug-only: log solver stats BEFORE moving state
     if solver_debug_enabled() {
         let json_bytes = serde_json::to_string(&result_expr)
             .map(|s| s.len())
             .unwrap_or(0);
-        eprintln!(
-            "[verter-solver] nodes={} steps={} depth={} payload={}B exactness={} status={}",
-            arena.len(),
-            state.steps,
-            state.recursion.max_depth(),
-            json_bytes,
-            state.exactness,
-            state.execution_status,
-        );
+        let input_summary = solver_expr_summary(expr);
+        if state.execution_status == ExecutionStatus::HardStop || state.steps > 10_000 {
+            eprintln!(
+                "[verter-solver] SLOW nodes={} steps={} depth={} payload={}B exactness={} status={} input={}",
+                arena.len(),
+                state.steps,
+                state.recursion.max_depth(),
+                json_bytes,
+                state.exactness,
+                state.execution_status,
+                input_summary,
+            );
+            // Log which symbols hit recursion limits
+            for reason in &state.incomplete_reasons {
+                eprintln!("  [verter-solver]   reason: {}", reason);
+            }
+        } else {
+            eprintln!(
+                "[verter-solver] nodes={} steps={} depth={} payload={}B exactness={} status={}",
+                arena.len(),
+                state.steps,
+                state.recursion.max_depth(),
+                json_bytes,
+                state.exactness,
+                state.execution_status,
+            );
+        }
     }
 
+    CachedSolveEntry {
+        result: SolverResult {
+            value: result_expr,
+            exactness: state.exactness,
+            execution_status: state.execution_status,
+            incomplete_reasons: state.incomplete_reasons,
+        },
+        trace: state.visited_external_decls,
+    }
+}
+
+/// Solve (normalize/expand) a `TypeExpr` using the host for cross-file
+/// declaration resolution.
+///
+/// Production callers always run through the shared production limits source.
+pub fn solve_type(expr: &TypeExpr, host: &dyn TypeSolverHost) -> SolverResult<TypeExpr> {
+    run_solve_query(expr, host, SolveLimits::default()).result
+}
+
+#[cfg(test)]
+fn solve_type_with_limits(
+    expr: &TypeExpr,
+    host: &dyn TypeSolverHost,
+    limits: SolveLimits,
+) -> SolverResult<TypeExpr> {
+    run_solve_query(expr, host, limits).result
+}
+
+fn solver_expr_summary(expr: &TypeExpr) -> String {
+    match expr {
+        TypeExpr::Primitive(p) => format!("Primitive({:?})", p),
+        TypeExpr::Literal(lit) => format!("Literal({:?})", lit),
+        TypeExpr::Union(members) => format!("Union({} members)", members.len()),
+        TypeExpr::Intersection(members) => format!("Intersection({} members)", members.len()),
+        TypeExpr::Array { .. } => "Array".into(),
+        TypeExpr::Tuple { elements, .. } => format!("Tuple({} elements)", elements.len()),
+        TypeExpr::Object(obj) => format!("Object({} members)", obj.properties.len()),
+        TypeExpr::Function(_) => "Function".into(),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if type_arguments.is_empty() {
+                format!("Ref({})", name)
+            } else {
+                format!("Ref({}<{} args>)", name, type_arguments.len())
+            }
+        }
+        TypeExpr::TypeParameter(param) => format!("TypeParameter({})", param.name),
+        TypeExpr::KeyOf(_) => "KeyOf".into(),
+        TypeExpr::TypeOf(val) => format!("TypeOf({})", val.path.join(".")),
+        TypeExpr::IndexedAccess { .. } => "IndexedAccess".into(),
+        TypeExpr::Conditional { .. } => "Conditional".into(),
+        TypeExpr::Mapped { parameter, .. } => format!("Mapped({})", parameter),
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            format!("TemplateLiteral({} exprs)", expressions.len())
+        }
+        TypeExpr::Infer { name } => format!("Infer({})", name),
+        TypeExpr::Rest(_) => "Rest".into(),
+        TypeExpr::Parenthesized(inner) => format!("Parenthesized({})", solver_expr_summary(inner)),
+        TypeExpr::Unknown { raw } => {
+            let preview: String = raw.chars().take(40).collect();
+            format!("Unknown({})", preview)
+        }
+    }
+}
+
+fn cancelled_solver_result(expr: &TypeExpr) -> SolverResult<TypeExpr> {
     SolverResult {
-        value: result_expr,
-        exactness: state.exactness,
-        execution_status: state.execution_status,
-        incomplete_reasons: state.incomplete_reasons,
-    }
-}
-
-/// Stats from a solver run — always cheap to compute (counter reads).
-#[derive(Debug, Clone)]
-pub struct SolverStats {
-    pub arena_nodes: usize,
-    pub resolve_steps: u64,
-    pub max_instantiation_depth: usize,
-    pub result_json_bytes: usize,
-    pub exactness: SolverExactness,
-    pub execution_status: ExecutionStatus,
-}
-
-/// Compute solver stats from a completed run.
-pub fn compute_solver_stats(
-    result: &SolverResult<TypeExpr>,
-    arena: &QueryArena,
-    state: &SolveState,
-) -> SolverStats {
-    let result_json_bytes = serde_json::to_string(&result.value)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    SolverStats {
-        arena_nodes: arena.len(),
-        resolve_steps: state.steps,
-        max_instantiation_depth: state.recursion.max_depth(),
-        result_json_bytes,
-        exactness: result.exactness,
-        execution_status: result.execution_status,
+        value: expr.clone(),
+        // Preserve the current uncached solver behavior: cancellation is tracked
+        // in execution status, while the projected value stays unchanged.
+        exactness: SolverExactness::ExactConcrete,
+        execution_status: ExecutionStatus::Cancelled,
+        incomplete_reasons: vec![],
     }
 }
 
@@ -200,49 +264,75 @@ fn solver_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("VERTER_SOLVER_DEBUG").is_some())
 }
 
-#[allow(dead_code)]
-fn solver_debug_log(result: &SolverResult<TypeExpr>, arena: &QueryArena, state: &SolveState) {
-    if !solver_debug_enabled() {
-        return;
-    }
-    let stats = compute_solver_stats(result, arena, state);
-    eprintln!(
-        "[verter-solver] nodes={} steps={} depth={} payload={}B exactness={} status={}",
-        stats.arena_nodes,
-        stats.resolve_steps,
-        stats.max_instantiation_depth,
-        stats.result_json_bytes,
-        stats.exactness,
-        stats.execution_status,
-    );
-}
-
 /// Solve a type expression and return both the result and a trace of
 /// external declarations visited during resolution. The trace is a
 /// sidecar for the orchestration layer (registry publishing) and is
 /// NOT part of the semantic `SolverResult`.
+///
+/// Production callers always run through the shared production limits source.
 pub fn solve_type_with_trace(
     expr: &TypeExpr,
     host: &dyn TypeSolverHost,
-    limits: SolveLimits,
 ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
-    let mut arena = QueryArena::new();
-    let mut state = SolveState::new(limits);
+    let entry = run_solve_query(expr, host, SolveLimits::default());
+    (entry.result, entry.trace)
+}
 
-    let root = lower_type_expr(&mut arena, expr);
-    let resolved = resolve_node(&mut arena, root, host, &mut state, &SubstitutionEnv::new());
-    let result_expr = project_to_type_expr(&arena, resolved);
+// ---------------------------------------------------------------------------
+// SolveBatch — batch-scoped top-level solve memoization
+// ---------------------------------------------------------------------------
 
-    let trace = state.visited_external_decls;
-    (
-        SolverResult {
-            value: result_expr,
-            exactness: state.exactness,
-            execution_status: state.execution_status,
-            incomplete_reasons: state.incomplete_reasons,
-        },
-        trace,
-    )
+/// Batch-scoped solve memoization. Created at the start of a macro-expansion
+/// function, dropped when that function returns. Caches `(TypeExpr → result)`
+/// within one fixed host and the shared production limits.
+///
+/// **Not** a host-global or cross-request cache — strictly query-scoped.
+pub struct SolveBatch<'a> {
+    host: &'a dyn TypeSolverHost,
+    cache: rustc_hash::FxHashMap<TypeExpr, CachedSolveEntry>,
+}
+
+impl<'a> SolveBatch<'a> {
+    /// Create a new batch pinned to one host.
+    pub fn new(host: &'a dyn TypeSolverHost) -> Self {
+        Self {
+            host,
+            cache: rustc_hash::FxHashMap::default(),
+        }
+    }
+
+    /// Solve a type expression, reusing a cached result when possible.
+    pub fn solve(&mut self, expr: &TypeExpr) -> SolverResult<TypeExpr> {
+        if let RequestStatus::Cancelled = self.host.request_status() {
+            return cancelled_solver_result(expr);
+        }
+        if let Some(entry) = self.cache.get(expr) {
+            return entry.result.clone();
+        }
+        let entry = run_solve_query(expr, self.host, SolveLimits::default());
+        let result = entry.result.clone();
+        self.cache.insert(expr.clone(), entry);
+        result
+    }
+
+    /// Solve a type expression and return both the result and the visited
+    /// external declaration trace. On a cache hit the stored trace is cloned.
+    pub fn solve_with_trace(
+        &mut self,
+        expr: &TypeExpr,
+    ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+        if let RequestStatus::Cancelled = self.host.request_status() {
+            return (cancelled_solver_result(expr), Vec::new());
+        }
+        if let Some(entry) = self.cache.get(expr) {
+            return (entry.result.clone(), entry.trace.clone());
+        }
+        let entry = run_solve_query(expr, self.host, SolveLimits::default());
+        let result = entry.result.clone();
+        let trace = entry.trace.clone();
+        self.cache.insert(expr.clone(), entry);
+        (result, trace)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +350,12 @@ fn resolve_node(
     // Check cancellation
     if host.request_status() == RequestStatus::Cancelled {
         state.execution_status = ExecutionStatus::Cancelled;
+        return node;
+    }
+
+    // Preserve the original hard-stop cause once a deterministic guard has
+    // fired on another branch; do not relabel sibling work as a step-limit hit.
+    if state.execution_status == ExecutionStatus::HardStop {
         return node;
     }
 
@@ -1350,7 +1446,7 @@ fn resolve_template_literal(
 
     // Guard: deterministic operational limit on cartesian product size.
     let product_size: usize = expr_options.iter().map(|v| v.len()).product();
-    if product_size > 10_000 {
+    if product_size > MAX_TEMPLATE_LITERAL_PRODUCT {
         state.execution_status = ExecutionStatus::HardStop;
         state.mark_incomplete(IncompleteReason::RecursionPolicy {
             description: format!(
@@ -1687,7 +1783,7 @@ mod tests {
     #[test]
     fn solve_primitive_is_identity() {
         let expr = TypeExpr::Primitive(PrimitiveName::String);
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
         assert_eq!(result.exactness, SolverExactness::ExactConcrete);
@@ -1697,7 +1793,7 @@ mod tests {
     #[test]
     fn solve_literal_is_identity() {
         let expr = TypeExpr::string_literal("hello");
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("hello"));
         assert_eq!(result.exactness, SolverExactness::ExactConcrete);
@@ -1709,7 +1805,7 @@ mod tests {
             TypeExpr::Primitive(PrimitiveName::String),
             TypeExpr::Primitive(PrimitiveName::Number),
         ]));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -1732,7 +1828,7 @@ mod tests {
                 },
             )],
         }));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -1748,7 +1844,7 @@ mod tests {
             name: Arc::from("UnknownType"),
             type_arguments: Arc::from(vec![]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         // Should stay as a Ref since NoopSolverHost can't resolve it
         assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
@@ -1768,7 +1864,7 @@ mod tests {
                 TypeExpr::Primitive(PrimitiveName::Undefined),
             ]))]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         // NonNullable should filter out null and undefined
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
@@ -1781,7 +1877,7 @@ mod tests {
             name: Arc::from("Uppercase"),
             type_arguments: Arc::from(vec![TypeExpr::string_literal("hello")]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("HELLO"));
         assert_eq!(result.exactness, SolverExactness::ExactConcrete);
@@ -1793,7 +1889,7 @@ mod tests {
             name: Arc::from("Capitalize"),
             type_arguments: Arc::from(vec![TypeExpr::string_literal("hello")]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("Hello"));
     }
@@ -1804,7 +1900,7 @@ mod tests {
             element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
             readonly: true,
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Array { readonly, .. } => assert!(readonly),
@@ -1815,7 +1911,6 @@ mod tests {
     // -- Test host with prepared declarations --
 
     use crate::analysis::type_eval::TypeDeclKind;
-    use crate::analysis::type_solver::prepared::PreparedTypeDecl;
     use rustc_hash::FxHashMap;
 
     struct TestHost {
@@ -1904,7 +1999,7 @@ mod tests {
             name: Arc::from("MyString"),
             type_arguments: Arc::from(vec![]),
         };
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
         assert_eq!(result.exactness, SolverExactness::ExactConcrete);
@@ -1935,7 +2030,7 @@ mod tests {
             name: Arc::from("Wrap"),
             type_arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::Number)]),
         };
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         match &result.value {
             TypeExpr::Array { element, readonly } => {
@@ -1968,7 +2063,7 @@ mod tests {
             name: Arc::from("B"),
             type_arguments: Arc::from(vec![]),
         };
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
     }
@@ -2006,7 +2101,7 @@ mod tests {
             name: Arc::from("MissingType"),
             type_arguments: Arc::from(vec![]),
         };
-        let result = solve_type(&expr, &MissingDeclHost, SolveLimits::default());
+        let result = solve_type(&expr, &MissingDeclHost);
 
         assert_eq!(result.exactness, SolverExactness::Incomplete);
         assert!(!result.incomplete_reasons.is_empty());
@@ -2037,7 +2132,7 @@ mod tests {
             name: Arc::from("WithDefault"),
             type_arguments: Arc::from(vec![]),
         };
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         match &result.value {
             TypeExpr::Array { element, .. } => {
@@ -2062,7 +2157,7 @@ mod tests {
             max_resolve_steps: 50, // Very low limit
             ..Default::default()
         };
-        let result = solve_type(&expr, &NoopSolverHost, limits);
+        let result = solve_type_with_limits(&expr, &NoopSolverHost, limits);
 
         // Should hit the step limit
         assert_eq!(result.execution_status, ExecutionStatus::HardStop);
@@ -2151,7 +2246,7 @@ mod tests {
         let expr = TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef {
             path: vec!["theme".into()],
         });
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         assert_eq!(
             result.value,
@@ -2246,7 +2341,7 @@ mod tests {
         let expr = TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef {
             path: vec!["ThemeNs".into(), "theme".into(), "slots".into()],
         });
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         let TypeExpr::Object(obj) = result.value else {
             panic!("namespace typeof member path should resolve to object shape");
@@ -2451,7 +2546,7 @@ mod tests {
             },
         };
 
-        let result = solve_type(&TypeExpr::named("Button"), &host, SolveLimits::default());
+        let result = solve_type(&TypeExpr::named("Button"), &host);
 
         let TypeExpr::Object(obj) = result.value else {
             panic!(
@@ -2697,7 +2792,7 @@ mod tests {
             },
         };
 
-        let result = solve_type(&TypeExpr::named("Button"), &host, SolveLimits::default());
+        let result = solve_type(&TypeExpr::named("Button"), &host);
 
         let TypeExpr::Object(obj) = result.value else {
             panic!("Button should resolve to an object shape after Id<T> normalization");
@@ -2753,7 +2848,7 @@ mod tests {
                 ],
             },
         ))));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         // Should be "a" | "b"
         match &result.value {
@@ -2782,7 +2877,7 @@ mod tests {
                 )],
             },
         ))));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
     }
@@ -2793,7 +2888,7 @@ mod tests {
             element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
             readonly: false,
         }));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::Number));
     }
@@ -2817,7 +2912,7 @@ mod tests {
             ]),
             readonly: false,
         }));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -2856,7 +2951,7 @@ mod tests {
             ))),
             index: Arc::new(TypeExpr::string_literal("a")),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
         assert_eq!(result.exactness, SolverExactness::ExactConcrete);
@@ -2893,7 +2988,7 @@ mod tests {
                 TypeExpr::string_literal("b"),
             ]))),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -2989,7 +3084,7 @@ mod tests {
             index: Arc::new(TypeExpr::string_literal("variants")),
         };
 
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match result.value {
             TypeExpr::Intersection(members) => {
@@ -3013,7 +3108,7 @@ mod tests {
             true_type: Arc::new(TypeExpr::string_literal("yes")),
             false_type: Arc::new(TypeExpr::string_literal("no")),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("yes"));
     }
@@ -3027,7 +3122,7 @@ mod tests {
             true_type: Arc::new(TypeExpr::string_literal("yes")),
             false_type: Arc::new(TypeExpr::string_literal("no")),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("no"));
     }
@@ -3048,7 +3143,7 @@ mod tests {
             readonly: crate::analysis::type_expr::MappedModifier::None,
             name_type: None,
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -3081,7 +3176,7 @@ mod tests {
             readonly: crate::analysis::type_expr::MappedModifier::None,
             name_type: None,
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         let TypeExpr::Object(obj) = result.value else {
             panic!("expected Object");
@@ -3113,7 +3208,7 @@ mod tests {
             readonly: crate::analysis::type_expr::MappedModifier::None,
             name_type: None,
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -3149,7 +3244,7 @@ mod tests {
             quasis: vec!["hello".into(), "world".into()],
             expressions: Arc::from(vec![TypeExpr::string_literal(" ")]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("hello world"));
         assert_eq!(result.exactness, SolverExactness::ExactConcrete);
@@ -3165,7 +3260,7 @@ mod tests {
                 TypeExpr::string_literal("b"),
             ]))]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -3184,7 +3279,7 @@ mod tests {
             quasis: vec!["count_".into(), "".into()],
             expressions: Arc::from(vec![TypeExpr::number_literal(42.0)]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("count_42"));
     }
@@ -3198,7 +3293,7 @@ mod tests {
             name: Arc::from("Awaited"),
             type_arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
     }
@@ -3233,7 +3328,7 @@ mod tests {
                 false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
             })),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -3263,7 +3358,7 @@ mod tests {
             }),
             false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Intersection(members) => {
@@ -3328,7 +3423,7 @@ mod tests {
             ]))),
             false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         let TypeExpr::Intersection(parts) = result.value else {
             panic!("infer conditional should resolve true branch under contravariant function comparison");
@@ -3363,7 +3458,7 @@ mod tests {
             true_type: Arc::new(TypeExpr::boolean_literal(true)),
             false_type: Arc::new(TypeExpr::boolean_literal(false)),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::boolean_literal(true));
     }
@@ -3420,7 +3515,7 @@ mod tests {
                 ]),
             }]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -3459,7 +3554,7 @@ mod tests {
                 ])),
             ]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -3488,7 +3583,7 @@ mod tests {
                 TypeExpr::string_literal("a"),
             ]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -3528,7 +3623,7 @@ mod tests {
                 )],
             })),
         ]))));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -3571,7 +3666,7 @@ mod tests {
             type_arguments: Arc::from(vec![]),
         };
         // Should not hang or stack overflow — recursion tracker catches it
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
         // The result should be an object (possibly with a recursive ref for children)
         assert!(
             result.execution_status == ExecutionStatus::Completed
@@ -3604,7 +3699,7 @@ mod tests {
         );
 
         let expr = TypeExpr::named_with_args("NestedItem", vec![TypeExpr::named("Unresolved")]);
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         assert_eq!(result.execution_status, ExecutionStatus::Completed);
         assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
@@ -3643,7 +3738,7 @@ mod tests {
         );
 
         let expr = TypeExpr::named_with_args("Loop", vec![TypeExpr::named("T")]);
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         assert_eq!(result.execution_status, ExecutionStatus::Completed);
         assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
@@ -3717,7 +3812,7 @@ mod tests {
                 type_arguments: Arc::from(vec![]),
             }]),
         };
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -3782,7 +3877,7 @@ mod tests {
             name: Arc::from("Props"),
             type_arguments: Arc::from(vec![]),
         };
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         match result.value {
             TypeExpr::Object(obj) => match &obj.properties[0] {
@@ -3843,7 +3938,7 @@ mod tests {
             )],
         }));
 
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match result.value {
             TypeExpr::Object(obj) => match &obj.properties[0] {
@@ -3866,7 +3961,7 @@ mod tests {
             default: Some(Arc::new(TypeExpr::named("Item"))),
         });
 
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match result.value {
             TypeExpr::TypeParameter(param) => {
@@ -3902,7 +3997,7 @@ mod tests {
                 ])),
             ]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -3925,7 +4020,7 @@ mod tests {
             quasis: vec!["is_".into(), "".into()],
             expressions: Arc::from(vec![TypeExpr::boolean_literal(true)]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::string_literal("is_true"));
     }
@@ -3946,7 +4041,7 @@ mod tests {
             readonly: crate::analysis::type_expr::MappedModifier::None,
             name_type: None,
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -3975,7 +4070,7 @@ mod tests {
             true_type: Arc::new(TypeExpr::string_literal("yes")),
             false_type: Arc::new(TypeExpr::string_literal("no")),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         // T is unresolved — relation is Unknown, so conditional stays symbolic
         assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
@@ -4003,7 +4098,7 @@ mod tests {
                 TypeExpr::Primitive(PrimitiveName::Boolean),
             ]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -4059,7 +4154,7 @@ mod tests {
             }),
             index: Arc::new(TypeExpr::string_literal("a")),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
     }
@@ -4076,7 +4171,7 @@ mod tests {
             quasis: vec!["prefix_".into(), "".into()],
             expressions: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::Never)]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::Never));
     }
@@ -4118,7 +4213,7 @@ mod tests {
                 TypeExpr::Primitive(PrimitiveName::Number),
             ]))]),
         };
-        let result = solve_type(&expr, &host, SolveLimits::default());
+        let result = solve_type(&expr, &host);
 
         match &result.value {
             TypeExpr::Union(members) => {
@@ -4141,7 +4236,7 @@ mod tests {
                 TypeExpr::Primitive(PrimitiveName::String),
             ]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Object(obj) => {
@@ -4162,7 +4257,7 @@ mod tests {
             name: Arc::from("NonNullable"),
             type_arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::Any)]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::Any));
     }
@@ -4194,7 +4289,7 @@ mod tests {
                 },
             ))]),
         };
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         // Should project back as a Tuple TypeExpr, not Unknown
         match &result.value {
@@ -4227,7 +4322,7 @@ mod tests {
             return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
             type_parameters: vec![],
         }));
-        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+        let result = solve_type(&expr, &NoopSolverHost);
 
         match &result.value {
             TypeExpr::Function(f) => {
@@ -4236,5 +4331,424 @@ mod tests {
             }
             _ => panic!("expected Function, got: {:?}", result.value),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Budget alignment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_default_limits_match_target_budgets() {
+        let limits = SolveLimits::default();
+        assert_eq!(
+            limits.max_resolve_steps, 500_000,
+            "production step budget should be 500k"
+        );
+        assert_eq!(
+            limits.max_arena_nodes, 2_000_000,
+            "production arena budget should be 2M"
+        );
+        assert_eq!(
+            limits.max_instantiation_depth, 50,
+            "instantiation depth should stay at 50"
+        );
+    }
+
+    #[test]
+    fn public_solver_entry_points_use_shared_production_limits() {
+        let expr = TypeExpr::Primitive(PrimitiveName::String);
+
+        let solved = solve_type(&expr, &NoopSolverHost);
+        let (solved_with_trace, trace) = solve_type_with_trace(&expr, &NoopSolverHost);
+
+        assert_eq!(
+            solved.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "public solve_type should keep primitive identities under production limits"
+        );
+        assert_eq!(
+            solved_with_trace.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "public solve_type_with_trace should use the same production limits path"
+        );
+        assert!(
+            trace.is_empty(),
+            "primitive solve should not report external trace entries"
+        );
+        assert_eq!(
+            solved.execution_status,
+            ExecutionStatus::Completed,
+            "primitive solve should complete under production defaults"
+        );
+        assert_eq!(
+            solved_with_trace.execution_status,
+            ExecutionStatus::Completed,
+            "trace solve should also complete under production defaults"
+        );
+    }
+
+    #[test]
+    fn template_literal_product_limit_constant_matches_target() {
+        assert_eq!(
+            MAX_TEMPLATE_LITERAL_PRODUCT, 100_000,
+            "template literal cartesian product ceiling should be 100k"
+        );
+    }
+
+    #[test]
+    fn solve_template_literal_hard_stops_above_product_limit() {
+        // Create a template literal whose cartesian product exceeds the cap.
+        // With 17 binary union expressions: 2^17 = 131072 > 100_000.
+        let binary_union = TypeExpr::Union(Arc::from(vec![
+            TypeExpr::string_literal("a"),
+            TypeExpr::string_literal("b"),
+        ]));
+        let expressions: Vec<TypeExpr> = (0..17).map(|_| binary_union.clone()).collect();
+        let quasis: Vec<String> = (0..=17).map(|_| String::new()).collect();
+        let expr = TypeExpr::TemplateLiteral {
+            quasis,
+            expressions: Arc::from(expressions),
+        };
+        let result = solve_type(&expr, &NoopSolverHost);
+
+        assert_eq!(
+            result.execution_status,
+            ExecutionStatus::HardStop,
+            "should hard-stop above product limit"
+        );
+        assert_ne!(
+            result.execution_status,
+            ExecutionStatus::Completed,
+            "should NOT report Completed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SolveBatch tests
+    // -----------------------------------------------------------------------
+
+    /// A counting solver host that tracks how many times `resolve_prepared_type_decl`
+    /// is called. Delegates to an inner `FxHashMap` for actual resolution.
+    struct CountingSolverHost {
+        types: FxHashMap<String, Arc<PreparedTypeDecl>>,
+        resolve_count: std::cell::Cell<u32>,
+    }
+
+    impl CountingSolverHost {
+        fn new() -> Self {
+            Self {
+                types: FxHashMap::default(),
+                resolve_count: std::cell::Cell::new(0),
+            }
+        }
+
+        fn with_type(mut self, id: &str, name: &str, body: TypeExpr) -> Self {
+            self.types.insert(
+                name.to_string(),
+                Arc::new(PreparedTypeDecl::new(
+                    ResolvedRootIdentity::new(id, name),
+                    TypeDeclKind::Alias,
+                    body,
+                )),
+            );
+            self
+        }
+
+        fn resolve_calls(&self) -> u32 {
+            self.resolve_count.get()
+        }
+    }
+
+    impl TypeSolverHost for CountingSolverHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            self.resolve_count.set(self.resolve_count.get() + 1);
+            self.types.get(&root_identity.symbol_name).cloned()
+        }
+
+        fn resolve_prepared_value_decl(
+            &self,
+            _root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            None
+        }
+
+        fn utility_source(&self, name: &str) -> UtilitySource {
+            if BuiltinUtility::from_name(name).is_some() {
+                UtilitySource::Builtin
+            } else {
+                UtilitySource::Unknown
+            }
+        }
+
+        fn root_identity(
+            &self,
+            _canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            if self.types.contains_key(symbol_name) {
+                Some(ResolvedRootIdentity::new("/types.ts", symbol_name))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn solve_batch_reuses_same_expr_without_second_host_lookup() {
+        let host = CountingSolverHost::new().with_type(
+            "/types.ts",
+            "Shared",
+            TypeExpr::Primitive(PrimitiveName::String),
+        );
+        let expr = TypeExpr::Ref {
+            name: Arc::from("Shared"),
+            type_arguments: Arc::from(vec![]),
+        };
+
+        let mut batch = SolveBatch::new(&host);
+
+        let result1 = batch.solve(&expr);
+        let calls_after_first = host.resolve_calls();
+        assert!(
+            calls_after_first > 0,
+            "first call should trigger host lookup"
+        );
+
+        let result2 = batch.solve(&expr);
+        let calls_after_second = host.resolve_calls();
+
+        // Positive: both produce the same semantic result
+        assert_eq!(result1.value, result2.value);
+        assert_eq!(
+            result1.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "should resolve Shared to String"
+        );
+        // Negative: second call must not increase host lookup count
+        assert_eq!(
+            calls_after_first, calls_after_second,
+            "cached hit should not trigger another host lookup"
+        );
+        // Negative: result should not be Unknown or a leftover Ref
+        assert_ne!(result1.exactness, SolverExactness::Incomplete);
+    }
+
+    #[test]
+    fn solve_batch_preserves_trace_on_hit() {
+        // Use a type hosted on an external canonical file so the trace is non-empty.
+        // The solver records external decl visits when the canonical_id is not "$owner".
+        let host = CountingSolverHost::new().with_type(
+            "/dep.ts",
+            "Imported",
+            TypeExpr::Primitive(PrimitiveName::Number),
+        );
+        let expr = TypeExpr::Ref {
+            name: Arc::from("Imported"),
+            type_arguments: Arc::from(vec![]),
+        };
+
+        let mut batch = SolveBatch::new(&host);
+
+        let (result1, trace1) = batch.solve_with_trace(&expr);
+        let (result2, trace2) = batch.solve_with_trace(&expr);
+
+        // Positive: both produce the same result
+        assert_eq!(result1.value, result2.value);
+        assert_eq!(
+            result1.value,
+            TypeExpr::Primitive(PrimitiveName::Number),
+            "should resolve to Number"
+        );
+        // Positive: trace should be non-empty (external file)
+        assert!(
+            !trace1.is_empty(),
+            "trace should capture visited external declaration /dep.ts::Imported"
+        );
+        // Positive: cached trace matches original
+        assert_eq!(
+            trace1, trace2,
+            "cached trace should match the original trace"
+        );
+    }
+
+    #[test]
+    fn solve_batch_distinguishes_distinct_exprs() {
+        let host = CountingSolverHost::new()
+            .with_type(
+                "/types.ts",
+                "Alpha",
+                TypeExpr::Primitive(PrimitiveName::String),
+            )
+            .with_type(
+                "/types.ts",
+                "Beta",
+                TypeExpr::Primitive(PrimitiveName::Number),
+            );
+
+        let expr_a = TypeExpr::Ref {
+            name: Arc::from("Alpha"),
+            type_arguments: Arc::from(vec![]),
+        };
+        let expr_b = TypeExpr::Ref {
+            name: Arc::from("Beta"),
+            type_arguments: Arc::from(vec![]),
+        };
+
+        let mut batch = SolveBatch::new(&host);
+
+        let result_a = batch.solve(&expr_a);
+        let result_b = batch.solve(&expr_b);
+
+        // Positive: different expressions produce different results
+        assert_ne!(result_a.value, result_b.value);
+        assert_eq!(result_a.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert_eq!(result_b.value, TypeExpr::Primitive(PrimitiveName::Number));
+        // Positive: both should have triggered host lookups
+        assert!(
+            host.resolve_calls() >= 2,
+            "distinct expressions should each trigger at least one host lookup"
+        );
+        // Negative: neither should be incomplete
+        assert_eq!(result_a.execution_status, ExecutionStatus::Completed);
+        assert_eq!(result_b.execution_status, ExecutionStatus::Completed);
+    }
+
+    #[test]
+    fn solve_batch_matches_uncached_result_on_first_miss() {
+        let host = CountingSolverHost::new().with_type(
+            "/types.ts",
+            "Props",
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+        );
+        let expr = TypeExpr::Ref {
+            name: Arc::from("Props"),
+            type_arguments: Arc::from(vec![]),
+        };
+
+        // Uncached path
+        let uncached = solve_type(&expr, &host);
+
+        let mut batch = SolveBatch::new(&host);
+        let batched = batch.solve(&expr);
+
+        // Positive: batch first-miss matches uncached
+        assert_eq!(
+            uncached.value, batched.value,
+            "batch first-miss should match uncached solve_type"
+        );
+        assert_eq!(uncached.exactness, batched.exactness);
+        assert_eq!(uncached.execution_status, batched.execution_status);
+        // Negative: should not produce Unknown
+        assert_ne!(
+            batched.value,
+            TypeExpr::Primitive(PrimitiveName::Unknown),
+            "should not fall back to Unknown"
+        );
+    }
+
+    /// Verify cancelled requests get a cheap cancelled outcome without running
+    /// resolution. Uses a Ref type that would require host lookup if not cancelled.
+    #[test]
+    fn solve_batch_respects_cancellation() {
+        struct CancelledHost;
+
+        impl TypeSolverHost for CancelledHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                _: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                panic!("should not be called on cancelled request");
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedValueDecl>> {
+                panic!("should not be called on cancelled request");
+            }
+
+            fn utility_source(&self, _: &str) -> UtilitySource {
+                UtilitySource::Unknown
+            }
+
+            fn request_status(&self) -> RequestStatus {
+                RequestStatus::Cancelled
+            }
+        }
+
+        let host = CancelledHost;
+        // Use a Ref that would normally trigger host resolution — the
+        // cancellation check must prevent this from ever reaching the host.
+        let expr = TypeExpr::Ref {
+            name: Arc::from("ShouldNotResolve"),
+            type_arguments: Arc::from(vec![]),
+        };
+
+        let mut batch = SolveBatch::new(&host);
+        let result = batch.solve(&expr);
+        let uncached = solve_type(&expr, &host);
+
+        // Positive: execution status is Cancelled
+        assert_eq!(result.execution_status, ExecutionStatus::Cancelled);
+        assert_eq!(
+            result.value, uncached.value,
+            "cancelled batch path should preserve the uncached projected value"
+        );
+        assert_eq!(
+            result.exactness, uncached.exactness,
+            "cancelled batch path should preserve uncached exactness semantics"
+        );
+        // Negative: should not be Completed or HardStop
+        assert_ne!(result.execution_status, ExecutionStatus::Completed);
+        assert_ne!(result.execution_status, ExecutionStatus::HardStop);
+
+        // Also test solve_with_trace path
+        let (trace_result, trace) = batch.solve_with_trace(&expr);
+        assert_eq!(trace_result.execution_status, ExecutionStatus::Cancelled);
+        assert!(
+            trace.is_empty(),
+            "cancelled request should produce empty trace"
+        );
+    }
+
+    #[test]
+    fn hardstop_on_one_branch_does_not_add_spurious_step_limit_reason() {
+        let binary_union = TypeExpr::Union(Arc::from(vec![
+            TypeExpr::string_literal("a"),
+            TypeExpr::string_literal("b"),
+        ]));
+        let expressions: Vec<TypeExpr> = (0..17).map(|_| binary_union.clone()).collect();
+        let quasis: Vec<String> = (0..=17).map(|_| String::new()).collect();
+        let explosive = TypeExpr::TemplateLiteral {
+            quasis,
+            expressions: Arc::from(expressions),
+        };
+        let expr = TypeExpr::Union(Arc::from(vec![
+            explosive,
+            TypeExpr::Primitive(PrimitiveName::String),
+        ]));
+
+        let result = solve_type(&expr, &NoopSolverHost);
+
+        assert_eq!(result.execution_status, ExecutionStatus::HardStop);
+        assert!(
+            result.incomplete_reasons.iter().any(|reason| matches!(
+                reason,
+                IncompleteReason::RecursionPolicy { description }
+                    if description.contains("template literal expansion")
+            )),
+            "template literal hard-stop reason should be preserved"
+        );
+        assert!(
+            !result.incomplete_reasons.iter().any(|reason| matches!(
+                reason,
+                IncompleteReason::UnsupportedSyntax { description }
+                    if description == "resolve step or arena size limit exceeded"
+            )),
+            "sibling branches should not be relabeled as step-limit failures after a hard-stop"
+        );
     }
 }

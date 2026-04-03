@@ -178,7 +178,7 @@ pub struct RecursionKey {
 }
 
 impl RecursionTracker {
-    const MAX_SYMBOL_REENTRY: usize = 5;
+    const MAX_SYMBOL_REENTRY: usize = 10;
 
     pub fn new() -> Self {
         Self::default()
@@ -399,21 +399,31 @@ mod tests {
     fn recursion_tracker_limits_structural_symbol_reentry() {
         let mut tracker = RecursionTracker::new();
 
-        for args_hash in 0..5 {
+        // Push MAX_SYMBOL_REENTRY (10) distinct args_hash entries — all should succeed.
+        for args_hash in 0..10 {
             let key = RecursionKey {
                 canonical_id: "/types.ts".into(),
                 symbol_name: "NestedItem".into(),
                 args_hash,
             };
-            assert!(tracker.enter(key.clone()).is_none());
+            assert!(
+                tracker.enter(key.clone()).is_none(),
+                "entry {} should succeed",
+                args_hash
+            );
             tracker.push(key, NodeId(args_hash as u32));
         }
 
+        // The 11th reentry (different args_hash) should return the last placeholder.
         let structural_reentry = RecursionKey {
             canonical_id: "/types.ts".into(),
             symbol_name: "NestedItem".into(),
             args_hash: 99,
         };
-        assert_eq!(tracker.enter(structural_reentry), Some(NodeId(4)));
+        assert_eq!(
+            tracker.enter(structural_reentry),
+            Some(NodeId(9)),
+            "11th reentry should return last placeholder"
+        );
     }
 }

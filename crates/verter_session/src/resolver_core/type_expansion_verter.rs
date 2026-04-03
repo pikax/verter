@@ -192,7 +192,7 @@ pub fn resolved_macro_to_expansion_via_solver(
     TypeExpansionResult,
     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
 ) {
-    use verter_semantic::analysis::type_solver::solve::{solve_type_with_trace, SolveLimits};
+    use verter_semantic::analysis::type_solver::solve::SolveBatch;
 
     let solver_host = if macro_meta.declaration.canonical_source.is_empty() {
         crate::resolver_core::SessionSolverHost::new(host, store_view)
@@ -203,7 +203,7 @@ pub fn resolved_macro_to_expansion_via_solver(
             macro_meta.declaration.canonical_source.as_str(),
         )
     };
-    let limits = SolveLimits::default();
+    let mut batch = SolveBatch::new(&solver_host);
     let mut all_visited = Vec::new();
 
     let mut members = Vec::new();
@@ -214,7 +214,7 @@ pub fn resolved_macro_to_expansion_via_solver(
             .as_deref()
             .map(|text| {
                 let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
-                let (result, trace) = solve_type_with_trace(&parsed, &solver_host, limits.clone());
+                let (result, trace) = batch.solve_with_trace(&parsed);
                 all_visited.extend(trace);
                 result.value
             })
@@ -235,7 +235,7 @@ pub fn resolved_macro_to_expansion_via_solver(
             .as_deref()
             .map(|text| {
                 let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
-                let (result, trace) = solve_type_with_trace(&parsed, &solver_host, limits.clone());
+                let (result, trace) = batch.solve_with_trace(&parsed);
                 all_visited.extend(trace);
                 result.value
             })
@@ -268,7 +268,7 @@ pub fn resolved_macro_to_expansion_via_solver(
 
     let type_expr = if !macro_meta.type_name.is_empty() {
         let parsed = TypeExpr::named(&macro_meta.type_name);
-        let (result, trace) = solve_type_with_trace(&parsed, &solver_host, limits);
+        let (result, trace) = batch.solve_with_trace(&parsed);
         all_visited.extend(trace);
         result.value
     } else {

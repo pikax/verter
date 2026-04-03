@@ -15,14 +15,14 @@ pub use request::{
 use crate::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use crate::analysis::type_solver::host::TypeSolverHost;
 use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
-use crate::analysis::type_solver::solve::{solve_type, SolveLimits};
+use crate::analysis::type_solver::solve::solve_type;
 
 /// Expand a `TypeExpr` into an `ExpandedObjectShape` via the native solver.
 pub fn expand_object_shape(
     expr: &TypeExpr,
     solver_host: &dyn TypeSolverHost,
 ) -> ExpansionResult<ExpandedObjectShape> {
-    let result = solve_type(expr, solver_host, SolveLimits::default());
+    let result = solve_type(expr, solver_host);
     type_expr_to_object_result(&result.value, result.exactness)
 }
 
@@ -31,7 +31,7 @@ pub fn expand_normalized_expr(
     expr: &TypeExpr,
     solver_host: &dyn TypeSolverHost,
 ) -> ExpansionResult<ExpandedNormalizedExpr> {
-    let result = solve_type(expr, solver_host, SolveLimits::default());
+    let result = solve_type(expr, solver_host);
     ExpansionResult {
         value: ExpandedNormalizedExpr { expr: result.value },
         exactness: result.exactness,

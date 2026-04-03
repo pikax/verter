@@ -300,10 +300,5 @@ impl Default for EvalEnv {
 /// `TypeSolverHost` — it creates an `EvalEnvSolverHost` from the env.
 pub fn evaluate(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
     let solver_host = crate::analysis::type_solver::host::EvalEnvSolverHost::new(env);
-    crate::analysis::type_solver::solve::solve_type(
-        expr,
-        &solver_host,
-        crate::analysis::type_solver::solve::SolveLimits::default(),
-    )
-    .value
+    crate::analysis::type_solver::solve::solve_type(expr, &solver_host).value
 }

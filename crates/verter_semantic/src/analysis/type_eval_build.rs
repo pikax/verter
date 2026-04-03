@@ -1089,7 +1089,7 @@ fn expand_macro_types_impl(
     };
     use crate::analysis::type_expr_lower::parse_type_annotation;
     use crate::analysis::type_solver::result::{IncompleteReason, SolverResult};
-    use crate::analysis::type_solver::solve::{solve_type, SolveLimits};
+    use crate::analysis::type_solver::solve::SolveBatch;
 
     // -- local helpers: solver result → expansion result conversion --
 
@@ -1142,6 +1142,7 @@ fn expand_macro_types_impl(
         }
     }
 
+    let mut batch = SolveBatch::new(solver_host);
     let mut result = ExpandedComponentTypes::default();
     let macro_type_params = source.map(collect_define_macro_type_params);
     let mut define_props_index = 0usize;
@@ -1176,7 +1177,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = solve_type(&parsed, solver_host, SolveLimits::default());
+                    let solved = batch.solve(&parsed);
                     let expanded = solver_to_expr_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1215,7 +1216,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = solve_type(lowered, solver_host, SolveLimits::default());
+                    let solved = batch.solve(lowered);
                     let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1253,7 +1254,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = solve_type(lowered, solver_host, SolveLimits::default());
+                    let solved = batch.solve(lowered);
                     let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1288,7 +1289,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = solve_type(&parsed, solver_host, SolveLimits::default());
+                    let solved = batch.solve(&parsed);
                     let expanded = solver_to_expr_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1333,7 +1334,7 @@ fn expand_macro_types_impl(
                         if let Some(env) = debug_env.as_deref_mut() {
                             env.preserve_canonical_vue_vnode_slot_returns = true;
                         }
-                        let solved = solve_type(lowered, solver_host, SolveLimits::default());
+                        let solved = batch.solve(lowered);
                         if let (Some(previous), Some(env)) =
                             (previous_slot_return_mode, debug_env.as_deref_mut())
                         {
@@ -1382,7 +1383,7 @@ fn expand_macro_types_impl(
                             start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                         };
                         log_expand_stage_start(&stage_log);
-                        let solved = solve_type(&parsed, solver_host, SolveLimits::default());
+                        let solved = batch.solve(&parsed);
                         let expanded = solver_to_expr_result(solved);
                         log_expand_stage(
                             stage_log,
@@ -1418,7 +1419,7 @@ fn expand_macro_types_impl(
             start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
         };
         log_expand_stage_start(&stage_log);
-        let solved = solve_type(type_ann, solver_host, SolveLimits::default());
+        let solved = batch.solve(type_ann);
         let expanded = solver_to_expr_result(solved);
         log_expand_stage(
             stage_log,

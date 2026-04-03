@@ -1524,20 +1524,35 @@ export type PricingPlansSlots<TPlan extends PricingPlan = PricingPlan> = {
     let Some(first_param) = func.parameters.first() else {
         panic!("badge slot function should have one parameter");
     };
-    let TypeExpr::Object(obj) = &first_param.ty else {
-        panic!(
-            "badge slot parameter should be an object type, got {:?}",
-            first_param.ty
-        );
+    // Collect property names from either a flat Object or an Intersection of Objects
+    // (the solver may keep `P & { plan: TPlan }` as an intersection rather than
+    // flattening — both are semantically correct).
+    let binding_names: std::collections::BTreeSet<_> = match &first_param.ty {
+        TypeExpr::Object(obj) => obj
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                _ => None,
+            })
+            .collect(),
+        TypeExpr::Intersection(members) => members
+            .iter()
+            .filter_map(|m| match m {
+                TypeExpr::Object(obj) => Some(obj.properties.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|member| match member {
+                ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                _ => None,
+            })
+            .collect(),
+        other => panic!(
+            "badge slot parameter should be an object or intersection type, got {:?}",
+            other
+        ),
     };
-    let binding_names: std::collections::BTreeSet<_> = obj
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(prop) => Some(prop.name.as_str()),
-            _ => None,
-        })
-        .collect();
     assert_eq!(
         binding_names,
         std::collections::BTreeSet::from(["plan", "planId"])

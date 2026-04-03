@@ -223,13 +223,11 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             return None;
         }
 
-        let Some(target) = self.host.resolve_value_export_target_in_view(
+        let target = self.host.resolve_value_export_target_in_view(
             &root_identity.canonical_id,
             &root_identity.symbol_name,
             self.store_view,
-        ) else {
-            return None;
-        };
+        )?;
         let final_canonical_id = target.canonical_id;
         let final_symbol_name = target.name;
         if final_canonical_id == root_identity.canonical_id

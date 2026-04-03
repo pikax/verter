@@ -821,11 +821,11 @@ impl VerterHost {
             let pending_source_hint = imported_owner_route
                 .as_ref()
                 .map(|(canonical_id, _)| canonical_id.as_str())
-                .or_else(|| pending.source_hint.as_deref());
+                .or(pending.source_hint.as_deref());
             let pending_exported_name = imported_owner_route
                 .as_ref()
                 .map(|(_, exported_name)| exported_name.as_str())
-                .or_else(|| pending.exported_name.as_deref());
+                .or(pending.exported_name.as_deref());
             if crate::host_manage::component_meta_debug_enabled() {
                 crate::host_manage::component_meta_debug(format!(
                     "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?}",
@@ -1568,6 +1568,12 @@ struct PendingComponentMetaRegistryRef {
     exported_name: Option<String>,
 }
 
+type PreparedAliasEntry = Option<(
+    String,
+    String,
+    crate::resolver_core::CachedPreparedImportedTypeAlias,
+)>;
+
 #[derive(Default)]
 struct ComponentMetaRegistryAppendCache {
     owner_collection_exprs:
@@ -1577,14 +1583,7 @@ struct ComponentMetaRegistryAppendCache {
         Option<verter_semantic::analysis::type_expr::TypeExpr>,
     >,
     declarations: rustc_hash::FxHashMap<(String, String), ResolvedTypeDeclaration>,
-    prepared_aliases: rustc_hash::FxHashMap<
-        (String, String),
-        Option<(
-            String,
-            String,
-            crate::resolver_core::CachedPreparedImportedTypeAlias,
-        )>,
-    >,
+    prepared_aliases: rustc_hash::FxHashMap<(String, String), PreparedAliasEntry>,
     resolvable_refs: rustc_hash::FxHashMap<(String, String), bool>,
 }
 
@@ -1877,11 +1876,7 @@ fn solve_component_meta_registry_decl_in_view(
         scope_canonical_id,
     );
     let type_ref = verter_semantic::analysis::type_expr::TypeExpr::named(requested_name);
-    let result = verter_semantic::analysis::type_solver::solve::solve_type(
-        &type_ref,
-        &solver_host,
-        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
-    );
+    let result = verter_semantic::analysis::type_solver::solve::solve_type(&type_ref, &solver_host);
 
     match &result.value {
         verter_semantic::analysis::type_expr::TypeExpr::Ref {
@@ -3276,11 +3271,7 @@ fn resolve_jsdoc_tag_type(
         store_view,
         canonical_source,
     );
-    let resolved = verter_semantic::analysis::type_solver::solve::solve_type(
-        &parsed,
-        &solver_host,
-        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
-    );
+    let resolved = verter_semantic::analysis::type_solver::solve::solve_type(&parsed, &solver_host);
     Some(resolved.value)
 }
 

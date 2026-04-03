@@ -5410,7 +5410,6 @@ export type Avatar = {
     let prepared_avatar = verter_semantic::analysis::type_solver::solve::solve_type(
         &TypeExpr::named("Avatar"),
         &solver_host,
-        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
     )
     .value;
     assert!(
@@ -5544,7 +5543,6 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
     let evaluated = verter_semantic::analysis::type_solver::solve::solve_type(
         &TypeExpr::named("ButtonProps"),
         &solver_host,
-        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
     )
     .value;
     let mut prop_names = std::collections::BTreeSet::new();
@@ -5653,7 +5651,6 @@ defineProps<Props>()
     let evaluated = verter_semantic::analysis::type_solver::solve::solve_type(
         &TypeExpr::named("Props"),
         &solver_host,
-        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
     )
     .value;
     let mut prop_names = std::collections::BTreeSet::new();
@@ -5670,8 +5667,6 @@ defineProps<Props>()
     );
 }
 
-#[cfg(feature = "scheduler")]
-#[cfg(feature = "scheduler")]
 #[cfg(feature = "scheduler")]
 #[test]
 fn get_component_meta_reuses_barrel_routes_for_multiple_late_exports() {
@@ -6883,4 +6878,163 @@ defineProps<MissingType>()
             meta.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-owner file-level reuse tests (budget alignment plan)
+// ---------------------------------------------------------------------------
+
+/// Two different Vue files importing the same type from the same canonical
+/// file should share the host-owned imported file state.
+#[test]
+fn same_canonical_file_reuses_state_across_two_owners() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Shared { label: string }",
+    );
+    upsert_vue(
+        &host,
+        "/OwnerA.vue",
+        r#"<script setup lang="ts">
+import type { Shared } from './types'
+defineProps<Shared>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/OwnerB.vue",
+        r#"<script setup lang="ts">
+import type { Shared } from './types'
+defineProps<Shared>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta_a = host
+        .get_component_meta("/OwnerA.vue")
+        .expect("OwnerA should produce meta");
+    let meta_b = host
+        .get_component_meta("/OwnerB.vue")
+        .expect("OwnerB should produce meta");
+
+    // Both owners should see the same "label" prop from Shared
+    assert_eq!(meta_a.props.len(), 1, "OwnerA should have one prop");
+    assert_eq!(meta_b.props.len(), 1, "OwnerB should have one prop");
+    assert_eq!(meta_a.props[0].name, "label");
+    assert_eq!(meta_b.props[0].name, "label");
+
+    // Warm call for OwnerA should not trigger recomputes
+    host.provenance.reset();
+    let meta_a_warm = host
+        .get_component_meta("/OwnerA.vue")
+        .expect("warm OwnerA should produce meta");
+    let recomputes = host
+        .provenance
+        .component_meta_resolved_state_recomputes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        meta_a_warm.props.len(),
+        meta_a.props.len(),
+        "warm call should return identical meta"
+    );
+    assert_eq!(
+        recomputes, 0,
+        "warm call should not trigger resolved state recomputes"
+    );
+}
+
+/// Mutating an imported dependency should invalidate only that file's
+/// cache lineage, while owner-file caches stay warm.
+#[test]
+fn changed_imported_dependency_keeps_owner_files_warm() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Props { label: string }",
+    );
+    upsert_vue(
+        &host,
+        "/OwnerA.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/OwnerB.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // Cold: both owners compute meta
+    let meta_a1 = host.get_component_meta("/OwnerA.vue").expect("cold OwnerA");
+    let meta_b1 = host.get_component_meta("/OwnerB.vue").expect("cold OwnerB");
+    assert_eq!(meta_a1.props.len(), 1);
+    assert_eq!(meta_b1.props.len(), 1);
+
+    // Mutate the imported dependency — add a new prop
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Props { label: string; count: number }",
+    );
+
+    // Owner files were NOT changed, only the dependency
+    let meta_a2 = host
+        .get_component_meta("/OwnerA.vue")
+        .expect("post-change OwnerA");
+    let meta_b2 = host
+        .get_component_meta("/OwnerB.vue")
+        .expect("post-change OwnerB");
+
+    // Both owners should now see the updated two-prop shape
+    assert_eq!(
+        meta_a2.props.len(),
+        2,
+        "OwnerA should reflect the updated dependency (label + count)"
+    );
+    assert_eq!(
+        meta_b2.props.len(),
+        2,
+        "OwnerB should reflect the updated dependency (label + count)"
+    );
+    // Positive: new prop present
+    assert!(
+        meta_a2.props.iter().any(|p| p.name == "count"),
+        "OwnerA should have the new 'count' prop"
+    );
+    // Positive: old prop still present
+    assert!(
+        meta_a2.props.iter().any(|p| p.name == "label"),
+        "OwnerA should still have the original 'label' prop"
+    );
+    // Negative: old result no longer valid
+    assert_ne!(
+        meta_a1.props.len(),
+        meta_a2.props.len(),
+        "cached meta must have been invalidated by the dependency change"
+    );
+    // Negative: no phantom props beyond the expected two
+    let prop_names: Vec<&str> = meta_a2.props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        prop_names.len(),
+        2,
+        "should have exactly 2 props, no phantom data: {:?}",
+        prop_names
+    );
 }
