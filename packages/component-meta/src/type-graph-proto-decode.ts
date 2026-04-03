@@ -46,6 +46,7 @@ import {
   NODE_OBJECT,
   NODE_PARENTHESIZED,
   NODE_PRIMITIVE,
+  NODE_RECURSIVE_REF,
   NODE_REF,
   NODE_REST,
   NODE_TEMPLATE_LITERAL,
@@ -67,6 +68,7 @@ import {
   ROOT_TARGET_DYNAMIC_COMPONENT_USAGE,
   ROOT_TARGET_NATIVE_ELEMENT,
   ROOT_TARGET_UNRESOLVED,
+  type GraphConditionalFrameRecord,
   type GraphFunctionParamRecord,
   type GraphNodeRecord,
   type GraphObjectMemberRecord,
@@ -160,7 +162,9 @@ function decodeTypeGraph(typeGraph: ProtoRecord): DecodedTypeGraph {
 }
 
 function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
-  const kind = node.kind?.case;
+  const kind = node.kind?.case as typeof node.kind extends { case: infer C }
+    ? C | "recursiveRef"
+    : string | undefined;
   const value = node.kind?.value as ProtoRecord | undefined;
 
   switch (kind) {
@@ -298,6 +302,20 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
       return { kind: NODE_INFER, nameId: Number(value?.nameId ?? 0) };
     case "rest":
       return { kind: NODE_REST, innerNodeId: Number(value?.innerNodeId ?? 0) };
+    case "recursiveRef":
+      return {
+        kind: NODE_RECURSIVE_REF,
+        nameId: Number(value?.nameId ?? 0),
+        typeArgumentNodeIds: numberList(value?.typeArgumentNodeIds),
+        conditionalContext: ((value?.conditionalContext as ProtoRecord[] | undefined) ?? []).map(
+          (frame) => ({
+            branch: Number(frame.branch ?? 0),
+            decided: Boolean(frame.decided),
+            checkNodeId: Number(frame.checkNodeId ?? 0),
+            extendsNodeId: Number(frame.extendsNodeId ?? 0),
+          }),
+        ) as GraphConditionalFrameRecord[],
+      };
     default:
       throw graphError("component-meta graph payload has unknown node kind 0");
   }
@@ -421,6 +439,14 @@ function validateNodeTable(graph: DecodedTypeGraph): void {
         break;
       case NODE_REST:
         graph.getNode(node.innerNodeId);
+        break;
+      case NODE_RECURSIVE_REF:
+        graph.getString(node.nameId);
+        node.typeArgumentNodeIds.forEach((id) => graph.getNode(id));
+        node.conditionalContext.forEach((frame) => {
+          graph.getNode(frame.checkNodeId);
+          graph.getNode(frame.extendsNodeId);
+        });
         break;
       default:
         break;
@@ -1023,10 +1049,7 @@ function decodeRootBranch(branch: ProtoRecord, graph: DecodedTypeGraph): NativeR
   };
 }
 
-function decodeRootTargetRef(
-  target: ProtoRecord,
-  graph: DecodedTypeGraph,
-): NativeRootTargetRef {
+function decodeRootTargetRef(target: ProtoRecord, graph: DecodedTypeGraph): NativeRootTargetRef {
   const kind = Number(target.kind ?? 0);
   switch (kind) {
     case ROOT_TARGET_NATIVE_ELEMENT:
@@ -1503,9 +1526,7 @@ function decodeStringList(ids: number[], graph: DecodedTypeGraph, context: strin
   return ids.map((id) => graph.getString(readRequiredId(id, context)));
 }
 
-function decodeExpansionExactness(
-  value: number,
-): "exactConcrete" | "exactSymbolic" | "incomplete" {
+function decodeExpansionExactness(value: number): "exactConcrete" | "exactSymbolic" | "incomplete" {
   switch (value) {
     case EXPANSION_EXACTNESS_EXACT_CONCRETE:
       return "exactConcrete";

@@ -1194,6 +1194,23 @@ fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
         GraphNode::Rest { inner } => type_node::Kind::Rest(RestNode {
             inner_node_id: *inner,
         }),
+        GraphNode::RecursiveRef {
+            name,
+            type_arguments,
+            conditional_context,
+        } => type_node::Kind::RecursiveRef(proto::RecursiveRefNode {
+            name_id: *name,
+            type_argument_node_ids: type_arguments.clone(),
+            conditional_context: conditional_context
+                .iter()
+                .map(|f| proto::ConditionalFrameNode {
+                    branch: f.branch,
+                    decided: f.decided,
+                    check_node_id: f.check,
+                    extends_node_id: f.extends,
+                })
+                .collect(),
+        }),
     };
     TypeNode { kind: Some(kind) }
 }

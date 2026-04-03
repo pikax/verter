@@ -1136,6 +1136,11 @@ pub(crate) fn collect_type_expr_symbol_refs(
                 collect_type_expr_symbol_refs(expr, refs);
             }
         }
+        TypeExpr::RecursiveRef { type_arguments, .. } => {
+            for arg in type_arguments.iter() {
+                collect_type_expr_symbol_refs(arg, refs);
+            }
+        }
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::TypeParameter(_)

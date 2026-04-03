@@ -1629,6 +1629,7 @@ fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
             | TypeExpr::Infer { .. }
             | TypeExpr::TypeOf(_)
             | TypeExpr::Unknown { .. }
+            | TypeExpr::RecursiveRef { .. }
             | TypeExpr::TypeParameter(_) => false,
             TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
                 types.iter().any(|inner| visit(inner, seen, limit))

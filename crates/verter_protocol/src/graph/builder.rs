@@ -95,6 +95,21 @@ pub enum GraphNode {
     Rest {
         inner: u32,
     },
+    RecursiveRef {
+        name: u32,
+        type_arguments: Vec<u32>,
+        conditional_context: Vec<GraphConditionalFrame>,
+    },
+}
+
+/// A conditional branch frame in the graph transport.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GraphConditionalFrame {
+    /// 1 = true, 2 = false
+    pub branch: u32,
+    pub decided: bool,
+    pub check: u32,
+    pub extends: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -277,6 +292,26 @@ impl GraphBuilder {
             TypeExpr::Rest(inner) => GraphNode::Rest {
                 inner: self.node_id(inner),
             },
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => GraphNode::RecursiveRef {
+                name: self.string_id(name),
+                type_arguments: type_arguments.iter().map(|ty| self.node_id(ty)).collect(),
+                conditional_context: conditional_context
+                    .iter()
+                    .map(|f| GraphConditionalFrame {
+                        branch: match f.branch {
+                            verter_semantic::analysis::type_expr::RecursiveConditionalBranch::True => 1,
+                            verter_semantic::analysis::type_expr::RecursiveConditionalBranch::False => 2,
+                        },
+                        decided: f.decided,
+                        check: self.node_id(&f.check),
+                        extends: self.node_id(&f.extends),
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -434,4 +469,54 @@ impl GraphBuilder {
 
 fn mapped_modifier_tag(modifier: MappedModifier) -> u32 {
     schema::mapped_modifier_to_tag(modifier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_semantic::analysis::type_expr::{
+        PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame, TypeExpr,
+    };
+
+    #[test]
+    fn graph_builder_encodes_recursive_ref_not_unknown() {
+        let expr = TypeExpr::RecursiveRef {
+            name: std::sync::Arc::from("Tree"),
+            type_arguments: std::sync::Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            conditional_context: std::sync::Arc::from(vec![RecursiveConditionalFrame {
+                branch: RecursiveConditionalBranch::True,
+                decided: true,
+                check: std::sync::Arc::new(TypeExpr::named("T")),
+                extends: std::sync::Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            }]),
+        };
+
+        let mut builder = GraphBuilder::new();
+        let node_id = builder.node_id(&expr);
+        let nodes = builder.nodes();
+        let node = &nodes[(node_id - 1) as usize];
+
+        assert!(
+            matches!(node, GraphNode::RecursiveRef { .. }),
+            "graph builder must produce GraphNode::RecursiveRef, got {:?}",
+            std::mem::discriminant(node)
+        );
+
+        if let GraphNode::RecursiveRef {
+            name,
+            type_arguments,
+            conditional_context,
+        } = node
+        {
+            assert!(*name > 0, "name string ID should be set");
+            assert_eq!(type_arguments.len(), 1, "should have 1 type argument");
+            assert_eq!(
+                conditional_context.len(),
+                1,
+                "should have 1 conditional frame"
+            );
+            assert_eq!(conditional_context[0].branch, 1, "branch=true should be 1");
+            assert!(conditional_context[0].decided);
+        }
+    }
 }

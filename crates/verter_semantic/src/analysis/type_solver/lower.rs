@@ -160,6 +160,39 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
 
         TypeExpr::Parenthesized(inner) => lower_type_expr(arena, inner),
 
+        TypeExpr::RecursiveRef {
+            name,
+            type_arguments,
+            conditional_context,
+        } => {
+            use super::arena::{ConditionalBranch, ConditionalFrameSnapshot};
+            let args: Vec<NodeId> = type_arguments
+                .iter()
+                .map(|a| lower_type_expr(arena, a))
+                .collect();
+            let ctx: Vec<ConditionalFrameSnapshot> = conditional_context
+                .iter()
+                .map(|f| ConditionalFrameSnapshot {
+                    branch: match f.branch {
+                        crate::analysis::type_expr::RecursiveConditionalBranch::True => {
+                            ConditionalBranch::True
+                        }
+                        crate::analysis::type_expr::RecursiveConditionalBranch::False => {
+                            ConditionalBranch::False
+                        }
+                    },
+                    decided: f.decided,
+                    check: lower_type_expr(arena, &f.check),
+                    extends: lower_type_expr(arena, &f.extends),
+                })
+                .collect();
+            arena.alloc(Node::RecursiveRef {
+                symbol_name: name.to_string(),
+                type_arguments: args,
+                conditional_context: ctx,
+            })
+        }
+
         TypeExpr::Unknown { raw } => arena.error(raw.clone()),
     }
 }

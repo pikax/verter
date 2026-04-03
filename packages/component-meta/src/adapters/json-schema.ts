@@ -105,6 +105,7 @@ export function typeToJsonSchema(type: TypeDescriptor): JSONSchema {
       return { description: type.name };
 
     case "ref":
+    case "recursiveRef":
       // Named type reference — cannot resolve without context
       return { description: type.name };
 

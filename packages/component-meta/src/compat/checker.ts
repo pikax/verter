@@ -602,6 +602,8 @@ function typeDescriptorToCompatDisplay(
       }
       return typeDescriptorToString(descriptor);
     }
+    case "recursiveRef":
+      return typeDescriptorToString(descriptor);
   }
 }
 

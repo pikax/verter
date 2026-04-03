@@ -798,6 +798,7 @@ fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
         | TypeExpr::Ref { .. }
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Infer { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::Unknown { .. } => {}
     }
 }

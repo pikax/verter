@@ -272,9 +272,33 @@ fn display_node_inner(
             buf.push_str("...");
             display_node_inner(arena, *inner, buf, depth + 1, visited);
         }
-        Node::RecursiveRef { target } => {
+        Node::RecursiveRef {
+            symbol_name,
+            type_arguments,
+            conditional_context,
+        } => {
             buf.push_str("@rec(");
-            buf.push_str(&target.to_string());
+            buf.push_str(symbol_name);
+            if !type_arguments.is_empty() {
+                buf.push('<');
+                for (i, &arg) in type_arguments.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
+                    display_node_inner(arena, arg, buf, depth + 1, visited);
+                }
+                buf.push('>');
+            }
+            for frame in conditional_context {
+                buf.push_str(", ");
+                match frame.branch {
+                    super::arena::ConditionalBranch::True => buf.push_str("branch=true"),
+                    super::arena::ConditionalBranch::False => buf.push_str("branch=false"),
+                }
+                if frame.decided {
+                    buf.push_str(", decided");
+                }
+            }
             buf.push(')');
         }
         Node::Error { description } => {

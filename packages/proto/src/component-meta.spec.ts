@@ -20,5 +20,10 @@ describe("ComponentMetaPayloadSchema", () => {
     expect(graph?.strings[(body?.props[0]?.nameId ?? 0) - 1]).toBe("root");
     expect(graph?.nodes.length).toBeGreaterThan(0);
     expect(body?.slots).toHaveLength(1);
+    expect(graph?.nodes[2]?.kind.case).toBe("recursiveRef");
+    if (graph?.nodes[2]?.kind.case === "recursiveRef") {
+      expect(graph.nodes[2].kind.value.typeArgumentNodeIds).toEqual([1]);
+      expect(graph.nodes[2].kind.value.conditionalContext).toHaveLength(1);
+    }
   });
 });

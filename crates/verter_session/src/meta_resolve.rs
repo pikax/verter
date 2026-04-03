@@ -2085,6 +2085,7 @@ fn component_meta_registry_indexed_ref_penalty(
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::Ref { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
@@ -2329,6 +2330,7 @@ fn collect_component_meta_registry_refs(
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::Infer { .. } => {}
     }
@@ -2446,6 +2448,7 @@ fn collect_component_meta_registry_public_surface_refs(
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Infer { .. } => {}
@@ -2716,6 +2719,7 @@ fn collect_component_meta_registry_member_surface_refs(
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::Ref { .. } => {}

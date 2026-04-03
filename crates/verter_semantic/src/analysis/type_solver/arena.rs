@@ -130,10 +130,13 @@ pub enum Node {
     Rest(NodeId),
 
     // -- Special --
-    /// Recursive backedge / SCC placeholder — points to the node that will
-    /// be resolved during fixed-point iteration.
+    /// Recursive backedge / SCC placeholder. Preserves the recursive symbol
+    /// name, applied type arguments, and active conditional context at the
+    /// moment recursion was detected.
     RecursiveRef {
-        target: NodeId,
+        symbol_name: String,
+        type_arguments: Vec<NodeId>,
+        conditional_context: Vec<ConditionalFrameSnapshot>,
     },
     /// An error/unknown node carrying diagnostic context.
     Error {
@@ -254,6 +257,22 @@ pub struct ParamNode {
 #[derive(Debug, Clone)]
 pub struct FunctionNode {
     pub signatures: Vec<CallSignatureNode>,
+}
+
+/// A snapshot of one conditional branch frame in the solver arena.
+#[derive(Debug, Clone)]
+pub struct ConditionalFrameSnapshot {
+    pub branch: ConditionalBranch,
+    pub decided: bool,
+    pub check: NodeId,
+    pub extends: NodeId,
+}
+
+/// Which branch of a conditional type was active in the solver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConditionalBranch {
+    True,
+    False,
 }
 
 /// Declaration identity for applied/instantiated types — used as memoization

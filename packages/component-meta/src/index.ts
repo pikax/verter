@@ -77,6 +77,8 @@ export type {
   EnumType,
   EnumMember,
   RefType,
+  RecursiveRefType,
+  RecursiveRefConditionalFrame,
   UnknownType,
 } from "./type-ir.js";
 
@@ -91,6 +93,7 @@ export {
   func,
   typeParameter,
   ref,
+  recursiveRef,
   unknown,
 } from "./type-ir.js";
 

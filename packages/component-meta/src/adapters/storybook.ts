@@ -167,6 +167,10 @@ function typeToSummary(type: TypeDescriptor): string {
       return type.typeArguments
         ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`
         : type.name;
+    case "recursiveRef":
+      return type.typeArguments.length > 0
+        ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`
+        : type.name;
     case "enum":
       return type.name;
     case "unknown":

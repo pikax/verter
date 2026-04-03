@@ -9,8 +9,7 @@ import {
 
 export { ComponentMetaPayloadSchema };
 
-export type ProtoRecord<TypeName extends string = string> = Message<TypeName> &
-  Record<string, any>;
+export type ProtoRecord<TypeName extends string = string> = Message<TypeName> & Record<string, any>;
 
 export type ProtoTypeNode = ProtoRecord<"verter.v1.TypeNode"> & RawTypeNode;
 export type ProtoTypeGraph = ProtoRecord<"verter.v1.TypeGraph"> & RawTypeGraph;
@@ -28,9 +27,14 @@ const ROOT_REACHABILITY_NO_FALLTHROUGH = 1;
 const FALLTHROUGH_SURFACE_NONE = 1;
 const NO_FALLTHROUGH_REASON_NO_TEMPLATE = 5;
 
-type TypeNodeInit = NonNullable<NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]>[number];
+type TypeNodeInit = NonNullable<
+  NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]
+>[number];
 
-function typeNode(caseName: "primitive" | "ref" | "union" | "object", value: Record<string, unknown>): TypeNodeInit {
+function typeNode(
+  caseName: "primitive" | "ref" | "union" | "object" | "recursiveRef",
+  value: Record<string, unknown>,
+): TypeNodeInit {
   return {
     kind: {
       case: caseName as TypeNodeInit["kind"] extends { case: infer C } ? C : never,
@@ -47,7 +51,18 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
       nodes: [
         typeNode("primitive", { primitive: PRIMITIVE_STRING }),
         typeNode("primitive", { primitive: PRIMITIVE_UNDEFINED }),
-        typeNode("ref", { nameId: 2, typeArgumentNodeIds: [] }),
+        typeNode("recursiveRef", {
+          nameId: 2,
+          typeArgumentNodeIds: [1],
+          conditionalContext: [
+            {
+              branch: 1,
+              decided: true,
+              checkNodeId: 1,
+              extendsNodeId: 1,
+            },
+          ],
+        }),
         typeNode("union", { typeNodeIds: [3, 2] }),
         typeNode("object", {
           members: [

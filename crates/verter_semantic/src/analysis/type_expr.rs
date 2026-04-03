@@ -122,9 +122,38 @@ pub enum TypeExpr {
     /// transparent to evaluation.
     Parenthesized(Arc<TypeExpr>),
 
+    /// A recursive type reference placeholder — produced by the solver when
+    /// recursion is detected during type expansion. Preserves the recursive
+    /// symbol name, applied type arguments, and active conditional context.
+    RecursiveRef {
+        name: Arc<str>,
+        type_arguments: Arc<[TypeExpr]>,
+        conditional_context: Arc<[RecursiveConditionalFrame]>,
+    },
+
     /// A type the lowering could not represent.
     /// Carries the raw source text for diagnostics.
     Unknown { raw: String },
+}
+
+// ---------------------------------------------------------------------------
+// Recursive conditional context types
+// ---------------------------------------------------------------------------
+
+/// A snapshot of one conditional branch frame at the moment recursion was detected.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecursiveConditionalFrame {
+    pub branch: RecursiveConditionalBranch,
+    pub decided: bool,
+    pub check: Arc<TypeExpr>,
+    pub extends: Arc<TypeExpr>,
+}
+
+/// Which branch of a conditional type was active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecursiveConditionalBranch {
+    True,
+    False,
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +331,39 @@ fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
         "parenthesized" => Some(TypeExpr::Parenthesized(Arc::new(type_expr_from_json(
             v.get("inner")?,
         )?))),
+        "recursiveRef" => {
+            let name = v.get("name")?.as_str()?.to_string();
+            let args = v
+                .get("typeArguments")
+                .and_then(json_array_to_type_exprs)
+                .unwrap_or_default();
+            let ctx = v
+                .get("conditionalContext")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|f| {
+                            let branch = match f.get("branch")?.as_str()? {
+                                "true" => RecursiveConditionalBranch::True,
+                                "false" => RecursiveConditionalBranch::False,
+                                _ => return None,
+                            };
+                            Some(RecursiveConditionalFrame {
+                                branch,
+                                decided: f.get("decided")?.as_bool()?,
+                                check: Arc::new(type_expr_from_json(f.get("check")?)?),
+                                extends: Arc::new(type_expr_from_json(f.get("extends")?)?),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Some(TypeExpr::RecursiveRef {
+                name: Arc::from(name),
+                type_arguments: Arc::from(args),
+                conditional_context: Arc::from(ctx),
+            })
+        }
         "unknown" => {
             let raw = v.get("raw")?.as_str()?.to_string();
             Some(TypeExpr::Unknown { raw })
@@ -734,6 +796,20 @@ impl TypeExpr {
         Self::TypeParameter(param)
     }
 
+    /// Create a recursive ref with no conditional context.
+    pub fn recursive_ref(name: impl Into<String>, args: Vec<TypeExpr>) -> Self {
+        Self::RecursiveRef {
+            name: Arc::from(name.into()),
+            type_arguments: Arc::from(args),
+            conditional_context: Arc::from(Vec::<RecursiveConditionalFrame>::new()),
+        }
+    }
+
+    /// Returns `true` if this is a `RecursiveRef` node.
+    pub fn is_recursive_ref(&self) -> bool {
+        matches!(self, Self::RecursiveRef { .. })
+    }
+
     /// Returns `true` if this is an `Unknown` node.
     pub fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown { .. })
@@ -888,6 +964,24 @@ impl TypeExpr {
             Self::Parenthesized(inner) => {
                 json!({ "kind": "parenthesized", "inner": inner.to_json_value() })
             }
+            Self::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => json!({
+                "kind": "recursiveRef",
+                "name": name,
+                "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>(),
+                "conditionalContext": conditional_context.iter().map(|f| json!({
+                    "branch": match f.branch {
+                        RecursiveConditionalBranch::True => "true",
+                        RecursiveConditionalBranch::False => "false",
+                    },
+                    "decided": f.decided,
+                    "check": f.check.to_json_value(),
+                    "extends": f.extends.to_json_value()
+                })).collect::<Vec<_>>()
+            }),
             Self::Unknown { raw } => json!({ "kind": "unknown", "raw": raw }),
         }
     }

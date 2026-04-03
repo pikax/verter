@@ -724,6 +724,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
         | TypeExpr::Infer { .. }
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::Unknown { .. } => expr.clone(),
     }
 }

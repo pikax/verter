@@ -111,6 +111,7 @@ export function typeToZodString(type: TypeDescriptor): string {
       return "z.unknown()";
 
     case "ref":
+    case "recursiveRef":
       // Named types we can't resolve — fall back to unknown
       return "z.unknown()";
 
@@ -277,6 +278,7 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
       return z.unknown();
 
     case "ref":
+    case "recursiveRef":
       return z.unknown();
 
     case "enum": {

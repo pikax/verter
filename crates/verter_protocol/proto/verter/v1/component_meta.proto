@@ -36,6 +36,7 @@ message TypeNode {
     UnknownNode unknown = 18;
     InferNode infer = 19;
     RestNode rest = 20;
+    RecursiveRefNode recursive_ref = 21;
   }
 }
 
@@ -163,6 +164,19 @@ message InferNode {
 
 message RestNode {
   uint32 inner_node_id = 1;
+}
+
+message RecursiveRefNode {
+  uint32 name_id = 1;
+  repeated uint32 type_argument_node_ids = 2;
+  repeated ConditionalFrameNode conditional_context = 3;
+}
+
+message ConditionalFrameNode {
+  uint32 branch = 1;
+  bool decided = 2;
+  uint32 check_node_id = 3;
+  uint32 extends_node_id = 4;
 }
 
 message TypeRegistryEntry {

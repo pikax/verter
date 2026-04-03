@@ -124,6 +124,22 @@ export interface RefType {
   typeArguments?: TypeDescriptor[];
 }
 
+// ── RecursiveRef (recursive type back-reference) ────────────────
+
+export interface RecursiveRefConditionalFrame {
+  branch: "true" | "false";
+  decided: boolean;
+  check: TypeDescriptor;
+  extends: TypeDescriptor;
+}
+
+export interface RecursiveRefType {
+  kind: "recursiveRef";
+  name: string;
+  typeArguments: TypeDescriptor[];
+  conditionalContext: RecursiveRefConditionalFrame[];
+}
+
 // ── Unknown (fallback) ──────────────────────────────────────────
 
 export interface UnknownType {
@@ -145,6 +161,7 @@ export type TypeDescriptor =
   | TypeParameterType
   | EnumType
   | RefType
+  | RecursiveRefType
   | UnknownType;
 
 // ── Factory helpers ──────────────────────────────────────────────
@@ -226,6 +243,14 @@ export function func(
 
 export function ref(name: string, typeArguments?: TypeDescriptor[]): RefType {
   return typeArguments ? { kind: "ref", name, typeArguments } : { kind: "ref", name };
+}
+
+export function recursiveRef(
+  name: string,
+  typeArguments: TypeDescriptor[],
+  conditionalContext: RecursiveRefConditionalFrame[],
+): RecursiveRefType {
+  return { kind: "recursiveRef", name, typeArguments, conditionalContext };
 }
 
 export function unknown(rawType: string): UnknownType {

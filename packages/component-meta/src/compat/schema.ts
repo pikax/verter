@@ -207,6 +207,9 @@ function convertType(
       return { kind: "object" as const, type: name, schema: {} };
     }
 
+    case "recursiveRef":
+      return { kind: "object" as const, type: td.name, schema: {} };
+
     case "unknown":
       return td.rawType || "unknown";
   }
@@ -291,6 +294,8 @@ function schemaDescriptorToString(
       }
       return typeDescriptorToString(td);
     }
+    case "recursiveRef":
+      return td.name;
   }
 }
 
@@ -354,6 +359,10 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return td.name;
     case "ref":
       return td.typeArguments
+        ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
+        : td.name;
+    case "recursiveRef":
+      return td.typeArguments.length > 0
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
         : td.name;
     case "enum":

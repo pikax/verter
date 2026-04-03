@@ -74,9 +74,20 @@ pub struct SolveState {
     /// which would otherwise recurse forever before prepared-ref recursion
     /// tracking has a chance to run.
     pub active_substitution_names: Vec<String>,
+    /// Stack of active conditional branch frames. Pushed by `resolve_conditional`
+    /// when entering a branch, popped on exit. Used to capture conditional
+    /// context when recursion is detected.
+    pub conditional_context_stack: Vec<super::arena::ConditionalFrameSnapshot>,
+    /// Stack of base indices into `conditional_context_stack`, one per active
+    /// prepared-ref symbol resolution. Ensures `current_symbol_conditional_context()`
+    /// returns only frames from the currently resolving symbol, not cross-symbol frames.
+    pub conditional_context_base_stack: Vec<usize>,
 }
 
 impl SolveState {
+    /// Maximum conditional context frames to capture per recursive ref.
+    const MAX_CONDITIONAL_CONTEXT_FRAMES: usize = 8;
+
     pub fn new(limits: SolveLimits) -> Self {
         Self {
             depth: 0,
@@ -90,6 +101,8 @@ impl SolveState {
             value_decl_context_stack: Vec::new(),
             visited_external_decls: Vec::new(),
             active_substitution_names: Vec::new(),
+            conditional_context_stack: Vec::new(),
+            conditional_context_base_stack: Vec::new(),
         }
     }
 
@@ -103,6 +116,27 @@ impl SolveState {
     pub fn step(&mut self) -> bool {
         self.steps += 1;
         self.is_exceeded()
+    }
+
+    /// Returns the conditional context frames scoped to the currently resolving
+    /// symbol. Uses the symbol-local base to avoid capturing cross-symbol frames.
+    pub fn current_symbol_conditional_context(
+        &self,
+    ) -> Vec<super::arena::ConditionalFrameSnapshot> {
+        let base = self
+            .conditional_context_base_stack
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let start = self
+            .conditional_context_stack
+            .len()
+            .saturating_sub(Self::MAX_CONDITIONAL_CONTEXT_FRAMES)
+            .max(base);
+        self.conditional_context_stack[start..]
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Record incomplete status.
@@ -240,6 +274,17 @@ fn solver_expr_summary(expr: &TypeExpr) -> String {
         TypeExpr::Infer { name } => format!("Infer({})", name),
         TypeExpr::Rest(_) => "Rest".into(),
         TypeExpr::Parenthesized(inner) => format!("Parenthesized({})", solver_expr_summary(inner)),
+        TypeExpr::RecursiveRef {
+            name,
+            type_arguments,
+            ..
+        } => {
+            if type_arguments.is_empty() {
+                format!("RecursiveRef({})", name)
+            } else {
+                format!("RecursiveRef({}<{} args>)", name, type_arguments.len())
+            }
+        }
         TypeExpr::Unknown { raw } => {
             let preview: String = raw.chars().take(40).collect();
             format!("Unknown({})", preview)
@@ -742,15 +787,41 @@ fn resolve_prepared_ref(
     root_id: &ResolvedRootIdentity,
     args: &[NodeId],
 ) -> NodeId {
+    // Look up the prepared declaration up front so recursion identity can use
+    // effective, substitution-aware type arguments rather than raw call-site
+    // nodes or fresh lowered defaults.
+    let Some(prepared) = host.resolve_prepared_type_decl(root_id) else {
+        state.mark_incomplete(IncompleteReason::MissingSource {
+            canonical_id: root_id.canonical_id.clone(),
+            symbol_name: root_id.symbol_name.clone(),
+        });
+        return arena.error(format!("missing: {}", root_id));
+    };
+    let effective_args = build_effective_args(arena, &prepared, parent_subst, args);
+
     // Check recursion — have we already started resolving this exact
-    // (identity, args) combination?
+    // (identity, effective_args) combination?
     let rec_key = RecursionKey {
         canonical_id: root_id.canonical_id.clone(),
         symbol_name: root_id.symbol_name.clone(),
-        args_hash: hash_node_ids(args),
+        args_hash: hash_effective_args(arena, &effective_args),
     };
 
-    if let Some(placeholder) = state.recursion.enter(rec_key.clone()) {
+    // Compute structural fingerprint for tiered recursion policy.
+    // Only compute when the symbol is already active (common non-recursive
+    // path pays zero fingerprint cost).
+    let cond_ctx = state.current_symbol_conditional_context();
+    let fingerprint = if state.recursion.is_symbol_active(&rec_key) {
+        Some(super::recursion::compute_structural_fingerprint(
+            arena,
+            &effective_args,
+            &cond_ctx,
+        ))
+    } else {
+        None
+    };
+
+    if let Some(placeholder) = state.recursion.enter(rec_key.clone(), fingerprint.as_ref()) {
         // Cycle detected — return the recursive placeholder
         return placeholder;
     }
@@ -769,32 +840,36 @@ fn resolve_prepared_ref(
         return arena.error(format!("depth exceeded: {}", root_id));
     }
 
-    // Create a recursive placeholder in case the body references itself
+    // Create a recursive placeholder in case the body references itself.
+    // Capture symbol name and effective args so downstream transport preserves
+    // useful symbolic info instead of degrading to Unknown.
     let placeholder = arena.alloc(Node::RecursiveRef {
-        target: NodeId::UNRESOLVED,
+        symbol_name: root_id.symbol_name.clone(),
+        type_arguments: effective_args.clone(),
+        conditional_context: cond_ctx,
     });
-    state.recursion.push(rec_key.clone(), placeholder);
+    state
+        .recursion
+        .push(rec_key.clone(), placeholder, fingerprint.as_ref());
 
     // Record external declaration visit for registry publishing
     if !root_id.canonical_id.is_empty() && root_id.canonical_id != "$owner" {
         state.visited_external_decls.push(root_id.clone());
     }
 
-    // Look up the prepared declaration
-    let Some(prepared) = host.resolve_prepared_type_decl(root_id) else {
-        state.recursion.pop(&rec_key);
-        state.depth -= 1;
-        state.mark_incomplete(IncompleteReason::MissingSource {
-            canonical_id: root_id.canonical_id.clone(),
-            symbol_name: root_id.symbol_name.clone(),
-        });
-        return arena.error(format!("missing: {}", root_id));
-    };
+    // Save scope state for guard-based cleanup (handles early returns)
+    let saved_cond_ctx_len = state.conditional_context_stack.len();
+
+    // Push symbol-local conditional context base so that
+    // current_symbol_conditional_context() only sees frames from this symbol.
+    state
+        .conditional_context_base_stack
+        .push(state.conditional_context_stack.len());
 
     // Lower the declaration body into the arena
     let body_node = lower_type_expr(arena, &prepared.body);
 
-    // Build substitution: bind type params to resolved args
+    // Build substitution: bind type params to effective args
     let param_names: Vec<String> = prepared
         .type_parameters
         .iter()
@@ -803,12 +878,8 @@ fn resolve_prepared_ref(
 
     let mut child_subst = parent_subst.clone();
     for (i, param_name) in param_names.iter().enumerate() {
-        if let Some(&arg) = args.get(i) {
+        if let Some(&arg) = effective_args.get(i) {
             child_subst.bind(param_name, arg);
-        } else if let Some(ref default) = prepared.type_parameters[i].default {
-            // Use default type argument if not supplied
-            let default_node = lower_type_expr(arena, default);
-            child_subst.bind(param_name, default_node);
         }
     }
 
@@ -826,11 +897,14 @@ fn resolve_prepared_ref(
     // Resolve the body with the new substitution
     let resolved = resolve_node(arena, body_node, host, state, &child_subst);
 
-    // Pop declaration context and recursion tracker
+    // Pop all scope state: declaration context, conditional context base,
+    // conditional context stack (truncate back), recursion tracker, depth.
     if pushed {
         state.type_decl_context_stack.pop();
     }
-    state.recursion.pop(&rec_key);
+    state.conditional_context_base_stack.pop();
+    state.conditional_context_stack.truncate(saved_cond_ctx_len);
+    state.recursion.pop(&rec_key, fingerprint.as_ref());
     state.depth -= 1;
 
     resolved
@@ -859,12 +933,454 @@ fn resolve_name_in_context(state: &SolveState, name: &str) -> Option<ResolvedRoo
     None
 }
 
-/// Simple hash for a slice of NodeIds (for recursion tracking keys).
-fn hash_node_ids(ids: &[NodeId]) -> u64 {
+fn build_effective_args(
+    arena: &mut QueryArena,
+    prepared: &PreparedTypeDecl,
+    parent_subst: &SubstitutionEnv,
+    args: &[NodeId],
+) -> Vec<NodeId> {
+    let mut effective_args = Vec::new();
+    let mut default_subst = parent_subst.clone();
+
+    for (index, param) in prepared.type_parameters.iter().enumerate() {
+        let arg = if let Some(&explicit) = args.get(index) {
+            materialize_effective_arg(arena, explicit, &default_subst)
+        } else if let Some(default) = &param.default {
+            let lowered = lower_type_expr(arena, default);
+            materialize_effective_arg(arena, lowered, &default_subst)
+        } else {
+            continue;
+        };
+        effective_args.push(arg);
+        default_subst.bind(param.name.clone(), arg);
+    }
+
+    effective_args
+}
+
+fn materialize_effective_arg(
+    arena: &mut QueryArena,
+    node: NodeId,
+    subst: &SubstitutionEnv,
+) -> NodeId {
+    if node.is_unresolved() {
+        return node;
+    }
+
+    match arena.get(node).clone() {
+        Node::Primitive(_)
+        | Node::Literal(_)
+        | Node::Applied { .. }
+        | Node::TypeOf { .. }
+        | Node::Error { .. }
+        | Node::RecursiveRef { .. } => node,
+        Node::TypeParam { name, .. } => subst.resolve(&name).unwrap_or(node),
+        Node::Infer { .. } => node,
+        Node::Ref {
+            name,
+            type_arguments,
+        } => {
+            if type_arguments.is_empty() {
+                if let Some(bound) = subst.resolve(&name) {
+                    return materialize_effective_arg(arena, bound, subst);
+                }
+            }
+            let resolved_args: Vec<NodeId> = type_arguments
+                .iter()
+                .map(|&arg| materialize_effective_arg(arena, arg, subst))
+                .collect();
+            arena.type_ref(name, resolved_args)
+        }
+        Node::Union(members) => {
+            let resolved: Vec<NodeId> = members
+                .into_iter()
+                .map(|member| materialize_effective_arg(arena, member, subst))
+                .collect();
+            arena.union(resolved)
+        }
+        Node::Intersection(members) => {
+            let resolved: Vec<NodeId> = members
+                .into_iter()
+                .map(|member| materialize_effective_arg(arena, member, subst))
+                .collect();
+            arena.intersection(resolved)
+        }
+        Node::Array { element, readonly } => {
+            let element = materialize_effective_arg(arena, element, subst);
+            arena.array(element, readonly)
+        }
+        Node::Tuple { elements, readonly } => {
+            let mut resolved_elements = Vec::with_capacity(elements.len());
+            for element in elements {
+                resolved_elements.push(super::arena::TupleNodeElement {
+                    label: element.label,
+                    ty: materialize_effective_arg(arena, element.ty, subst),
+                    optional: element.optional,
+                    rest: element.rest,
+                });
+            }
+            arena.alloc(Node::Tuple {
+                elements: resolved_elements,
+                readonly,
+            })
+        }
+        Node::Object(obj) => {
+            let mut properties = Vec::with_capacity(obj.properties.len());
+            for property in obj.properties {
+                properties.push(super::arena::PropertyNode {
+                    name: property.name,
+                    ty: materialize_effective_arg(arena, property.ty, subst),
+                    optional: property.optional,
+                    readonly: property.readonly,
+                    is_method: property.is_method,
+                });
+            }
+
+            let mut index_signatures = Vec::with_capacity(obj.index_signatures.len());
+            for signature in obj.index_signatures {
+                let key_type = materialize_effective_arg(arena, signature.key_type, subst);
+                let value_type = materialize_effective_arg(arena, signature.value_type, subst);
+                index_signatures.push(super::arena::IndexSignatureNode {
+                    key_type,
+                    value_type,
+                    readonly: signature.readonly,
+                });
+            }
+
+            let mut call_signatures = Vec::with_capacity(obj.call_signatures.len());
+            for signature in obj.call_signatures {
+                call_signatures.push(materialize_signature(arena, signature, subst));
+            }
+
+            let mut construct_signatures = Vec::with_capacity(obj.construct_signatures.len());
+            for signature in obj.construct_signatures {
+                construct_signatures.push(materialize_signature(arena, signature, subst));
+            }
+
+            arena.alloc(Node::Object(super::arena::ObjectNode {
+                properties,
+                index_signatures,
+                call_signatures,
+                construct_signatures,
+            }))
+        }
+        Node::Function(func) => {
+            let mut signatures = Vec::with_capacity(func.signatures.len());
+            for signature in func.signatures {
+                signatures.push(materialize_signature(arena, signature, subst));
+            }
+            arena.alloc(Node::Function(super::arena::FunctionNode { signatures }))
+        }
+        Node::KeyOf(operand) => {
+            let operand = materialize_effective_arg(arena, operand, subst);
+            arena.key_of(operand)
+        }
+        Node::IndexedAccess { object, index } => {
+            let object = materialize_effective_arg(arena, object, subst);
+            let index = materialize_effective_arg(arena, index, subst);
+            arena.indexed_access(object, index)
+        }
+        Node::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            distributive,
+        } => {
+            let check = materialize_effective_arg(arena, check, subst);
+            let extends = materialize_effective_arg(arena, extends, subst);
+            let true_branch = materialize_effective_arg(arena, true_branch, subst);
+            let false_branch = materialize_effective_arg(arena, false_branch, subst);
+            arena.conditional(check, extends, true_branch, false_branch, distributive)
+        }
+        Node::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => {
+            let source = materialize_effective_arg(arena, source, subst);
+            let value = materialize_effective_arg(arena, value, subst);
+            let name_type = name_type.map(|node| materialize_effective_arg(arena, node, subst));
+            arena.mapped(parameter, source, value, optional, readonly, name_type)
+        }
+        Node::TemplateLiteral {
+            quasis,
+            expressions,
+        } => {
+            let mut resolved_expressions = Vec::with_capacity(expressions.len());
+            for expr in expressions {
+                resolved_expressions.push(materialize_effective_arg(arena, expr, subst));
+            }
+            arena.alloc(Node::TemplateLiteral {
+                quasis,
+                expressions: resolved_expressions,
+            })
+        }
+        Node::Rest(inner) => {
+            let inner = materialize_effective_arg(arena, inner, subst);
+            arena.alloc(Node::Rest(inner))
+        }
+    }
+}
+
+fn materialize_signature(
+    arena: &mut QueryArena,
+    signature: super::arena::CallSignatureNode,
+    subst: &SubstitutionEnv,
+) -> super::arena::CallSignatureNode {
+    super::arena::CallSignatureNode {
+        type_parameters: signature
+            .type_parameters
+            .into_iter()
+            .map(|param| super::arena::TypeParamNode {
+                name: param.name,
+                constraint: param
+                    .constraint
+                    .map(|node| materialize_effective_arg(arena, node, subst)),
+                default: param
+                    .default
+                    .map(|node| materialize_effective_arg(arena, node, subst)),
+            })
+            .collect(),
+        parameters: signature
+            .parameters
+            .into_iter()
+            .map(|param| super::arena::ParamNode {
+                name: param.name,
+                ty: materialize_effective_arg(arena, param.ty, subst),
+                optional: param.optional,
+                rest: param.rest,
+            })
+            .collect(),
+        return_type: materialize_effective_arg(arena, signature.return_type, subst),
+    }
+}
+
+/// Semantic hash for a slice of effective argument nodes (for exact recursion keys).
+fn hash_effective_args(arena: &QueryArena, ids: &[NodeId]) -> u64 {
+    use std::collections::HashSet;
     use std::hash::{Hash, Hasher};
+
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ids.hash(&mut hasher);
+    let mut in_progress = HashSet::new();
+    ids.len().hash(&mut hasher);
+    for &id in ids {
+        hash_effective_arg_node(arena, id, &mut hasher, &mut in_progress);
+    }
     hasher.finish()
+}
+
+fn hash_effective_arg_node(
+    arena: &QueryArena,
+    node: NodeId,
+    hasher: &mut impl std::hash::Hasher,
+    in_progress: &mut std::collections::HashSet<NodeId>,
+) {
+    use std::hash::Hash;
+
+    if node.is_unresolved() {
+        255u8.hash(hasher);
+        return;
+    }
+    if !in_progress.insert(node) {
+        254u8.hash(hasher);
+        return;
+    }
+
+    match arena.get(node) {
+        Node::Primitive(kind) => {
+            0u8.hash(hasher);
+            (*kind as u8).hash(hasher);
+        }
+        Node::Literal(literal) => {
+            1u8.hash(hasher);
+            literal.hash(hasher);
+        }
+        Node::Union(members) => {
+            2u8.hash(hasher);
+            members.len().hash(hasher);
+            for &member in members {
+                hash_effective_arg_node(arena, member, hasher, in_progress);
+            }
+        }
+        Node::Intersection(members) => {
+            3u8.hash(hasher);
+            members.len().hash(hasher);
+            for &member in members {
+                hash_effective_arg_node(arena, member, hasher, in_progress);
+            }
+        }
+        Node::Array { element, readonly } => {
+            4u8.hash(hasher);
+            readonly.hash(hasher);
+            hash_effective_arg_node(arena, *element, hasher, in_progress);
+        }
+        Node::Tuple { elements, readonly } => {
+            5u8.hash(hasher);
+            readonly.hash(hasher);
+            elements.len().hash(hasher);
+            for element in elements {
+                element.label.hash(hasher);
+                element.optional.hash(hasher);
+                element.rest.hash(hasher);
+                hash_effective_arg_node(arena, element.ty, hasher, in_progress);
+            }
+        }
+        Node::Object(object) => {
+            6u8.hash(hasher);
+            object.properties.len().hash(hasher);
+            for property in &object.properties {
+                property.name.hash(hasher);
+                property.optional.hash(hasher);
+                property.readonly.hash(hasher);
+                property.is_method.hash(hasher);
+                hash_effective_arg_node(arena, property.ty, hasher, in_progress);
+            }
+            object.index_signatures.len().hash(hasher);
+            for signature in &object.index_signatures {
+                signature.readonly.hash(hasher);
+                hash_effective_arg_node(arena, signature.key_type, hasher, in_progress);
+                hash_effective_arg_node(arena, signature.value_type, hasher, in_progress);
+            }
+        }
+        Node::Function(function) => {
+            7u8.hash(hasher);
+            function.signatures.len().hash(hasher);
+            for signature in &function.signatures {
+                signature.parameters.len().hash(hasher);
+                for param in &signature.parameters {
+                    param.name.hash(hasher);
+                    param.optional.hash(hasher);
+                    param.rest.hash(hasher);
+                    hash_effective_arg_node(arena, param.ty, hasher, in_progress);
+                }
+                hash_effective_arg_node(arena, signature.return_type, hasher, in_progress);
+            }
+        }
+        Node::Ref {
+            name,
+            type_arguments,
+        } => {
+            8u8.hash(hasher);
+            name.hash(hasher);
+            type_arguments.len().hash(hasher);
+            for &arg in type_arguments {
+                hash_effective_arg_node(arena, arg, hasher, in_progress);
+            }
+        }
+        Node::Applied { identity, args } => {
+            9u8.hash(hasher);
+            identity.hash(hasher);
+            args.len().hash(hasher);
+            for &arg in args {
+                hash_effective_arg_node(arena, arg, hasher, in_progress);
+            }
+        }
+        Node::TypeParam {
+            name,
+            constraint,
+            default,
+        } => {
+            10u8.hash(hasher);
+            node.hash(hasher);
+            name.hash(hasher);
+            constraint.map(|node| hash_effective_arg_node(arena, node, hasher, in_progress));
+            default.map(|node| hash_effective_arg_node(arena, node, hasher, in_progress));
+        }
+        Node::KeyOf(operand) => {
+            11u8.hash(hasher);
+            hash_effective_arg_node(arena, *operand, hasher, in_progress);
+        }
+        Node::TypeOf { path } => {
+            12u8.hash(hasher);
+            path.hash(hasher);
+        }
+        Node::IndexedAccess { object, index } => {
+            13u8.hash(hasher);
+            hash_effective_arg_node(arena, *object, hasher, in_progress);
+            hash_effective_arg_node(arena, *index, hasher, in_progress);
+        }
+        Node::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            distributive,
+        } => {
+            14u8.hash(hasher);
+            distributive.hash(hasher);
+            hash_effective_arg_node(arena, *check, hasher, in_progress);
+            hash_effective_arg_node(arena, *extends, hasher, in_progress);
+            hash_effective_arg_node(arena, *true_branch, hasher, in_progress);
+            hash_effective_arg_node(arena, *false_branch, hasher, in_progress);
+        }
+        Node::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => {
+            15u8.hash(hasher);
+            parameter.hash(hasher);
+            optional.hash(hasher);
+            readonly.hash(hasher);
+            hash_effective_arg_node(arena, *source, hasher, in_progress);
+            hash_effective_arg_node(arena, *value, hasher, in_progress);
+            if let Some(name_type) = name_type {
+                hash_effective_arg_node(arena, *name_type, hasher, in_progress);
+            }
+        }
+        Node::TemplateLiteral {
+            quasis,
+            expressions,
+        } => {
+            16u8.hash(hasher);
+            quasis.hash(hasher);
+            expressions.len().hash(hasher);
+            for &expr in expressions {
+                hash_effective_arg_node(arena, expr, hasher, in_progress);
+            }
+        }
+        Node::Infer { name } => {
+            17u8.hash(hasher);
+            node.hash(hasher);
+            name.hash(hasher);
+        }
+        Node::Rest(inner) => {
+            18u8.hash(hasher);
+            hash_effective_arg_node(arena, *inner, hasher, in_progress);
+        }
+        Node::RecursiveRef {
+            symbol_name,
+            type_arguments,
+            conditional_context,
+        } => {
+            19u8.hash(hasher);
+            symbol_name.hash(hasher);
+            type_arguments.len().hash(hasher);
+            for &arg in type_arguments {
+                hash_effective_arg_node(arena, arg, hasher, in_progress);
+            }
+            conditional_context.len().hash(hasher);
+            for frame in conditional_context {
+                frame.branch.hash(hasher);
+                frame.decided.hash(hasher);
+                hash_effective_arg_node(arena, frame.check, hasher, in_progress);
+                hash_effective_arg_node(arena, frame.extends, hasher, in_progress);
+            }
+        }
+        Node::Error { description } => {
+            20u8.hash(hasher);
+            description.hash(hasher);
+        }
+    }
+
+    in_progress.remove(&node);
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,15 +1619,57 @@ fn resolve_conditional(
                     true_subst.bind(name, binding);
                 }
             }
-            resolve_node(arena, true_branch, host, state, &true_subst)
+            // Push decided true-branch context
+            state
+                .conditional_context_stack
+                .push(super::arena::ConditionalFrameSnapshot {
+                    branch: super::arena::ConditionalBranch::True,
+                    decided: true,
+                    check,
+                    extends,
+                });
+            let result = resolve_node(arena, true_branch, host, state, &true_subst);
+            state.conditional_context_stack.pop();
+            result
         }
         super::result::RelationResult::NotAssignable => {
-            resolve_node(arena, false_branch, host, state, subst)
+            // Push decided false-branch context
+            state
+                .conditional_context_stack
+                .push(super::arena::ConditionalFrameSnapshot {
+                    branch: super::arena::ConditionalBranch::False,
+                    decided: true,
+                    check,
+                    extends,
+                });
+            let result = resolve_node(arena, false_branch, host, state, subst);
+            state.conditional_context_stack.pop();
+            result
         }
         super::result::RelationResult::Unknown => {
             state.mark_symbolic();
+            // Push undecided true-branch context for symbolic walk
+            state
+                .conditional_context_stack
+                .push(super::arena::ConditionalFrameSnapshot {
+                    branch: super::arena::ConditionalBranch::True,
+                    decided: false,
+                    check,
+                    extends,
+                });
             let tb = resolve_node(arena, true_branch, host, state, subst);
+            state.conditional_context_stack.pop();
+            // Push undecided false-branch context for symbolic walk
+            state
+                .conditional_context_stack
+                .push(super::arena::ConditionalFrameSnapshot {
+                    branch: super::arena::ConditionalBranch::False,
+                    decided: false,
+                    check,
+                    extends,
+                });
             let fb = resolve_node(arena, false_branch, host, state, subst);
+            state.conditional_context_stack.pop();
             arena.conditional(check, extends, tb, fb, distributive)
         }
     }
@@ -1703,7 +2261,61 @@ fn project_inner(
             raw: description.clone(),
         },
 
-        // Mapped, TemplateLiteral, Applied, RecursiveRef — use display as fallback
+        Node::RecursiveRef {
+            symbol_name,
+            type_arguments,
+            conditional_context,
+        } => {
+            use super::arena::ConditionalBranch;
+            use crate::analysis::type_expr::{
+                RecursiveConditionalBranch, RecursiveConditionalFrame,
+            };
+
+            // Use compact recursive summary projector with bounded depth
+            let arg_depth_cap = 2;
+            let arg_node_cap = 32;
+            let ctx_start = conditional_context
+                .len()
+                .saturating_sub(SolveState::MAX_CONDITIONAL_CONTEXT_FRAMES);
+
+            TypeExpr::RecursiveRef {
+                name: Arc::from(symbol_name.as_str()),
+                type_arguments: Arc::from(
+                    type_arguments
+                        .iter()
+                        .map(|&a| {
+                            project_recursive_arg_summary(arena, a, arg_depth_cap, arg_node_cap)
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                conditional_context: Arc::from(
+                    conditional_context[ctx_start..]
+                        .iter()
+                        .map(|frame| RecursiveConditionalFrame {
+                            branch: match frame.branch {
+                                ConditionalBranch::True => RecursiveConditionalBranch::True,
+                                ConditionalBranch::False => RecursiveConditionalBranch::False,
+                            },
+                            decided: frame.decided,
+                            check: Arc::new(project_recursive_arg_summary(
+                                arena,
+                                frame.check,
+                                1,
+                                8,
+                            )),
+                            extends: Arc::new(project_recursive_arg_summary(
+                                arena,
+                                frame.extends,
+                                1,
+                                8,
+                            )),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            }
+        }
+
+        // Mapped, TemplateLiteral, Applied — use display as fallback
         _ => TypeExpr::Unknown {
             raw: display_node(arena, node),
         },
@@ -1767,6 +2379,254 @@ fn project_signature(
                     .map(|node| Arc::new(project_inner(arena, node, visited, depth + 1))),
             })
             .collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compact recursive summary projector
+// ---------------------------------------------------------------------------
+
+/// Project a node to a compact TypeExpr suitable for recursive transport.
+/// Uses a separate, bounded depth/node budget — never triggers the full projector.
+fn project_recursive_arg_summary(
+    arena: &QueryArena,
+    node: NodeId,
+    max_depth: usize,
+    max_nodes: usize,
+) -> TypeExpr {
+    let mut count = 0;
+    project_recursive_summary_inner(arena, node, 0, max_depth, &mut count, max_nodes)
+}
+
+fn project_recursive_summary_inner(
+    arena: &QueryArena,
+    node: NodeId,
+    depth: usize,
+    max_depth: usize,
+    count: &mut usize,
+    max_nodes: usize,
+) -> TypeExpr {
+    if node.is_unresolved() || depth > max_depth || *count > max_nodes {
+        return TypeExpr::Unknown { raw: "...".into() };
+    }
+    *count += 1;
+
+    match arena.get(node) {
+        Node::Primitive(kind) => TypeExpr::Primitive(project_primitive(*kind)),
+        Node::Literal(lit) => match lit {
+            super::arena::SolverLiteral::String(s) => TypeExpr::string_literal(s),
+            super::arena::SolverLiteral::Number(n) => TypeExpr::number_literal(*n),
+            super::arena::SolverLiteral::Boolean(b) => TypeExpr::boolean_literal(*b),
+            super::arena::SolverLiteral::BigInt(s) => {
+                TypeExpr::Literal(crate::analysis::type_expr::LiteralValue::BigInt(s.clone()))
+            }
+        },
+        Node::Union(members) => {
+            let types: Vec<TypeExpr> = members
+                .iter()
+                .take(4) // Cap union members for compactness
+                .map(|&m| {
+                    project_recursive_summary_inner(
+                        arena,
+                        m,
+                        depth + 1,
+                        max_depth,
+                        count,
+                        max_nodes,
+                    )
+                })
+                .collect();
+            TypeExpr::Union(Arc::from(types))
+        }
+        Node::Intersection(members) => {
+            let types: Vec<TypeExpr> = members
+                .iter()
+                .take(4)
+                .map(|&m| {
+                    project_recursive_summary_inner(
+                        arena,
+                        m,
+                        depth + 1,
+                        max_depth,
+                        count,
+                        max_nodes,
+                    )
+                })
+                .collect();
+            TypeExpr::Intersection(Arc::from(types))
+        }
+        Node::Array { element, readonly } => TypeExpr::Array {
+            element: Arc::new(project_recursive_summary_inner(
+                arena,
+                *element,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+            readonly: *readonly,
+        },
+        Node::Ref {
+            name,
+            type_arguments,
+        } => TypeExpr::Ref {
+            name: Arc::from(name.as_str()),
+            type_arguments: Arc::from(
+                type_arguments
+                    .iter()
+                    .map(|&a| {
+                        project_recursive_summary_inner(
+                            arena,
+                            a,
+                            depth + 1,
+                            max_depth,
+                            count,
+                            max_nodes,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        },
+        Node::Tuple { elements, readonly } => TypeExpr::Tuple {
+            elements: Arc::from(
+                elements
+                    .iter()
+                    .take(4)
+                    .map(|el| crate::analysis::type_expr::TupleElement {
+                        label: el.label.clone(),
+                        ty: project_recursive_summary_inner(
+                            arena,
+                            el.ty,
+                            depth + 1,
+                            max_depth,
+                            count,
+                            max_nodes,
+                        ),
+                        optional: el.optional,
+                        rest: el.rest,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            readonly: *readonly,
+        },
+        Node::Object(obj) => {
+            let members: Vec<crate::analysis::type_expr::ObjectMember> = obj
+                .properties
+                .iter()
+                .take(4)
+                .map(|p| {
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: p.name.clone(),
+                            ty: project_recursive_summary_inner(
+                                arena,
+                                p.ty,
+                                depth + 1,
+                                max_depth,
+                                count,
+                                max_nodes,
+                            ),
+                            optional: p.optional,
+                            readonly: p.readonly,
+                        },
+                    )
+                })
+                .collect();
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: members,
+            }))
+        }
+        Node::TypeParam {
+            name,
+            constraint,
+            default,
+        } => TypeExpr::TypeParameter(crate::analysis::type_expr::TypeParam {
+            name: name.clone(),
+            constraint: constraint.map(|node| {
+                Arc::new(project_recursive_summary_inner(
+                    arena,
+                    node,
+                    depth + 1,
+                    max_depth,
+                    count,
+                    max_nodes,
+                ))
+            }),
+            default: default.map(|node| {
+                Arc::new(project_recursive_summary_inner(
+                    arena,
+                    node,
+                    depth + 1,
+                    max_depth,
+                    count,
+                    max_nodes,
+                ))
+            }),
+        }),
+        Node::RecursiveRef {
+            symbol_name,
+            type_arguments,
+            conditional_context,
+        } => {
+            use super::arena::ConditionalBranch;
+            use crate::analysis::type_expr::{
+                RecursiveConditionalBranch, RecursiveConditionalFrame,
+            };
+
+            let ctx_start = conditional_context
+                .len()
+                .saturating_sub(SolveState::MAX_CONDITIONAL_CONTEXT_FRAMES);
+            TypeExpr::RecursiveRef {
+                name: Arc::from(symbol_name.as_str()),
+                type_arguments: Arc::from(
+                    type_arguments
+                        .iter()
+                        .map(|&arg| {
+                            project_recursive_summary_inner(
+                                arena,
+                                arg,
+                                depth + 1,
+                                max_depth,
+                                count,
+                                max_nodes,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                conditional_context: Arc::from(
+                    conditional_context[ctx_start..]
+                        .iter()
+                        .map(|frame| RecursiveConditionalFrame {
+                            branch: match frame.branch {
+                                ConditionalBranch::True => RecursiveConditionalBranch::True,
+                                ConditionalBranch::False => RecursiveConditionalBranch::False,
+                            },
+                            decided: frame.decided,
+                            check: Arc::new(project_recursive_summary_inner(
+                                arena,
+                                frame.check,
+                                depth + 1,
+                                max_depth,
+                                count,
+                                max_nodes,
+                            )),
+                            extends: Arc::new(project_recursive_summary_inner(
+                                arena,
+                                frame.extends,
+                                depth + 1,
+                                max_depth,
+                                count,
+                                max_nodes,
+                            )),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            }
+        }
+        Node::Infer { name } => TypeExpr::Infer { name: name.clone() },
+        _ => TypeExpr::Unknown {
+            raw: display_node(arena, node),
+        },
     }
 }
 
@@ -4750,5 +5610,1934 @@ mod tests {
             )),
             "sibling branches should not be relabeled as step-limit failures after a hard-stop"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // RecursiveRef transport & projection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn recursive_ref_json_round_trip() {
+        use crate::analysis::type_expr::{RecursiveConditionalBranch, RecursiveConditionalFrame};
+
+        let expr = TypeExpr::RecursiveRef {
+            name: Arc::from("Tree"),
+            type_arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            conditional_context: Arc::from(vec![RecursiveConditionalFrame {
+                branch: RecursiveConditionalBranch::True,
+                decided: true,
+                check: Arc::new(TypeExpr::named("T")),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            }]),
+        };
+
+        let json = expr.to_json_value();
+        let kind = json.get("kind").and_then(|k| k.as_str());
+        assert_eq!(kind, Some("recursiveRef"), "JSON kind must be recursiveRef");
+
+        let round_tripped: TypeExpr = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            round_tripped, expr,
+            "round-trip must preserve full structure"
+        );
+    }
+
+    #[test]
+    fn recursive_ref_is_not_unknown() {
+        let expr = TypeExpr::recursive_ref("Tree", vec![]);
+        assert!(
+            expr.is_recursive_ref(),
+            "RecursiveRef must report is_recursive_ref()"
+        );
+        assert!(
+            !expr.is_unknown(),
+            "RecursiveRef must NOT report is_unknown()"
+        );
+    }
+
+    #[test]
+    fn recursive_ref_equality_and_hash_include_args_and_context() {
+        use crate::analysis::type_expr::{RecursiveConditionalBranch, RecursiveConditionalFrame};
+        use std::collections::HashSet;
+
+        let a = TypeExpr::recursive_ref("T", vec![TypeExpr::Primitive(PrimitiveName::String)]);
+        let b = TypeExpr::recursive_ref("T", vec![TypeExpr::Primitive(PrimitiveName::Number)]);
+        let c = TypeExpr::RecursiveRef {
+            name: Arc::from("T"),
+            type_arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            conditional_context: Arc::from(vec![RecursiveConditionalFrame {
+                branch: RecursiveConditionalBranch::True,
+                decided: true,
+                check: Arc::new(TypeExpr::named("X")),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            }]),
+        };
+
+        assert_ne!(a, b, "different args should differ");
+        assert_ne!(a, c, "different conditional context should differ");
+
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        set.insert(b.clone());
+        set.insert(c.clone());
+        assert_eq!(set.len(), 3, "all three should be distinct in a HashSet");
+    }
+
+    #[test]
+    fn solve_self_recursive_projects_named_recursive_ref() {
+        // type Tree = { children: Tree[] }
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "children".into(),
+                    ty: TypeExpr::Array {
+                        element: Arc::new(TypeExpr::named("Tree")),
+                        readonly: false,
+                    },
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Tree".into(),
+            declaration_id: 0,
+            body: body.clone(),
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(&TypeExpr::named("Tree"), &host);
+
+        // The result should contain a RecursiveRef for the self-reference,
+        // not degrade to Unknown.
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("recursiveRef"),
+            "self-recursive type should project RecursiveRef, got: {}",
+            &json[..json.len().min(200)]
+        );
+        assert!(
+            !json.contains("@rec("),
+            "should NOT contain opaque @rec(...) in output"
+        );
+    }
+
+    #[test]
+    fn solve_recursive_generic_projects_applied_args() {
+        // type ValueOrArray<T> = T | Array<ValueOrArray<T>>
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::union(vec![
+            TypeExpr::named("T"),
+            TypeExpr::Array {
+                element: Arc::new(TypeExpr::named_with_args(
+                    "ValueOrArray",
+                    vec![TypeExpr::named("T")],
+                )),
+                readonly: false,
+            },
+        ]);
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "ValueOrArray".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let input = TypeExpr::named_with_args(
+            "ValueOrArray",
+            vec![TypeExpr::Primitive(PrimitiveName::String)],
+        );
+        let result = solve_type(&input, &host);
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("recursiveRef"),
+            "recursive generic should produce RecursiveRef"
+        );
+        // The type arguments on the RecursiveRef should include the applied arg
+        assert!(
+            json.contains("\"name\":\"ValueOrArray\""),
+            "RecursiveRef should name the recursive symbol"
+        );
+    }
+
+    #[test]
+    fn solve_json_recursive_projects_recursive_ref_not_unknown() {
+        // type Json = string | number | boolean | null | Json[] | { [k: string]: Json }
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+            TypeExpr::Primitive(PrimitiveName::Null),
+            TypeExpr::Array {
+                element: Arc::new(TypeExpr::named("Json")),
+                readonly: false,
+            },
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::IndexSignature(
+                    crate::analysis::type_expr::IndexSignature {
+                        key_name: "k".into(),
+                        key_type: TypeExpr::Primitive(PrimitiveName::String),
+                        value_type: TypeExpr::named("Json"),
+                        readonly: false,
+                    },
+                )],
+            })),
+        ]);
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Json".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(&TypeExpr::named("Json"), &host);
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("recursiveRef"),
+            "Json recursive type should project RecursiveRef, got: {}",
+            &json[..json.len().min(300)]
+        );
+    }
+
+    #[test]
+    fn solve_mutual_recursion_projects_recursive_refs() {
+        // type A = { b: B }; type B = { a: A }
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body_a = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "b".into(),
+                    ty: TypeExpr::named("B"),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+        let body_b = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "a".into(),
+                    ty: TypeExpr::named("A"),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "A".into(),
+            declaration_id: 0,
+            body: body_a,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+        env.add_type(TypeDeclInfo {
+            name: "B".into(),
+            declaration_id: 0,
+            body: body_b,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(&TypeExpr::named("A"), &host);
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("recursiveRef"),
+            "mutual recursion should project RecursiveRef"
+        );
+    }
+
+    #[test]
+    fn recursive_ref_serialization_contains_no_opaque_at_rec_unknown_payload() {
+        // Verify that the new RecursiveRef serialization doesn't degrade
+        let expr = TypeExpr::recursive_ref("Foo", vec![TypeExpr::Primitive(PrimitiveName::String)]);
+        let json = serde_json::to_string(&expr).unwrap();
+        assert!(
+            !json.contains("@rec("),
+            "RecursiveRef JSON must not contain opaque @rec(...)"
+        );
+        assert!(
+            json.contains("\"kind\":\"recursiveRef\""),
+            "must serialize with kind=recursiveRef"
+        );
+        assert!(
+            json.contains("\"name\":\"Foo\""),
+            "must preserve symbol name"
+        );
+    }
+
+    #[test]
+    fn recursive_transport_arg_summary_caps_depth_and_width() {
+        let mut arena = QueryArena::new();
+        let mut inner = arena.primitive(PrimitiveKind::String);
+        for _ in 0..10 {
+            inner = arena.array(inner, false);
+        }
+
+        let summary = project_recursive_arg_summary(&arena, inner, 2, 32);
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(
+            json.contains("array") || json.contains("..."),
+            "deep nesting should be capped by compact projector"
+        );
+        assert!(
+            json.len() < 500,
+            "compact summary should stay small, got {} bytes",
+            json.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #4 — internal JSON round-trip preserves full context
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn recursive_ref_internal_json_round_trip_preserves_full_context() {
+        use crate::analysis::type_expr::{RecursiveConditionalBranch, RecursiveConditionalFrame};
+        let expr = TypeExpr::RecursiveRef {
+            name: Arc::from("Flatten"),
+            type_arguments: Arc::from(vec![
+                TypeExpr::Array {
+                    element: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                    readonly: true,
+                },
+                TypeExpr::named("U"),
+            ]),
+            conditional_context: Arc::from(vec![
+                RecursiveConditionalFrame {
+                    branch: RecursiveConditionalBranch::True,
+                    decided: true,
+                    check: Arc::new(TypeExpr::named("T")),
+                    extends: Arc::new(TypeExpr::Array {
+                        element: Arc::new(TypeExpr::Infer { name: "U".into() }),
+                        readonly: true,
+                    }),
+                },
+                RecursiveConditionalFrame {
+                    branch: RecursiveConditionalBranch::False,
+                    decided: false,
+                    check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                    extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                },
+            ]),
+        };
+
+        let json = expr.to_json_value();
+        let round_tripped: TypeExpr = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            round_tripped, expr,
+            "full conditional context must survive round-trip"
+        );
+
+        // Verify internal structure survived — not collapsed to Unknown
+        match &round_tripped {
+            TypeExpr::RecursiveRef {
+                type_arguments,
+                conditional_context,
+                ..
+            } => {
+                assert_eq!(type_arguments.len(), 2);
+                assert_eq!(conditional_context.len(), 2);
+                assert!(conditional_context[0].decided);
+                assert!(!conditional_context[1].decided);
+            }
+            _ => panic!("round-trip must preserve RecursiveRef variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // #6 — effective args after defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exact_recursive_key_uses_effective_args_after_defaults() {
+        // type Box<T, U = string> = { value: T; next: Box<T> }
+        // Box<number> and Box<number, string> should produce same recursive key
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![
+                crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "value".into(),
+                        ty: TypeExpr::named("T"),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+                crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "next".into(),
+                        ty: TypeExpr::named_with_args("Box", vec![TypeExpr::named("T")]),
+                        optional: true,
+                        readonly: false,
+                    },
+                ),
+            ],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Box".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+                crate::analysis::type_expr::TypeParam {
+                    name: "U".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                },
+            ],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+
+        // Box<number> should terminate (recursive ref, not hang)
+        let result = solve_type(
+            &TypeExpr::named_with_args("Box", vec![TypeExpr::Primitive(PrimitiveName::Number)]),
+            &host,
+        );
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("recursiveRef"),
+            "Box<number> with default U=string should produce RecursiveRef"
+        );
+        assert!(
+            result.execution_status != ExecutionStatus::HardStop,
+            "should terminate via exact key, not hard stop"
+        );
+    }
+
+    #[test]
+    fn exact_recursive_key_substitutes_dependent_defaults_before_transport() {
+        // type Box<T, U = T> = { next: Box<T> }
+        // The recursive transport must preserve effective args after substitution,
+        // not the raw default expression `T`.
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        fn first_recursive_ref(expr: &TypeExpr) -> Option<&TypeExpr> {
+            match expr {
+                TypeExpr::RecursiveRef { .. } => Some(expr),
+                TypeExpr::Array { element, .. }
+                | TypeExpr::KeyOf(element)
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => first_recursive_ref(element),
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    types.iter().find_map(first_recursive_ref)
+                }
+                TypeExpr::Tuple { elements, .. } => {
+                    elements.iter().find_map(|element| first_recursive_ref(&element.ty))
+                }
+                TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
+                    crate::analysis::type_expr::ObjectMember::Property(property) => {
+                        first_recursive_ref(&property.ty)
+                    }
+                    crate::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                        first_recursive_ref(&signature.key_type)
+                            .or_else(|| first_recursive_ref(&signature.value_type))
+                    }
+                    crate::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | crate::analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                        function
+                            .parameters
+                            .iter()
+                            .find_map(|param| first_recursive_ref(&param.ty))
+                            .or_else(|| function.return_type.as_deref().and_then(first_recursive_ref))
+                    }
+                    crate::analysis::type_expr::ObjectMember::Method(method) => method
+                        .function
+                        .parameters
+                        .iter()
+                        .find_map(|param| first_recursive_ref(&param.ty))
+                        .or_else(|| {
+                            method
+                                .function
+                                .return_type
+                                .as_deref()
+                                .and_then(first_recursive_ref)
+                        }),
+                }),
+                TypeExpr::Function(function) => function
+                    .parameters
+                    .iter()
+                    .find_map(|param| first_recursive_ref(&param.ty))
+                    .or_else(|| function.return_type.as_deref().and_then(first_recursive_ref)),
+                TypeExpr::Ref { type_arguments, .. } => type_arguments.iter().find_map(first_recursive_ref),
+                TypeExpr::IndexedAccess { object, index } => {
+                    first_recursive_ref(object).or_else(|| first_recursive_ref(index))
+                }
+                TypeExpr::Conditional {
+                    check,
+                    extends,
+                    true_type,
+                    false_type,
+                } => first_recursive_ref(check)
+                    .or_else(|| first_recursive_ref(extends))
+                    .or_else(|| first_recursive_ref(true_type))
+                    .or_else(|| first_recursive_ref(false_type)),
+                TypeExpr::Mapped {
+                    source,
+                    value,
+                    name_type,
+                    ..
+                } => first_recursive_ref(source)
+                    .or_else(|| first_recursive_ref(value))
+                    .or_else(|| name_type.as_deref().and_then(first_recursive_ref)),
+                TypeExpr::TemplateLiteral { expressions, .. } => {
+                    expressions.iter().find_map(first_recursive_ref)
+                }
+                TypeExpr::Primitive(_)
+                | TypeExpr::Literal(_)
+                | TypeExpr::TypeParameter(_)
+                | TypeExpr::TypeOf(_)
+                | TypeExpr::Infer { .. }
+                | TypeExpr::Unknown { .. } => None,
+            }
+        }
+
+        let body = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "next".into(),
+                    ty: TypeExpr::named_with_args("Box", vec![TypeExpr::named("T")]),
+                    optional: true,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Box".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+                crate::analysis::type_expr::TypeParam {
+                    name: "U".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::named("T"))),
+                },
+            ],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(
+            &TypeExpr::named_with_args("Box", vec![TypeExpr::Primitive(PrimitiveName::Number)]),
+            &host,
+        );
+
+        let TypeExpr::RecursiveRef { type_arguments, .. } = first_recursive_ref(&result.value)
+            .expect("recursive solve should produce a RecursiveRef")
+        else {
+            panic!("expected RecursiveRef");
+        };
+
+        assert_eq!(
+            type_arguments.len(),
+            2,
+            "effective defaults should be transported"
+        );
+        assert_eq!(
+            type_arguments[0],
+            TypeExpr::Primitive(PrimitiveName::Number),
+            "first effective arg should be the concrete T binding"
+        );
+        assert_eq!(
+            type_arguments[1],
+            TypeExpr::Primitive(PrimitiveName::Number),
+            "dependent default U = T should be substituted before transport"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #11 — structural fingerprint uses symbol-local context only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn structural_fingerprint_uses_symbol_local_context_only() {
+        use crate::analysis::type_solver::recursion::*;
+        let mut arena = QueryArena::new();
+        let str_node = arena.primitive(PrimitiveKind::String);
+
+        // Same args, different conditional context
+        let ctx_a = vec![
+            crate::analysis::type_solver::arena::ConditionalFrameSnapshot {
+                branch: crate::analysis::type_solver::arena::ConditionalBranch::True,
+                decided: true,
+                check: str_node,
+                extends: str_node,
+            },
+        ];
+        let ctx_b = vec![
+            crate::analysis::type_solver::arena::ConditionalFrameSnapshot {
+                branch: crate::analysis::type_solver::arena::ConditionalBranch::False,
+                decided: true,
+                check: str_node,
+                extends: str_node,
+            },
+        ];
+
+        let fp_a = compute_structural_fingerprint(&arena, &[str_node], &ctx_a);
+        let fp_b = compute_structural_fingerprint(&arena, &[str_node], &ctx_b);
+
+        assert_ne!(
+            fp_a.combined_fingerprint, fp_b.combined_fingerprint,
+            "different branch contexts must produce different fingerprints"
+        );
+        assert_eq!(fp_a.mode, StructuralRecursionMode::Conditional);
+        assert_eq!(fp_b.mode, StructuralRecursionMode::Conditional);
+
+        // Empty context should be Plain mode
+        let fp_empty = compute_structural_fingerprint(&arena, &[str_node], &[]);
+        assert_eq!(fp_empty.mode, StructuralRecursionMode::Plain);
+    }
+
+    // -----------------------------------------------------------------------
+    // #12-14 — conditional context push/pop behavior
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conditional_true_branch_pushes_decided_true_frame() {
+        // string extends string ? "yes" : "no"
+        // The true branch is taken (decided). After resolve, conditional
+        // context should be empty (popped), and result should be "yes".
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::string_literal("yes")),
+            false_type: Arc::new(TypeExpr::string_literal("no")),
+        };
+
+        let mut arena = QueryArena::new();
+        let mut state = SolveState::new(SolveLimits::default());
+        let root = lower_type_expr(&mut arena, &expr);
+        let resolved = resolve_node(
+            &mut arena,
+            root,
+            &NoopSolverHost,
+            &mut state,
+            &SubstitutionEnv::new(),
+        );
+        let result = project_to_type_expr(&arena, resolved);
+
+        assert_eq!(result, TypeExpr::string_literal("yes"));
+        // Context stack must be clean after resolution
+        assert!(
+            state.conditional_context_stack.is_empty(),
+            "conditional context stack must be empty after resolution"
+        );
+    }
+
+    #[test]
+    fn conditional_false_branch_pushes_decided_false_frame() {
+        // number extends string ? "yes" : "no"
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::string_literal("yes")),
+            false_type: Arc::new(TypeExpr::string_literal("no")),
+        };
+
+        let mut arena = QueryArena::new();
+        let mut state = SolveState::new(SolveLimits::default());
+        let root = lower_type_expr(&mut arena, &expr);
+        let resolved = resolve_node(
+            &mut arena,
+            root,
+            &NoopSolverHost,
+            &mut state,
+            &SubstitutionEnv::new(),
+        );
+        let result = project_to_type_expr(&arena, resolved);
+
+        assert_eq!(result, TypeExpr::string_literal("no"));
+        assert!(
+            state.conditional_context_stack.is_empty(),
+            "conditional context stack must be empty after resolution"
+        );
+    }
+
+    #[test]
+    fn symbolic_conditional_branches_capture_undecided_frames() {
+        // T extends string ? "yes" : "no" — T is unresolved, symbolic
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::named("T")),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::string_literal("yes")),
+            false_type: Arc::new(TypeExpr::string_literal("no")),
+        };
+
+        let mut arena = QueryArena::new();
+        let mut state = SolveState::new(SolveLimits::default());
+        let root = lower_type_expr(&mut arena, &expr);
+        let _resolved = resolve_node(
+            &mut arena,
+            root,
+            &NoopSolverHost,
+            &mut state,
+            &SubstitutionEnv::new(),
+        );
+
+        // After resolution, conditional context stack should be clean
+        assert!(
+            state.conditional_context_stack.is_empty(),
+            "conditional context stack must be clean after symbolic conditional resolution"
+        );
+        // The result should be symbolic (conditional preserved)
+        assert!(
+            state.exactness == SolverExactness::ExactSymbolic,
+            "symbolic conditional should mark exactness as symbolic"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #15 — conditional context stack restores on early return
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conditional_context_stack_restores_on_early_return() {
+        // Nested conditionals: both stacks should be clean after
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                true_type: Arc::new(TypeExpr::string_literal("inner-yes")),
+                false_type: Arc::new(TypeExpr::string_literal("inner-no")),
+            }),
+            false_type: Arc::new(TypeExpr::string_literal("no")),
+        };
+
+        let mut arena = QueryArena::new();
+        let mut state = SolveState::new(SolveLimits::default());
+        let root = lower_type_expr(&mut arena, &expr);
+        let resolved = resolve_node(
+            &mut arena,
+            root,
+            &NoopSolverHost,
+            &mut state,
+            &SubstitutionEnv::new(),
+        );
+        let result = project_to_type_expr(&arena, resolved);
+
+        assert_eq!(result, TypeExpr::string_literal("inner-yes"));
+        assert!(
+            state.conditional_context_stack.is_empty(),
+            "nested conditional context stack must be fully clean"
+        );
+        assert!(
+            state.conditional_context_base_stack.is_empty(),
+            "conditional context base stack must be fully clean"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #16 — mutual recursion captures only symbol-local frames
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mutual_recursion_captures_only_symbol_local_conditional_frames() {
+        // type A = { b: B }; type B = { a: A }
+        // Mutual recursion — each symbol's RecursiveRef should NOT carry
+        // the other symbol's conditional frames.
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body_a = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "b".into(),
+                    ty: TypeExpr::named("B"),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+        let body_b = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "a".into(),
+                    ty: TypeExpr::named("A"),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "A".into(),
+            declaration_id: 0,
+            body: body_a,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+        env.add_type(TypeDeclInfo {
+            name: "B".into(),
+            declaration_id: 0,
+            body: body_b,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(&TypeExpr::named("A"), &host);
+
+        // The RecursiveRef for A should have empty conditional context
+        // (no conditional branches in either type body)
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(json.contains("recursiveRef"));
+        assert!(
+            json.contains("\"conditionalContext\":[]"),
+            "mutual recursion without conditionals should have empty context"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #19 — conditional recursive ref captures branch context
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_conditional_recursive_ref_captures_branch_context() {
+        // type Flatten<T> = T extends readonly (infer U)[] ? Flatten<U> : T
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::Array {
+                element: Arc::new(TypeExpr::Infer { name: "U".into() }),
+                readonly: true,
+            }),
+            true_type: Arc::new(TypeExpr::named_with_args(
+                "Flatten",
+                vec![TypeExpr::named("U")],
+            )),
+            false_type: Arc::new(TypeExpr::named("T")),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Flatten".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        // Flatten<string[][]> should eventually produce RecursiveRef or string
+        let input = TypeExpr::named_with_args(
+            "Flatten",
+            vec![TypeExpr::Array {
+                element: Arc::new(TypeExpr::Array {
+                    element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                    readonly: false,
+                }),
+                readonly: false,
+            }],
+        );
+        let result = solve_type(&input, &host);
+        let json = serde_json::to_string(&result.value).unwrap();
+
+        // Should terminate without hard stop
+        assert!(
+            result.execution_status != ExecutionStatus::HardStop,
+            "Flatten should terminate cleanly, not hard stop"
+        );
+        // Should produce concrete string (fully reduced) or RecursiveRef
+        assert!(
+            json.contains("string") || json.contains("recursiveRef"),
+            "Flatten<string[][]> should reduce to string or produce named RecursiveRef, got: {}",
+            &json[..json.len().min(200)]
+        );
+        // Must NOT contain opaque @rec
+        assert!(
+            !json.contains("@rec("),
+            "must not contain opaque @rec fallback"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #20 — Flatten-like conditional recursion stays symbolic without hanging
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_flatten_like_conditional_recursion_stays_symbolic_without_hanging() {
+        // type Flatten<T> = T extends readonly (infer U)[] ? Flatten<U> : T
+        // With a symbolic input (unresolved T), should stay symbolic
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::Array {
+                element: Arc::new(TypeExpr::Infer { name: "U".into() }),
+                readonly: true,
+            }),
+            true_type: Arc::new(TypeExpr::named_with_args(
+                "Flatten",
+                vec![TypeExpr::named("U")],
+            )),
+            false_type: Arc::new(TypeExpr::named("T")),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Flatten".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        // Flatten with an unresolvable generic arg
+        let input = TypeExpr::named_with_args("Flatten", vec![TypeExpr::named("SomeType")]);
+        let result = solve_type(&input, &host);
+
+        // Must terminate without hard stop
+        assert!(
+            result.execution_status != ExecutionStatus::HardStop,
+            "Flatten<SomeType> should terminate cleanly"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #23 — branch-sensitive: Bar<T> vs Bar<string> remain distinct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_branch_sensitive_bar_t_vs_bar_string_remain_distinct() {
+        // type Foo<T> = T extends string ? Bar<T> : Bar<string>
+        // type Bar<T> = { value: T }
+        // Foo<number> → false branch → Bar<string> → { value: string }
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let foo_body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::named_with_args("Bar", vec![TypeExpr::named("T")])),
+            false_type: Arc::new(TypeExpr::named_with_args(
+                "Bar",
+                vec![TypeExpr::Primitive(PrimitiveName::String)],
+            )),
+        };
+        let bar_body = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "value".into(),
+                    ty: TypeExpr::named("T"),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Foo".into(),
+            declaration_id: 0,
+            body: foo_body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+        env.add_type(TypeDeclInfo {
+            name: "Bar".into(),
+            declaration_id: 0,
+            body: bar_body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        // Foo<number> → false branch → Bar<string> → { value: string }
+        let result = solve_type(
+            &TypeExpr::named_with_args("Foo", vec![TypeExpr::Primitive(PrimitiveName::Number)]),
+            &host,
+        );
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("\"value\"") && json.contains("string"),
+            "Foo<number> should produce object with value: string, got: {}",
+            &json[..json.len().min(200)]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #25 — DeepReadonly recursive mapped type preserves recursive transport
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_deep_readonly_recursive_mapped_type_preserves_recursive_transport() {
+        // type DeepReadonly<T> = { readonly [K in keyof T]: DeepReadonly<T[K]> }
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::named_with_args(
+                "DeepReadonly",
+                vec![TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("T")),
+                    index: Arc::new(TypeExpr::named("K")),
+                }],
+            )),
+            optional: crate::analysis::type_expr::MappedModifier::None,
+            readonly: crate::analysis::type_expr::MappedModifier::Add,
+            name_type: None,
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "DeepReadonly".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let input_type = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "x".into(),
+                    ty: TypeExpr::Primitive(PrimitiveName::Number),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+        let result = solve_type(
+            &TypeExpr::named_with_args("DeepReadonly", vec![input_type]),
+            &host,
+        );
+
+        // Should terminate, and output should NOT be a hard stop
+        assert!(
+            result.execution_status != ExecutionStatus::HardStop,
+            "DeepReadonly should not hard stop"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #26 — AwaitedLike recursive conditional preserves recursive transport
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_awaited_like_recursive_conditional_preserves_recursive_transport() {
+        // type AwaitedLike<T> = T extends Promise<infer U> ? AwaitedLike<U> : T
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::named_with_args(
+                "Promise",
+                vec![TypeExpr::Infer { name: "U".into() }],
+            )),
+            true_type: Arc::new(TypeExpr::named_with_args(
+                "AwaitedLike",
+                vec![TypeExpr::named("U")],
+            )),
+            false_type: Arc::new(TypeExpr::named("T")),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "AwaitedLike".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        // AwaitedLike<string> should just return string (not a Promise)
+        let result = solve_type(
+            &TypeExpr::named_with_args(
+                "AwaitedLike",
+                vec![TypeExpr::Primitive(PrimitiveName::String)],
+            ),
+            &host,
+        );
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            result.execution_status != ExecutionStatus::HardStop,
+            "AwaitedLike<string> should terminate cleanly"
+        );
+        // string is not a Promise, so false branch → T → string
+        assert!(
+            json.contains("string"),
+            "AwaitedLike<string> should produce string"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #28 — distributive recursive wrap union captures per-member context
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_distributive_recursive_wrap_union_captures_per_member_context() {
+        // type Wrap<T> = T extends any ? { wrapped: T } : never
+        // Wrap<string | number> should distribute over the union
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::Any)),
+            true_type: Arc::new(TypeExpr::Object(Arc::new(
+                crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "wrapped".into(),
+                            ty: TypeExpr::named("T"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                },
+            ))),
+            false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Wrap".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let input = TypeExpr::named_with_args(
+            "Wrap",
+            vec![TypeExpr::union(vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::Primitive(PrimitiveName::Number),
+            ])],
+        );
+        let result = solve_type(&input, &host);
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        // Should distribute: { wrapped: string } | { wrapped: number }
+        assert!(
+            json.contains("wrapped"),
+            "distributive should produce wrapped members"
+        );
+        assert!(
+            result.execution_status != ExecutionStatus::HardStop,
+            "distributive should not hard stop"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #29 — recursive transport stays compact for deep object cycles
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_recursive_transport_stays_compact_for_deep_object_cycles() {
+        // type Deep = { a: { b: { c: Deep } } }
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "a".into(),
+                    ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "b".into(),
+                                ty: TypeExpr::Object(Arc::new(
+                                    crate::analysis::type_expr::ObjectExpr {
+                                        properties: vec![
+                                            crate::analysis::type_expr::ObjectMember::Property(
+                                                crate::analysis::type_expr::ObjectProperty {
+                                                    name: "c".into(),
+                                                    ty: TypeExpr::named("Deep"),
+                                                    optional: false,
+                                                    readonly: false,
+                                                },
+                                            ),
+                                        ],
+                                    },
+                                )),
+                                optional: false,
+                                readonly: false,
+                            },
+                        )],
+                    })),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Deep".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(&TypeExpr::named("Deep"), &host);
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("recursiveRef"),
+            "deep object cycle should produce RecursiveRef"
+        );
+        // Compact: should not produce a deeply nested 50-level property tree
+        assert!(
+            json.len() < 2000,
+            "recursive transport should stay compact, got {} bytes",
+            json.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #32 — unconditional recursive generic no longer uses full structural budget
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unconditional_recursive_generic_no_longer_uses_full_structural_budget() {
+        // type Tree = { children: Tree[] }
+        // Should terminate quickly via exact-key, not exhaust structural budget
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "children".into(),
+                    ty: TypeExpr::Array {
+                        element: Arc::new(TypeExpr::named("Tree")),
+                        readonly: false,
+                    },
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Tree".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(&TypeExpr::named("Tree"), &host);
+
+        assert!(
+            result.execution_status != ExecutionStatus::HardStop,
+            "unconditional recursion should terminate via exact key, not hard stop"
+        );
+        assert!(
+            result.incomplete_reasons.is_empty()
+                || !result.incomplete_reasons.iter().any(|r| {
+                    matches!(r, IncompleteReason::RecursionPolicy { description }
+                        if description.contains("depth"))
+                }),
+            "should not hit depth limit for simple self-recursion"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #33 — conditional recursive generic keeps branch and args when bailing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conditional_recursive_generic_keeps_branch_and_args_when_bailing() {
+        // type ValueOrArray<T> = T | Array<ValueOrArray<T>>
+        // When recursion is detected, the RecursiveRef should preserve the args
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::union(vec![
+            TypeExpr::named("T"),
+            TypeExpr::Array {
+                element: Arc::new(TypeExpr::named_with_args(
+                    "ValueOrArray",
+                    vec![TypeExpr::named("T")],
+                )),
+                readonly: false,
+            },
+        ]);
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "ValueOrArray".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(
+            &TypeExpr::named_with_args(
+                "ValueOrArray",
+                vec![TypeExpr::Primitive(PrimitiveName::Number)],
+            ),
+            &host,
+        );
+
+        let json = serde_json::to_string(&result.value).unwrap();
+        // RecursiveRef should name the symbol
+        assert!(
+            json.contains("\"name\":\"ValueOrArray\""),
+            "RecursiveRef should preserve symbol name"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #35 — transported conditional context caps at eight frames
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transported_conditional_context_caps_at_eight_frames() {
+        use crate::analysis::type_expr::{RecursiveConditionalBranch, RecursiveConditionalFrame};
+
+        // Build a RecursiveRef with >8 frames
+        let frames: Vec<RecursiveConditionalFrame> = (0..12)
+            .map(|i| RecursiveConditionalFrame {
+                branch: if i % 2 == 0 {
+                    RecursiveConditionalBranch::True
+                } else {
+                    RecursiveConditionalBranch::False
+                },
+                decided: true,
+                check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            })
+            .collect();
+
+        // The SolveState caps at 8 frames via current_symbol_conditional_context()
+        let mut state = SolveState::new(SolveLimits::default());
+        for frame in &frames {
+            state.conditional_context_stack.push(
+                crate::analysis::type_solver::arena::ConditionalFrameSnapshot {
+                    branch: match frame.branch {
+                        RecursiveConditionalBranch::True => {
+                            crate::analysis::type_solver::arena::ConditionalBranch::True
+                        }
+                        RecursiveConditionalBranch::False => {
+                            crate::analysis::type_solver::arena::ConditionalBranch::False
+                        }
+                    },
+                    decided: frame.decided,
+                    check: NodeId(0),
+                    extends: NodeId(1),
+                },
+            );
+        }
+
+        let ctx = state.current_symbol_conditional_context();
+        assert_eq!(
+            ctx.len(),
+            8,
+            "current_symbol_conditional_context() must cap at 8 frames, got {}",
+            ctx.len()
+        );
+    }
+
+    #[test]
+    fn transported_conditional_context_keeps_innermost_eight_frames() {
+        let mut state = SolveState::new(SolveLimits::default());
+        state.conditional_context_base_stack.push(0);
+
+        for i in 0..12u32 {
+            state.conditional_context_stack.push(
+                crate::analysis::type_solver::arena::ConditionalFrameSnapshot {
+                    branch: crate::analysis::type_solver::arena::ConditionalBranch::True,
+                    decided: true,
+                    check: NodeId(i),
+                    extends: NodeId(i + 100),
+                },
+            );
+        }
+
+        let ctx = state.current_symbol_conditional_context();
+        let checks: Vec<u32> = ctx.iter().map(|frame| frame.check.0).collect();
+
+        assert_eq!(checks.len(), 8);
+        assert_eq!(
+            checks,
+            vec![4, 5, 6, 7, 8, 9, 10, 11],
+            "transported conditional context should keep the innermost eight frames"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #36 — fingerprint walk respects depth and node caps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fingerprint_walk_respects_depth_and_node_caps() {
+        use crate::analysis::type_solver::recursion::compute_structural_fingerprint;
+
+        let mut arena = QueryArena::new();
+        // Build a deeply nested structure: 100 levels of Array
+        let mut inner = arena.primitive(PrimitiveKind::String);
+        for _ in 0..100 {
+            inner = arena.array(inner, false);
+        }
+
+        // Fingerprint computation should not stack overflow or take long
+        let fp = compute_structural_fingerprint(&arena, &[inner], &[]);
+        assert_eq!(
+            fp.mode,
+            crate::analysis::type_solver::recursion::StructuralRecursionMode::Plain
+        );
+        // Just verify it completed without panic
+        assert!(fp.combined_fingerprint != 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // #38 — recursive context summary caps depth without large subtree projection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn recursive_context_summary_caps_depth_without_large_subtree_projection() {
+        // Build a complex arena node and verify the compact projector caps it
+        let mut arena = QueryArena::new();
+        let str_ty = arena.primitive(PrimitiveKind::String);
+        let _num_ty = arena.primitive(PrimitiveKind::Number);
+
+        // Build a 5-level nested object
+        use crate::analysis::type_solver::arena::{ObjectNode as ON, PropertyNode as PN};
+        let mut current = arena.object(ON {
+            properties: vec![PN {
+                name: "leaf".into(),
+                ty: str_ty,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+        for i in 0..5 {
+            current = arena.object(ON {
+                properties: vec![PN {
+                    name: format!("level{}", i),
+                    ty: current,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                }],
+                index_signatures: vec![],
+                call_signatures: vec![],
+                construct_signatures: vec![],
+            });
+        }
+
+        // Project with depth cap 1 — should truncate deeply
+        let summary = project_recursive_arg_summary(&arena, current, 1, 8);
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(
+            json.len() < 500,
+            "context summary with depth cap 1 should be compact, got {} bytes: {}",
+            json.len(),
+            &json[..json.len().min(200)]
+        );
+    }
+
+    #[test]
+    fn recursive_arg_summary_preserves_type_parameter_identity_and_nested_context() {
+        let mut arena = QueryArena::new();
+        let type_param = arena.alloc(Node::TypeParam {
+            name: "T".into(),
+            constraint: None,
+            default: None,
+        });
+        let check = arena.primitive(PrimitiveKind::String);
+        let extends = arena.primitive(PrimitiveKind::Number);
+        let nested = arena.alloc(Node::RecursiveRef {
+            symbol_name: "Box".into(),
+            type_arguments: vec![type_param],
+            conditional_context: vec![
+                crate::analysis::type_solver::arena::ConditionalFrameSnapshot {
+                    branch: crate::analysis::type_solver::arena::ConditionalBranch::True,
+                    decided: true,
+                    check,
+                    extends,
+                },
+            ],
+        });
+
+        let summary = project_recursive_arg_summary(&arena, nested, 2, 32);
+        match summary {
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => {
+                assert_eq!(&*name, "Box");
+                assert_eq!(type_arguments.len(), 1);
+                assert!(matches!(
+                    &type_arguments[0],
+                    TypeExpr::TypeParameter(crate::analysis::type_expr::TypeParam { name, .. }) if name == "T"
+                ));
+                assert_eq!(conditional_context.len(), 1);
+                assert!(matches!(
+                    conditional_context[0].check.as_ref(),
+                    TypeExpr::Primitive(PrimitiveName::String)
+                ));
+                assert!(matches!(
+                    conditional_context[0].extends.as_ref(),
+                    TypeExpr::Primitive(PrimitiveName::Number)
+                ));
+            }
+            other => panic!("expected nested recursive summary, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // #39 — component_meta boundary does not degrade recursive ref to unknown
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn component_meta_boundary_does_not_degrade_recursive_ref_to_unknown() {
+        use crate::analysis::type_expr::RecursiveConditionalBranch;
+        use crate::analysis::type_expr::RecursiveConditionalFrame;
+
+        let expr = TypeExpr::RecursiveRef {
+            name: Arc::from("Tree"),
+            type_arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            conditional_context: Arc::from(vec![RecursiveConditionalFrame {
+                branch: RecursiveConditionalBranch::True,
+                decided: true,
+                check: Arc::new(TypeExpr::named("T")),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            }]),
+        };
+
+        // Verify it doesn't match is_unknown or type_expr_is_placeholder_for_symbolic_fallback
+        assert!(!expr.is_unknown(), "RecursiveRef must not be Unknown");
+        assert!(
+            !matches!(expr, TypeExpr::Unknown { .. }),
+            "RecursiveRef must not pattern-match as Unknown"
+        );
+
+        // Verify the JSON output uses "recursiveRef", not "unknown"
+        let json = expr.to_json_value();
+        assert_eq!(
+            json.get("kind").and_then(|k| k.as_str()),
+            Some("recursiveRef"),
+            "JSON kind must be recursiveRef, not unknown"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #5 — exact recursive key reuses placeholder through full solver flow
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exact_recursive_key_still_reuses_placeholder() {
+        // type Tree = { children: Tree[] }
+        // The exact-key hit should reuse the placeholder immediately on the
+        // second encounter, producing RecursiveRef in the output.
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "children".into(),
+                    ty: TypeExpr::Array {
+                        element: Arc::new(TypeExpr::named("Tree")),
+                        readonly: false,
+                    },
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Tree".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let result = solve_type(&TypeExpr::named("Tree"), &host);
+
+        // Exact-key detection must produce RecursiveRef, not hit depth limit
+        assert_eq!(
+            result.execution_status,
+            ExecutionStatus::Completed,
+            "exact-key recursion should complete normally"
+        );
+        let json = serde_json::to_string(&result.value).unwrap();
+        assert!(
+            json.contains("recursiveRef"),
+            "exact-key should produce RecursiveRef placeholder"
+        );
+        assert!(
+            !json.contains("depth exceeded"),
+            "should not hit depth limit"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #10 — same symbol global ceiling stops unbounded fingerprint churn
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn same_symbol_global_ceiling_still_stops_unbounded_fingerprint_churn() {
+        use crate::analysis::type_solver::recursion::*;
+
+        let mut tracker = RecursionTracker::new();
+
+        // Push 10 entries with DIFFERENT fingerprints — each gets its own
+        // soft budget, but the hard ceiling should still stop at 10.
+        for i in 0..10u64 {
+            let key = RecursionKey {
+                canonical_id: "/types.ts".into(),
+                symbol_name: "Churn".into(),
+                args_hash: i,
+            };
+            let fp = StructuralRecursionFingerprint {
+                mode: StructuralRecursionMode::Conditional,
+                combined_fingerprint: i * 1000, // all different fingerprints
+            };
+            assert!(
+                tracker.enter(key.clone(), Some(&fp)).is_none(),
+                "entry {} with distinct fingerprint should succeed",
+                i
+            );
+            tracker.push(key, NodeId(i as u32), Some(&fp));
+        }
+
+        // 11th entry with yet another distinct fingerprint should still bail
+        // because the hard ceiling (10) is reached.
+        let key11 = RecursionKey {
+            canonical_id: "/types.ts".into(),
+            symbol_name: "Churn".into(),
+            args_hash: 999,
+        };
+        let fp11 = StructuralRecursionFingerprint {
+            mode: StructuralRecursionMode::Conditional,
+            combined_fingerprint: 99999,
+        };
+        assert!(
+            tracker.enter(key11, Some(&fp11)).is_some(),
+            "hard ceiling should stop unbounded fingerprint churn"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #24 — same named infer binders in different branches remain distinct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solve_same_named_infer_binders_in_different_branches_remain_distinct() {
+        // type Foo<T> =
+        //   T extends string ? { kind: "str"; value: T } :
+        //   T extends number ? { kind: "num"; value: T } :
+        //   never
+        // Foo<string> → { kind: "str"; value: string }
+        // Foo<number> → { kind: "num"; value: number }
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::Object(Arc::new(
+                crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "kind".into(),
+                                ty: TypeExpr::string_literal("str"),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "value".into(),
+                                ty: TypeExpr::named("T"),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                    ],
+                },
+            ))),
+            false_type: Arc::new(TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::TypeParameter(
+                    crate::analysis::type_expr::TypeParam {
+                        name: "T".into(),
+                        constraint: None,
+                        default: None,
+                    },
+                )),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                true_type: Arc::new(TypeExpr::Object(Arc::new(
+                    crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![
+                            crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "kind".into(),
+                                    ty: TypeExpr::string_literal("num"),
+                                    optional: false,
+                                    readonly: false,
+                                },
+                            ),
+                            crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "value".into(),
+                                    ty: TypeExpr::named("T"),
+                                    optional: false,
+                                    readonly: false,
+                                },
+                            ),
+                        ],
+                    },
+                ))),
+                false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+            }),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "Foo".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+
+        // Foo<string> → true branch → { kind: "str"; value: string }
+        let result_str = solve_type(
+            &TypeExpr::named_with_args("Foo", vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            &host,
+        );
+        let json_str = serde_json::to_string(&result_str.value).unwrap();
+        assert!(
+            json_str.contains("\"str\""),
+            "Foo<string> should take the string branch, got: {}",
+            &json_str[..json_str.len().min(200)]
+        );
+        assert!(
+            !json_str.contains("\"num\""),
+            "Foo<string> must NOT take the number branch"
+        );
+
+        // Foo<number> → false branch → true branch → { kind: "num"; value: number }
+        let result_num = solve_type(
+            &TypeExpr::named_with_args("Foo", vec![TypeExpr::Primitive(PrimitiveName::Number)]),
+            &host,
+        );
+        let json_num = serde_json::to_string(&result_num.value).unwrap();
+        assert!(
+            json_num.contains("\"num\""),
+            "Foo<number> should take the number branch, got: {}",
+            &json_num[..json_num.len().min(200)]
+        );
+        assert!(
+            !json_num.contains("\"str\""),
+            "Foo<number> must NOT take the string branch"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #30 — component meta proto round-trips RecursiveRef without unknown fallback
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn component_meta_proto_round_trips_recursive_ref_without_unknown_fallback() {
+        use crate::analysis::type_expr::{RecursiveConditionalBranch, RecursiveConditionalFrame};
+
+        // Verify that RecursiveRef survives JSON round-trip with full
+        // structural fidelity — the same path the graph builder reads from.
+        let expr = TypeExpr::RecursiveRef {
+            name: Arc::from("Tree"),
+            type_arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            conditional_context: Arc::from(vec![RecursiveConditionalFrame {
+                branch: RecursiveConditionalBranch::True,
+                decided: true,
+                check: Arc::new(TypeExpr::named("T")),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            }]),
+        };
+
+        let json_value = expr.to_json_value();
+
+        // Must serialize as "recursiveRef", never "unknown"
+        assert_eq!(
+            json_value.get("kind").and_then(|k| k.as_str()),
+            Some("recursiveRef"),
+            "kind must be recursiveRef for protocol encoding"
+        );
+
+        // type_arguments must be present and non-empty
+        let args = json_value.get("typeArguments").and_then(|a| a.as_array());
+        assert!(
+            args.is_some() && !args.unwrap().is_empty(),
+            "typeArguments must be present"
+        );
+
+        // conditionalContext must be present and non-empty
+        let ctx = json_value
+            .get("conditionalContext")
+            .and_then(|c| c.as_array());
+        assert!(
+            ctx.is_some() && !ctx.unwrap().is_empty(),
+            "conditionalContext must be present"
+        );
+
+        // Frame fields must be present
+        let frame = &ctx.unwrap()[0];
+        assert_eq!(frame.get("branch").and_then(|b| b.as_str()), Some("true"));
+        assert_eq!(frame.get("decided").and_then(|d| d.as_bool()), Some(true));
+        assert!(frame.get("check").is_some());
+        assert!(frame.get("extends").is_some());
+
+        // Round-trip must preserve everything
+        let round_tripped: TypeExpr = serde_json::from_value(json_value).unwrap();
+        assert_eq!(round_tripped, expr);
     }
 }

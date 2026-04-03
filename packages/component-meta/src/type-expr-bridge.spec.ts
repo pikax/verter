@@ -125,6 +125,36 @@ describe("typeExprToDescriptor", () => {
     expect((result as { elements: unknown[] }).elements).toHaveLength(2);
   });
 
+  it("converts native recursiveRef types without degrading to unknown", () => {
+    const result = typeExprToDescriptor({
+      kind: "recursiveRef",
+      name: "Tree",
+      typeArguments: [{ kind: "primitive", name: "string" }],
+      conditionalContext: [
+        {
+          branch: "true",
+          decided: true,
+          check: { kind: "primitive", name: "string" },
+          extends: { kind: "primitive", name: "string" },
+        },
+      ],
+    } as NativeTypeExpr);
+
+    expect(result).toEqual({
+      kind: "recursiveRef",
+      name: "Tree",
+      typeArguments: [{ kind: "primitive", name: "string" }],
+      conditionalContext: [
+        {
+          branch: "true",
+          decided: true,
+          check: { kind: "primitive", name: "string" },
+          extends: { kind: "primitive", name: "string" },
+        },
+      ],
+    });
+  });
+
   // =============================================================================
   // Object
   // =============================================================================

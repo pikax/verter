@@ -679,6 +679,7 @@ fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeParameter(_) => false,
         TypeExpr::Ref { .. }
         | TypeExpr::TypeOf(_)
@@ -710,6 +711,7 @@ fn contains_runtime_value_resolution_targets(expr: &TypeExpr) -> bool {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Infer { .. } => false,
         TypeExpr::TypeOf(_) => true,
@@ -899,6 +901,7 @@ fn method_surface_specificity_score(expr: &TypeExpr) -> usize {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::Ref { .. }
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
@@ -911,6 +914,7 @@ fn bound_generic_ref_penalty(expr: &TypeExpr) -> usize {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
         | TypeExpr::Infer { .. } => 0,
         TypeExpr::TypeOf(_) => 1,
         TypeExpr::TypeParameter(param) => {
@@ -1230,6 +1234,7 @@ pub fn imported_type_body_specificity_score(expr: &TypeExpr) -> usize {
                     .sum::<usize>()
         }
         TypeExpr::Infer { .. } => SPECIFICITY_TYPEOF,
+        TypeExpr::RecursiveRef { .. } => SPECIFICITY_REF_BASE,
     }
 }
 

@@ -17,6 +17,7 @@ import {
   func,
   typeParameter,
   ref as typeRef,
+  recursiveRef,
   unknown,
 } from "./type-ir.js";
 import {
@@ -44,6 +45,7 @@ import {
   NODE_OBJECT,
   NODE_PARENTHESIZED,
   NODE_PRIMITIVE,
+  NODE_RECURSIVE_REF,
   NODE_REF,
   NODE_REST,
   NODE_TEMPLATE_LITERAL,
@@ -144,6 +146,17 @@ export type NativeTypeExpr =
       typeParameters?: NativeTypeParameter[];
     }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
+  | {
+      kind: "recursiveRef";
+      name: string;
+      typeArguments: NativeTypeExpr[];
+      conditionalContext: Array<{
+        branch: "true" | "false";
+        decided: boolean;
+        check: NativeTypeExpr;
+        extends: NativeTypeExpr;
+      }>;
+    }
   | {
       kind: "typeParameter";
       name: string;
@@ -357,6 +370,20 @@ export function typeExprToDescriptor(
         );
       }
       return typeRef(expr.name);
+
+    case "recursiveRef":
+      return recursiveRef(
+        expr.name,
+        expr.typeArguments.map((typeArgument) =>
+          typeExprToDescriptor(typeArgument, nativeRegistry, visiting, graphVisiting),
+        ),
+        expr.conditionalContext.map((frame) => ({
+          branch: frame.branch,
+          decided: frame.decided,
+          check: typeExprToDescriptor(frame.check, nativeRegistry, visiting, graphVisiting),
+          extends: typeExprToDescriptor(frame.extends, nativeRegistry, visiting, graphVisiting),
+        })),
+      );
 
     case "typeParameter":
       return nativeTypeParameterToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
@@ -672,6 +699,13 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
       case "ref":
         current.typeArguments?.forEach(visit);
         return;
+      case "recursiveRef":
+        current.typeArguments.forEach(visit);
+        current.conditionalContext.forEach((frame) => {
+          visit(frame.check);
+          visit(frame.extends);
+        });
+        return;
       case "typeParameter":
         if (!seen.has(current.name)) {
           seen.add(current.name);
@@ -788,6 +822,18 @@ function substituteDescriptorTypeParameters(
         descriptor.typeArguments?.map((typeArgument) =>
           substituteDescriptorTypeParameters(typeArgument, bindings),
         ),
+      );
+    case "recursiveRef":
+      return recursiveRef(
+        descriptor.name,
+        descriptor.typeArguments.map((typeArgument) =>
+          substituteDescriptorTypeParameters(typeArgument, bindings),
+        ),
+        descriptor.conditionalContext.map((frame) => ({
+          ...frame,
+          check: substituteDescriptorTypeParameters(frame.check, bindings),
+          extends: substituteDescriptorTypeParameters(frame.extends, bindings),
+        })),
       );
     case "typeParameter": {
       const bound = bindings.get(descriptor.name);
@@ -2074,6 +2120,34 @@ function graphNodeToDescriptor(
         visiting,
         graphVisiting,
       );
+    case NODE_RECURSIVE_REF: {
+      const name = expr.graph.getString(node.nameId);
+      const typeArguments = node.typeArgumentNodeIds.map((id) =>
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, id),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      );
+      const conditionalContext = node.conditionalContext.map((frame) => ({
+        branch: (frame.branch === 1 ? "true" : "false") as "true" | "false",
+        decided: frame.decided,
+        check: typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, frame.checkNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+        extends: typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, frame.extendsNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      }));
+      return recursiveRef(name, typeArguments, conditionalContext);
+    }
     case NODE_UNKNOWN:
       return unknown(expr.graph.getString(node.rawId));
     default:
@@ -2134,6 +2208,8 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
       return `keyof ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.operandNodeId))}`;
     case NODE_TYPE_OF:
       return `typeof ${node.pathIds.map((id) => expr.graph.getString(id)).join(".")}`;
+    case NODE_RECURSIVE_REF:
+      return expr.graph.getString(node.nameId);
     case NODE_UNKNOWN:
       return expr.graph.getString(node.rawId);
     default:
@@ -2165,6 +2241,10 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return String(expr.value);
     case "ref":
       return expr.name;
+    case "recursiveRef":
+      return expr.typeArguments.length > 0
+        ? `${expr.name}<${expr.typeArguments.map(nativeTypeExprToString).join(", ")}>`
+        : expr.name;
     case "keyOf":
       return `keyof ${nativeTypeExprToString(expr.operand)}`;
     case "typeOf":
